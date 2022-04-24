@@ -2,6 +2,6 @@
 
 (straight-use-package 'magit)
 
-(global-set-key (kbd "C-c a m") 'magit)
+(meow-leader-define-key '("a m" . magit))
 
 (provide 'init-magit)
