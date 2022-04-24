@@ -114,4 +114,6 @@
 (meow-global-mode 1)
 (meow-setup-indicator)
 
+(add-to-list 'meow-mode-state-list '(osx-dictionary-mode . motion))
+
 (provide 'init-meow)
