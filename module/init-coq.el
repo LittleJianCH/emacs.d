@@ -1,7 +1,9 @@
 ;;; -*- lexical-binding: t -*-
 
-(straight-use-package 'proof-general)
+(leaf proof-general
+  :straight t
+  :custom
+  (coq-prog-name . "opt/homebrew/bin/coqtop"))
 
-(custom-set-variables '(coq-prog-name "/opt/homebrew/bin/coqtop"))
 
 (provide 'init-coq)
