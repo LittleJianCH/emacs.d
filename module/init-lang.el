@@ -42,7 +42,7 @@
   :hook prog-mode-hook)
 
 (require 'init-coq)
-
+(require 'init-racket)
 
 (provide 'init-lang)
 
