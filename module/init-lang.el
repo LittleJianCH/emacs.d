@@ -43,6 +43,7 @@
 
 (require 'init-coq)
 (require 'init-racket)
+(require 'init-forth)
 
 (provide 'init-lang)
 
