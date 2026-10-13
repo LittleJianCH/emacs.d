@@ -3,13 +3,15 @@
 ;;; Commentary:
 
 ;; agent CLI 在后台以结构化协议运行，对话由 Emacs 渲染（agent-session）。
+;; 会话 buffer 只显示对话；输入在 minibuffer 中进行；模型等信息在状态栏。
 ;; 全局命令在 C-c a 前缀下：
 ;;   C-c a a  显示 / 隐藏 agent 列        C-c a n  新建会话（C-u 先选 agent）
-;;   C-c a s  会话列表（进行中 + 历史）   C-c a k  结束会话
-;;   C-c a f  把当前文件引用插入输入区    C-c a r  把选区代码块插入输入区
-;;   C-c a v  回到 agent 最近展示的页面
-;; 会话中：C-c C-c 发送，C-c C-o 设置菜单（agent / 模型 / 推理强度 / 权限模式），
-;; C-c C-k 中断，C-c C-y / C-c C-n 允许 / 拒绝；输入 / 补全命令，@ 补全文件。
+;;   C-c a i  给当前项目的会话发消息      C-c a s  会话列表（进行中 + 历史）
+;;   C-c a f  带上当前文件引用输入        C-c a r  带上选区代码块输入
+;;   C-c a k  结束会话                    C-c a v  回到 agent 最近展示的页面
+;; 会话 buffer 中（只读，单键）：RET / i 输入，o 设置菜单，m 模型，e 推理强度，
+;; M 权限模式，P 计划模式，A 切换 agent，a / d 允许 / 拒绝，k 中断，s 会话列表，
+;; n / p 上一条 / 下一条消息。minibuffer 中：RET 发送，C-j 换行，/ 与 @ 补全。
 ;;
 ;; 新增 agent：实现一个后端（参考 agent-claude.el），再加一行 `agent-session-define-agent'。
 
