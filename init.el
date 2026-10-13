@@ -41,6 +41,8 @@
 (dolist (lang my/languages)
   (require (intern (format "lang-%s" lang))))
 
+(require 'init-agent)       ; agent 终端会话、agent → Emacs 桥
+
 ;; 启动完成后恢复正常 GC。
 (add-hook 'emacs-startup-hook
           (lambda ()
