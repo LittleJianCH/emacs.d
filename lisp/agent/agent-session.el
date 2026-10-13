@@ -683,7 +683,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (push text (agent-session-history session))
     (setq agent-session--history-index nil)
     (delete-region (agent-session-input session) (point-max))
-    (agent-session-submit session text)))
+    ;; /model 等本地命令在 Emacs 中执行；其余（包括 agent 自己的 /命令）发给 agent。
+    (unless (agent-session--run-local-command session text)
+      (agent-session-submit session text))))
 
 (defun agent-session--history-step (step)
   "在输入历史中移动 STEP。"
@@ -740,6 +742,250 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   (interactive)
   (goto-char (point-max)))
 
+;;; 切换 agent / 模型 / 推理强度 / 权限模式
+
+(defun agent-session--has-conversation (session)
+  "SESSION 是否已经有对话（用户消息或 agent 回复）。"
+  (catch 'found
+    (maphash (lambda (_id block)
+               (when (memq (plist-get block :type) '(user text tool))
+                 (throw 'found t)))
+             (agent-session-blocks session))
+    nil))
+
+(defun agent-session--mode-label (mode)
+  "权限模式 MODE 的显示名。"
+  (or (cadr (assq mode agent-session-modes)) (symbol-name mode)))
+
+(defun agent-session--completing-read (prompt candidates &optional default)
+  "带说明的 completing-read。CANDIDATES 为 ((值 . 说明) ...)。"
+  (let ((completion-extra-properties
+         (list :annotation-function
+               (lambda (candidate)
+                 (when-let* ((note (cdr (assoc candidate candidates))))
+                   (concat "  " (propertize note 'face 'completions-annotations)))))))
+    (completing-read prompt (mapcar #'car candidates) nil t nil nil default)))
+
+(defun agent-session-select-model (&optional model)
+  "切换当前会话的模型。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (models (or (agent-session-backend-models (agent-session-backend session) session)
+                     (user-error "%s 还没有返回模型列表" (agent-session-title session))))
+         (model (or model
+                    (agent-session--completing-read
+                     "模型: "
+                     (mapcar (lambda (m) (cons (plist-get m :id)
+                                               (string-join (delq nil (list (plist-get m :name)
+                                                                            (plist-get m :description)))
+                                                            " · ")))
+                             models)
+                     (agent-session-setting session :model)))))
+    (unless (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
+      (user-error "没有模型 %s" model))
+    (agent-session-configure session :model model)
+    ;; 新模型不支持当前强度时恢复默认。
+    (let ((efforts (plist-get (agent-session-model-info session) :efforts))
+          (effort (agent-session-setting session :effort)))
+      (when (and effort efforts (not (member effort efforts)))
+        (agent-session-configure session :effort nil)))))
+
+(defun agent-session-select-effort (&optional effort)
+  "切换当前会话的推理强度。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (info (agent-session-model-info session))
+         (efforts (or (plist-get info :efforts)
+                      (user-error "当前模型不支持调整推理强度")))
+         (effort (or effort
+                     (agent-session--completing-read
+                      "推理强度: "
+                      (mapcar (lambda (e) (cons e (and (equal e (plist-get info :default-effort))
+                                                      "默认")))
+                              efforts)
+                      (agent-session-setting session :effort)))))
+    (unless (member effort efforts) (user-error "当前模型不支持强度 %s" effort))
+    (agent-session-configure session :effort effort)))
+
+(defun agent-session-select-mode (&optional mode)
+  "切换当前会话的权限模式。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (modes (agent-session-backend-modes (agent-session-backend session) session))
+         (mode (or mode
+                   (let ((label (agent-session--completing-read
+                                 "权限模式: "
+                                 (mapcar (lambda (m) (cons (agent-session--mode-label m)
+                                                           (nth 2 (assq m agent-session-modes))))
+                                         modes)
+                                 (agent-session--mode-label (agent-session-setting session :mode)))))
+                     (car (seq-find (lambda (m) (equal (cadr m) label)) agent-session-modes))))))
+    (unless (memq mode modes) (user-error "%s 不支持该权限模式" (agent-session-title session)))
+    (agent-session-configure session :mode mode)))
+
+(defun agent-session-select-agent (&optional agent)
+  "切换 agent。还没有对话时原地替换；否则新开会话并带上输入区草稿。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (agent (or agent
+                    (intern (agent-session--completing-read
+                             "Agent: "
+                             (mapcar (lambda (a) (cons (symbol-name (car a))
+                                                       (plist-get (cdr a) :title)))
+                                     (reverse agent-session-agents))
+                             (symbol-name (agent-session-agent session)))))))
+    (unless (assq agent agent-session-agents) (user-error "未注册 agent：%s" agent))
+    (unless (eq agent (agent-session-agent session))
+      (if (agent-session--has-conversation session)
+          (let ((draft (agent-session--input-text session))
+                (root (agent-session-root session)))
+            (with-current-buffer (agent-session-start agent t nil root)
+              (agent-session-insert-input (current-buffer) draft)))
+        (agent-session-backend-stop (agent-session-backend session) session)
+        (setf (agent-session-agent session) agent
+              (agent-session-backend session) (agent-session--get agent :backend)
+              (agent-session-state session) nil
+              (agent-session-info session) nil
+              (agent-session-settings session)
+              (copy-sequence (alist-get agent agent-session-last-settings))
+              (agent-session-status session) 'starting)
+        (with-current-buffer (agent-session-buffer session)
+          (rename-buffer (format "*%s@%s*" agent (file-name-nondirectory
+                                                   (directory-file-name (agent-session-root session))))
+                         t))
+        (agent-session-backend-start (agent-session-backend session) session)))))
+
+(defun agent-session-new ()
+  "在同一项目中用同一个 agent 新开会话。"
+  (interactive)
+  (let ((session (agent-session--this)))
+    (agent-session-start (agent-session-agent session) t nil (agent-session-root session))))
+
+(defun agent-session-resume (&optional agent)
+  "从 AGENT（默认当前 agent）在本项目的历史会话中选择一个恢复。"
+  (interactive)
+  (let* ((session agent-session--current)
+         (agent (or agent (and session (agent-session-agent session)) (agent-session--read-agent)))
+         (root (if session (agent-session-root session) (agent-session--root)))
+         (items 'pending))
+    (agent-session-backend-history (agent-session--get agent :backend) root
+                                   (lambda (result) (setq items result)))
+    (with-timeout (20 (user-error "获取历史会话超时"))
+      (while (eq items 'pending) (accept-process-output nil 0.05)))
+    (unless items (user-error "本项目没有 %s 的历史会话" agent))
+    (let* ((candidates (mapcar (lambda (item)
+                                 (cons (format "%s  %s" (format-time-string "%m-%d %H:%M"
+                                                                            (plist-get item :time))
+                                               (plist-get item :title))
+                                       (plist-get item :id)))
+                               items))
+           (choice (completing-read "恢复会话: " candidates nil t)))
+      (agent-session-start agent nil (cdr (assoc choice candidates)) root))))
+
+;;; 斜杠命令与补全
+
+(defvar agent-session-local-commands
+  '(("model" agent-session-select-model "切换模型" agent-session--model-ids)
+    ("effort" agent-session-select-effort "切换推理强度" agent-session--effort-names)
+    ("mode" agent-session-select-mode "切换权限模式" agent-session--mode-names)
+    ("agent" agent-session-select-agent "切换 agent" agent-session--agent-names)
+    ("new" agent-session-new "新开会话")
+    ("resume" agent-session-resume "恢复历史会话")
+    ("interrupt" agent-session-interrupt "中断当前回合"))
+  "在 Emacs 中执行、不发给 agent 的命令：(名称 函数 说明 [参数候选函数])。
+带参数时以参数字符串（模式、agent 转为符号）调用函数。")
+
+(defun agent-session--model-ids (session)
+  "SESSION 可选的模型 id。"
+  (mapcar (lambda (m) (plist-get m :id))
+          (agent-session-backend-models (agent-session-backend session) session)))
+
+(defun agent-session--effort-names (session)
+  "SESSION 当前模型支持的推理强度。"
+  (plist-get (agent-session-model-info session) :efforts))
+
+(defun agent-session--mode-names (session)
+  "SESSION 支持的权限模式名。"
+  (mapcar #'symbol-name (agent-session-backend-modes (agent-session-backend session) session)))
+
+(defun agent-session--agent-names (_session)
+  "已注册的 agent 名。"
+  (mapcar (lambda (a) (symbol-name (car a))) (reverse agent-session-agents)))
+
+(defun agent-session--run-local-command (session text)
+  "TEXT 若是本地命令则执行并返回非 nil。"
+  (when (string-match "\\`/\\([[:alnum:]-]+\\)\\(?:[ \t]+\\(.*\\)\\)?\\'" text)
+    (when-let* ((entry (assoc (match-string 1 text) agent-session-local-commands)))
+      (let ((arg (match-string 2 text)))
+        (with-current-buffer (agent-session-buffer session)
+          (if (and arg (nth 3 entry))
+              (funcall (nth 1 entry)
+                       (if (memq (nth 1 entry) '(agent-session-select-mode agent-session-select-agent))
+                           (intern arg)
+                         arg))
+            (call-interactively (nth 1 entry)))))
+      t)))
+
+(defun agent-session--command-candidates (session)
+  "斜杠命令候选：((\"/name\" 说明 参数提示 来源) ...)。"
+  (append
+   (mapcar (lambda (c) (list (concat "/" (car c)) (nth 2 c) nil 'local)) agent-session-local-commands)
+   (mapcar (lambda (c) (list (concat "/" (plist-get c :name)) (plist-get c :description)
+                             (plist-get c :hint) 'agent))
+           (agent-session-backend-commands (agent-session-backend session) session))))
+
+(defun agent-session--project-files (session)
+  "SESSION 项目中的文件（相对路径），用于 @ 补全。"
+  (let ((default-directory (agent-session-root session)))
+    (when-let* ((project (project-current nil default-directory)))
+      (mapcar (lambda (f) (file-relative-name f default-directory))
+              (seq-take (project-files project) 20000)))))
+
+(defun agent-session-completion-at-point ()
+  "输入区补全：行首的 /命令、命令参数、@文件。"
+  (let ((session agent-session--current))
+    (when (and session (>= (point) (agent-session-input session)))
+      (let ((line-start (max (line-beginning-position) (agent-session-input session))))
+        (save-excursion
+          (cond
+           ;; 命令参数：/model xxx
+           ((and (looking-back "^/\\([[:alnum:]-]+\\)[ \t]+\\([^ \t\n]*\\)" line-start)
+                 (nth 3 (assoc (match-string 1) agent-session-local-commands)))
+            (let ((candidates (funcall (nth 3 (assoc (match-string 1) agent-session-local-commands))
+                                       session)))
+              (list (match-beginning 2) (match-end 2) candidates :exclusive 'no)))
+           ;; 行首的 /命令
+           ((looking-back "^/[^ \t\n]*" line-start)
+            (let ((candidates (agent-session--command-candidates session)))
+              (list (match-beginning 0) (match-end 0) (mapcar #'car candidates)
+                    :exclusive 'no
+                    :annotation-function
+                    (lambda (name)
+                      (when-let* ((c (assoc name candidates)))
+                        (concat (if (nth 2 c) (concat " " (nth 2 c)) "")
+                                (propertize (format "  %s%s" (if (eq (nth 3 c) 'local) "· " "")
+                                                    (truncate-string-to-width (or (nth 1 c) "") 60
+                                                                              nil nil "…"))
+                                            'face 'completions-annotations))))
+                    :exit-function (lambda (_name status)
+                                     (when (eq status 'finished) (insert " "))))))
+           ;; @文件
+           ((looking-back "\\(?:^\\|[ \t]\\)@\\([^ \t\n]*\\)" line-start)
+            (list (match-beginning 1) (match-end 1)
+                  (completion-table-with-cache
+                   (lambda (_) (agent-session--project-files session)))
+                  :exclusive 'no
+                  :category 'file
+                  :exit-function (lambda (_name status)
+                                   (when (eq status 'finished) (insert " ")))))))))))
+
+(defun agent-session-tab ()
+  "输入区中补全，对话记录中跳到下一个按钮。"
+  (interactive)
+  (if (>= (point) (agent-session-input (agent-session--this)))
+      (completion-at-point)
+    (forward-button 1 t)))
+
 ;;; 模式
 
 (defvar-keymap agent-session-mode-map
@@ -751,7 +997,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   "M-p" #'agent-session-previous-input
   "M-n" #'agent-session-next-input
   "C-c C-i" #'agent-session-goto-input
-  "TAB" #'forward-button
+  "TAB" #'agent-session-tab
   "<backtab>" #'backward-button)
 
 (define-derived-mode agent-session-mode fundamental-mode "Agent"
@@ -760,6 +1006,10 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
               word-wrap t
               word-wrap-by-category t
               header-line-format '(:eval (agent-session--header agent-session--current)))
+  (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
+  ;; 输入 / 后立即弹出补全。
+  (setq-local corfu-auto-prefix 1
+              corfu-auto-delay 0.1)
   ;; 对话记录不断插入到输入区之前，undo 记录的位置会错乱，所以关闭 undo。
   (buffer-disable-undo))
 

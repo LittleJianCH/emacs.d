@@ -21,7 +21,15 @@
 
 (cl-defmethod agent-session-backend-stop ((_ (eql test-echo)) _session) nil)
 
+(cl-defmethod agent-session-backend-models ((_ (eql test-echo)) _session)
+  '((:id "small" :name "Small" :efforts ("low" "high") :default-effort "low")
+    (:id "big" :name "Big" :efforts ("high" "max"))))
+
+(cl-defmethod agent-session-backend-commands ((_ (eql test-echo)) _session)
+  '((:name "compact" :description "压缩上下文")))
+
 (agent-session-define-agent test-echo :title "Echo")
+(agent-session-define-agent test-echo2 :title "Echo2" :backend test-echo)
 
 (defmacro agent-session-test--with-session (&rest body)
   "在一个新的假会话 buffer 中执行 BODY。"
@@ -93,6 +101,64 @@
    (should-not (agent-session-queue agent-session--current))
    (should (string-match-p "hold\\(.\\|\n\\)*q1\\(.\\|\n\\)*收到：q1\\(.\\|\n\\)*q2\\(.\\|\n\\)*收到：q2"
                            (agent-session-test--transcript)))))
+
+(defun agent-session-test--complete (input)
+  "在输入区输入 INPUT 后，返回补全候选。"
+  (goto-char (point-max))
+  (insert input)
+  (pcase-let ((`(,beg ,end ,table . ,_) (agent-session-completion-at-point)))
+    (all-completions (buffer-substring-no-properties beg end) table)))
+
+(ert-deftest agent-session-test-local-command ()
+  "本地命令在 Emacs 中执行，不作为消息发出。"
+  (agent-session-test--with-session
+   (let ((agent-session-last-settings nil))
+     (agent-session-test--type "/model big")
+     (should (equal (agent-session-setting agent-session--current :model) "big"))
+     (agent-session-test--type "/effort max")
+     (should (equal (agent-session-setting agent-session--current :effort) "max"))
+     ;; 换到不支持当前强度的模型时，强度恢复默认。
+     (agent-session-test--type "/model small")
+     (should-not (agent-session-setting agent-session--current :effort))
+     (agent-session-test--type "/mode full")
+     (should (eq (agent-session-setting agent-session--current :mode) 'full))
+     (should-not (agent-session--has-conversation agent-session--current))
+     ;; agent 自己的命令照常发出。
+     (agent-session-test--type "/compact")
+     (should (string-match-p "收到：/compact" (agent-session-test--transcript))))))
+
+(ert-deftest agent-session-test-completion ()
+  "/ 补全命令名与参数。"
+  (agent-session-test--with-session
+   (should (member "/model" (agent-session-test--complete "/mo")))
+   (delete-region (agent-session-input agent-session--current) (point-max))
+   (should (member "/compact" (agent-session-test--complete "/com")))
+   (delete-region (agent-session-input agent-session--current) (point-max))
+   (should (equal (sort (agent-session-test--complete "/model ") #'string<) '("big" "small")))
+   (delete-region (agent-session-input agent-session--current) (point-max))
+   (should (equal (agent-session-test--complete "/effort h") '("high")))))
+
+(ert-deftest agent-session-test-switch-agent ()
+  "没有对话时原地切换 agent；有对话后新开会话并带上草稿。"
+  (agent-session-test--with-session
+   (let ((buffer (current-buffer)))
+     (agent-session-select-agent 'test-echo2)
+     (should (eq (agent-session-agent agent-session--current) 'test-echo2))
+     (should (eq (current-buffer) buffer))
+     (agent-session-test--type "hi")
+     (goto-char (point-max))
+     (insert "草稿")
+     (agent-session-select-agent 'test-echo)
+     (let ((new (seq-find (lambda (b) (and (not (eq b buffer))
+                                           (eq (agent-session-agent
+                                                (buffer-local-value 'agent-session--current b))
+                                               'test-echo)))
+                          (agent-session-buffers))))
+       (should new)
+       (should (equal (with-current-buffer new
+                        (agent-session--input-text agent-session--current))
+                      "草稿"))
+       (kill-buffer new)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
