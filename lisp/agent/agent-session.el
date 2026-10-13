@@ -77,7 +77,8 @@
   tail           ; 对话记录末尾（新 block 插入处）
   input          ; 输入区起点
   queue          ; 运行中输入的消息，回合结束后依次发送
-  history)
+  history
+  settings)      ; 用户选择：:model :effort :mode（nil 表示用 agent 的默认值）
 
 (defvar-local agent-session--current nil "本 buffer 的会话对象。")
 (put 'agent-session--current 'permanent-local t)
@@ -111,8 +112,81 @@
 (cl-defgeneric agent-session-backend-stop (backend session)
   "结束会话。默认直接结束进程。"
   (ignore backend)
-  (when (process-live-p (agent-session-process session))
-    (delete-process (agent-session-process session))))
+  (when-let* ((process (agent-session-process session)))
+    ;; 先解除关联，旧进程的 sentinel 据此忽略这次退出。
+    (setf (agent-session-process session) nil)
+    (when (process-live-p process) (delete-process process))))
+
+(cl-defgeneric agent-session-backend-models (backend session)
+  "可选模型：((:id ID :name 显示名 :description 说明 :efforts (强度...) :default-effort E) ...)。"
+  (ignore backend session)
+  nil)
+
+(cl-defgeneric agent-session-backend-modes (backend session)
+  "支持的权限模式（`agent-session-modes' 的键）。"
+  (ignore backend session)
+  '(ask edits full))
+
+(cl-defgeneric agent-session-backend-commands (backend session)
+  "agent 提供的斜杠命令：((:name N :description D :hint H) ...)。"
+  (ignore backend session)
+  nil)
+
+(cl-defgeneric agent-session-backend-apply-settings (backend session changed)
+  "设置变化后生效。CHANGED 为变化的键列表（:model :effort :mode）。"
+  (ignore backend session changed))
+
+;;; 设置：模型、推理强度、权限模式
+
+(defconst agent-session-modes
+  '((ask "需确认" "命令和文件改动都需要确认")
+    (edits "自动接受编辑" "文件改动自动通过，其他操作仍需确认")
+    (auto "自动审查" "由 agent 的自动审查放行常规操作，其余询问")
+    (full "完全访问" "命令和改动都不再询问")
+    (plan "计划" "只读规划，不做改动"))
+  "统一的权限模式（参考 T3 Code），由各后端映射到自己的设置。")
+
+(defcustom agent-session-default-mode 'edits
+  "新会话默认的权限模式。"
+  :type '(choice (const ask) (const edits) (const auto) (const full)))
+
+(defvar agent-session-last-settings nil
+  "每个 agent 最近一次使用的设置：((AGENT . PLIST) ...)，新会话沿用。")
+(with-eval-after-load 'savehist
+  (add-to-list 'savehist-additional-variables 'agent-session-last-settings))
+
+(defun agent-session-setting (session key)
+  "SESSION 的设置 KEY；未设置模式时用默认模式。"
+  (or (plist-get (agent-session-settings session) key)
+      (and (eq key :mode) agent-session-default-mode)))
+
+(defun agent-session-configure (session &rest props)
+  "修改 SESSION 的设置（:model :effort :mode）并让后端生效。"
+  (let (changed)
+    (cl-loop for (key value) on props by #'cddr
+             unless (equal value (agent-session-setting session key))
+             do (push key changed)
+                (setf (agent-session-settings session)
+                      (plist-put (agent-session-settings session) key value)))
+    (when changed
+      (setf (alist-get (agent-session-agent session) agent-session-last-settings)
+            (agent-session-settings session))
+      (agent-session-backend-apply-settings (agent-session-backend session) session changed)
+      (agent-session--refresh-header session))
+    changed))
+
+(defun agent-session-model-info (session &optional model)
+  "SESSION 中模型 MODEL（默认当前模型）的信息 plist。"
+  (let ((models (agent-session-backend-models (agent-session-backend session) session))
+        (model (or model (agent-session-setting session :model))))
+    (or (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
+        (car models))))
+
+(defun agent-session-restart-process (session)
+  "重启 SESSION 的后台进程（例如切换只能在启动时指定的设置）。"
+  (agent-session-backend-stop (agent-session-backend session) session)
+  (setf (agent-session-status session) 'starting)
+  (agent-session-backend-start (agent-session-backend session) session))
 
 ;;; 后台进程
 
@@ -153,7 +227,8 @@
            :sentinel
            (lambda (process _event)
              (unless (process-live-p process)
-               (when (buffer-live-p buffer)
+               ;; 已被替换或主动结束的进程，不算意外退出。
+               (when (and (buffer-live-p buffer) (eq process (agent-session-process session)))
                  (agent-session-set-status session 'exited)
                  (agent-session-notice
                   session (format "进程已退出（%s，退出码 %s）"
@@ -764,7 +839,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                        :agent agent
                        :backend (or (agent-session--get agent :backend)
                                     (user-error "未注册 agent：%s" agent))
-                       :root root :buffer buffer)))
+                       :root root :buffer buffer
+                       :settings (copy-sequence
+                                  (alist-get agent agent-session-last-settings)))))
         (agent-session--setup-buffer session)
         (with-current-buffer buffer
           (setq default-directory root)

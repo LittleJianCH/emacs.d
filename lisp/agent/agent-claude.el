@@ -25,16 +25,21 @@
   "claude 命令。"
   :type 'string)
 
-(defcustom agent-claude-model nil
-  "使用的模型，例如 \"opus\"；nil 时用 CLI 的默认设置。"
-  :type '(choice (const nil) string))
-
 (defcustom agent-claude-extra-args nil
   "额外的命令行参数。"
   :type '(repeat string))
 
+(defconst agent-claude--modes
+  '((ask . "default") (edits . "acceptEdits") (auto . "auto")
+    (full . "bypassPermissions") (plan . "plan"))
+  "统一权限模式到 Claude permission mode 的映射。")
+
+(defun agent-claude--mode (session)
+  "SESSION 当前权限模式对应的 Claude 取值。"
+  (alist-get (agent-session-setting session :mode) agent-claude--modes "default"))
+
 (defun agent-claude--command (session)
-  "启动 SESSION 的命令行。"
+  "启动 SESSION 的命令行。模型、推理强度、权限模式取自会话设置。"
   (append
    (list agent-claude-executable "-p"
          "--input-format" "stream-json" "--output-format" "stream-json"
@@ -44,7 +49,13 @@
                          (list :mcpServers
                                (list :emacs (list :command (car (agent-session-emx-command))
                                                   :args (vconcat (cdr (agent-session-emx-command))))))))
-   (when agent-claude-model (list "--model" agent-claude-model))
+   ;; 允许之后在会话中切换到“完全访问”；是否启用由 --permission-mode 决定。
+   (list "--allow-dangerously-skip-permissions"
+         "--permission-mode" (agent-claude--mode session))
+   (when-let* ((model (agent-session-setting session :model)))
+     (unless (equal model "default") (list "--model" model)))
+   (when-let* ((effort (agent-session-setting session :effort)))
+     (list "--effort" effort))
    (when-let* ((resume (plist-get (agent-session-state session) :resume)))
      (list "--resume" resume))
    agent-claude-extra-args))
@@ -57,15 +68,55 @@
   "设置 SESSION 的后端状态 KEY。"
   (setf (agent-session-state session) (plist-put (agent-session-state session) key value)))
 
-(defun agent-claude--control (session request)
-  "向 CLI 发送控制请求 REQUEST。"
-  (agent-session-write session (list :type "control_request"
-                                     :request_id (symbol-name (gensym "emacs-"))
-                                     :request request)))
+(defun agent-claude--control (session request &optional callback)
+  "向 CLI 发送控制请求 REQUEST；收到成功响应后以响应内容调用 CALLBACK。"
+  (let ((id (symbol-name (gensym "emacs-"))))
+    (when callback
+      (agent-claude--set session :callbacks
+                         (cons (cons id callback) (agent-claude--state session :callbacks))))
+    (agent-session-write session (list :type "control_request" :request_id id :request request))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
   (agent-session-start-process session (agent-claude--command session))
-  (agent-claude--control session (list :subtype "initialize")))
+  (agent-claude--control
+   session (list :subtype "initialize")
+   (lambda (response)
+     ;; 初始化结果里有模型列表（含各模型支持的推理强度）和斜杠命令。
+     (agent-claude--set session :models (plist-get response :models))
+     (agent-claude--set session :commands (plist-get response :commands))
+     (agent-session-set-status session 'idle))))
+
+(cl-defmethod agent-session-backend-models ((_ (eql claude)) session)
+  (mapcar (lambda (model)
+            (list :id (plist-get model :value)
+                  :name (plist-get model :displayName)
+                  :description (plist-get model :description)
+                  :efforts (append (plist-get model :supportedEffortLevels) nil)))
+          (agent-claude--state session :models)))
+
+(cl-defmethod agent-session-backend-modes ((_ (eql claude)) _session)
+  (mapcar #'car agent-claude--modes))
+
+(cl-defmethod agent-session-backend-commands ((_ (eql claude)) session)
+  (mapcar (lambda (command)
+            (list :name (plist-get command :name)
+                  :description (plist-get command :description)
+                  :hint (plist-get command :argumentHint)))
+          (agent-claude--state session :commands)))
+
+(cl-defmethod agent-session-backend-apply-settings ((_ (eql claude)) session changed)
+  (when (memq :model changed)
+    (agent-claude--control session (list :subtype "set_model"
+                                         :model (agent-session-setting session :model))))
+  (when (memq :mode changed)
+    (agent-claude--control session (list :subtype "set_permission_mode"
+                                         :mode (agent-claude--mode session))))
+  ;; 推理强度只能在启动时指定：空闲时立即以 --resume 重启，运行中等回合结束。
+  (when (memq :effort changed)
+    (if (eq (agent-session-status session) 'running)
+        (progn (agent-claude--set session :restart-pending t)
+               (agent-session-notice session "推理强度将在本回合结束后生效"))
+      (agent-session-restart-process session))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql claude)) session text)
   (agent-session-write session (list :type "user"
@@ -250,7 +301,10 @@
          (agent-session-notice session (format "出错：%s" (or (plist-get message :result)
                                                              (plist-get message :subtype)))
                                'agent-session-error))
-       (agent-session-set-status session 'idle))
+       (agent-session-set-status session 'idle)
+       (when (agent-claude--state session :restart-pending)
+         (agent-claude--set session :restart-pending nil)
+         (agent-session-restart-process session)))
       ("control_request"
        (let ((request (plist-get message :request))
              (request-id (plist-get message :request_id)))
@@ -261,13 +315,15 @@
                                       :response (list :subtype "error" :request_id request-id
                                                       :error "Emacs 不支持该请求"))))))
       ("control_response"
-       (let ((response (plist-get message :response)))
+       (let* ((response (plist-get message :response))
+              (id (plist-get response :request_id))
+              (callback (alist-get id (agent-claude--state session :callbacks) nil nil #'equal)))
+         (agent-claude--set session :callbacks
+                            (assoc-delete-all id (agent-claude--state session :callbacks)))
          (if (equal (plist-get response :subtype) "error")
              (agent-session-notice session (format "控制请求失败：%s" (plist-get response :error))
                                    'agent-session-error)
-           ;; initialize 完成后即可输入；system/init 要等第一条消息才会出现。
-           (when (eq (agent-session-status session) 'starting)
-             (agent-session-set-status session 'idle))))))))
+           (when callback (funcall callback (plist-get response :response)))))))))
 
 (provide 'agent-claude)
 ;;; agent-claude.el ends here

@@ -24,17 +24,18 @@
   "codex 命令。"
   :type 'string)
 
-(defcustom agent-codex-model nil
-  "使用的模型；nil 时用 ~/.codex/config.toml 中的设置。"
-  :type '(choice (const nil) string))
+(defconst agent-codex--modes
+  ;; 与 T3 Code 相同的映射：(审批策略 沙箱 thread/start 用的沙箱名 审批者)
+  '((ask "untrusted" "readOnly" "read-only" "user")
+    (edits "on-request" "workspaceWrite" "workspace-write" "user")
+    (auto "on-request" "workspaceWrite" "workspace-write" "auto_review")
+    (full "never" "dangerFullAccess" "danger-full-access" "user"))
+  "统一权限模式到 Codex 审批策略与沙箱的映射。")
 
-(defcustom agent-codex-approval-policy "on-request"
-  "审批策略：untrusted / on-request / never。"
-  :type '(choice (const "untrusted") (const "on-request") (const "never")))
-
-(defcustom agent-codex-sandbox "workspace-write"
-  "沙箱模式：read-only / workspace-write / danger-full-access。"
-  :type '(choice (const "read-only") (const "workspace-write") (const "danger-full-access")))
+(defun agent-codex--mode (session)
+  "SESSION 当前权限模式的 Codex 设置：(审批策略 沙箱策略类型 沙箱名 审批者)。"
+  (or (alist-get (agent-session-setting session :mode) agent-codex--modes)
+      (alist-get 'edits agent-codex--modes)))
 
 (defcustom agent-codex-extra-args nil
   "额外的命令行参数（放在 app-server 之后），例如 (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")。"
@@ -103,23 +104,55 @@
    (lambda (_result)
      (agent-codex--notify session "initialized")
      (agent-codex--request
-      session "thread/start"
-      (append (list :cwd (expand-file-name (agent-session-root session))
-                    :approvalPolicy agent-codex-approval-policy
-                    :sandbox agent-codex-sandbox)
-              (when agent-codex-model (list :model agent-codex-model)))
-      (lambda (result)
-        (agent-codex--set session :thread (plist-get (plist-get result :thread) :id))
-        (agent-session-set-info session :model (plist-get result :model))
-        (agent-session-set-status session 'idle))))))
+      session "model/list" (list :limit 50)
+      (lambda (result) (agent-codex--set session :models (plist-get result :data))))
+     (pcase-let ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session)))
+       (agent-codex--request
+        session "thread/start"
+        (append (list :cwd (expand-file-name (agent-session-root session))
+                      :approvalPolicy approval
+                      :sandbox sandbox)
+                (when-let* ((model (agent-session-setting session :model)))
+                  (list :model model)))
+        (lambda (result)
+          (agent-codex--set session :thread (plist-get (plist-get result :thread) :id))
+          (agent-session-set-info session :model (plist-get result :model))
+          (agent-session-set-status session 'idle)))))))
+
+(cl-defmethod agent-session-backend-models ((_ (eql codex)) session)
+  (seq-keep (lambda (model)
+              (unless (plist-get model :hidden)
+                (list :id (plist-get model :model)
+                      :name (plist-get model :displayName)
+                      :description (plist-get model :description)
+                      :efforts (mapcar (lambda (e) (plist-get e :reasoningEffort))
+                                       (plist-get model :supportedReasoningEfforts))
+                      :default-effort (plist-get model :defaultReasoningEffort))))
+            (agent-codex--state session :models)))
+
+(cl-defmethod agent-session-backend-modes ((_ (eql codex)) _session)
+  (mapcar #'car agent-codex--modes))
+
+(cl-defmethod agent-session-backend-apply-settings ((_ (eql codex)) session changed)
+  ;; 设置随每次 turn/start 发送，下一条消息起生效。
+  (when (memq :model changed)
+    (agent-session-set-info session :model (agent-session-setting session :model))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql codex)) session text)
   (agent-codex--request
    session "turn/start"
-   (list :threadId (agent-codex--state session :thread)
-         :input (vector (list :type "text" :text text))
-         ;; 要求推理摘要，才会有 item/reasoning/summaryTextDelta。
-         :summary "detailed")
+   (pcase-let ((`(,approval ,sandbox ,_ ,reviewer) (agent-codex--mode session)))
+     (append
+      (list :threadId (agent-codex--state session :thread)
+            :input (vector (list :type "text" :text text))
+            ;; 要求推理摘要，才会有 item/reasoning/summaryTextDelta。
+            :summary "detailed"
+            ;; 审批相关设置每回合都显式发送，避免恢复会话后沿用旧值。
+            :approvalPolicy approval
+            :approvalsReviewer reviewer
+            :sandboxPolicy (list :type sandbox))
+      (when-let* ((model (agent-session-setting session :model))) (list :model model))
+      (when-let* ((effort (agent-session-setting session :effort))) (list :effort effort))))
    (lambda (result)
      (agent-codex--set session :turn (plist-get (plist-get result :turn) :id)))))
 
