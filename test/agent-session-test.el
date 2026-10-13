@@ -10,6 +10,7 @@
 
 (require 'ert)
 (require 'agent-session)
+(require 'agent-session-list)
 
 (cl-defmethod agent-session-backend-start ((_ (eql test-echo)) session)
   (agent-session-set-status session 'idle))
@@ -24,6 +25,9 @@
 (cl-defmethod agent-session-backend-models ((_ (eql test-echo)) _session)
   '((:id "small" :name "Small" :efforts ("low" "high") :default-effort "low")
     (:id "big" :name "Big" :efforts ("high" "max"))))
+
+(cl-defmethod agent-session-backend-modes ((_ (eql test-echo)) _session)
+  '(ask edits full plan))
 
 (cl-defmethod agent-session-backend-commands ((_ (eql test-echo)) _session)
   '((:name "compact" :description "压缩上下文")))
@@ -159,6 +163,75 @@
                         (agent-session--input-text agent-session--current))
                       "草稿"))
        (kill-buffer new)))))
+
+(defun agent-session-test--toolbar ()
+  "工具栏（含审批横幅）的纯文本。"
+  (buffer-substring-no-properties (agent-session-tail agent-session--current)
+                                  (agent-session-input agent-session--current)))
+
+(ert-deftest agent-session-test-toolbar ()
+  "工具栏显示当前设置；重绘时保留输入区内容与光标。"
+  (agent-session-test--with-session
+   (let ((agent-session-last-settings nil))
+     (should (string-match-p "Echo ▾.*Small ▾.*推理 默认 ▾.*自动接受编辑 ▾"
+                             (agent-session-test--toolbar)))
+     (goto-char (point-max))
+     (insert "草稿中")
+     (backward-char 1)
+     (agent-session-configure agent-session--current :model "big" :effort "max" :mode 'full)
+     (should (string-match-p "Big ▾.*推理 max ▾.*完全访问 ▾" (agent-session-test--toolbar)))
+     (should (equal (agent-session--input-text agent-session--current) "草稿中"))
+     (should (equal (char-after) ?中))
+     (delete-region (agent-session-input agent-session--current) (point-max))
+     (agent-session-test--type "/plan")
+     (should (string-match-p "计划模式" (agent-session-test--toolbar)))
+     (agent-session-test--type "/default")
+     (should (eq (agent-session-setting agent-session--current :mode) 'full)))))
+
+(ert-deftest agent-session-test-approval-banner ()
+  "待确认的请求显示在工具栏的审批横幅中，回答后消失。"
+  (agent-session-test--with-session
+   (let (answer)
+     (agent-session-ask agent-session--current :title "Write：a.txt"
+                        :choices '((allow "允许") (deny "拒绝"))
+                        :callback (lambda (key) (setq answer key)))
+     (should (string-match-p "⚠ Write：a.txt +允许 +拒绝" (agent-session-test--toolbar)))
+     (agent-session-approve)
+     (should (eq answer 'allow))
+     (should-not (string-match-p "⚠" (agent-session-test--toolbar))))))
+
+(ert-deftest agent-session-test-list ()
+  "会话列表显示进行中的会话及其标题。"
+  (agent-session-test--with-session
+   (agent-session-test--type "修复输入区的问题")
+   (let ((buffer (current-buffer)))
+     (with-temp-buffer
+       (agent-session-list-mode)
+       (setq agent-session-list--root temporary-file-directory)
+       (agent-session-list--render)
+       (should (string-match-p "进行中\\(.\\|\n\\)*Echo\\(.\\|\n\\)*修复输入区的问题"
+                               (buffer-string)))
+       (goto-char (point-min))
+       (agent-session-list-next)
+       (should (eq (plist-get (get-text-property (point) 'agent-session-entry) :buffer) buffer))))))
+
+(ert-deftest agent-session-test-list-debounce ()
+  "防抖重绘的回调只重绘一次，不会再次安排自己（曾导致 Emacs 卡死）。"
+  (let ((agent-session-list--pending nil)
+        (scheduled 0) (refreshed 0))
+    (agent-session-list--refresh-soon)
+    (let ((timer agent-session-list--pending))
+      (should (timerp timer))
+      (cancel-timer timer)
+      (cl-letf* ((original (symbol-function 'agent-session-list--refresh-soon))
+                 ((symbol-function 'agent-session-list--refresh-soon)
+                  (lambda () (cl-incf scheduled) (funcall original)))
+                 ((symbol-function 'agent-session-list--refresh)
+                  (lambda () (cl-incf refreshed))))
+        (funcall (timer--function timer))
+        (should (= refreshed 1))
+        (should (= scheduled 0))
+        (should-not agent-session-list--pending)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
