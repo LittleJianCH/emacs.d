@@ -44,6 +44,7 @@
       transient-levels-file (my/var "transient/levels.el")
       transient-values-file (my/var "transient/values.el")
       url-configuration-directory (my/var "url/")
+      tramp-persistency-file-name (my/var "tramp")
       custom-file (expand-file-name "custom.el" user-emacs-directory))
 (load custom-file 'noerror 'nomessage)
 
