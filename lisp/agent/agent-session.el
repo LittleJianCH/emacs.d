@@ -951,13 +951,19 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   (let* ((session (agent-session--this))
          (modes (agent-session-backend-modes (agent-session-backend session) session))
          (mode (or mode
-                   (let ((label (agent-session--completing-read
-                                 "权限模式: "
-                                 (mapcar (lambda (m) (cons (agent-session--mode-label m)
-                                                           (nth 2 (assq m agent-session-modes))))
-                                         modes)
-                                 (agent-session--mode-label (agent-session-setting session :mode)))))
-                     (car (seq-find (lambda (m) (equal (cadr m) label)) agent-session-modes))))))
+                   ;; 候选同时带中文名与英文名，输入任一种都能匹配，例如“完全访问 full”。
+                   (let* ((candidates (mapcar (lambda (m) (cons (format "%s %s"
+                                                                       (agent-session--mode-label m) m)
+                                                                 (nth 2 (assq m agent-session-modes))))
+                                              modes))
+                          (label (agent-session--completing-read
+                                  "权限模式: " candidates
+                                  (car (seq-find (lambda (c) (string-suffix-p
+                                                              (format " %s" (agent-session-setting
+                                                                             session :mode))
+                                                              (car c)))
+                                                 candidates)))))
+                     (intern (car (last (split-string label " "))))))))
     (unless (memq mode modes) (user-error "%s 不支持该权限模式" (agent-session-title session)))
     (agent-session-configure session :mode mode)))
 

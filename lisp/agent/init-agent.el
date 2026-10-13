@@ -52,6 +52,60 @@
   :demand t
   :after agent-ui)
 
+;; Vim 键位（加载了 evil 时）。会话 buffer 只读：i / a / o / RET 都是开始输入，
+;; j / k 等照常导航，设置与审批放在本地 leader “,” 下（只在 agent 的 buffer 中生效）。
+(with-eval-after-load 'evil
+  (evil-define-key '(normal motion visual) 'global
+    (kbd "<leader>a") agent-session-command-map)
+
+  (defvar-keymap agent-session-local-leader-map
+    :doc "会话 buffer 中 , 之后的按键。"
+    "o" #'agent-session-menu
+    "m" #'agent-session-select-model
+    "e" #'agent-session-select-effort
+    "M" #'agent-session-select-mode
+    "p" #'agent-session-toggle-plan
+    "A" #'agent-session-select-agent
+    "y" #'agent-session-approve
+    "n" #'agent-session-deny
+    "k" #'agent-session-interrupt
+    "s" #'agent-session-list
+    "N" #'agent-session-new
+    "r" #'agent-session-resume)
+
+  (evil-set-initial-state 'agent-session-mode 'normal)
+  (evil-define-key '(normal motion) agent-session-mode-map
+    (kbd "RET") #'agent-session-ret
+    "i" #'agent-session-input
+    "a" #'agent-session-input
+    "o" #'agent-session-input
+    "]]" #'agent-session-next-message
+    "[[" #'agent-session-previous-message
+    (kbd "TAB") #'forward-button
+    (kbd "<backtab>") #'backward-button
+    "q" #'quit-window
+    "," agent-session-local-leader-map)
+
+  (evil-set-initial-state 'agent-session-list-mode 'normal)
+  (evil-define-key '(normal motion) agent-session-list-mode-map
+    (kbd "RET") #'agent-session-list-open
+    "o" #'agent-session-list-open
+    "c" #'agent-session-list-create
+    "x" #'agent-session-list-kill
+    "gr" #'agent-session-list-refresh
+    "]]" #'agent-session-list-next
+    "[[" #'agent-session-list-previous
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-canvas-mode 'normal)
+  (evil-define-key '(normal motion) agent-canvas-mode-map
+    (kbd "RET") #'push-button
+    (kbd "TAB") #'agent-canvas-tab
+    (kbd "<backtab>") #'backward-button
+    "c" #'agent-canvas-comment
+    "gr" #'revert-buffer
+    "q" #'quit-window))
+
 ;; agent 通过 emacsclient / emx 回调本实例。
 (use-package server
   :demand t
