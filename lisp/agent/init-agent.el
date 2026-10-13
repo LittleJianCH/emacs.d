@@ -46,6 +46,11 @@
   :config
   (keymap-set agent-term-command-map "v" #'agent-ui-last-view))
 
+;; agent 生成的原生页面：render / patch 方法。
+(use-package agent-canvas
+  :demand t
+  :after agent-ui)
+
 ;; agent 通过 emacsclient / emx 回调本实例。
 (use-package server
   :demand t

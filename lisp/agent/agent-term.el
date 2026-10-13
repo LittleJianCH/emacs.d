@@ -167,12 +167,18 @@ PLIST 支持：
 
 ;;; 向 agent 发送内容
 
-(defun agent-term-send-string (string &optional buffer)
-  "以粘贴方式把 STRING 发送到 BUFFER（默认目标会话），不自动回车。"
+(defun agent-term-send-string (string &optional buffer submit)
+  "以粘贴方式把 STRING 发送到 BUFFER（默认目标会话）。
+SUBMIT 非空时随后回车提交；稍作延迟，避免 TUI 把回车当成粘贴内容。"
   (let ((buffer (or buffer (agent-term--target)
                     (user-error "没有 agent 会话，先用 C-c a n 启动"))))
     (with-current-buffer buffer
       (vterm-send-string string t))
+    (when submit
+      (run-with-timer 0.15 nil (lambda ()
+                                 (when (buffer-live-p buffer)
+                                   (with-current-buffer buffer
+                                     (vterm-send-return))))))
     (select-window (agent-term--display buffer))))
 
 (defun agent-term-reference-colon (path start end)

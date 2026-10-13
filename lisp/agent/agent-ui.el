@@ -31,13 +31,17 @@
 
 ;;; 方法注册
 
+(defvar agent-ui-caller nil
+  "当前调用方信息，例如 (:agent_buffer \"*agent:claude@proj*\")。
+emx 根据所在 agent 会话的环境变量自动填写，方法内可直接读取。")
+
 (defvar agent-ui--methods nil
   "已注册方法：((NAME . (:function F :description D :params SPEC)) ...)。")
 
 (defmacro agent-ui-defmethod (name params docstring &rest body)
   "定义 agent 可调用的方法 NAME（字符串）。
 PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
-类型符号：string、integer、boolean。BODY 中可直接使用与参数同名的变量，
+类型符号：string、integer、boolean、array（对象数组）、object。BODY 中可直接使用与参数同名的变量，
 返回值（plist / vector / 字符串 / 数字）会序列化为 JSON。"
   (declare (indent 2) (doc-string 3))
   (let ((fn (intern (format "agent-ui--method-%s" name)))
@@ -78,8 +82,10 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
     (dolist (entry spec)
       (setq properties
             (plist-put properties (intern (format ":%s" (car entry)))
-                       (list :type (symbol-name (nth 1 entry))
-                             :description (nth 2 entry))))
+                       (append (pcase (nth 1 entry)
+                                 ('array (list :type "array" :items (list :type "object")))
+                                 (type (list :type (symbol-name type))))
+                               (list :description (nth 2 entry)))))
       (when (memq 'required entry)
         (push (symbol-name (car entry)) required)))
     (list :type "object"
@@ -105,7 +111,8 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                     (entry (or (alist-get method agent-ui--methods nil nil #'equal)
                                (error "未知方法：%s" method)))
                     (spec (plist-get entry :params))
-                    (params (agent-ui--coerce (plist-get request :params) spec)))
+                    (params (agent-ui--coerce (plist-get request :params) spec))
+                    (agent-ui-caller (plist-get request :context)))
                (agent-ui--check-required method params spec)
                (list :ok t
                      :result (agent-ui--json-value
