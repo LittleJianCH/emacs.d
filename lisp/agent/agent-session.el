@@ -796,7 +796,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 
 ;;; 从代码 buffer 引用到输入区
 
-(defun agent-session--insert-input (buffer text)
+(defun agent-session-insert-input (buffer text)
   "把 TEXT 插入会话 BUFFER 的输入区末尾，并跳过去继续输入。"
   (select-window (agent-session-display buffer))
   (goto-char (point-max))
@@ -816,7 +816,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                      (format ":%d-%d" (line-number-at-pos (region-beginning))
                              (line-number-at-pos (max (region-beginning) (1- (region-end))))))))
     (deactivate-mark)
-    (agent-session--insert-input buffer (concat (file-relative-name file root) lines " "))))
+    (agent-session-insert-input buffer (concat (file-relative-name file root) lines " "))))
 
 ;;;###autoload
 (defun agent-session-insert-region (start end)
@@ -832,7 +832,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
          (lang (string-remove-suffix "-ts" (string-remove-suffix "-mode" (symbol-name major-mode))))
          (code (buffer-substring-no-properties start end)))
     (deactivate-mark)
-    (agent-session--insert-input buffer (format "\n%s\n```%s\n%s\n```\n" where lang code))))
+    (agent-session-insert-input buffer (format "\n%s\n```%s\n%s\n```\n" where lang code))))
 
 ;;; 注册 agent
 

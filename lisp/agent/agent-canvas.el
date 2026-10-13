@@ -21,7 +21,7 @@
 (require 'svg)
 (require 'dom)
 (require 'button)
-(require 'agent-term)
+(require 'agent-session)
 (require 'agent-ui)
 
 (defgroup agent-canvas nil
@@ -510,16 +510,24 @@
 
 (defun agent-canvas--agent-buffer ()
   "页面所属的 agent 会话 buffer。"
-  (or (and agent-canvas--agent (get-buffer agent-canvas--agent))
-      (agent-term--target)
+  (or (and agent-canvas--agent (agent-session-buffer-p (get-buffer agent-canvas--agent))
+           (get-buffer agent-canvas--agent))
+      (agent-session-target)
       (user-error "找不到 agent 会话")))
+
+(defun agent-canvas--send (text submit)
+  "把 TEXT 发给页面所属的会话；SUBMIT 为 nil 时只填入输入区。"
+  (let ((buffer (agent-canvas--agent-buffer)))
+    (if (not submit)
+        (agent-session-insert-input buffer text)
+      (agent-session-submit (buffer-local-value 'agent-session--current buffer) text)
+      (agent-session-display buffer))))
 
 (defun agent-canvas--press (spec)
   "执行按钮 SPEC：发送 prompt 给 agent，或打开 open 指向的位置。"
   (cond ((plist-get spec :prompt)
-         (agent-term-send-string (plist-get spec :prompt)
-                                 (agent-canvas--agent-buffer)
-                                 (if (plist-member spec :submit) (plist-get spec :submit) t)))
+         (agent-canvas--send (plist-get spec :prompt)
+                             (if (plist-member spec :submit) (plist-get spec :submit) t)))
         ((plist-get spec :open) (agent-canvas--open (plist-get spec :open)))))
 
 (defun agent-canvas--buttons (block)
@@ -1024,9 +1032,8 @@
 (defun agent-canvas-comment (text)
   "就当前页面给 agent 发一句话 TEXT。"
   (interactive (list (read-string "回复 agent：")))
-  (agent-term-send-string (format "[关于页面「%s」] %s"
-                                  (plist-get agent-canvas--page :title) text)
-                          (agent-canvas--agent-buffer) t))
+  (agent-canvas--send (format "[关于页面「%s」] %s" (plist-get agent-canvas--page :title) text)
+                      t))
 
 (defvar-keymap agent-canvas-mode-map
   :doc "agent 页面的按键。"
@@ -1053,8 +1060,9 @@
 
 (defun agent-canvas--caller-root (agent)
   "AGENT 会话所属的项目根目录。"
-  (or (when-let* ((buffer (and agent (get-buffer agent))))
-        (buffer-local-value 'agent-term--root buffer))
+  (or (when-let* ((buffer (and agent (get-buffer agent)))
+                  (session (buffer-local-value 'agent-session--current buffer)))
+        (agent-session-root session))
       (with-current-buffer (window-buffer (agent-ui--main-window))
         (when-let* ((project (project-current))) (project-root project)))
       default-directory))
@@ -1107,7 +1115,7 @@
 - {\"type\":\"progress\",\"items\":[{\"label\":\"编译\",\"value\":3,\"max\":5}]}  或单项 {\"type\":\"progress\",\"label\":…,\"value\":…}
 - {\"type\":\"section\",\"title\":\"…\",\"collapsed\":false,\"blocks\":[…]}
 - {\"type\":\"buttons\",\"buttons\":[{\"label\":\"按方案 A 实施\",\"prompt\":\"按方案 A 实施\"},{\"label\":\"看代码\",\"open\":\"src/main.rs:10\"}]}
-  用户点击 prompt 按钮时，prompt 会作为用户消息发送到你的会话（submit:false 则只填入输入框）
+  用户点击 prompt 按钮时，prompt 会作为用户消息发送到你的会话（submit:false 则只填入输入区）
 - {\"type\":\"image\",\"path\":\"…\",\"width\":600}
 - {\"type\":\"divider\"}
 文件路径相对于项目根目录。"

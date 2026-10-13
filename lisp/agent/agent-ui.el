@@ -17,7 +17,7 @@
 (require 'subr-x)
 (require 'flymake)
 (require 'project)
-(require 'agent-term)
+(require 'agent-session)
 
 
 (defgroup agent-ui nil
@@ -141,7 +141,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
   "用户的工作窗口：最近使用的非 agent 窗口；没有时在 agent 列左侧新开。"
   (let* ((frame (agent-ui--frame))
          (windows (seq-remove (lambda (window)
-                                (or (agent-term-buffer-p (window-buffer window))
+                                (or (agent-session-buffer-p (window-buffer window))
                                     (window-parameter window 'window-side)
                                     (window-dedicated-p window)))
                               (window-list frame 'no-minibuf))))
