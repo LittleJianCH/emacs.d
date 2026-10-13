@@ -106,18 +106,92 @@
      (agent-codex--request
       session "model/list" (list :limit 50)
       (lambda (result) (agent-codex--set session :models (plist-get result :data))))
-     (pcase-let ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session)))
+     (pcase-let* ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session))
+                  (resume (agent-codex--state session :resume)))
        (agent-codex--request
-        session "thread/start"
+        session (if resume "thread/resume" "thread/start")
         (append (list :cwd (expand-file-name (agent-session-root session))
                       :approvalPolicy approval
                       :sandbox sandbox)
+                (when resume (list :threadId resume :excludeTurns t))
                 (when-let* ((model (agent-session-setting session :model)))
                   (list :model model)))
         (lambda (result)
-          (agent-codex--set session :thread (plist-get (plist-get result :thread) :id))
+          (let ((thread (plist-get (plist-get result :thread) :id)))
+            (agent-codex--set session :thread thread)
+            (agent-codex--set session :resume thread))
           (agent-session-set-info session :model (plist-get result :model))
-          (agent-session-set-status session 'idle)))))))
+          (if (and resume (zerop (hash-table-count (agent-session-blocks session))))
+              (agent-codex--replay session)
+            (agent-session-set-status session 'idle))))))))
+
+(defun agent-codex--replay (session)
+  "取回恢复的会话的历史回合并渲染，完成后进入空闲。"
+  (agent-codex--request
+   session "thread/turns/list"
+   (list :threadId (agent-codex--state session :thread)
+         :itemsView "full" :sortDirection "asc" :limit 200)
+   (lambda (result)
+     (seq-doseq (turn (plist-get result :data))
+       (seq-doseq (item (plist-get turn :items))
+         (if (equal (plist-get item :type) "userMessage")
+             (agent-session--new-block
+              session (plist-get item :id)
+              (list :type 'user
+                    :text (mapconcat (lambda (part) (or (plist-get part :text) ""))
+                                     (plist-get item :content) "")))
+           (agent-codex--item-completed session item))))
+     (agent-session-notice session "—— 以上为历史记录 ——")
+     (agent-session-set-status session 'idle))))
+
+;;; 历史会话列表：临时启动一个 app-server 调用 thread/list
+
+(cl-defmethod agent-session-backend-history ((_ (eql codex)) root callback)
+  (let* ((pending "")
+         (done nil)
+         (process
+          (make-process
+           :name "agent-codex-list"
+           :command (list agent-codex-executable "app-server")
+           :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           :stderr (get-buffer-create " *agent-codex-list stderr*")
+           :filter
+           (lambda (process output)
+             (setq pending (concat pending output))
+             (let ((lines (split-string pending "\n")))
+               (setq pending (car (last lines)))
+               (dolist (line (butlast lines))
+                 (when-let* ((message (ignore-errors
+                                        (json-parse-string line :object-type 'plist
+                                                           :null-object nil :false-object nil))))
+                   (pcase (plist-get message :id)
+                     (1 (process-send-string
+                         process
+                         (concat (json-serialize '(:jsonrpc "2.0" :method "initialized")) "\n"
+                                 (json-serialize
+                                  (list :jsonrpc "2.0" :id 2 :method "thread/list"
+                                        :params (list :cwd (directory-file-name (expand-file-name root))
+                                                      :limit 50 :sortKey "updated_at"
+                                                      :sortDirection "desc")))
+                                 "\n")))
+                     (2 (setq done t)
+                        (delete-process process)
+                        (funcall callback
+                                 (mapcar (lambda (thread)
+                                           (list :id (plist-get thread :id)
+                                                 :title (or (plist-get thread :name)
+                                                            (car (split-string
+                                                                  (string-trim (or (plist-get thread :preview) ""))
+                                                                  "\n"))
+                                                            "（无标题）")
+                                                 :time (plist-get thread :updatedAt)))
+                                         (plist-get (plist-get message :result) :data)))))))))
+           :sentinel (lambda (_process _event)
+                       (unless done (setq done t) (funcall callback nil))))))
+    (process-send-string
+     process (concat (json-serialize (list :jsonrpc "2.0" :id 1 :method "initialize"
+                                           :params (list :clientInfo (list :name "emacs" :version emacs-version))))
+                     "\n"))))
 
 (cl-defmethod agent-session-backend-models ((_ (eql codex)) session)
   (seq-keep (lambda (model)

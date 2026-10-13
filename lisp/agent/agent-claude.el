@@ -76,7 +76,90 @@
                          (cons (cons id callback) (agent-claude--state session :callbacks))))
     (agent-session-write session (list :type "control_request" :request_id id :request request))))
 
+;;; 历史会话（~/.claude/projects/<编码后的项目路径>/<session-id>.jsonl）
+
+(defun agent-claude--project-dir (root)
+  "项目 ROOT 的会话目录：路径中非字母数字的字符都替换为 -。"
+  (expand-file-name (replace-regexp-in-string "[^[:alnum:]]" "-" (directory-file-name
+                                                                   (expand-file-name root)))
+                    "~/.claude/projects/"))
+
+(defun agent-claude--json-lines (file &optional beg end)
+  "FILE 中 BEG 到 END 字节范围内能完整解析的 JSON 行。"
+  (with-temp-buffer
+    (insert-file-contents file nil beg end)
+    (let (result)
+      (dolist (line (split-string (buffer-string) "\n" t) (nreverse result))
+        (when-let* ((object (ignore-errors
+                              (json-parse-string line :object-type 'plist
+                                                 :null-object nil :false-object nil))))
+          (push object result))))))
+
+(defun agent-claude--user-text (entry)
+  "ENTRY 若是用户亲自输入的消息则返回其文本（排除元信息、命令标签、子 agent）。"
+  (let ((content (plist-get (plist-get entry :message) :content)))
+    (when (and (equal (plist-get entry :type) "user")
+               (stringp content)
+               (not (plist-get entry :isMeta))
+               (not (plist-get entry :isSidechain))
+               (not (string-prefix-p "<" (string-trim-left content))))
+      content)))
+
+(defun agent-claude--session-title (file)
+  "会话文件 FILE 的标题：Claude 生成的标题，否则取第一条用户消息。"
+  (let* ((size (file-attribute-size (file-attributes file)))
+         (tail (agent-claude--json-lines file (max 0 (- size 65536)) size))
+         (custom (seq-find (lambda (e) (equal (plist-get e :type) "custom-title")) (reverse tail))))
+    (or (plist-get custom :customTitle)
+        (seq-some #'agent-claude--user-text (agent-claude--json-lines file 0 (min size 65536)))
+        "（无标题）")))
+
+(cl-defmethod agent-session-backend-history ((_ (eql claude)) root callback)
+  (let* ((dir (agent-claude--project-dir root))
+         (files (and (file-directory-p dir) (directory-files dir t "\\.jsonl\\'")))
+         (mtime (lambda (file)
+                  (float-time (file-attribute-modification-time (file-attributes file)))))
+         (files (seq-take (sort files :key mtime :reverse t :in-place t) 50)))
+    (funcall callback
+             (mapcar (lambda (file)
+                       (list :id (file-name-base file)
+                             :title (car (split-string (string-trim (agent-claude--session-title file))
+                                                       "\n"))
+                             :time (funcall mtime file)))
+                     files))))
+
+(defun agent-claude--replay (session)
+  "把恢复的会话的历史记录渲染到 SESSION 中。"
+  (let ((file (expand-file-name (concat (agent-claude--state session :resume) ".jsonl")
+                                (agent-claude--project-dir (agent-session-root session)))))
+    (when (file-exists-p file)
+      (dolist (entry (agent-claude--json-lines file))
+        (unless (plist-get entry :isSidechain)
+          (let ((message (plist-get entry :message)))
+            (pcase (plist-get entry :type)
+              ("user"
+               (if-let* ((text (agent-claude--user-text entry)))
+                   (agent-session--new-block session (plist-get entry :uuid)
+                                             (list :type 'user :text text))
+                 (agent-claude--tool-results session message)))
+              ("assistant"
+               (seq-do-indexed
+                (lambda (part index)
+                  (pcase (plist-get part :type)
+                    ("text" (agent-session-text-done
+                             session (format "%s-%s" (plist-get message :id) index)
+                             (plist-get part :text)))
+                    ("tool_use"
+                     (apply #'agent-session-tool session (plist-get part :id) :status 'ok
+                            (agent-claude--tool-view session (plist-get part :name)
+                                                     (plist-get part :input))))))
+                (plist-get message :content))))))))
+    (agent-session-notice session "—— 以上为历史记录 ——")))
+
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
+  (when (and (agent-claude--state session :resume)
+             (zerop (hash-table-count (agent-session-blocks session))))
+    (agent-claude--replay session))
   (agent-session-start-process session (agent-claude--command session))
   (agent-claude--control
    session (list :subtype "initialize")

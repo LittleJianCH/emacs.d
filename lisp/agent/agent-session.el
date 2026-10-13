@@ -90,6 +90,10 @@
   "读取已注册 AGENT 的属性 PROP。"
   (plist-get (alist-get agent agent-session-agents) prop))
 
+(defun agent-session-resume-id (session)
+  "SESSION 对应的 agent 原生会话 id（Claude session id / Codex thread id），可能为 nil。"
+  (and session (plist-get (agent-session-state session) :resume)))
+
 (defun agent-session-title (session)
   "SESSION 的显示名，如 Claude。"
   (or (agent-session--get (agent-session-agent session) :title)
@@ -135,6 +139,12 @@
 (cl-defgeneric agent-session-backend-apply-settings (backend session changed)
   "设置变化后生效。CHANGED 为变化的键列表（:model :effort :mode）。"
   (ignore backend session changed))
+
+(cl-defgeneric agent-session-backend-history (backend root callback)
+  "列出项目 ROOT 中的历史会话，以列表调用 CALLBACK（可异步）。
+每项为 (:id ID :title 标题 :time 秒数)，按时间倒序。"
+  (ignore backend root)
+  (funcall callback nil))
 
 ;;; 设置：模型、推理强度、权限模式
 
@@ -826,12 +836,18 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   (intern (completing-read "Agent: " (reverse (mapcar #'car agent-session-agents)) nil t)))
 
 ;;;###autoload
-(defun agent-session-start (agent &optional new)
-  "打开当前项目的 AGENT 会话；NEW 非空（前缀参数）时总是新建。"
+(defun agent-session-start (agent &optional new resume root)
+  "打开当前项目的 AGENT 会话；NEW 非空（前缀参数）时总是新建。
+RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
   (interactive (list (agent-session--read-agent) current-prefix-arg))
   (unless (server-running-p) (server-start))
-  (let ((root (agent-session--root)))
-    (if-let* ((existing (and (not new) (car (agent-session-buffers root agent)))))
+  (let ((root (or root (agent-session--root))))
+    (if-let* ((existing (if resume
+                            (seq-find (lambda (b) (equal resume (agent-session-resume-id
+                                                                 (buffer-local-value
+                                                                  'agent-session--current b))))
+                                      (agent-session-buffers))
+                          (and (not new) (car (agent-session-buffers root agent))))))
         (select-window (agent-session-display existing))
       (let* ((buffer (generate-new-buffer
                       (format "*%s@%s*" agent (file-name-nondirectory (directory-file-name root)))))
@@ -840,6 +856,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                        :backend (or (agent-session--get agent :backend)
                                     (user-error "未注册 agent：%s" agent))
                        :root root :buffer buffer
+                       :state (and resume (list :resume resume))
                        :settings (copy-sequence
                                   (alist-get agent agent-session-last-settings)))))
         (agent-session--setup-buffer session)
