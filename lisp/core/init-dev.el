@@ -20,9 +20,7 @@
 (use-package diff-hl
   :ensure t
   :demand t
-  :hook ((magit-pre-refresh . diff-hl-magit-pre-refresh)
-         (magit-post-refresh . diff-hl-magit-post-refresh)
-         (dired-mode . diff-hl-dired-mode))
+  :hook (dired-mode . diff-hl-dired-mode)
   :config
   (global-diff-hl-mode 1)
   (diff-hl-flydiff-mode 1))
@@ -45,10 +43,25 @@
   (eglot-autoshutdown t)
   (eglot-events-buffer-config '(:size 0)))
 
+(defun my/eglot-format-on-save ()
+  "保存前用语言服务器格式化当前 buffer（eglot 已连接时才生效）。
+语言模块把它挂到各自的 mode hook 上。"
+  (add-hook 'before-save-hook
+            (lambda ()
+              (when (and (fboundp 'eglot-managed-p) (eglot-managed-p))
+                (eglot-format-buffer)))
+            nil t))
+
 (use-package flymake
   :bind (:map flymake-mode-map
          ("M-g n" . flymake-goto-next-error)
          ("M-g p" . flymake-goto-prev-error)))
+
+(use-package compile
+  :custom
+  (compilation-scroll-output 'first-error)
+  (compilation-ask-about-save nil)
+  :hook (compilation-filter . ansi-color-compilation-filter))
 
 ;; 优先使用 tree-sitter 模式（Emacs 31）；缺少语法时询问后自动安装到 tree-sitter/。
 (use-package treesit
