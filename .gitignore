@@ -1,0 +1,10 @@
+# 运行时状态
+/var/
+/elpa/
+/eln-cache/
+/tree-sitter/
+/custom.el
+/auto-save-list/
+/transient/
+/url/
+*.elc
