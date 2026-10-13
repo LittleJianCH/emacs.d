@@ -488,9 +488,23 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                     (plist-put (agent-session-info session) key value)))
   (agent-session--refresh-header session))
 
+(defun agent-session--settle (session)
+  "回合结束或进程退出时收尾：仍在运行的工具标为中断，未回答的确认作废。"
+  (maphash (lambda (id block)
+             (pcase (plist-get block :type)
+               ('tool (when (eq (plist-get block :status) 'running)
+                        (agent-session--update session id :status 'error :note "已中断")))
+               ('ask (unless (plist-get block :answer)
+                       (agent-session--update session id :answer "已失效")))
+               ('text (unless (plist-get block :done)
+                        (agent-session--update session id :done t)))))
+           (agent-session-blocks session)))
+
 (defun agent-session-set-status (session status)
   "设置会话状态：idle / running / exited。空闲时发送排队的消息。"
   (setf (agent-session-status session) status)
+  (when (memq status '(idle exited))
+    (agent-session--settle session))
   (agent-session--refresh-header session)
   (when (and (eq status 'idle) (agent-session-queue session))
     (let ((next (pop (agent-session-queue session))))
