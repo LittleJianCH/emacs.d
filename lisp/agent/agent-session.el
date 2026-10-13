@@ -238,6 +238,13 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
       (insert (agent-session--ro (agent-session--format session id block)))
       (set-marker end (point)))))
 
+(defun agent-session--remove-block (session id)
+  "从对话记录中删除 block ID（连同其后的分隔换行）。"
+  (when-let* ((block (agent-session--block session id)))
+    (agent-session--with-buffer session
+      (delete-region (plist-get block :start) (1+ (plist-get block :end))))
+    (remhash id (agent-session-blocks session))))
+
 (defun agent-session--update (session id &rest props)
   "合并 PROPS 到 block ID 并重绘；block 不存在时新建。"
   (let ((block (agent-session--block session id)))
@@ -508,7 +515,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   (agent-session--refresh-header session)
   (when (and (eq status 'idle) (agent-session-queue session))
     (let ((next (pop (agent-session-queue session))))
-      (agent-session--update session (car next) :queued nil)
+      ;; 排队时显示在当时的末尾；真正发出时移到对话末尾，保持记录顺序与实际一致。
+      (agent-session--remove-block session (car next))
+      (agent-session--new-block session (car next) (list :type 'user :text (cdr next)))
       (agent-session--deliver session (cdr next)))))
 
 ;;; header-line
@@ -680,12 +689,14 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (setq agent-session--current session)
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (setf (agent-session-tail session) (copy-marker (point) t))
       (insert (agent-session--ro
                (propertize (concat "\n──── C-c C-c 发送 · C-c C-k 中断 · "
                                    "C-c C-y / C-c C-n 允许 / 拒绝 · M-p 历史 ────\n")
                            'face 'agent-session-dim)))
-      (setf (agent-session-input session) (point-marker)))))
+      (setf (agent-session-input session) (point-marker))
+      ;; 对话记录插在分隔线之前。标记要在插入分隔线之后再建：
+      ;; 它随插入后移，若先建，插入分隔线时会被推到分隔线后面。
+      (setf (agent-session-tail session) (copy-marker (point-min) t)))))
 
 ;;; 会话管理
 
