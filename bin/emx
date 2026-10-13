@@ -1,0 +1,182 @@
+#!/usr/bin/env node
+// emx — agent 操作 Emacs 的桥（命令行 + MCP server）。
+//
+//   emx help                         列出 Emacs 提供的全部方法
+//   emx <method> [位置参数] [--key value ...]
+//   emx open src/main.rs 42          打开文件并跳到第 42 行
+//   emx show report.org              展示 org / markdown / diff 等内容
+//   echo '* 标题' | emx show - --format org   从标准输入读取内容
+//   emx context                      用户当前在看的文件、光标、选区
+//   emx eval '(buffer-list)'         执行任意 Elisp
+//   emx mcp                          以 stdio MCP server 运行
+//
+// 方法定义在 lisp/agent/agent-ui.el，用 agent-ui-defmethod 扩展。
+// 环境变量：EMACS_SOCKET_NAME 指定 server（agent 会话内已自动设置），
+//           EMX_EMACSCLIENT 指定 emacsclient 路径。
+
+'use strict';
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const readline = require('node:readline');
+
+const EMACSCLIENT = process.env.EMX_EMACSCLIENT || 'emacsclient';
+const VERSION = '0.1.0';
+
+// 位置参数到参数名的映射；其余参数用 --key value。
+const POSITIONAL = {
+  open: ['path', 'line', 'end_line'],
+  show: ['path'],
+  eval: ['code'],
+  notify: ['message'],
+  read_buffer: ['name', 'start_line', 'end_line'],
+  diagnostics: ['path'],
+};
+
+const lispString = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+
+// 调用 Emacs 中的 agent-ui 方法，返回 result 或抛出错误。
+function call(method, params = {}) {
+  params = { ...params };
+  if (typeof params.path === 'string') params.path = path.resolve(params.path);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emx-'));
+  const request = path.join(dir, 'request.json');
+  const response = path.join(dir, 'response.json');
+  try {
+    fs.writeFileSync(request, JSON.stringify({ method, params }));
+    try {
+      execFileSync(EMACSCLIENT,
+        ['--eval', `(agent-ui-rpc ${lispString(request)} ${lispString(response)})`],
+        { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
+    } catch (err) {
+      const detail = (err.stderr && err.stderr.toString().trim()) || err.message;
+      throw new Error(`无法调用 Emacs（Emacs 是否已启动并运行 server？）：${detail}`);
+    }
+    const out = JSON.parse(fs.readFileSync(response, 'utf8'));
+    if (!out.ok) throw new Error(out.error);
+    return out.result;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const render = (result) =>
+  typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+
+// ---------------------------------------------------------------- 命令行
+
+function parseArgs(method, argv) {
+  const params = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith('--') && arg.length > 2) {
+      const [key, inline] = arg.slice(2).split(/=(.*)/s);
+      params[key.replace(/-/g, '_')] = inline !== undefined ? inline : argv[++i];
+    } else {
+      positional.push(arg);
+    }
+  }
+  (POSITIONAL[method] || []).forEach((key, i) => {
+    if (positional[i] !== undefined && params[key] === undefined) params[key] = positional[i];
+  });
+  // "-" 表示从标准输入读取内容。
+  if (params.path === '-') {
+    delete params.path;
+    params.content = fs.readFileSync(0, 'utf8');
+  }
+  return params;
+}
+
+function help() {
+  const methods = call('describe');
+  const lines = ['用法：emx <method> [位置参数] [--key value ...]', ''];
+  for (const m of methods) {
+    lines.push(`${m.name}  ${m.description.split('\n')[0]}`);
+    const required = new Set(m.inputSchema.required);
+    for (const [key, prop] of Object.entries(m.inputSchema.properties)) {
+      lines.push(`    --${key} <${prop.type}>${required.has(key) ? ' (必填)' : ''}  ${prop.description}`);
+    }
+  }
+  lines.push('', 'emx mcp  以 stdio MCP server 运行');
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------- MCP
+
+const MCP_INSTRUCTIONS = `这些工具操作用户正在使用的 Emacs（你运行在它的终端里）。
+- 想让用户看某段代码：用 open 打开并高亮，而不是只贴路径。
+- 需要展示 org / markdown 文档、diff 时用 show。
+- 先用 context 了解用户正在看的文件和选区，再决定怎么做。
+- 其他工具覆盖不到的编辑器操作，用 eval 执行 Elisp。`;
+
+function mcpServer() {
+  const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
+  const reply = (id, result) => send({ jsonrpc: '2.0', id, result });
+  const fail = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, message } });
+
+  const handlers = {
+    initialize: (params) => ({
+      protocolVersion: (params && params.protocolVersion) || '2025-06-18',
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'emacs', version: VERSION },
+      instructions: MCP_INSTRUCTIONS,
+    }),
+    ping: () => ({}),
+    'tools/list': () => {
+      try {
+        return { tools: call('describe') };
+      } catch (err) {
+        process.stderr.write(`emx: ${err.message}\n`);
+        return { tools: [] };
+      }
+    },
+    'tools/call': ({ name, arguments: args }) => {
+      try {
+        return { content: [{ type: 'text', text: render(call(name, args || {})) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: err.message }], isError: true };
+      }
+    },
+  };
+
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on('line', (line) => {
+    if (!line.trim()) return;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return fail(null, -32700, 'Parse error');
+    }
+    if (msg.id === undefined) return; // 通知无需回复
+    const handler = handlers[msg.method];
+    if (!handler) return fail(msg.id, -32601, `Method not found: ${msg.method}`);
+    try {
+      reply(msg.id, handler(msg.params || {}));
+    } catch (err) {
+      fail(msg.id, -32603, err.message);
+    }
+  });
+}
+
+// ---------------------------------------------------------------- 入口
+
+function main() {
+  const [method, ...rest] = process.argv.slice(2);
+  if (method === 'mcp') return mcpServer();
+  if (!method || method === 'help' || method === '-h' || method === '--help') {
+    console.log(help());
+    return;
+  }
+  console.log(render(call(method, parseArgs(method, rest))));
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(`emx: ${err.message}`);
+  process.exit(1);
+}

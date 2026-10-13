@@ -8,6 +8,7 @@
 ;;   C-c a n  选择 agent 启动  C-c a s  切换会话   C-c a k  结束会话
 ;;   C-c a f  发送当前文件引用（有选区时带行号）
 ;;   C-c a r  发送选区代码块
+;;   C-c a v  回到 agent 最近展示的内容
 ;;
 ;; 新增 agent：在下方加一行 `agent-term-define-agent'。
 
@@ -37,6 +38,13 @@
     (dolist (entry '((agent-term-claude "Claude" ?c)
                      (agent-term-codex "Codex" ?x)))
       (add-to-list 'project-switch-commands entry t))))
+
+;; agent → Emacs：emx 命令和 MCP server 调用的方法都定义在 agent-ui 中。
+(use-package agent-ui
+  :demand t
+  :after agent-term
+  :config
+  (keymap-set agent-term-command-map "v" #'agent-ui-last-view))
 
 ;; agent 通过 emacsclient / emx 回调本实例。
 (use-package server
