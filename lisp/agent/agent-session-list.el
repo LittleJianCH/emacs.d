@@ -77,11 +77,46 @@
   "ROOT 的项目名。"
   (file-name-nondirectory (directory-file-name root)))
 
+(defun agent-session-list-mouse-open (event)
+  "鼠标点击会话条目：点在按钮（如 ×）上时执行按钮，否则打开该会话。"
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (pos (posn-point posn)))
+    (select-window (posn-window posn))
+    (goto-char pos)
+    (if (button-at pos)
+        (push-button pos)
+      (agent-session-list-open))))
+
+(defvar-keymap agent-session-list-entry-map
+  :doc "会话条目上的鼠标操作（键盘按键仍由 `agent-session-list-mode-map' 处理）。"
+  "<mouse-1>" #'agent-session-list-mouse-open
+  "<mouse-2>" #'agent-session-list-mouse-open)
+
 (defun agent-session-list--insert-entry (entry &rest strings)
-  "插入一项，整段带上 ENTRY 属性。"
+  "插入一项，整段带上 ENTRY 属性；鼠标悬停高亮，单击打开。"
   (let ((start (point)))
     (apply #'insert strings)
-    (put-text-property start (point) 'agent-session-entry entry)))
+    (add-text-properties start (point)
+                         (list 'agent-session-entry entry
+                               'mouse-face 'highlight
+                               'keymap agent-session-list-entry-map))
+    ;; “点击打开”的提示只加在非按钮部分，不覆盖 × 自己的提示。
+    (let ((pos start))
+      (while (< pos (point))
+        (let ((next (next-single-property-change pos 'button nil (point))))
+          (unless (get-text-property pos 'button)
+            (put-text-property pos next 'help-echo "点击打开"))
+          (setq pos next))))))
+
+(defun agent-session-list--kill-button (buffer)
+  "结束会话 BUFFER 的 × 按钮。"
+  (make-text-button " ×" nil 'face 'agent-session-dim 'follow-link t
+                    'help-echo "结束这个会话"
+                    'action (lambda (_)
+                              (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
+                                (kill-buffer buffer)
+                                (agent-session-list--refresh)))))
 
 (defun agent-session-list--truncate (string)
   "按窗口宽度截断 STRING。"
@@ -106,6 +141,7 @@
            "  " (agent-session-status-label session)
            (propertize (format "  %s · %s" (agent-session-title session) project)
                        'face 'agent-session-dim)
+           (agent-session-list--kill-button buffer)
            "\n    "
            (propertize (agent-session-list--truncate (agent-session-display-title session))
                        'face 'agent-session-list-title)
@@ -229,14 +265,33 @@
   "n" #'agent-session-list-next
   "p" #'agent-session-list-previous)
 
+(defun agent-session-list--header-button (label command help)
+  "标题栏上可点击的按钮：点击时在会话列表窗口中执行 COMMAND。"
+  (propertize label
+              'face 'agent-session-assistant
+              'mouse-face 'header-line-highlight
+              'help-echo help
+              'local-map (let ((map (make-sparse-keymap)))
+                           (define-key map [header-line mouse-1]
+                                       (lambda (event)
+                                         (interactive "e")
+                                         (with-selected-window (posn-window (event-start event))
+                                           (call-interactively command))))
+                           map)))
+
 (define-derived-mode agent-session-list-mode special-mode "Sessions"
   "agent 会话列表。"
   (setq-local truncate-lines t
               cursor-type 'bar
               revert-buffer-function (lambda (&rest _) (agent-session-list-refresh))
               header-line-format
-              '(:eval (concat " 会话"
-                              (propertize "   RET 打开 · c 新建 · k 结束 · g 刷新"
+              '(:eval (concat " 会话  "
+                              (agent-session-list--header-button "[+ 新建]" #'agent-session-list-create
+                                                                 "新建会话（c）")
+                              " "
+                              (agent-session-list--header-button "[刷新]" #'agent-session-list-refresh
+                                                                 "重新获取历史会话（g）")
+                              (propertize "  单击打开 · RET 打开 · k 结束"
                                           'face 'agent-session-dim))))
   (hl-line-mode 1))
 

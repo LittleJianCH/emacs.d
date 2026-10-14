@@ -51,6 +51,7 @@
   `(let ((default-directory temporary-file-directory)
          ;; 每个测试从默认设置开始，互不影响。
          (agent-session-last-settings nil)
+         (before (agent-session-buffers))
          (buffer nil))
      (unwind-protect
          (progn
@@ -58,7 +59,9 @@
            (with-current-buffer buffer
              (goto-char (point-max))
              ,@body))
-       (when (buffer-live-p buffer) (kill-buffer buffer)))))
+       ;; 清理本测试新建的所有会话（包括切换 agent 时新开的）。
+       (dolist (b (agent-session-buffers))
+         (unless (memq b before) (kill-buffer b))))))
 
 (defun agent-session-test--type (string)
   "在输入区末尾输入 STRING 并发送。"
@@ -460,6 +463,44 @@
      (should-not (agent-session-queue session))
      (should-not (string-match-p "写错了" (agent-session-test--transcript)))
      (should (equal (agent-session--input-text session) "写错了")))))
+
+(ert-deftest agent-session-test-list-mouse ()
+  "会话列表：单击条目打开会话，单击 × 结束会话。"
+  (agent-session-test--with-session
+   (agent-session-test--type "鼠标测试")
+   (let ((session-buffer (current-buffer))
+         (list-buffer (get-buffer-create "*agent-sessions-test*")))
+     (unwind-protect
+         (progn
+           (switch-to-buffer list-buffer)
+           (agent-session-list-mode)
+           (setq agent-session-list--root temporary-file-directory)
+           (agent-session-list--render)
+           ;; batch 中没有真实显示，直接构造带位置的鼠标事件。
+           (cl-flet ((click (pos)
+                       (agent-session-list-mouse-open
+                        (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))))
+             ;; 单击条目的标题处：打开会话
+             (goto-char (point-min))
+             (search-forward "鼠标测试")
+             (let (opened)
+               (cl-letf (((symbol-function 'agent-session-display)
+                          (lambda (b) (setq opened b) (selected-window))))
+                 (click (match-beginning 0)))
+               (should (eq opened session-buffer)))
+             ;; 单击本会话那一条的 ×：确认后结束会话（列表中可能还有其他会话）
+             (with-current-buffer list-buffer
+               (goto-char (point-min))
+               (let* ((start (text-property-search-forward
+                              'agent-session-entry (list :buffer session-buffer) #'equal))
+                      (kill (progn (goto-char (prop-match-beginning start))
+                                   (search-forward " ×" (prop-match-end start))
+                                   (match-beginning 0))))
+                 (should (equal (get-text-property kill 'help-echo) "结束这个会话"))
+                 (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                   (click kill))))
+             (should-not (buffer-live-p session-buffer))))
+       (kill-buffer list-buffer)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
