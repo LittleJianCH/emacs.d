@@ -56,11 +56,21 @@
   (corfu-history-mode 1)
   (corfu-popupinfo-mode 1))
 
+(defun my/cape-dabbrev-english ()
+  "只在英文单词处用 dabbrev 补全（至少 3 个字母）。
+中文没有空格分词，dabbrev 会把整串汉字当成一个词，候选很乱，所以不补；
+候选也只保留纯 ASCII 的词。"
+  (when (and (looking-back "\\(?:^\\|[^[:alnum:]_]\\)[A-Za-z][A-Za-z0-9_-]\\{2,\\}"
+                           (line-beginning-position))
+             (require 'cape nil t))
+    (funcall (cape-capf-predicate #'cape-dabbrev
+                                  (lambda (candidate) (string-match-p "\\`[[:ascii:]]+\\'" candidate))))))
+
 (use-package cape
   :ensure t
   :init
   (add-hook 'completion-at-point-functions #'cape-file)
-  (add-hook 'completion-at-point-functions #'cape-dabbrev 90))
+  (add-hook 'completion-at-point-functions #'my/cape-dabbrev-english 90))
 
 (provide 'init-completion)
 ;;; init-completion.el ends here
