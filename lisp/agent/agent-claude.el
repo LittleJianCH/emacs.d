@@ -315,6 +315,26 @@
                (agent-session-notice session "推理强度将在本回合结束后生效"))
       (agent-session-restart-process session))))
 
+(defun agent-claude--content (text)
+  "用户消息 TEXT 的 content：没有图片时是字符串，否则是图片在前、文字在后的列表。"
+  (let ((images (agent-session-message-images text))
+        (plain (agent-session-message-text text)))
+    (if (null images)
+        plain
+      (vconcat
+       (mapcar (lambda (file)
+                 (list :type "image"
+                       :source (list :type "base64"
+                                     :media_type (agent-session-image-media-type file)
+                                     :data (with-temp-buffer
+                                             (set-buffer-multibyte nil)
+                                             (insert-file-contents-literally file)
+                                             (base64-encode-region (point-min) (point-max) t)
+                                             (buffer-string)))))
+               images)
+       (unless (string-empty-p plain)
+         (list (list :type "text" :text plain)))))))
+
 (cl-defmethod agent-session-backend-send ((_ (eql claude)) session text)
   ;; 其他客户端写入过消息：先重启，让 CLI 读到完整的会话记录。
   (when (agent-claude--state session :external)
@@ -324,11 +344,14 @@
     (agent-session-set-status session 'running))
   (agent-claude--set session :sync-source nil)
   (agent-session-write session (list :type "user"
-                                     :message (list :role "user" :content text))))
+                                     :message (list :role "user"
+                                                    :content (agent-claude--content text)))))
 
 (cl-defmethod agent-session-backend-steer ((_ (eql claude)) session text)
   ;; 回合进行中写入的用户消息，CLI 会在下一个间隙（如工具调用之间）插入当前回合。
-  (agent-session-write session (list :type "user" :message (list :role "user" :content text)))
+  (agent-session-write session (list :type "user"
+                                     :message (list :role "user"
+                                                    :content (agent-claude--content text))))
   t)
 
 (cl-defmethod agent-session-backend-interrupt ((_ (eql claude)) session)

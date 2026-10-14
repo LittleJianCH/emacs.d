@@ -212,13 +212,20 @@
   (when (memq :model changed)
     (agent-session-set-info session :model (agent-session-setting session :model))))
 
+(defun agent-codex--input (text)
+  "用户消息 TEXT 的输入项：文字与图片（本地文件）。"
+  (let ((plain (agent-session-message-text text)))
+    (vconcat (unless (string-empty-p plain) (list (list :type "text" :text plain)))
+             (mapcar (lambda (file) (list :type "localImage" :path file))
+                     (agent-session-message-images text)))))
+
 (cl-defmethod agent-session-backend-send ((_ (eql codex)) session text)
   (agent-codex--request
    session "turn/start"
    (pcase-let ((`(,approval ,sandbox ,_ ,reviewer) (agent-codex--mode session)))
      (append
       (list :threadId (agent-codex--state session :thread)
-            :input (vector (list :type "text" :text text))
+            :input (agent-codex--input text)
             ;; 要求推理摘要，才会有 item/reasoning/summaryTextDelta。
             :summary "detailed"
             ;; 审批相关设置每回合都显式发送，避免恢复会话后沿用旧值。
@@ -243,7 +250,7 @@
     (agent-codex--request session "turn/steer"
                           (list :threadId (agent-codex--state session :thread)
                                 :expectedTurnId turn
-                                :input (vector (list :type "text" :text text))))
+                                :input (agent-codex--input text)))
     t))
 
 (cl-defmethod agent-session-backend-interrupt ((_ (eql codex)) session)

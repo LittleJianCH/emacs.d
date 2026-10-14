@@ -21,6 +21,7 @@
 (require 'project)
 (require 'server)
 (require 'button)
+(require 'dnd)
 
 ;; 在 let 中动态绑定，渲染代码块时不弹出安装 tree-sitter 语法的询问。
 (defvar treesit-auto-install-grammar)
@@ -101,8 +102,9 @@
   (or (plist-get (agent-session-info session) :title) "新会话"))
 
 (defun agent-session--title-seed (text)
-  "由用户消息 TEXT 生成标题：合并空白，截取前 50 个字符。"
-  (let ((text (string-trim (replace-regexp-in-string "[ \t\n]+" " " text))))
+  "由用户消息 TEXT 生成标题：合并空白，截取前 50 个字符（图片显示为 [图片] 文字）。"
+  (let ((text (string-trim (replace-regexp-in-string "[ \t\n]+" " "
+                                                     (substring-no-properties text)))))
     (if (> (length text) 50) (concat (substring text 0 50) "…") text)))
 
 (defun agent-session-resume-id (session)
@@ -982,9 +984,120 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
 (defvar-local agent-session--history-index nil "当前浏览到的输入历史位置。")
 
 (defun agent-session--input-text (session)
-  "输入区的文本。"
+  "输入区的文本；图片附件保留为带 `agent-session-image' 属性的占位文字。"
   (with-current-buffer (agent-session-buffer session)
-    (buffer-substring-no-properties (agent-session-input session) (point-max))))
+    (let* ((start (agent-session-input session))
+           (text (buffer-substring-no-properties start (point-max)))
+           (pos start))
+      (while (setq pos (text-property-not-all pos (point-max) 'agent-session-image nil))
+        (let ((end (next-single-property-change pos 'agent-session-image nil (point-max))))
+          (add-text-properties (- pos start) (- end start)
+                               (text-properties-at
+                                0 (agent-session--image-string
+                                   (get-text-property pos 'agent-session-image)))
+                               text)
+          (setq pos end)))
+      text)))
+
+;;; 图片附件
+;;
+;; 输入区中的图片是一段占位文字“[图片]”，带 `agent-session-image' 属性（文件路径），
+;; GUI 中显示为缩略图。消息文本在排队、引导、历史中都保留这个属性，
+;; 后端用 `agent-session-message-images' / `agent-session-message-text' 取出图片和文字。
+
+(defcustom agent-session-image-directory (locate-user-emacs-file "var/agent-images/")
+  "粘贴的图片保存在这里。"
+  :type 'directory :group 'agent-session)
+
+(defconst agent-session--clipboard-image-types
+  '((image/png . "png") (image/jpeg . "jpg") (image/gif . "gif") (image/webp . "webp")
+    (image/tiff . "tiff"))
+  "剪贴板中可作为图片粘贴的类型及扩展名，按优先顺序。")
+
+(defun agent-session--image-string (file)
+  "图片附件 FILE 的占位文字；GUI 中显示为缩略图。"
+  (apply #'propertize "[图片]"
+         'agent-session-image file
+         'help-echo (abbreviate-file-name file)
+         'rear-nonsticky t
+         (when (display-images-p)
+           (list 'display (create-image file nil nil
+                                        :max-height (* 6 (default-line-height))
+                                        :ascent 'center)))))
+
+(defun agent-session-message-images (text)
+  "消息 TEXT 中的图片文件，按出现顺序。"
+  (let ((pos 0) files)
+    (while (setq pos (text-property-not-all pos (length text) 'agent-session-image nil text))
+      (push (get-text-property pos 'agent-session-image text) files)
+      (setq pos (next-single-property-change pos 'agent-session-image text (length text))))
+    (nreverse files)))
+
+(defun agent-session-message-text (text)
+  "消息 TEXT 去掉图片占位后的纯文字。"
+  (let ((pos 0) parts)
+    (while (< pos (length text))
+      (let ((next (next-single-property-change pos 'agent-session-image text (length text))))
+        (unless (get-text-property pos 'agent-session-image text)
+          (push (substring-no-properties text pos next) parts))
+        (setq pos next)))
+    (string-trim (apply #'concat (nreverse parts)))))
+
+(defun agent-session-image-media-type (file)
+  "图片 FILE 的 MIME 类型。"
+  (pcase (downcase (or (file-name-extension file) ""))
+    ((or "jpg" "jpeg") "image/jpeg")
+    ("gif" "image/gif")
+    ("webp" "image/webp")
+    (_ "image/png")))
+
+(defun agent-session--clipboard-image ()
+  "剪贴板中有图片（且没有文字）时保存为文件并返回路径，否则返回 nil。
+有文字时按文字粘贴：例如从 Finder 复制的文件，剪贴板里同时有文件名和图标。"
+  (when-let* ((targets (ignore-errors (gui-get-selection 'CLIPBOARD 'TARGETS)))
+              ((not (seq-some (lambda (type) (seq-contains-p targets type))
+                              '(STRING UTF8_STRING text/plain))))
+              (type (seq-find (lambda (type) (seq-contains-p targets (car type)))
+                              agent-session--clipboard-image-types))
+              (data (ignore-errors (gui-get-selection 'CLIPBOARD (car type))))
+              ((> (length data) 0)))
+    (make-directory agent-session-image-directory t)
+    (let* ((base (expand-file-name (format-time-string "%Y%m%d-%H%M%S-%3N")
+                                   agent-session-image-directory))
+           (file (concat base "." (cdr type))))
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region data nil file nil 'silent))
+      ;; macOS 截图有时只有 TIFF，agent 不支持，转成 PNG。
+      (when (equal (cdr type) "tiff")
+        (let ((png (concat base ".png")))
+          (when (eq 0 (call-process "sips" nil nil nil "-s" "format" "png" file "--out" png))
+            (delete-file file)
+            (setq file png))))
+      file)))
+
+(defun agent-session-insert-image (file)
+  "在输入区插入图片附件 FILE（光标不在输入区时插到末尾）。"
+  (interactive (list (read-file-name "图片：" nil nil t nil
+                                     (lambda (f) (or (file-directory-p f)
+                                                     (string-match-p (image-file-name-regexp) f))))))
+  (unless (agent-session--in-input-p) (goto-char (point-max)))
+  (insert (agent-session--image-string (expand-file-name file))))
+
+(defun agent-session-yank (&optional arg)
+  "粘贴：剪贴板中是图片时作为图片附件插入输入区，否则同 `yank'。"
+  (interactive "*P")
+  (if-let* ((file (agent-session--clipboard-image)))
+      (agent-session-insert-image file)
+    (unless (agent-session--in-input-p) (goto-char (point-max)))
+    (setq this-command 'yank)
+    (yank arg)))
+
+(defun agent-session--dnd-file (uri action)
+  "拖进会话 buffer 的图片作为附件；其他文件照常打开。"
+  (let ((file (dnd-get-local-file-name uri t)))
+    (if (and file (string-match-p (image-file-name-regexp) file))
+        (progn (agent-session-insert-image file) 'private)
+      (dnd-open-file uri action))))
 
 (defun agent-session--in-input-p ()
   "光标是否在输入区。"
@@ -1547,7 +1660,9 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
   "C-c C-i" #'agent-session-goto-input
   "C-c C-b" #'agent-session-previous-message
   "C-c C-f" #'agent-session-next-message
-  "C-c C-s" #'agent-session-list)
+  "C-c C-s" #'agent-session-list
+  "C-c C-a" #'agent-session-insert-image
+  "<remap> <yank>" #'agent-session-yank)
 
 (define-derived-mode agent-session-mode fundamental-mode "Agent"
   "Emacs 渲染的 agent 会话（参考 telega）：上方是对话，页脚之后是输入区。
@@ -1559,6 +1674,7 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
               header-line-format nil
               mode-line-format '((:eval (agent-session--mode-line agent-session--current))))
   (cursor-intangible-mode 1)
+  (setq-local dnd-protocol-alist (cons '("^file:" . agent-session--dnd-file) dnd-protocol-alist))
   (add-hook 'post-command-hook #'agent-session--keep-point-out-of-prompt nil t)
   (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
   ;; 输入 / 后立即弹出补全。

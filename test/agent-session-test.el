@@ -13,6 +13,7 @@
 (require 'agent-session)
 (require 'agent-session-list)
 (require 'agent-claude)
+(require 'agent-codex)
 
 (cl-defmethod agent-session-backend-start ((_ (eql test-echo)) session)
   (agent-session-set-status session 'idle))
@@ -574,6 +575,52 @@
            (should (= (agent-claude--state session :sync-offset)
                       (file-attribute-size (file-attributes file)))))
        (delete-file file)))))
+
+;; 图片：粘贴剪贴板中的图片、插入文件；发送时 Claude 用 base64，Codex 用本地路径。
+(ert-deftest agent-session-test-images ()
+  "图片附件：剪贴板粘贴、随消息发送、各后端的格式。"
+  (agent-session-test--with-session
+   (let* ((agent-session-image-directory (make-temp-file "agent-images-" t))
+          (png "\x89PNG\r\n\x1a\nfake")
+          (session agent-session--current)
+          sent)
+     (unwind-protect
+         (cl-letf (((symbol-function 'gui-get-selection)
+                    (lambda (_ type) (if (eq type 'TARGETS) [TARGETS image/png] png)))
+                   ((symbol-function 'agent-session-backend-send)
+                    (lambda (_ _ text) (setq sent text))))
+           ;; 粘贴：剪贴板图片保存为文件，输入区插入占位
+           (goto-char (point-max))
+           (insert "看这张图 ")
+           (agent-session-yank)
+           (let ((file (car (agent-session-message-images (agent-session--input-text session)))))
+             (should (file-exists-p file))
+             (should (equal (with-temp-buffer (set-buffer-multibyte nil)
+                                              (insert-file-contents-literally file) (buffer-string))
+                            png))
+             (agent-session-send-input)
+             ;; 发出的消息带着图片；对话中显示占位
+             (should (equal (agent-session-message-images sent) (list file)))
+             (should (equal (agent-session-message-text sent) "看这张图"))
+             (should (string-search "看这张图 [图片]" (agent-session-test--transcript)))
+             ;; Claude：图片在前（base64），文字在后
+             (let ((content (agent-claude--content sent)))
+               (should (equal (plist-get (aref content 0) :type) "image"))
+               (should (equal (base64-decode-string
+                               (plist-get (plist-get (aref content 0) :source) :data))
+                              png))
+               (should (equal (aref content 1) '(:type "text" :text "看这张图"))))
+             ;; Codex：文字与本地图片路径
+             (should (equal (agent-codex--input sent)
+                            (vector '(:type "text" :text "看这张图")
+                                    (list :type "localImage" :path file))))
+             ;; 没有图片时 Claude 仍发字符串
+             (should (equal (agent-claude--content "纯文字") "纯文字")))
+           ;; 剪贴板里有文字时按文字粘贴（例如 Finder 复制的文件）
+           (cl-letf (((symbol-function 'gui-get-selection)
+                      (lambda (_ type) (if (eq type 'TARGETS) [TARGETS STRING image/tiff] png))))
+             (should-not (agent-session--clipboard-image))))
+       (delete-directory agent-session-image-directory t)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
