@@ -237,6 +237,15 @@
                             (list :threadId (agent-codex--state session :thread) :turnId turn))
     (agent-codex--set session :interrupt-pending t)))
 
+(cl-defmethod agent-session-backend-steer ((_ (eql codex)) session text)
+  ;; turn/steer 需要当前回合 id；还不知道时返回 nil，由调用方退回到中断后发送。
+  (when-let* ((turn (agent-codex--state session :turn)))
+    (agent-codex--request session "turn/steer"
+                          (list :threadId (agent-codex--state session :thread)
+                                :expectedTurnId turn
+                                :input (vector (list :type "text" :text text))))
+    t))
+
 (cl-defmethod agent-session-backend-interrupt ((_ (eql codex)) session)
   (agent-codex--interrupt session))
 

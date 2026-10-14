@@ -23,6 +23,16 @@
 
 (cl-defmethod agent-session-backend-stop ((_ (eql test-echo)) _session) nil)
 
+(defvar agent-session-test--steered nil "假后端收到的引导消息。")
+(defvar agent-session-test--interrupted nil "假后端是否被中断。")
+
+(cl-defmethod agent-session-backend-steer ((_ (eql test-echo)) _session text)
+  (push text agent-session-test--steered)
+  t)
+
+(cl-defmethod agent-session-backend-interrupt ((_ (eql test-echo)) _session)
+  (setq agent-session-test--interrupted t))
+
 (cl-defmethod agent-session-backend-models ((_ (eql test-echo)) _session)
   '((:id "small" :name "Small" :efforts ("low" "high") :default-effort "low")
     (:id "big" :name "Big" :efforts ("high" "max"))))
@@ -393,6 +403,63 @@
      (push-button (button-start (button-at (point))))
      (should (string-match-p "step-1\\(.\\|\n\\)*我先改配置。\\(.\\|\n\\)*step-2"
                              (agent-session-test--visible-transcript))))))
+
+(ert-deftest agent-session-test-steer-queued ()
+  "排队的消息可以转为引导：立刻送进当前回合，不再排队。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (agent-session-test--steered nil))
+     (agent-session-test--type "hold")
+     (agent-session-test--type "改用方案 B")
+     (should (string-match-p "⏳ 排队：改用方案 B +引导 +取消" (agent-session-test--footer)))
+     (agent-session-steer-queued)
+     (should-not (agent-session-queue session))
+     (should (equal agent-session-test--steered '("改用方案 B")))
+     (should-not (string-match-p "排队" (agent-session-test--footer)))
+     (should (string-match-p "↪ 引导\n *改用方案 B" (agent-session-test--transcript)))
+     (should (eq (agent-session-status session) 'running)))))
+
+(ert-deftest agent-session-test-steer-input ()
+  "M-RET：运行中直接以引导方式发送；空闲时等同普通发送。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (agent-session-test--steered nil))
+     (goto-char (point-max)) (insert "先别发")
+     (agent-session-steer-input)                    ; 空闲：普通发送
+     (should (string-match-p "收到：先别发" (agent-session-test--transcript)))
+     (should-not agent-session-test--steered)
+     (agent-session-test--type "hold")
+     (goto-char (point-max)) (insert "顺便加个测试")
+     (agent-session-steer-input)
+     (should (equal agent-session-test--steered '("顺便加个测试")))
+     (should-not (agent-session-queue session)))))
+
+(ert-deftest agent-session-test-steer-fallback ()
+  "后端不支持引导时，中断当前回合并把消息排到最前。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (agent-session-test--interrupted nil))
+     (agent-session-test--type "hold")
+     (agent-session-test--type "排在后面")
+     (cl-letf (((symbol-function 'agent-session-backend-steer) #'ignore))
+       (agent-session-steer session "请先做这个"))
+     (should agent-session-test--interrupted)
+     (should (equal (mapcar #'cdr (agent-session-queue session)) '("请先做这个" "排在后面")))
+     ;; 中断后回合结束：先发引导的消息
+     (agent-session-set-status session 'idle)
+     (should (string-match-p "收到：请先做这个\\(.\\|\n\\)*收到：排在后面"
+                             (agent-session-test--transcript))))))
+
+(ert-deftest agent-session-test-cancel-queued ()
+  "撤回排队的消息：从队列与对话中移除，放回输入区。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-test--type "hold")
+     (agent-session-test--type "写错了")
+     (agent-session-cancel-queued)
+     (should-not (agent-session-queue session))
+     (should-not (string-match-p "写错了" (agent-session-test--transcript)))
+     (should (equal (agent-session--input-text session) "写错了")))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

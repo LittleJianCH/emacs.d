@@ -154,6 +154,12 @@
   "设置变化后生效。CHANGED 为变化的键列表（:model :effort :mode）。"
   (ignore backend session changed))
 
+(cl-defgeneric agent-session-backend-steer (backend session text)
+  "把用户消息 TEXT 送进正在进行的回合（引导）。支持时返回非 nil；
+默认不支持，由调用方退回到“中断后再发送”。"
+  (ignore backend session text)
+  nil)
+
 (cl-defgeneric agent-session-backend-history (backend root callback)
   "列出项目 ROOT 中的历史会话，以列表调用 CALLBACK（可异步）。
 每项为 (:id ID :title 标题 :time 秒数)，按时间倒序。"
@@ -430,7 +436,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   "用户消息；回合已折叠时，下方附一行过程摘要（可点击展开）。"
   (let ((fold (plist-get block :fold)))
     (concat (propertize "▍ 你" 'face 'agent-session-user)
-            (if (plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim) "")
+            (cond ((plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim))
+                  ((plist-get block :steer) (propertize "  ↪ 引导" 'face 'agent-session-dim))
+                  (t ""))
             "\n"
             (agent-session--indent (plist-get block :text))
             "\n"
@@ -926,8 +934,17 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                 "\n")
                         'face 'font-lock-string-face)))))
      (mapconcat (lambda (queued)
-                  (propertize (concat " ⏳ 排队：" (agent-session--title-seed (cdr queued)) "\n")
-                              'face 'agent-session-dim))
+                  (concat
+                   (propertize (concat " ⏳ 排队：" (agent-session--title-seed (cdr queued)) "  ")
+                               'face 'agent-session-dim)
+                   (make-text-button " 引导 " nil 'type 'agent-session-choice
+                                     'help-echo "立刻送进当前回合"
+                                     'action (lambda (_) (agent-session-steer-queued (car queued))))
+                   " "
+                   (make-text-button " 取消 " nil 'type 'agent-session-choice
+                                     'help-echo "撤回这条排队消息"
+                                     'action (lambda (_) (agent-session-cancel-queued (car queued))))
+                   "\n"))
                 (agent-session-queue session) "")
      ;; 提示符：只读、不可进入；其后的文本可编辑。
      (propertize (concat (agent-session-title session) " ❯ ")
@@ -1011,6 +1028,59 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (let ((inhibit-read-only t))
       (delete-region (agent-session-input session) (point-max)))
     (agent-session-send session text)))
+
+(defun agent-session-steer (session text)
+  "把 TEXT 送进 SESSION 正在进行的回合（引导）。
+agent 不在运行时等同普通发送；后端不支持引导时，中断当前回合后优先发送。"
+  (cond
+   ((not (eq (agent-session-status session) 'running))
+    (agent-session-send session text))
+   ;; /model 等本地命令照常在 Emacs 中执行。
+   ((agent-session--run-local-command session text))
+   (t
+    (if (agent-session-backend-steer (agent-session-backend session) session text)
+        (agent-session--new-block session (format "user-%s" (random))
+                                  (list :type 'user :text text :steer t))
+      (let ((id (format "user-%s" (random))))
+        (agent-session--new-block session id (list :type 'user :text text :queued t))
+        (setf (agent-session-queue session) (cons (cons id text) (agent-session-queue session)))
+        (agent-session-backend-interrupt (agent-session-backend session) session)
+        (agent-session-notice session "该 agent 不支持引导，已中断当前回合，随后发送")))
+    (agent-session--refresh session))))
+
+(defun agent-session-steer-input ()
+  "以引导方式发送输入区内容：agent 运行中时立刻送进当前回合，而不是排队。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (text (string-trim (agent-session--input-text session))))
+    (when (string-empty-p text) (user-error "输入为空"))
+    (push text (agent-session-history session))
+    (setq agent-session--history-index nil)
+    (let ((inhibit-read-only t))
+      (delete-region (agent-session-input session) (point-max)))
+    (agent-session-steer session text)))
+
+(defun agent-session--take-queued (session id)
+  "从排队中取出 ID（默认最早一条）并删除其显示，返回 (ID . TEXT)。"
+  (let ((entry (if id (assoc id (agent-session-queue session)) (car (agent-session-queue session)))))
+    (unless entry (user-error "没有排队的消息"))
+    (setf (agent-session-queue session) (delq entry (agent-session-queue session)))
+    (agent-session--remove-block session (car entry))
+    entry))
+
+(defun agent-session-steer-queued (&optional id)
+  "把排队的消息 ID（默认最早一条）转为引导，立刻送进当前回合。"
+  (interactive)
+  (let ((session (agent-session--this)))
+    (agent-session-steer session (cdr (agent-session--take-queued session id)))))
+
+(defun agent-session-cancel-queued (&optional id)
+  "撤回排队的消息 ID（默认最早一条），放回输入区以便修改。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (entry (agent-session--take-queued session id)))
+    (agent-session--refresh session)
+    (agent-session-insert-input (agent-session-buffer session) (cdr entry))))
 
 (defun agent-session-goto-input ()
   "跳到输入区末尾。"
@@ -1452,6 +1522,7 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
     ("s" "会话列表" agent-session-list)]
    ["回合"
     ("k" "中断" agent-session-interrupt)
+    ("g" "引导：最早的排队消息送进当前回合" agent-session-steer-queued)
     ("y" "允许" agent-session-approve)
     ("d" "拒绝" agent-session-deny)]])
 
@@ -1466,6 +1537,8 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
   "TAB" #'agent-session-tab
   "<backtab>" #'backward-button
   "C-c C-c" #'agent-session-send-input
+  "M-RET" #'agent-session-steer-input
+  "C-c C-g" #'agent-session-steer-queued
   "C-c C-k" #'agent-session-cancel-dwim
   "C-c C-o" #'agent-session-menu
   "C-c C-y" #'agent-session-approve

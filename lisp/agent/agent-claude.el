@@ -214,6 +214,11 @@
   (agent-session-write session (list :type "user"
                                      :message (list :role "user" :content text))))
 
+(cl-defmethod agent-session-backend-steer ((_ (eql claude)) session text)
+  ;; 回合进行中写入的用户消息，CLI 会在下一个间隙（如工具调用之间）插入当前回合。
+  (agent-session-write session (list :type "user" :message (list :role "user" :content text)))
+  t)
+
 (cl-defmethod agent-session-backend-interrupt ((_ (eql claude)) session)
   (agent-claude--control session (list :subtype "interrupt")))
 

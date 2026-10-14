@@ -11,6 +11,7 @@
 ;;   C-c a k  结束会话                    C-c a v  回到 agent 最近展示的页面
 ;; 会话 buffer 中：输入区 RET 发送，C-j 换行，M-p / M-n 历史，TAB 补全（/ 命令、@ 文件）；
 ;; C-c C-k 清空输入或中断，C-c C-o 设置菜单，C-c C-y / C-c C-n 允许 / 拒绝；
+;; agent 运行中：RET 排队，M-RET 引导（立刻送进当前回合），C-c C-g 把最早的排队消息转为引导；
 ;; 在对话记录中打字会跳到输入区。
 ;;
 ;; 新增 agent：实现一个后端（参考 agent-claude.el），再加一行 `agent-session-define-agent'。
@@ -81,6 +82,8 @@
     "y" #'agent-session-approve
     "n" #'agent-session-deny
     "k" #'agent-session-interrupt
+    "g" #'agent-session-steer-queued
+    "x" #'agent-session-cancel-queued
     "s" #'agent-session-list
     "N" #'agent-session-new
     "r" #'agent-session-resume)
