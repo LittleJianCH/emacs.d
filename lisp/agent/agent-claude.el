@@ -96,14 +96,25 @@
           (push object result))))))
 
 (defun agent-claude--user-text (entry)
-  "ENTRY 若是用户亲自输入的消息则返回其文本（排除元信息、命令标签、子 agent）。"
-  (let ((content (plist-get (plist-get entry :message) :content)))
+  "ENTRY 若是用户亲自输入的消息则返回其文本（排除元信息、命令标签、子 agent）。
+带图片的消息内容是列表（文字与图片），图片显示为 [图片]；工具结果不算。"
+  (let* ((content (plist-get (plist-get entry :message) :content))
+         (text (cond
+                ((stringp content) content)
+                ((and (vectorp content) (length> content 0)
+                      (seq-every-p (lambda (part) (member (plist-get part :type) '("text" "image")))
+                                   content))
+                 (mapconcat (lambda (part)
+                              (if (equal (plist-get part :type) "image")
+                                  "[图片]"
+                                (plist-get part :text)))
+                            content "\n")))))
     (when (and (equal (plist-get entry :type) "user")
-               (stringp content)
+               text
                (not (plist-get entry :isMeta))
                (not (plist-get entry :isSidechain))
-               (not (string-prefix-p "<" (string-trim-left content))))
-      content)))
+               (not (string-prefix-p "<" (string-trim-left text))))
+      text)))
 
 (defun agent-claude--session-title (file)
   "会话文件 FILE 的标题：Claude 生成的标题，否则取第一条用户消息。"
@@ -128,47 +139,137 @@
                              :time (funcall mtime file)))
                      files))))
 
+(defun agent-claude--transcript (session)
+  "SESSION 的会话记录文件；还不知道会话 id 时为 nil。"
+  (when-let* ((id (agent-claude--state session :resume)))
+    (expand-file-name (concat id ".jsonl") (agent-claude--project-dir (agent-session-root session)))))
+
+(defun agent-claude--read-entries (file beg)
+  "读取 FILE 从字节 BEG 开始的完整行：返回 (条目列表 . 读到的字节位置)。
+最后一行若还没写完（没有换行）留到下次再读。"
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file nil beg)
+    (goto-char (point-max))
+    (if (not (search-backward "\n" nil t))
+        (cons nil beg)
+      (let ((end (+ beg (point))))
+        (delete-region (1+ (point)) (point-max))
+        (decode-coding-region (point-min) (point-max) 'utf-8)
+        (set-buffer-multibyte t)
+        (cons (delq nil (mapcar (lambda (line)
+                                  (ignore-errors
+                                    (json-parse-string line :object-type 'plist
+                                                       :null-object nil :false-object nil)))
+                                (split-string (buffer-string) "\n" t)))
+              end)))))
+
+(defun agent-claude--render-entry (session entry)
+  "把会话记录中的一条 ENTRY 渲染到 SESSION；渲染了对话内容时返回非 nil。"
+  (unless (plist-get entry :isSidechain)
+    (let ((message (plist-get entry :message))
+          (uuid (plist-get entry :uuid)))
+      (pcase (plist-get entry :type)
+        ;; 回合进行中用户追加的消息，记录为 queued_command 附件。
+        ("attachment"
+         (let ((attachment (plist-get entry :attachment)))
+           ;; 以 < 开头的是内部消息（例如子 agent 交回的报告），不显示为用户消息。
+           (when (and (equal (plist-get attachment :type) "queued_command")
+                      (stringp (plist-get attachment :prompt))
+                      (not (string-prefix-p "<" (string-trim-left (plist-get attachment :prompt)))))
+             (agent-session--new-block session uuid
+                                       (list :type 'user :text (plist-get attachment :prompt)))
+             t)))
+        ("user"
+         (if-let* ((text (agent-claude--user-text entry)))
+             (progn (agent-session--new-block session uuid (list :type 'user :text text))
+                    t)
+           (agent-claude--tool-results session message)
+           nil))
+        ("assistant"
+         (seq-do-indexed
+          (lambda (part index)
+            (pcase (plist-get part :type)
+              ("text" (agent-session-text-done session (format "%s-%s" uuid index)
+                                               (plist-get part :text)))
+              ("tool_use"
+               (apply #'agent-session-tool session (plist-get part :id) :status 'ok
+                      (agent-claude--tool-view session (plist-get part :name)
+                                               (plist-get part :input))))))
+          (plist-get message :content))
+         t)))))
+
 (defun agent-claude--replay (session)
   "把恢复的会话的历史记录渲染到 SESSION 中。"
-  (let ((file (expand-file-name (concat (agent-claude--state session :resume) ".jsonl")
-                                (agent-claude--project-dir (agent-session-root session)))))
-    (when (file-exists-p file)
-      (dolist (entry (agent-claude--json-lines file))
-        (unless (plist-get entry :isSidechain)
-          (let ((message (plist-get entry :message)))
-            (pcase (plist-get entry :type)
-              ;; 回合进行中用户追加的消息，记录为 queued_command 附件。
-              ("attachment"
-               (let ((attachment (plist-get entry :attachment)))
-                 ;; 以 < 开头的是内部消息（例如子 agent 交回的报告），不显示为用户消息。
-                 (when (and (equal (plist-get attachment :type) "queued_command")
-                            (stringp (plist-get attachment :prompt))
-                            (not (string-prefix-p "<" (string-trim-left (plist-get attachment :prompt)))))
-                   (agent-session--new-block session (plist-get entry :uuid)
-                                             (list :type 'user :text (plist-get attachment :prompt))))))
-              ("user"
-               (if-let* ((text (agent-claude--user-text entry)))
-                   (agent-session--new-block session (plist-get entry :uuid)
-                                             (list :type 'user :text text))
-                 (agent-claude--tool-results session message)))
-              ("assistant"
-               (seq-do-indexed
-                (lambda (part index)
-                  (pcase (plist-get part :type)
-                    ("text" (agent-session-text-done
-                             session (format "%s-%s" (plist-get message :id) index)
-                             (plist-get part :text)))
-                    ("tool_use"
-                     (apply #'agent-session-tool session (plist-get part :id) :status 'ok
-                            (agent-claude--tool-view session (plist-get part :name)
-                                                     (plist-get part :input))))))
-                (plist-get message :content))))))))
+  (let ((file (agent-claude--transcript session)))
+    (when (and file (file-exists-p file))
+      (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file 0)))
+        (dolist (entry entries)
+          (agent-claude--render-entry session entry))
+        (agent-claude--set session :sync-offset end)))
     (agent-session-notice session "—— 以上为历史记录 ——")))
+
+;;; 与其他客户端同步（同一会话同时在 Claude Desktop、终端等处打开）
+;;
+;; 各客户端都把对话追加到同一个会话记录文件。监视这个文件，把不是本 Emacs 的
+;; CLI 写入的消息显示出来；CLI 进程的上下文在内存里，看不到这些消息，所以下次
+;; 发送前先以 --resume 重启，让它重新读取完整的会话记录。
+
+(defconst agent-claude--own-entrypoint "sdk-cli"
+  "本 Emacs 启动的 CLI 在会话记录中的 entrypoint。")
+
+(defun agent-claude--source-name (entrypoint)
+  "会话记录中 ENTRYPOINT 对应的客户端名称。"
+  (pcase entrypoint
+    ("claude-desktop" "Claude Desktop")
+    ("cli" "终端中的 Claude Code")
+    (_ (or entrypoint "其他客户端"))))
+
+(defun agent-claude--watch (session)
+  "开始监视 SESSION 的会话记录文件（已在监视或文件还不存在时什么也不做）。"
+  (let ((file (agent-claude--transcript session)))
+    (when (and file (file-exists-p file)
+               (not (agent-claude--state session :watch))
+               (require 'filenotify nil t))
+      (unless (agent-claude--state session :sync-offset)
+        (agent-claude--set session :sync-offset (file-attribute-size (file-attributes file))))
+      (agent-claude--set session :watch
+                         (ignore-errors
+                           (file-notify-add-watch
+                            file '(change)
+                            (lambda (event)
+                              (when (and (eq (nth 1 event) 'changed)
+                                         (buffer-live-p (agent-session-buffer session)))
+                                (agent-claude--sync session)))))))))
+
+(defun agent-claude--unwatch (session)
+  "停止监视 SESSION 的会话记录文件。"
+  (when-let* ((watch (agent-claude--state session :watch)))
+    (file-notify-rm-watch watch)
+    (agent-claude--set session :watch nil)))
+
+(defun agent-claude--sync (session)
+  "显示会话记录中其他客户端新写入的消息。"
+  (let ((file (agent-claude--transcript session))
+        (offset (agent-claude--state session :sync-offset)))
+    (when (and file offset (file-exists-p file))
+      (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file offset)))
+        (agent-claude--set session :sync-offset end)
+        (dolist (entry entries)
+          (let ((source (plist-get entry :entrypoint)))
+            (when (and source (not (equal source agent-claude--own-entrypoint)))
+              (unless (equal source (agent-claude--state session :sync-source))
+                (agent-claude--set session :sync-source source)
+                (agent-session-notice session (format "以下来自 %s"
+                                                      (agent-claude--source-name source))))
+              (when (agent-claude--render-entry session entry)
+                (agent-claude--set session :external t)))))))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
   (when (and (agent-claude--state session :resume)
              (zerop (hash-table-count (agent-session-blocks session))))
     (agent-claude--replay session))
+  (agent-claude--watch session)
   (agent-session-start-process session (agent-claude--command session))
   (agent-claude--control
    session (list :subtype "initialize")
@@ -176,7 +277,13 @@
      ;; 初始化结果里有模型列表（含各模型支持的推理强度）和斜杠命令。
      (agent-claude--set session :models (plist-get response :models))
      (agent-claude--set session :commands (plist-get response :commands))
-     (agent-session-set-status session 'idle))))
+     ;; 重启后可能已经发出了消息（见 `agent-session-backend-send'），不要覆盖 running。
+     (when (eq (agent-session-status session) 'starting)
+       (agent-session-set-status session 'idle)))))
+
+(cl-defmethod agent-session-backend-stop ((_ (eql claude)) session)
+  (agent-claude--unwatch session)
+  (cl-call-next-method))
 
 (cl-defmethod agent-session-backend-models ((_ (eql claude)) session)
   (mapcar (lambda (model)
@@ -211,6 +318,13 @@
       (agent-session-restart-process session))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql claude)) session text)
+  ;; 其他客户端写入过消息：先重启，让 CLI 读到完整的会话记录。
+  (when (agent-claude--state session :external)
+    (agent-claude--set session :external nil)
+    (agent-session-notice session "载入其他客户端的消息后继续")
+    (agent-session-restart-process session)
+    (agent-session-set-status session 'running))
+  (agent-claude--set session :sync-source nil)
   (agent-session-write session (list :type "user"
                                      :message (list :role "user" :content text))))
 
@@ -389,6 +503,7 @@
       ("system"
        (when (equal (plist-get message :subtype) "init")
          (agent-claude--set session :resume (plist-get message :session_id))
+         (agent-claude--watch session)
          (agent-session-set-info session :model (plist-get message :model))
          (when (eq (agent-session-status session) 'starting)
            (agent-session-set-status session 'idle))))
@@ -402,6 +517,8 @@
                                                              (plist-get message :subtype)))
                                'agent-session-error))
        (agent-session-set-status session 'idle)
+       ;; 新会话的记录文件在第一个回合中才创建。
+       (agent-claude--watch session)
        (when (agent-claude--state session :restart-pending)
          (agent-claude--set session :restart-pending nil)
          (agent-session-restart-process session)))

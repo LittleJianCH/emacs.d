@@ -12,6 +12,7 @@
 (require 'ert)
 (require 'agent-session)
 (require 'agent-session-list)
+(require 'agent-claude)
 
 (cl-defmethod agent-session-backend-start ((_ (eql test-echo)) session)
   (agent-session-set-status session 'idle))
@@ -527,6 +528,45 @@
       (goto-char (point-max))
       (forward-line -1)
       (should (eq (get-text-property (point) 'mouse-face) face)))))
+
+;; 同一会话在 Claude Desktop 等处同时打开时，显示它们写入会话记录的消息。
+(ert-deftest agent-session-test-claude-sync ()
+  "会话同步：只显示其他客户端的消息，半行留到下次，标记需要重新载入上下文。"
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (file (make-temp-file "agent-sync-" nil ".jsonl"))
+          (line (lambda (entry) (concat (json-encode entry) "\n")))
+          (own (funcall line '((type . "user") (entrypoint . "sdk-cli") (uuid . "u0")
+                               (message . ((role . "user") (content . "Emacs 里发的"))))))
+          (desktop-user (funcall line '((type . "user") (entrypoint . "claude-desktop") (uuid . "u1")
+                                        (message . ((role . "user")
+                                                    (content . [((type . "text") (text . "桌面端发的"))
+                                                                ((type . "image"))]))))))
+          (desktop-reply (funcall line '((type . "assistant") (entrypoint . "claude-desktop") (uuid . "a1")
+                                         (message . ((content . [((type . "text") (text . "桌面端回复"))])))))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-claude--transcript) (lambda (_) file)))
+           (agent-claude--set session :sync-offset 0)
+           ;; 最后一行还没写完
+           (with-temp-file file
+             (insert own desktop-user (substring desktop-reply 0 20)))
+           (agent-claude--sync session)
+           (let ((text (agent-session-test--transcript)))
+             (should-not (string-search "Emacs 里发的" text))
+             (should (string-search "以下来自 Claude Desktop" text))
+             (should (string-search "桌面端发的\n[图片]" text))
+             (should-not (string-search "桌面端回复" text)))
+           (should (agent-claude--state session :external))
+           ;; 写完之后再同步：补上回复，来源提示不重复
+           (with-temp-file file
+             (insert own desktop-user desktop-reply))
+           (agent-claude--sync session)
+           (let ((text (agent-session-test--transcript)))
+             (should (string-search "桌面端回复" text))
+             (should (= 1 (how-many "以下来自" (point-min) (point-max)))))
+           (should (= (agent-claude--state session :sync-offset)
+                      (file-attribute-size (file-attributes file)))))
+       (delete-file file)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
