@@ -15,6 +15,10 @@
 
 ;;; Code:
 
+;; 默认不加载 evil，编译本文件时声明一下其函数（运行时随 evil 加载）。
+(declare-function evil-set-leader "evil-core")
+(declare-function evil-define-key* "evil-core")
+
 (use-package evil
   :ensure t
   ;; NonGNU 上的 1.15.0 在 Emacs 31 下会报 void-variable evil-mode-buffers
