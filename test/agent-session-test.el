@@ -502,5 +502,16 @@
              (should-not (buffer-live-p session-buffer))))
        (kill-buffer list-buffer)))))
 
+;; 回归：所有条目共用同一个 mouse-face 时，悬停会把相邻条目连成一片高亮。
+(ert-deftest agent-session-test-list-hover-one-entry ()
+  "会话列表：相邻两项的鼠标高亮区域互不相连。"
+  (with-temp-buffer
+    (agent-session-list--insert-entry '(:id "a") "  第一项\n")
+    (agent-session-list--insert-entry '(:id "b") "  第二项\n")
+    (let ((boundary (next-single-property-change (point-min) 'mouse-face)))
+      (should (get-text-property (point-min) 'mouse-face))
+      (should (equal (get-text-property boundary 'agent-session-entry) '(:id "b")))
+      (should (= boundary (progn (goto-char (point-min)) (forward-line 1) (point)))))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
