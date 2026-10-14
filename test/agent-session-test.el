@@ -28,7 +28,7 @@
     (:id "big" :name "Big" :efforts ("high" "max"))))
 
 (cl-defmethod agent-session-backend-modes ((_ (eql test-echo)) _session)
-  '(ask edits full plan))
+  '(ask edits auto full plan))
 
 (cl-defmethod agent-session-backend-commands ((_ (eql test-echo)) _session)
   '((:name "compact" :description "压缩上下文")))
@@ -227,7 +227,7 @@
   "状态栏显示 agent、模型、推理强度、权限模式与状态。"
   (agent-session-test--with-session
    (let ((agent-session-last-settings nil))
-     (should (string-match-p "空闲.*Echo · Small · 推理 默认 · 自动接受编辑"
+     (should (string-match-p "空闲.*Echo · Small · 推理 默认 · 自动审查"
                              (agent-session-test--mode-line)))
      (agent-session-configure agent-session--current :model "big" :effort "max" :mode 'full)
      (should (string-match-p "Big · 推理 max · 完全访问" (agent-session-test--mode-line)))
@@ -237,20 +237,36 @@
      (should (eq (agent-session-setting agent-session--current :mode) 'full)))))
 
 (ert-deftest agent-session-test-approval ()
-  "待确认的请求显示在对话中并反映在状态栏；回答后状态恢复。"
+  "待确认的请求只显示在页脚；对话中只在关联的工具上标注等待与结果。"
   (agent-session-test--with-session
    (let (answer)
+     (agent-session-tool agent-session--current "t1" :kind 'edit :title "a.txt" :status 'running)
      (agent-session-ask agent-session--current :title "Write：a.txt"
                         :choices '((allow "允许") (deny "拒绝"))
-                        :callback (lambda (key) (setq answer key)))
-     (should (string-match-p "⚠ Write：a.txt\\(.\\|\n\\)* 允许 +拒绝" (agent-session-test--transcript)))
-     (should (string-match-p "⚠ Write：a.txt" (agent-session-test--footer)))
+                        :callback (lambda (key) (setq answer key))
+                        :tool "t1")
+     (should (string-match-p "⚠ Write：a.txt +允许 +拒绝" (agent-session-test--footer)))
+     (should-not (string-match-p "⚠" (agent-session-test--transcript)))
+     (should (string-match-p "a.txt.*等待确认" (agent-session-test--transcript)))
      (should (string-match-p "等待确认" (agent-session-test--mode-line)))
      (agent-session-approve)
      (should (eq answer 'allow))
-     (should (string-match-p "→ 允许" (agent-session-test--transcript)))
+     (should (string-match-p "a.txt.*允许" (agent-session-test--transcript)))
+     (should-not (string-match-p "等待确认\\|→" (agent-session-test--transcript)))
      (should-not (string-match-p "等待确认" (agent-session-test--mode-line)))
      (should-not (string-match-p "⚠" (agent-session-test--footer))))))
+
+(ert-deftest agent-session-test-thinking-collapsed ()
+  "思考默认折叠为一行，展开后显示全文。"
+  (agent-session-test--with-session
+   (agent-session-text agent-session--current "th" "第一段思考。" 'thinking)
+   (agent-session-text agent-session--current "th" "第二段思考。" 'thinking)
+   (should (string-match-p "▸ 思考中…" (agent-session-test--transcript)))
+   (should-not (string-match-p "第一段" (agent-session-test--transcript)))
+   (agent-session-text-done agent-session--current "th")
+   (should (string-match-p "▸ 思考\n" (agent-session-test--transcript)))
+   (agent-session--update agent-session--current "th" :collapsed nil)
+   (should (string-match-p "▾ 思考\n.*第一段思考。第二段思考。" (agent-session-test--transcript)))))
 
 (ert-deftest agent-session-test-list ()
   "会话列表显示进行中的会话及其标题。"

@@ -341,6 +341,7 @@
      :detail (and command (or (plist-get params :command) (plist-get tool :title)))
      :diff (and (not command) (plist-get tool :diff))
      :choices '((accept "允许") (acceptForSession "本会话允许") (decline "拒绝"))
+     :tool item-id
      :callback (lambda (choice)
                  (agent-codex--respond session id (list :decision (symbol-name choice)))))))
 

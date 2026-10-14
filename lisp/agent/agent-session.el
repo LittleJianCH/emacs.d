@@ -80,6 +80,7 @@
   (blocks (make-hash-table :test #'equal))
   tail           ; 对话记录末尾（新 block 插入处）
   input          ; 输入区起点（页脚之后）
+  asks           ; 确认请求（按出现先后），显示在页脚而不是对话中
   queue          ; 运行中输入的消息，回合结束后依次发送
   history
   settings)      ; 用户选择：:model :effort :mode（nil 表示用 agent 的默认值）
@@ -169,8 +170,9 @@
     (plan "计划" "只读规划，不做改动"))
   "统一的权限模式（参考 T3 Code），由各后端映射到自己的设置。")
 
-(defcustom agent-session-default-mode 'edits
-  "新会话默认的权限模式。"
+(defcustom agent-session-default-mode 'auto
+  "新会话默认的权限模式。默认“自动审查”：由 agent 的自动审查放行常规操作，
+只在风险较高时询问（与 Claude Code 桌面端的 auto mode 相同）。"
   :type '(choice (const ask) (const edits) (const auto) (const full)))
 
 (defvar agent-session-default-agent nil
@@ -369,9 +371,8 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   "把 BLOCK 渲染成字符串。"
   (pcase (plist-get block :type)
     ('user (agent-session--format-user block))
-    ('text (agent-session--format-text session block))
+    ('text (agent-session--format-text session id block))
     ('tool (agent-session--format-tool id block))
-    ('ask (agent-session--format-ask session id block))
     ('notice (concat (propertize (plist-get block :text)
                                  'face (or (plist-get block :face) 'agent-session-dim))
                      "\n"))))
@@ -429,19 +430,26 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
           (agent-session--indent (plist-get block :text))
           "\n"))
 
-(defun agent-session--format-text (session block)
-  "agent 的回复或思考。流式输出时显示原文，结束后渲染 markdown。"
-  (let ((text (string-trim-right (or (plist-get block :text) "")))
-        (thinking (eq (plist-get block :kind) 'thinking)))
-    (concat
-     (propertize (if thinking "  思考" (concat "● " (agent-session-title session)))
-                 'face (if thinking 'agent-session-dim 'agent-session-assistant))
-     "\n"
-     (agent-session--indent
-      (cond (thinking (propertize text 'face 'agent-session-thinking))
-            ((plist-get block :done) (agent-session--markdown text))
-            (t text)))
-     "\n")))
+(defun agent-session--format-text (session id block)
+  "agent 的回复或思考。回复流式输出时显示原文，结束后渲染 markdown；
+思考默认折叠成一行，可点击展开。"
+  (let ((text (string-trim-right (or (plist-get block :text) ""))))
+    (if (eq (plist-get block :kind) 'thinking)
+        (let ((collapsed (agent-session--collapsed-p block)))
+          (concat
+           (make-text-button
+            (concat (if collapsed "▸ " "▾ ")
+                    (propertize (if (plist-get block :done) "思考" "思考中…")
+                                'face 'agent-session-dim))
+            nil 'type 'agent-session-toggle 'agent-session-block id)
+           "\n"
+           (unless collapsed
+             (concat (agent-session--indent (propertize text 'face 'agent-session-thinking)) "\n"))))
+      (concat
+       (propertize (concat "● " (agent-session-title session)) 'face 'agent-session-assistant)
+       "\n"
+       (agent-session--indent (if (plist-get block :done) (agent-session--markdown text) text))
+       "\n"))))
 
 (defconst agent-session--tool-icons
   '((command . "$") (edit . "✎") (read . "≡") (search . "⌕") (web . "◎")
@@ -467,15 +475,20 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                 (string-join (last lines n) "\n"))
       (string-join lines "\n"))))
 
+(defun agent-session--collapsed-p (block)
+  "BLOCK 是否折叠：用户切换过则按其选择；思考默认折叠；
+工具调用默认折叠，有 diff 或出错时展开。"
+  (cond ((plist-member block :collapsed) (plist-get block :collapsed))
+        ((eq (plist-get block :kind) 'thinking) t)
+        (t (not (or (plist-get block :diff) (eq (plist-get block :status) 'error))))))
+
 (defun agent-session--format-tool (id block)
   "工具调用：标题行可点击折叠，展开后显示 diff 或输出。"
   (let* ((status (plist-get block :status))
          (diff (plist-get block :diff))
          (output (plist-get block :output))
          (has-body (or diff (and output (not (string-blank-p output)))))
-         (collapsed (if (plist-member block :collapsed)
-                        (plist-get block :collapsed)
-                      (not (or diff (eq status 'error)))))
+         (collapsed (agent-session--collapsed-p block))
          (header (concat
                   (if has-body (if collapsed "▸ " "▾ ") "  ")
                   (propertize (format "%s %s"
@@ -507,36 +520,12 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
         "\n")))))
 
 (defun agent-session--toggle-block (button)
-  "折叠或展开 BUTTON 所在的工具 block。"
+  "折叠或展开 BUTTON 所在的 block（工具调用、思考）。"
   (let* ((session agent-session--current)
-         (id (button-get button 'agent-session-block))
-         (block (agent-session--block session id))
-         (collapsed (if (plist-member block :collapsed)
-                        (plist-get block :collapsed)
-                      (not (or (plist-get block :diff) (eq (plist-get block :status) 'error))))))
-    (agent-session--update session id :collapsed (not collapsed))))
-
-(defun agent-session--format-ask (session id block)
-  "等待用户确认的请求：说明、详情和选项按钮。"
-  (let ((answer (plist-get block :answer)))
-    (concat
-     (propertize (concat (if answer "  " "⚠ ") (plist-get block :title))
-                 'face (if answer 'agent-session-dim 'agent-session-ask))
-     "\n"
-     (when-let* ((detail (plist-get block :detail)))
-       (concat (agent-session--indent (propertize detail 'face 'font-lock-string-face)) "\n"))
-     (when-let* ((diff (and (not answer) (plist-get block :diff))))
-       (concat (agent-session--indent (agent-session-fontify (string-trim-right diff) 'diff-mode))
-               "\n"))
-     (if answer
-         (agent-session--indent (propertize (concat "→ " answer) 'face 'agent-session-dim))
-       (agent-session--indent
-        (mapconcat (pcase-lambda (`(,key ,label))
-                     (make-text-button (format " %s " label) nil
-                                       'type 'agent-session-choice
-                                       'action (lambda (_) (agent-session--answer session id key))))
-                   (plist-get block :choices) "  ")))
-     "\n")))
+         (id (button-get button 'agent-session-block)))
+    (agent-session--update session id
+                           :collapsed (not (agent-session--collapsed-p
+                                            (agent-session--block session id))))))
 
 ;;; 界面 API（供后端调用）
 
@@ -546,16 +535,17 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (if (null block)
         (agent-session--new-block session id (list :type 'text :kind (or kind 'assistant)
                                                    :text text))
-      ;; 流式输出：直接在 block 末尾追加，不整段重绘。
       (puthash id (plist-put block :text (concat (plist-get block :text) text))
                (agent-session-blocks session))
-      (agent-session--with-buffer session
-        (let ((end (plist-get block :end)))
-          (goto-char (1- end))                    ; 末尾换行之前
-          (insert (agent-session--ro (agent-session--indent
-                                      (if (eq (plist-get block :kind) 'thinking)
-                                          (propertize text 'face 'agent-session-thinking)
-                                        text)))))))))
+      (if (eq (plist-get block :kind) 'thinking)
+          ;; 思考通常折叠，只需重绘（折叠时只有一行）。
+          (when (not (agent-session--collapsed-p block))
+            (agent-session--render session id))
+        ;; 回复流式输出：直接在 block 末尾追加，不整段重绘。
+        (agent-session--with-buffer session
+          (let ((end (plist-get block :end)))
+            (goto-char (1- end))                    ; 末尾换行之前
+            (insert (agent-session--ro (agent-session--indent text)))))))))
 
 (defun agent-session-text-done (session id &optional text)
   "消息 block ID 输出完毕；TEXT 非空时以它为最终全文。重绘为 markdown。"
@@ -574,23 +564,41 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   (when-let* ((block (agent-session--block session id)))
     (agent-session--update session id :output (concat (plist-get block :output) delta))))
 
-(cl-defun agent-session-ask (session &key title detail diff choices callback)
-  "请用户确认。CHOICES 为 ((KEY 标签) ...)，用户选择后以 KEY 调用 CALLBACK。"
+(cl-defun agent-session-ask (session &key title detail diff choices callback tool)
+  "请用户确认。CHOICES 为 ((KEY 标签) ...)，用户选择后以 KEY 调用 CALLBACK。
+请求显示在页脚的辅助行；TOOL 为关联的工具 block id，等待与回答的结果标注在它上面，
+对话中不再单独插入记录。DIFF 已由工具 block 展示，这里不再重复。"
+  (ignore diff)
   (let ((id (symbol-name (gensym "ask-"))))
-    (agent-session--new-block session id (list :type 'ask :title title :detail detail :diff diff
-                                               :choices choices :callback callback))
+    (setf (agent-session-asks session)
+          (append (agent-session-asks session)
+                  ;; :answer 预先占位，回答时原地修改，列表中的这一项随之更新。
+                  (list (list :id id :title title :detail detail :choices choices
+                              :callback callback :tool tool :answer nil))))
+    (when (and tool (agent-session--block session tool))
+      (agent-session--update session tool :note "等待确认"))
     (agent-session--refresh session)
     (message "%s 需要确认：%s（C-c C-y 允许，C-c C-n 拒绝）"
              (agent-session-title session) title)
     id))
 
+(defun agent-session--ask (session id)
+  "SESSION 中的确认请求 ID。"
+  (seq-find (lambda (ask) (equal (plist-get ask :id) id)) (agent-session-asks session)))
+
+(defun agent-session--close-ask (session ask label)
+  "把确认请求 ASK 标为已处理，结果 LABEL 标注在关联的工具上。"
+  (plist-put ask :answer label)
+  (when-let* ((tool (plist-get ask :tool))
+              ((agent-session--block session tool)))
+    (agent-session--update session tool :note label)))
+
 (defun agent-session--answer (session id key)
   "以 KEY 回答确认请求 ID。"
-  (let ((block (agent-session--block session id)))
-    (unless (plist-get block :answer)
-      (agent-session--update session id
-                             :answer (cadr (assq key (plist-get block :choices))))
-      (funcall (plist-get block :callback) key)
+  (let ((ask (agent-session--ask session id)))
+    (unless (or (null ask) (plist-get ask :answer))
+      (agent-session--close-ask session ask (cadr (assq key (plist-get ask :choices))))
+      (funcall (plist-get ask :callback) key)
       (agent-session--refresh session))))
 
 (defun agent-session-notice (session text &optional face)
@@ -611,11 +619,12 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
              (pcase (plist-get block :type)
                ('tool (when (eq (plist-get block :status) 'running)
                         (agent-session--update session id :status 'error :note "已中断")))
-               ('ask (unless (plist-get block :answer)
-                       (agent-session--update session id :answer "已失效")))
                ('text (unless (plist-get block :done)
                         (agent-session--update session id :done t)))))
-           (agent-session-blocks session)))
+           (agent-session-blocks session))
+  (dolist (ask (agent-session-asks session))
+    (unless (plist-get ask :answer)
+      (agent-session--close-ask session ask "已失效"))))
 
 (defun agent-session-set-status (session status)
   "设置会话状态：idle / running / exited。空闲时发送排队的消息。"
@@ -643,12 +652,8 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 
 (defun agent-session--pending-asks (session)
   "SESSION 中尚未回答的确认请求 id，按出现先后排列。"
-  (let (ids)
-    (maphash (lambda (id block)
-               (when (and (eq (plist-get block :type) 'ask) (not (plist-get block :answer)))
-                 (push (cons (marker-position (plist-get block :start)) id) ids)))
-             (agent-session-blocks session))
-    (mapcar #'cdr (sort ids :key #'car))))
+  (mapcar (lambda (ask) (plist-get ask :id))
+          (seq-remove (lambda (ask) (plist-get ask :answer)) (agent-session-asks session))))
 
 (defun agent-session--elapsed (since)
   "从 SINCE 到现在的简短时长，如 5s、3m、1h2m。"
@@ -780,16 +785,23 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                  'face 'agent-session-separator)
      "\n"
      ;; 辅助行：待确认的请求（带选项按钮）与排队中的消息。
-     (when-let* ((ask (car asks)))
-       (let ((block (agent-session--block session ask)))
+     (when-let* ((id (car asks)))
+       (let ((ask (agent-session--ask session id)))
          (concat
-          (propertize (concat " ⚠ " (plist-get block :title) "  ") 'face 'agent-session-ask)
+          (propertize (concat " ⚠ " (plist-get ask :title) "  ") 'face 'agent-session-ask)
           (mapconcat (pcase-lambda (`(,key ,label))
                        (make-text-button (format " %s " label) nil
                                          'type 'agent-session-choice
-                                         'action (lambda (_) (agent-session--answer session ask key))))
-                     (plist-get block :choices) " ")
-          "\n")))
+                                         'action (lambda (_) (agent-session--answer session id key))))
+                     (plist-get ask :choices) " ")
+          "\n"
+          ;; 没有关联工具 block 时，详情（例如命令）只能在这里看到。
+          (when-let* ((detail (and (not (agent-session--block session (plist-get ask :tool)))
+                                   (plist-get ask :detail))))
+            (propertize (concat "   " (truncate-string-to-width
+                                       (replace-regexp-in-string "\n" " ⏎ " detail) 200 nil nil "…")
+                                "\n")
+                        'face 'font-lock-string-face)))))
      (mapconcat (lambda (queued)
                   (propertize (concat " ⏳ 排队：" (agent-session--title-seed (cdr queued)) "\n")
                               'face 'agent-session-dim))
@@ -961,7 +973,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   "用 KEY-FN 从最早的待确认请求的选项中挑一个作答。"
   (let* ((session (agent-session--this))
          (id (or (car (agent-session--pending-asks session)) (user-error "没有待确认的请求")))
-         (choices (plist-get (agent-session--block session id) :choices)))
+         (choices (plist-get (agent-session--ask session id) :choices)))
     (agent-session--answer session id (funcall key-fn choices))))
 
 (defun agent-session-approve ()

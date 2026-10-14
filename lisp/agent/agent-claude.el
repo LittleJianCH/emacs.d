@@ -295,7 +295,9 @@
             (unless (string-empty-p (or text ""))
               (agent-session-text session (concat id "-thinking") text 'thinking)))))))
     ("content_block_stop"
-     (agent-session-text-done session (agent-claude--block-id session (plist-get event :index))))
+     (let ((id (agent-claude--block-id session (plist-get event :index))))
+       (agent-session-text-done session id)
+       (agent-session-text-done session (concat id "-thinking"))))
     ("message_delta" (agent-claude--usage session (plist-get event :usage)))))
 
 (defun agent-claude--usage (session usage)
@@ -343,6 +345,7 @@
                     (or (plist-get request :description) (plist-get view :title)))
      :detail (and (eq (plist-get view :kind) 'command) (plist-get input :command))
      :diff (plist-get view :diff)
+     :tool tool-id
      :choices (append '((allow "允许"))
                       (when suggestions '((always "本会话允许")))
                       '((deny "拒绝")))
