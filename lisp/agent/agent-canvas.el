@@ -21,6 +21,9 @@
 (require 'svg)
 (require 'dom)
 (require 'button)
+
+;; 在 let 中动态绑定，渲染代码块时不弹出安装 tree-sitter 语法的询问。
+(defvar treesit-auto-install-grammar)
 (require 'agent-session)
 (require 'agent-ui)
 

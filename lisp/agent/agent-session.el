@@ -21,6 +21,9 @@
 (require 'project)
 (require 'server)
 (require 'button)
+
+;; 在 let 中动态绑定，渲染代码块时不弹出安装 tree-sitter 语法的询问。
+(defvar treesit-auto-install-grammar)
 (require 'transient)
 
 (defgroup agent-session nil
@@ -76,7 +79,7 @@
   state          ; 后端私有状态 plist
   (blocks (make-hash-table :test #'equal))
   tail           ; 对话记录末尾（新 block 插入处）
-  draft          ; 取消输入时保留的草稿
+  input          ; 输入区起点（页脚之后）
   queue          ; 运行中输入的消息，回合结束后依次发送
   history
   settings)      ; 用户选择：:model :effort :mode（nil 表示用 agent 的默认值）
@@ -175,6 +178,7 @@
 
 (defvar agent-session-last-settings nil
   "每个 agent 最近一次使用的设置：((AGENT . PLIST) ...)，新会话沿用。")
+(defvar savehist-additional-variables)
 (with-eval-after-load 'savehist
   (add-to-list 'savehist-additional-variables 'agent-session-last-settings)
   (add-to-list 'savehist-additional-variables 'agent-session-default-agent))
@@ -294,9 +298,16 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 
 ;;; 对话记录：block 的插入与重绘
 
+(defvar-keymap agent-session-transcript-map
+  :doc "对话记录与页脚上的按键：在其中打字会跳到输入区。"
+  :parent button-map
+  "RET" #'agent-session-ret
+  "<remap> <self-insert-command>" #'agent-session-self-insert-to-input)
+
 (defun agent-session--ro (string)
-  "把 STRING 标为对话记录（只读）。"
-  (propertize string 'read-only t 'front-sticky '(read-only) 'rear-nonsticky '(read-only)))
+  "把 STRING 标为对话记录：只读，打字时跳到输入区。"
+  (propertize string 'read-only t 'front-sticky '(read-only) 'rear-nonsticky t
+              'keymap agent-session-transcript-map))
 
 (defmacro agent-session--with-buffer (session &rest body)
   "在 SESSION 的 buffer 中执行 BODY，允许修改只读的对话记录，并保持各窗口的光标。"
@@ -717,23 +728,25 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 (defvar agent-session--list-refresh-function nil
   "会话列表的刷新函数（由会话列表设置），会话状态变化时调用。")
 
-(defvar agent-session--clock nil "运行中的会话存在时，定时刷新状态栏上的计时。")
+(defvar agent-session--clock nil "运行中的会话存在时，定时刷新计时。")
 
 (defun agent-session--tick ()
-  "刷新运行中会话的状态栏；没有运行中的会话时停止计时器。"
+  "刷新运行中会话的状态栏与分隔线上的计时；没有运行中的会话时停止计时器。"
   (let ((running (seq-filter (lambda (b) (eq (agent-session-status
                                               (buffer-local-value 'agent-session--current b))
                                              'running))
                              (agent-session-buffers))))
     (if running
         (dolist (buffer running)
+          (agent-session--render-footer (buffer-local-value 'agent-session--current buffer))
           (with-current-buffer buffer (force-mode-line-update)))
       (cancel-timer agent-session--clock)
       (setq agent-session--clock nil))))
 
 (defun agent-session--refresh (session)
-  "刷新 SESSION 的状态栏，并通知会话列表。"
+  "刷新 SESSION 的页脚与状态栏，并通知会话列表。"
   (when (buffer-live-p (agent-session-buffer session))
+    (agent-session--render-footer session)
     (with-current-buffer (agent-session-buffer session)
       (force-mode-line-update))
     (when (and (eq (agent-session-status session) 'running) (not agent-session--clock))
@@ -741,12 +754,88 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (when agent-session--list-refresh-function
       (funcall agent-session--list-refresh-function))))
 
-;;; 输入：在 minibuffer 中输入，发给会话
+;;; 页脚：分隔线、辅助行、提示符（参考 telega 的 chatbuf）
+;;
+;; buffer 结构：对话记录 | tail | 分隔线 · 辅助行 · 提示符 | input | 输入
+;; 对话记录与页脚只读；提示符不可进入（cursor-intangible），其后到 buffer 末尾是输入区。
 
-(defvar agent-session-input-history nil "minibuffer 输入的历史。")
+(defface agent-session-separator '((t :inherit shadow :underline t))
+  "对话与输入之间的分隔线。")
 
-(defvar-local agent-session--completion-session nil
-  "minibuffer 输入所属的会话；补全据此提供命令与文件。")
+(defface agent-session-prompt '((t :inherit (bold font-lock-function-name-face)))
+  "输入提示符。")
+
+(defun agent-session--footer (session)
+  "页脚文本：分隔线（左侧为进行中的状态）、辅助行、提示符。"
+  (let* ((status (agent-session-status session))
+         (asks (agent-session--pending-asks session))
+         (state (cond (asks (agent-session-status-label session))
+                      ((memq status '(running starting exited))
+                       (agent-session-status-label session)))))
+    (concat
+     "\n"
+     ;; 分隔线：贯穿窗口宽度的下划线，左侧显示进行中的状态。
+     (propertize (concat (if state (concat " " state " ") "")
+                         (propertize " " 'display '(space :align-to right)))
+                 'face 'agent-session-separator)
+     "\n"
+     ;; 辅助行：待确认的请求（带选项按钮）与排队中的消息。
+     (when-let* ((ask (car asks)))
+       (let ((block (agent-session--block session ask)))
+         (concat
+          (propertize (concat " ⚠ " (plist-get block :title) "  ") 'face 'agent-session-ask)
+          (mapconcat (pcase-lambda (`(,key ,label))
+                       (make-text-button (format " %s " label) nil
+                                         'type 'agent-session-choice
+                                         'action (lambda (_) (agent-session--answer session ask key))))
+                     (plist-get block :choices) " ")
+          "\n")))
+     (mapconcat (lambda (queued)
+                  (propertize (concat " ⏳ 排队：" (agent-session--title-seed (cdr queued)) "\n")
+                              'face 'agent-session-dim))
+                (agent-session-queue session) "")
+     ;; 提示符：只读、不可进入；其后的文本可编辑。
+     (propertize (concat (agent-session-title session) " ❯ ")
+                 'face 'agent-session-prompt
+                 'cursor-intangible t 'field 'agent-session-prompt))))
+
+(defun agent-session--render-footer (session)
+  "重绘 SESSION 的页脚，保持各窗口中输入区内的光标位置与输入内容。"
+  (let ((buffer (agent-session-buffer session)))
+    (when (and (buffer-live-p buffer) (agent-session-input session))
+      (with-current-buffer buffer
+        (let* ((input (agent-session-input session))
+               (tail (agent-session-tail session))
+               (windows (get-buffer-window-list buffer nil t))
+               ;; 输入区中的光标记为相对输入起点的偏移，重绘后恢复。
+               (offsets (mapcar (lambda (w) (let ((p (window-point w)))
+                                              (and (>= p input) (- p input))))
+                                windows))
+               (offset (and (>= (point) input) (- (point) input)))
+               (inhibit-read-only t)
+               (inhibit-modification-hooks t)
+               (start (marker-position tail)))
+          (save-excursion
+            (delete-region start input)
+            (goto-char start)
+            (insert (agent-session--ro (agent-session--footer session)))
+            (set-marker tail start)
+            (set-marker input (point)))
+          (when offset (goto-char (+ input offset)))
+          (cl-mapc (lambda (w o) (when o (set-window-point w (+ input o)))) windows offsets))))))
+
+;;; 输入：页脚之后的输入区
+
+(defvar-local agent-session--history-index nil "当前浏览到的输入历史位置。")
+
+(defun agent-session--input-text (session)
+  "输入区的文本。"
+  (with-current-buffer (agent-session-buffer session)
+    (buffer-substring-no-properties (agent-session-input session) (point-max))))
+
+(defun agent-session--in-input-p ()
+  "光标是否在输入区。"
+  (and agent-session--current (>= (point) (agent-session-input agent-session--current))))
 
 (defun agent-session--deliver (session text)
   "把 TEXT 交给后端发送。"
@@ -776,62 +865,89 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
       (unless (agent-session--run-local-command session text)
         (agent-session-submit session text)))))
 
-(defvar-keymap agent-session-minibuffer-map
-  :doc "会话输入时 minibuffer 的按键：RET 发送，C-j 换行。"
-  :parent minibuffer-local-map
-  "C-j" #'newline
-  "S-<return>" #'newline
-  "TAB" #'completion-at-point)
+(defun agent-session-send-input ()
+  "发送输入区的内容。"
+  (interactive)
+  (let* ((session (agent-session--this))
+         (text (string-trim (agent-session--input-text session))))
+    (when (string-empty-p text) (user-error "输入为空"))
+    (push text (agent-session-history session))
+    (setq agent-session--history-index nil)
+    (let ((inhibit-read-only t))
+      (delete-region (agent-session-input session) (point-max)))
+    (agent-session-send session text)))
 
-(defun agent-session--minibuffer-setup (session)
-  "在 minibuffer 中启用会话的补全。"
-  (setq agent-session--completion-session session)
-  (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
-  (when (fboundp 'corfu-mode)
-    (setq-local corfu-auto t corfu-auto-prefix 1 corfu-auto-delay 0.1)
-    (corfu-mode 1)))
+(defun agent-session-goto-input ()
+  "跳到输入区末尾。"
+  (interactive)
+  (goto-char (point-max)))
 
-(defun agent-session-read (session)
-  "在 minibuffer 中为 SESSION 读取一条输入；取消时保留草稿。"
-  (let* ((draft (agent-session-draft session))
-         (prompt (concat (propertize (agent-session-title session) 'face 'agent-session-assistant)
-                         (if (memq (agent-session-status session) '(running starting))
-                             (propertize "（排队）" 'face 'agent-session-dim)
-                           "")
-                         " ❯ "))
-         (contents nil)
-         (text nil))
-    (unwind-protect
-        (minibuffer-with-setup-hook
-            (lambda ()
-              (agent-session--minibuffer-setup session)
-              ;; 退出 minibuffer（包括 C-g）时记下内容，取消时用作草稿。
-              (add-hook 'minibuffer-exit-hook
-                        (lambda () (setq contents (minibuffer-contents-no-properties)))
-                        nil t))
-          (setq text (read-from-minibuffer prompt draft agent-session-minibuffer-map nil
-                                           'agent-session-input-history)))
-      (setf (agent-session-draft session)
-            (and (null text) contents (not (string-blank-p contents)) contents)))
-    text))
+(defun agent-session-ret ()
+  "输入区中发送；按钮上执行按钮；对话中其他位置跳到输入区。"
+  (interactive)
+  (cond ((agent-session--in-input-p) (agent-session-send-input))
+        ((button-at (point)) (push-button))
+        (t (agent-session-goto-input))))
 
-(defun agent-session-input (&optional session)
-  "在 minibuffer 中输入并发送给 SESSION（默认当前或目标会话）。"
+(defun agent-session-self-insert-to-input ()
+  "在对话记录中打字时，跳到输入区末尾并输入。"
+  (interactive)
+  (goto-char (point-max))
+  (call-interactively #'self-insert-command))
+
+(defun agent-session-cancel-dwim ()
+  "有输入时清空输入区；没有输入时中断 agent。"
+  (interactive)
+  (let ((session (agent-session--this)))
+    (if (string-blank-p (agent-session--input-text session))
+        (agent-session-interrupt)
+      (let ((inhibit-read-only t))
+        (delete-region (agent-session-input session) (point-max))))))
+
+(defun agent-session--history-step (step)
+  "在输入历史中移动 STEP。"
+  (let* ((session (agent-session--this))
+         (history (agent-session-history session))
+         (index (+ (or agent-session--history-index -1) step)))
+    (cond ((< index 0)
+           (setq agent-session--history-index nil)
+           (delete-region (agent-session-input session) (point-max)))
+          ((< index (length history))
+           (setq agent-session--history-index index)
+           (delete-region (agent-session-input session) (point-max))
+           (goto-char (point-max))
+           (insert (nth index history)))
+          (t (user-error "没有更早的输入")))))
+
+(defun agent-session-previous-input ()
+  "上一条输入。"
+  (interactive)
+  (agent-session--history-step 1))
+
+(defun agent-session-next-input ()
+  "下一条输入。"
+  (interactive)
+  (agent-session--history-step -1))
+
+(defun agent-session-focus-input (&optional session)
+  "聚焦 SESSION（默认当前或目标会话）的输入区。"
   (interactive)
   (let* ((session (or session agent-session--current
                       (when-let* ((buffer (agent-session-target)))
                         (buffer-local-value 'agent-session--current buffer))
                       (user-error "没有 agent 会话，先用 C-c a n 新建")))
-         (text (agent-session-read session)))
-    (with-current-buffer (agent-session-buffer session)
-      (agent-session-send session text))))
+         (window (agent-session-display (agent-session-buffer session))))
+    (select-window window)
+    (goto-char (point-max))
+    (when (bound-and-true-p evil-local-mode)
+      (evil-insert-state))))
 
-(defun agent-session-ret ()
-  "在按钮上执行按钮，否则输入新消息。"
+(defun agent-session-tab ()
+  "输入区中补全，对话记录中跳到下一个按钮。"
   (interactive)
-  (if (button-at (point))
-      (push-button)
-    (agent-session-input)))
+  (if (agent-session--in-input-p)
+      (completion-at-point)
+    (forward-button 1 t)))
 
 (defun agent-session-interrupt ()
   "中断 agent 当前的回合，并清空排队的消息。"
@@ -868,11 +984,11 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (sort positions #'<)))
 
 (defun agent-session-next-message ()
-  "跳到下一条消息。"
+  "跳到下一条消息；没有时跳到输入区。"
   (interactive)
   (if-let* ((pos (seq-find (lambda (p) (> p (point))) (agent-session--message-positions))))
       (goto-char pos)
-    (goto-char (point-max))))
+    (agent-session-goto-input)))
 
 (defun agent-session-previous-message ()
   "跳到上一条消息。"
@@ -1007,10 +1123,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (unless (assq agent agent-session-agents) (user-error "未注册 agent：%s" agent))
     (unless (eq agent (agent-session-agent session))
       (if (agent-session--has-conversation session)
-          (let* ((draft (agent-session-draft session))
-                 (buffer (agent-session-start agent t nil (agent-session-root session))))
-            (setf (agent-session-draft (buffer-local-value 'agent-session--current buffer))
-                  draft))
+          (let ((draft (agent-session--input-text session)))
+            (agent-session-insert-input
+             (agent-session-start agent t nil (agent-session-root session)) draft))
         (agent-session-backend-stop (agent-session-backend session) session)
         (setf (agent-session-agent session) agent
               (agent-session-backend session) (agent-session--get agent :backend)
@@ -1114,10 +1229,11 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
               (seq-take (project-files project) 20000)))))
 
 (defun agent-session-completion-at-point ()
-  "minibuffer 输入的补全：行首的 /命令、命令参数、@文件。
-“行首”指提示符之后或换行之后，minibuffer 的提示符与输入在同一行。"
-  (when-let* ((session agent-session--completion-session))
-    (let* ((start (max (line-beginning-position) (minibuffer-prompt-end)))
+  "输入区的补全：行首的 /命令、命令参数、@文件。
+“行首”指提示符之后或换行之后，提示符与输入在同一行。"
+  (when-let* ((session agent-session--current)
+              ((agent-session--in-input-p)))
+    (let* ((start (max (line-beginning-position) (agent-session-input session)))
            (text (buffer-substring-no-properties start (point)))
            (exit (lambda (_name status) (when (eq status 'finished) (insert " ")))))
       (cond
@@ -1184,55 +1300,67 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     ("y" "允许" agent-session-approve)
     ("d" "拒绝" agent-session-deny)]])
 
-;;; 模式：只读的对话 buffer
+;;; 模式
 
 (defvar-keymap agent-session-mode-map
-  :doc "agent 会话的按键。对话 buffer 只读，输入在 minibuffer 中进行。"
-  :parent special-mode-map
+  :doc "agent 会话的按键：输入区中 RET 发送，C-j 换行。"
   "RET" #'agent-session-ret
-  "i" #'agent-session-input
-  "C-c C-c" #'agent-session-input
-  "o" #'agent-session-menu
+  "C-j" #'newline
+  "M-p" #'agent-session-previous-input
+  "M-n" #'agent-session-next-input
+  "TAB" #'agent-session-tab
+  "<backtab>" #'backward-button
+  "C-c C-c" #'agent-session-send-input
+  "C-c C-k" #'agent-session-cancel-dwim
   "C-c C-o" #'agent-session-menu
-  "m" #'agent-session-select-model
-  "e" #'agent-session-select-effort
-  "M" #'agent-session-select-mode
-  "P" #'agent-session-toggle-plan
-  "A" #'agent-session-select-agent
-  "a" #'agent-session-approve
-  "d" #'agent-session-deny
   "C-c C-y" #'agent-session-approve
   "C-c C-n" #'agent-session-deny
-  "k" #'agent-session-interrupt
-  "C-c C-k" #'agent-session-interrupt
-  "s" #'agent-session-list
-  "n" #'agent-session-next-message
-  "p" #'agent-session-previous-message
-  "TAB" #'forward-button
-  "<backtab>" #'backward-button)
+  "C-c C-i" #'agent-session-goto-input
+  "C-c C-b" #'agent-session-previous-message
+  "C-c C-f" #'agent-session-next-message
+  "C-c C-s" #'agent-session-list)
 
-(define-derived-mode agent-session-mode special-mode "Agent"
-  "Emacs 渲染的 agent 会话：只显示对话，输入在 minibuffer 中进行（RET 或 i）。
+(define-derived-mode agent-session-mode fundamental-mode "Agent"
+  "Emacs 渲染的 agent 会话（参考 telega）：上方是对话，页脚之后是输入区。
 \\{agent-session-mode-map}"
   (setq-local truncate-lines nil
               word-wrap t
               word-wrap-by-category t
+              scroll-conservatively 101
               header-line-format nil
               mode-line-format '((:eval (agent-session--mode-line agent-session--current))))
+  (cursor-intangible-mode 1)
+  (add-hook 'post-command-hook #'agent-session--keep-point-out-of-prompt nil t)
+  (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
+  ;; 输入 / 后立即弹出补全。
+  (setq-local corfu-auto-prefix 1
+              corfu-auto-delay 0.1)
+  ;; 对话记录不断插入到输入区之前，undo 记录的位置会错乱，所以关闭 undo。
   (buffer-disable-undo))
+
+(defun agent-session--keep-point-out-of-prompt ()
+  "光标落在提示符内时移到输入区起点（与 telega 相同，不依赖 cursor-intangible 的重绘时机）。"
+  (when (and agent-session--current
+             (eq (get-text-property (point) 'field) 'agent-session-prompt))
+    (goto-char (agent-session-input agent-session--current))))
 
 (defun agent-session--this ()
   "当前 buffer 的会话，没有时报错。"
   (or agent-session--current (user-error "不在 agent 会话中")))
 
 (defun agent-session--setup-buffer (session)
-  "初始化会话 buffer：只读的对话记录，新内容追加在末尾。"
+  "初始化会话 buffer：对话记录、页脚（分隔线、辅助行、提示符）、输入区。"
   (with-current-buffer (agent-session-buffer session)
     (agent-session-mode)
     (setq agent-session--current session)
     (let ((inhibit-read-only t))
       (erase-buffer))
-    (setf (agent-session-tail session) (copy-marker (point-max) t))))
+    ;; 对话记录插在 tail 处（随插入后移）；页脚位于 tail 与 input 之间，
+    ;; 由 `agent-session--render-footer' 维护两个标记。
+    (setf (agent-session-tail session) (copy-marker (point-min) t)
+          (agent-session-input session) (copy-marker (point-min)))
+    (agent-session--render-footer session)
+    (goto-char (point-max))))
 
 ;;; 会话管理
 
@@ -1342,7 +1470,7 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
                  t)))
     ;; 交互调用时直接开始输入第一条消息。
     (when (called-interactively-p 'interactive)
-      (agent-session-input (buffer-local-value 'agent-session--current buffer)))
+      (agent-session-focus-input (buffer-local-value 'agent-session--current buffer)))
     buffer))
 
 ;;;###autoload
@@ -1374,17 +1502,18 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
     (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
       (kill-buffer buffer))))
 
-;;; 从代码 buffer 引用到输入
+;;; 从代码 buffer 引用到输入区
 
 (defun agent-session-insert-input (buffer text)
-  "把 TEXT 追加到会话 BUFFER 的草稿中，并打开 minibuffer 继续输入。"
-  (let ((session (buffer-local-value 'agent-session--current buffer)))
-    (setf (agent-session-draft session)
-          (let ((draft (or (agent-session-draft session) "")))
-            (concat draft (if (or (string-empty-p draft) (string-match-p "[ \n]\\'" draft)) "" " ")
-                    text)))
-    (agent-session-display buffer)
-    (agent-session-input session)))
+  "把 TEXT 插入会话 BUFFER 的输入区末尾，并聚焦输入区。"
+  (with-current-buffer buffer
+    (goto-char (point-max))
+    (unless (or (= (point) (agent-session-input agent-session--current))
+                (memq (char-before) '(?\s ?\n)))
+      (insert " "))
+    (insert text))
+  (agent-session-focus-input (buffer-local-value 'agent-session--current buffer))
+  buffer)
 
 ;;;###autoload
 (defun agent-session-insert-reference ()
@@ -1420,7 +1549,7 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
 (defvar-keymap agent-session-command-map
   :doc "agent 命令前缀表（C-c a）。"
   "a" #'agent-session-toggle
-  "i" #'agent-session-input
+  "i" #'agent-session-focus-input
   "n" #'agent-session-create
   "s" #'agent-session-list
   "k" #'agent-session-kill

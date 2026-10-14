@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; 用一个假后端（立即回显）测试会话界面，不调用真实 agent。
-;; 输入在 minibuffer 中进行，测试直接调用 `agent-session-send'（即 minibuffer 提交之后的处理）。
+;; 布局参考 telega：对话 | 页脚（分隔线、辅助行、提示符）| 输入区。
 ;; 运行：
 ;;   emacs --batch -L lisp/agent -l test/agent-session-test.el -f ert-run-tests-batch-and-exit
 
@@ -39,6 +39,8 @@
 (defmacro agent-session-test--with-session (&rest body)
   "在一个新的假会话 buffer 中执行 BODY。"
   `(let ((default-directory temporary-file-directory)
+         ;; 每个测试从默认设置开始，互不影响。
+         (agent-session-last-settings nil)
          (buffer nil))
      (unwind-protect
          (progn
@@ -49,12 +51,19 @@
        (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (defun agent-session-test--type (string)
-  "像在 minibuffer 中输入 STRING 并回车一样发送。"
-  (agent-session-send agent-session--current string))
+  "在输入区末尾输入 STRING 并发送。"
+  (goto-char (point-max))
+  (insert string)
+  (agent-session-send-input))
 
 (defun agent-session-test--transcript ()
-  "对话 buffer 的纯文本。"
-  (buffer-substring-no-properties (point-min) (point-max)))
+  "对话记录部分（页脚之前）的纯文本。"
+  (buffer-substring-no-properties (point-min) (agent-session-tail agent-session--current)))
+
+(defun agent-session-test--footer ()
+  "页脚（分隔线、辅助行、提示符）的纯文本。"
+  (buffer-substring-no-properties (agent-session-tail agent-session--current)
+                                  (agent-session-input agent-session--current)))
 
 (defun agent-session-test--mode-line ()
   "状态栏的纯文本（batch 中 `format-mode-line' 不求值 :eval，直接调用生成函数）。"
@@ -69,12 +78,57 @@
                            (agent-session-test--transcript)))))
 
 (ert-deftest agent-session-test-transcript-read-only ()
-  "对话 buffer 只读，只显示对话。"
+  "对话记录与页脚只读，输入区可编辑。"
   (agent-session-test--with-session
    (agent-session-test--type "one")
+   (goto-char (point-min))
+   (should-error (insert "x") :type 'text-read-only)
+   (goto-char (agent-session-tail agent-session--current))
+   (should-error (insert "x") :type 'text-read-only)
    (goto-char (point-max))
-   (should-error (insert "x"))
-   (should-not (string-match-p "──\\|❯" (agent-session-test--transcript)))))
+   (insert "ok")
+   (should (equal (agent-session--input-text agent-session--current) "ok"))))
+
+(ert-deftest agent-session-test-footer ()
+  "页脚：分隔线、提示符；排队消息与待确认请求显示在辅助行。"
+  (agent-session-test--with-session
+   (should (string-match-p "\\`\n *\n.*Echo ❯ \\'" (agent-session-test--footer)))
+   (agent-session-test--type "hold")
+   (agent-session-test--type "排队的消息")
+   (should (string-match-p "工作中" (agent-session-test--footer)))
+   (should (string-match-p "⏳ 排队：排队的消息" (agent-session-test--footer)))
+   (agent-session-ask agent-session--current :title "Write：a.txt"
+                      :choices '((allow "允许") (deny "拒绝")) :callback #'ignore)
+   (should (string-match-p "⚠ Write：a.txt +允许 +拒绝" (agent-session-test--footer)))))
+
+(ert-deftest agent-session-test-typing-in-transcript ()
+  "在对话记录中打字会跳到输入区末尾。"
+  (agent-session-test--with-session
+   (agent-session-test--type "one")
+   (switch-to-buffer (current-buffer))
+   (goto-char (point-min))
+   (execute-kbd-macro "xy")
+   (should (equal (agent-session--input-text agent-session--current) "xy"))))
+
+(ert-deftest agent-session-test-point-out-of-prompt ()
+  "光标不会停在提示符内。"
+  (agent-session-test--with-session
+   (switch-to-buffer (current-buffer))
+   (goto-char (point-max))
+   (execute-kbd-macro (kbd "x <left> <left> <left>"))
+   (should (>= (point) (agent-session-input agent-session--current)))))
+
+(ert-deftest agent-session-test-footer-keeps-input ()
+  "重绘页脚（例如状态变化）时保留输入区内容与光标。"
+  (agent-session-test--with-session
+   (goto-char (point-max))
+   (insert "草稿中")
+   (backward-char 1)
+   (agent-session-configure agent-session--current :mode 'full)
+   (agent-session-set-status agent-session--current 'running)
+   (agent-session--refresh agent-session--current)
+   (should (equal (agent-session--input-text agent-session--current) "草稿中"))
+   (should (equal (char-after) ?中))))
 
 (ert-deftest agent-session-test-queue-order ()
   "忙时输入的消息排队，发出时移到对话末尾，记录顺序与实际一致。"
@@ -89,21 +143,13 @@
    (should (string-match-p "hold\\(.\\|\n\\)*q1\\(.\\|\n\\)*收到：q1\\(.\\|\n\\)*q2\\(.\\|\n\\)*收到：q2"
                            (agent-session-test--transcript)))))
 
-(defun agent-session-test--complete (session input)
-  "在模拟的 minibuffer 中输入 INPUT，返回补全候选。
-提示符与输入在同一行（真实 minibuffer 的情形），用 `minibuffer-prompt-end' 模拟。"
-  (with-temp-buffer
-    (setq agent-session--completion-session session)
-    (insert "Echo ❯ ")
-    (let ((prompt-end (point)))
-      (cl-letf (((symbol-function 'minibuffer-prompt-end) (lambda () prompt-end)))
-        (insert input)
-        (agent-session-test--complete-1)))))
-
-(defun agent-session-test--complete-1 ()
-  "对当前位置调用补全，返回候选。"
-  (pcase-let ((`(,beg ,end ,table . ,_) (agent-session-completion-at-point)))
-    (all-completions (buffer-substring-no-properties beg end) table)))
+(defun agent-session-test--complete (_session input)
+  "在会话输入区输入 INPUT（提示符与输入同一行），返回补全候选，随后清空输入。"
+  (goto-char (point-max))
+  (insert input)
+  (prog1 (pcase-let ((`(,beg ,end ,table . ,_) (agent-session-completion-at-point)))
+           (all-completions (buffer-substring-no-properties beg end) table))
+    (delete-region (agent-session-input agent-session--current) (point-max))))
 
 (ert-deftest agent-session-test-local-command ()
   "本地命令在 Emacs 中执行，不作为消息发出。"
@@ -143,7 +189,8 @@
      (should (eq (agent-session-agent agent-session--current) 'test-echo2))
      (should (eq (current-buffer) buffer))
      (agent-session-test--type "hi")
-     (setf (agent-session-draft agent-session--current) "草稿")
+     (goto-char (point-max))
+     (insert "草稿")
      (agent-session-select-agent 'test-echo)
      (let ((new (seq-find (lambda (b) (and (not (eq b buffer))
                                            (eq (agent-session-agent
@@ -151,7 +198,8 @@
                                                'test-echo)))
                           (agent-session-buffers))))
        (should new)
-       (should (equal (agent-session-draft (buffer-local-value 'agent-session--current new))
+       (should (equal (with-current-buffer new
+                        (agent-session--input-text agent-session--current))
                       "草稿"))
        (kill-buffer new)))))
 
@@ -176,11 +224,13 @@
                         :choices '((allow "允许") (deny "拒绝"))
                         :callback (lambda (key) (setq answer key)))
      (should (string-match-p "⚠ Write：a.txt\\(.\\|\n\\)* 允许 +拒绝" (agent-session-test--transcript)))
+     (should (string-match-p "⚠ Write：a.txt" (agent-session-test--footer)))
      (should (string-match-p "等待确认" (agent-session-test--mode-line)))
      (agent-session-approve)
      (should (eq answer 'allow))
      (should (string-match-p "→ 允许" (agent-session-test--transcript)))
-     (should-not (string-match-p "等待确认" (agent-session-test--mode-line))))))
+     (should-not (string-match-p "等待确认" (agent-session-test--mode-line)))
+     (should-not (string-match-p "⚠" (agent-session-test--footer))))))
 
 (ert-deftest agent-session-test-list ()
   "会话列表显示进行中的会话及其标题。"
