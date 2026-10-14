@@ -542,6 +542,10 @@
                                         (message . ((role . "user")
                                                     (content . [((type . "text") (text . "桌面端发的"))
                                                                 ((type . "image"))]))))))
+          (orphan (funcall line '((type . "user") (entrypoint . "claude-desktop") (uuid . "r0")
+                                  (message . ((role . "user")
+                                              (content . [((type . "tool_result") (tool_use_id . "t0")
+                                                           (content . "无主结果"))]))))))
           (desktop-reply (funcall line '((type . "assistant") (entrypoint . "claude-desktop") (uuid . "a1")
                                          (message . ((content . [((type . "text") (text . "桌面端回复"))])))))))
      (unwind-protect
@@ -549,17 +553,20 @@
            (agent-claude--set session :sync-offset 0)
            ;; 最后一行还没写完
            (with-temp-file file
-             (insert own desktop-user (substring desktop-reply 0 20)))
+             (insert own orphan desktop-user (substring desktop-reply 0 20)))
            (agent-claude--sync session)
            (let ((text (agent-session-test--transcript)))
              (should-not (string-search "Emacs 里发的" text))
+             ;; 没读到调用的工具结果不单独显示
+             (should-not (string-search "无主结果" text))
+             (should-not (agent-session--block session "t0"))
              (should (string-search "以下来自 Claude Desktop" text))
              (should (string-search "桌面端发的\n[图片]" text))
              (should-not (string-search "桌面端回复" text)))
            (should (agent-claude--state session :external))
            ;; 写完之后再同步：补上回复，来源提示不重复
            (with-temp-file file
-             (insert own desktop-user desktop-reply))
+             (insert own orphan desktop-user desktop-reply))
            (agent-claude--sync session)
            (let ((text (agent-session-test--transcript)))
              (should (string-search "桌面端回复" text))

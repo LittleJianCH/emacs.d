@@ -165,7 +165,7 @@
               end)))))
 
 (defun agent-claude--render-entry (session entry)
-  "把会话记录中的一条 ENTRY 渲染到 SESSION；渲染了对话内容时返回非 nil。"
+  "把会话记录中的一条 ENTRY 渲染到 SESSION。"
   (unless (plist-get entry :isSidechain)
     (let ((message (plist-get entry :message))
           (uuid (plist-get entry :uuid)))
@@ -178,14 +178,11 @@
                       (stringp (plist-get attachment :prompt))
                       (not (string-prefix-p "<" (string-trim-left (plist-get attachment :prompt)))))
              (agent-session--new-block session uuid
-                                       (list :type 'user :text (plist-get attachment :prompt)))
-             t)))
+                                       (list :type 'user :text (plist-get attachment :prompt))))))
         ("user"
          (if-let* ((text (agent-claude--user-text entry)))
-             (progn (agent-session--new-block session uuid (list :type 'user :text text))
-                    t)
-           (agent-claude--tool-results session message)
-           nil))
+             (agent-session--new-block session uuid (list :type 'user :text text))
+           (agent-claude--tool-results session message)))
         ("assistant"
          (seq-do-indexed
           (lambda (part index)
@@ -196,8 +193,7 @@
                (apply #'agent-session-tool session (plist-get part :id) :status 'ok
                       (agent-claude--tool-view session (plist-get part :name)
                                                (plist-get part :input))))))
-          (plist-get message :content))
-         t)))))
+          (plist-get message :content)))))))
 
 (defun agent-claude--replay (session)
   "把恢复的会话的历史记录渲染到 SESSION 中。"
@@ -262,7 +258,9 @@
                 (agent-claude--set session :sync-source source)
                 (agent-session-notice session (format "以下来自 %s"
                                                       (agent-claude--source-name source))))
-              (when (agent-claude--render-entry session entry)
+              (agent-claude--render-entry session entry)
+              ;; 其他客户端推进了对话，本进程的上下文已经落后。
+              (when (member (plist-get entry :type) '("user" "assistant"))
                 (agent-claude--set session :external t)))))))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
@@ -452,11 +450,13 @@
         (when (equal (plist-get part :type) "tool_result")
           (let* ((id (plist-get part :tool_use_id))
                  (declined (member id (agent-claude--state session :declined))))
-            (agent-session-tool session id
+            ;; 只更新已显示的工具；同步时可能只读到结果而没读到调用（开始监视之前写入的）。
+            (when (agent-session--block session id)
+              (agent-session-tool session id
                                 :status (cond (declined 'declined)
                                               ((plist-get part :is_error) 'error)
                                               (t 'ok))
-                                :output (agent-claude--result-text (plist-get part :content)))))))))
+                                :output (agent-claude--result-text (plist-get part :content))))))))))
 
 (defun agent-claude--permission (session request-id request)
   "处理权限请求：在会话中询问用户，再回复 CLI。"
