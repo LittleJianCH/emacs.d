@@ -35,7 +35,8 @@
 
 (require 'init-base)        ; 默认行为、路径、macOS 环境
 (require 'init-ui)          ; 主题、字体、窗口
-(require 'init-evil)        ; Vim 键位（evil），leader 为 SPC
+(when my/use-evil
+  (require 'init-evil))     ; Vim 键位（evil），默认关闭；M-x my/toggle-evil 切换
 (require 'init-completion)  ; vertico / consult / corfu
 (require 'init-dev)         ; 项目、git、eglot、tree-sitter
 

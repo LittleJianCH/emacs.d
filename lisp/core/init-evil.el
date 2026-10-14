@@ -9,6 +9,9 @@
 ;;   SPC g  magit           SPC a  agent 命令（同 C-c a）
 ;;   SPC w  窗口命令        SPC u  前缀参数（C-u 被用于向上翻页）
 ;; minibuffer 中不启用 evil，保持普通编辑。
+;;
+;; 是否加载由 init-base.el 中的 `my/use-evil' 决定（默认关闭）；
+;; 运行中用 M-x my/toggle-evil 开关，加前缀参数 C-u 同时保存为默认。
 
 ;;; Code:
 

@@ -84,6 +84,25 @@
   :config
   (exec-path-from-shell-initialize))
 
+;;; Vim 键位开关
+
+(defcustom my/use-evil nil
+  "非 nil 时启动加载 evil（Vim 键位，见 init-evil.el）；nil 时使用 Emacs 原生键位。
+运行中可用 `my/toggle-evil' 切换。"
+  :type 'boolean
+  :group 'convenience)
+
+(defun my/toggle-evil (&optional save)
+  "在当前 Emacs 中开启或关闭 evil。SAVE（前缀参数）时同时保存为以后启动的默认值。"
+  (interactive "P")
+  (let ((on (not (bound-and-true-p evil-mode))))
+    (if on
+        (if (featurep 'init-evil) (evil-mode 1) (require 'init-evil))
+      (evil-mode -1))
+    (setq my/use-evil on)
+    (when save (customize-save-variable 'my/use-evil on))
+    (message "evil 已%s%s" (if on "开启" "关闭") (if save "，并保存为默认" ""))))
+
 ;;; 便捷命令
 
 (defun my/open-init-file ()
