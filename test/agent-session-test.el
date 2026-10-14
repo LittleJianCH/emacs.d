@@ -181,6 +181,26 @@
      ;; 第二行行首的 / 同样可以补全。
      (should (member "/model" (agent-session-test--complete session "说明\n/mo"))))))
 
+(ert-deftest agent-session-test-completion-annotation-width ()
+  "/ 补全的注释等宽（corfu 右对齐注释，等宽才能对齐成一列），弹窗不超出窗口。"
+  (agent-session-test--with-session
+   (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 50))
+             ((symbol-function 'agent-session-backend-commands)
+              (lambda (&rest _)
+                '((:name "loop" :description "Run a prompt or slash command on a recurring interval"
+                         :hint "[interval] [prompt]")
+                  (:name "mcp" :description "Manage MCP servers" :hint "")
+                  (:name "docs" :description "中文说明也要对齐" :hint nil)))))
+     (goto-char (point-max))
+     (insert "/")
+     (pcase-let* ((`(,_beg ,_end ,table . ,plist) (agent-session-completion-at-point))
+                  (annotate (plist-get plist :annotation-function))
+                  (widths (seq-uniq (mapcar (lambda (c) (string-width (funcall annotate c)))
+                                            (all-completions "/" table)))))
+       (should (= (length widths) 1))
+       (should (< (+ (car widths) (length "/interrupt")) 50))
+       (should (<= corfu-max-width 49))))))
+
 (ert-deftest agent-session-test-switch-agent ()
   "没有对话时原地切换 agent；有对话后新开会话并带上草稿。"
   (agent-session-test--with-session

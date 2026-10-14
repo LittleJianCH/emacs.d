@@ -1228,6 +1228,26 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
       (mapcar (lambda (f) (file-relative-name f default-directory))
               (seq-take (project-files project) 20000)))))
 
+(defun agent-session--annotation-width (names)
+  "补全弹窗中注释列的宽度：窗口宽度减去最长的命令名，限制在 10 到 70 列。
+同时把 corfu 弹窗的最大宽度限制在会话窗口内（agent 列通常较窄）。"
+  (let ((window (window-body-width)))
+    (setq-local corfu-max-width (max 20 (1- window)))
+    (max 10 (min 70 (- window (apply #'max 0 (mapcar #'string-width names)) 6)))))
+
+(defun agent-session--command-annotation (command width)
+  "命令 COMMAND 的注释：参数提示与说明，补齐或截断到恰好 WIDTH 列。
+corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成一列。"
+  (pcase-let ((`(,_name ,description ,hint ,source) command))
+    (concat "  "
+            (truncate-string-to-width
+             (concat (if (and hint (not (string-empty-p hint)))
+                         (propertize (concat hint " ") 'face 'completions-common-part)
+                       "")
+                     (propertize (concat (if (eq source 'local) "· " "") (or description ""))
+                                 'face 'completions-annotations))
+             width nil ?\s "…"))))
+
 (defun agent-session-completion-at-point ()
   "输入区的补全：行首的 /命令、命令参数、@文件。
 “行首”指提示符之后或换行之后，提示符与输入在同一行。"
@@ -1245,17 +1265,14 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
               :exclusive 'no))
        ;; 行首的 /命令
        ((string-match "\\`/[^ \t\n]*\\'" text)
-        (let ((candidates (agent-session--command-candidates session)))
+        (let* ((candidates (agent-session--command-candidates session))
+               (width (agent-session--annotation-width (mapcar #'car candidates))))
           (list start (point) (mapcar #'car candidates)
                 :exclusive 'no
                 :annotation-function
                 (lambda (name)
                   (when-let* ((c (assoc name candidates)))
-                    (concat (if (nth 2 c) (concat " " (nth 2 c)) "")
-                            (propertize (format "  %s%s" (if (eq (nth 3 c) 'local) "· " "")
-                                                (truncate-string-to-width (or (nth 1 c) "") 60
-                                                                          nil nil "…"))
-                                        'face 'completions-annotations))))
+                    (agent-session--command-annotation c width)))
                 :exit-function exit)))
        ;; @文件
        ((string-match "\\(?:\\`\\|[ \t]\\)@\\([^ \t\n]*\\)\\'" text)
