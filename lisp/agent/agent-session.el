@@ -24,6 +24,7 @@
 
 ;; 在 let 中动态绑定，渲染代码块时不弹出安装 tree-sitter 语法的询问。
 (defvar treesit-auto-install-grammar)
+(declare-function evil-insert-state "evil-states")
 (require 'transient)
 
 (defgroup agent-session nil
@@ -1651,7 +1652,8 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
   "打开当前项目的 AGENT 会话；NEW 非空（前缀参数）时总是新建。
 RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
   (interactive (list (agent-session--read-agent) current-prefix-arg))
-  (unless (server-running-p) (server-start))
+  ;; 批处理（测试）中不启动 server：否则会占用用户 Emacs 的 socket，退出时把它删掉。
+  (unless (or noninteractive (server-running-p)) (server-start))
   (setq agent-session-default-agent agent)
   (let ((root (or root (agent-session--root))))
     (if-let* ((existing (if resume

@@ -64,11 +64,30 @@
        (goto-char (point-max))
        (evil-insert-state))))
 
+;; evil 默认不加载（见 `my/use-evil'），这里声明用到的函数，编译时不报警告。
+(declare-function evil-insert "evil-commands")
+(declare-function evil-append "evil-commands")
+(declare-function evil-insert-line "evil-commands")
+(declare-function evil-append-line "evil-commands")
+(declare-function evil-open-below "evil-commands")
+(declare-function evil-open-above "evil-commands")
+(declare-function evil-insert-state "evil-states")
+(declare-function evil-set-initial-state "evil-core")
+(declare-function evil-define-key* "evil-core")
+
+;; 这些命令只在调用时才用到 evil，提前定义没有副作用。
+(agent-session--evil-enter agent-session-evil-insert evil-insert)
+(agent-session--evil-enter agent-session-evil-append evil-append)
+(agent-session--evil-enter agent-session-evil-insert-line evil-insert-line)
+(agent-session--evil-enter agent-session-evil-append-line evil-append-line)
+(agent-session--evil-enter agent-session-evil-open-below evil-open-below)
+(agent-session--evil-enter agent-session-evil-open-above evil-open-above)
+
 ;; Vim 键位（加载了 evil 时）。会话 buffer 起始为 normal 状态：i / a / o 等在输入区中
 ;; 保持原意，在对话记录中则跳到输入区末尾进入 insert 状态；insert 状态下 RET 发送，
 ;; ESC 回到 normal 浏览对话。设置与审批放在本地 leader “,” 下（只在 agent 的 buffer 中生效）。
 (with-eval-after-load 'evil
-  (evil-define-key '(normal motion visual) 'global
+  (evil-define-key* '(normal motion visual) 'global
     (kbd "<leader>a") agent-session-command-map)
 
   (defvar-keymap agent-session-local-leader-map
@@ -88,15 +107,8 @@
     "N" #'agent-session-new
     "r" #'agent-session-resume)
 
-  (agent-session--evil-enter agent-session-evil-insert evil-insert)
-  (agent-session--evil-enter agent-session-evil-append evil-append)
-  (agent-session--evil-enter agent-session-evil-insert-line evil-insert-line)
-  (agent-session--evil-enter agent-session-evil-append-line evil-append-line)
-  (agent-session--evil-enter agent-session-evil-open-below evil-open-below)
-  (agent-session--evil-enter agent-session-evil-open-above evil-open-above)
-
   (evil-set-initial-state 'agent-session-mode 'normal)
-  (evil-define-key '(normal motion) agent-session-mode-map
+  (evil-define-key* '(normal motion) agent-session-mode-map
     (kbd "RET") #'agent-session-ret
     "i" #'agent-session-evil-insert
     "a" #'agent-session-evil-append
@@ -112,7 +124,7 @@
     "," agent-session-local-leader-map)
 
   (evil-set-initial-state 'agent-session-list-mode 'normal)
-  (evil-define-key '(normal motion) agent-session-list-mode-map
+  (evil-define-key* '(normal motion) agent-session-list-mode-map
     (kbd "RET") #'agent-session-list-open
     "o" #'agent-session-list-open
     "c" #'agent-session-list-create
@@ -123,7 +135,7 @@
     "q" #'quit-window)
 
   (evil-set-initial-state 'agent-canvas-mode 'normal)
-  (evil-define-key '(normal motion) agent-canvas-mode-map
+  (evil-define-key* '(normal motion) agent-canvas-mode-map
     (kbd "RET") #'push-button
     (kbd "TAB") #'agent-canvas-tab
     (kbd "<backtab>") #'backward-button
@@ -135,7 +147,7 @@
 (use-package server
   :demand t
   :config
-  (unless (or (daemonp) (server-running-p))
+  (unless (or noninteractive (daemonp) (server-running-p))
     (server-start)))
 
 (provide 'init-agent)
