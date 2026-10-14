@@ -103,6 +103,11 @@
                          (list 'agent-session-entry entry
                                'mouse-face (list 'highlight)
                                'keymap agent-session-list-entry-map))
+    ;; 换行符不高亮，否则行尾会多出一小块高亮。
+    (save-excursion
+      (goto-char start)
+      (while (search-forward "\n" nil t)
+        (remove-text-properties (1- (point)) (point) '(mouse-face nil))))
     ;; “点击打开”的提示只加在非按钮部分，不覆盖 × 自己的提示。
     (let ((pos start))
       (while (< pos (point))

@@ -508,10 +508,14 @@
   (with-temp-buffer
     (agent-session-list--insert-entry '(:id "a") "  第一项\n")
     (agent-session-list--insert-entry '(:id "b") "  第二项\n")
-    (let ((boundary (next-single-property-change (point-min) 'mouse-face)))
-      (should (get-text-property (point-min) 'mouse-face))
-      (should (equal (get-text-property boundary 'agent-session-entry) '(:id "b")))
-      (should (= boundary (progn (goto-char (point-min)) (forward-line 1) (point)))))))
+    (goto-char (point-min))
+    (let ((first (get-text-property (point) 'mouse-face))
+          (second (progn (forward-line 1) (get-text-property (point) 'mouse-face))))
+      (should (and first second (not (eq first second)))))
+    ;; 换行符不带高亮，行尾不会多出一小块
+    (goto-char (point-min))
+    (while (search-forward "\n" nil t)
+      (should-not (get-text-property (1- (point)) 'mouse-face)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here
