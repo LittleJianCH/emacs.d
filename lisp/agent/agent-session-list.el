@@ -97,17 +97,27 @@
   "插入一项，整段带上 ENTRY 属性；鼠标悬停高亮，单击打开。"
   (let ((start (point)))
     (apply #'insert strings)
+    ;; 每行末尾补一个伸到窗口右边缘的空白，悬停高亮占满整行；
+    ;; 换行符本身不高亮（见下），否则行尾会多出一小块。
+    (save-excursion
+      (let ((end (point-marker)))
+        (goto-char start)
+        (while (search-forward "\n" end t)
+          (backward-char)
+          (insert (propertize " " 'display '(space :align-to right)))
+          (forward-char))
+        (set-marker end nil)))
     ;; Emacs 把相邻且 mouse-face 相同（eq）的文字当成一片一起高亮，
     ;; 每项用新建的列表，悬停时只高亮这一项。
     (add-text-properties start (point)
                          (list 'agent-session-entry entry
                                'mouse-face (list 'highlight)
                                'keymap agent-session-list-entry-map))
-    ;; 换行符不高亮，否则行尾会多出一小块高亮。
     (save-excursion
-      (goto-char start)
-      (while (search-forward "\n" nil t)
-        (remove-text-properties (1- (point)) (point) '(mouse-face nil))))
+      (let ((end (point)))
+        (goto-char start)
+        (while (search-forward "\n" end t)
+          (remove-text-properties (1- (point)) (point) '(mouse-face nil)))))
     ;; “点击打开”的提示只加在非按钮部分，不覆盖 × 自己的提示。
     (let ((pos start))
       (while (< pos (point))
