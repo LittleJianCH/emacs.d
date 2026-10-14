@@ -301,5 +301,98 @@
         (should (= scheduled 0))
         (should-not agent-session-list--pending)))))
 
+(defun agent-session-test--visible-transcript ()
+  "对话记录中可见（未被折叠）的文本。"
+  (let ((end (agent-session-tail agent-session--current)) (pos (point-min)) (parts nil))
+    (while (< pos end)
+      (let ((next (next-single-char-property-change pos 'invisible nil end)))
+        (unless (invisible-p pos) (push (buffer-substring-no-properties pos next) parts))
+        (setq pos next)))
+    (apply #'concat (nreverse parts))))
+
+(ert-deftest agent-session-test-fold-turn ()
+  "回合结束后，过程折叠成摘要，最终回复保持可见；摘要可展开。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-test--type "hold")              ; 回合进行中
+     (agent-session-tool session "c1" :kind 'command :title "cargo test" :status 'ok)
+     (agent-session-text session "mid" "先跑一下测试。")
+     (agent-session-text-done session "mid")
+     (agent-session-tool session "e1" :kind 'edit :title "a.rs" :status 'ok)
+     (agent-session-tool session "e2" :kind 'edit :title "b.rs" :status 'error)
+     (agent-session-text session "final" "改好了。")
+     (agent-session-text-done session "final")
+     ;; 进行中的回合不折叠
+     (should (string-match-p "cargo test" (agent-session-test--visible-transcript)))
+     (agent-session-set-status session 'idle)
+     (let ((visible (agent-session-test--visible-transcript)))
+       (should (string-match-p "执行了 3 个操作 · 1 条命令 · 2 次编辑 · 1 个失败 · 用时" visible))
+       (should (string-match-p "改好了。" visible))
+       (should-not (string-match-p "cargo test\\|先跑一下测试\\|a.rs" visible)))
+     ;; 展开
+     (goto-char (point-min))
+     (search-forward "执行了")
+     (push-button (button-start (button-at (point))))
+     (should (string-match-p "▾ 执行了.*\\(.\\|\n\\)*cargo test\\(.\\|\n\\)*a.rs"
+                             (agent-session-test--visible-transcript)))
+     ;; 下一回合：之前的折叠不受影响，新回合结束后同样折叠
+     (agent-session-test--type "第二个问题")
+     (should (string-match-p "收到：第二个问题" (agent-session-test--visible-transcript))))))
+
+(ert-deftest agent-session-test-fold-skips-queued ()
+  "排队中的消息夹在上一回合中间时，不会把上一回合切断。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-test--type "hold")
+     (agent-session-tool session "c1" :kind 'command :title "step-1" :status 'ok)
+     (agent-session-test--type "排队消息")          ; 运行中输入，排队
+     (agent-session-tool session "c2" :kind 'command :title "step-2" :status 'ok)
+     (agent-session-text session "final" "完成。")
+     (agent-session-text-done session "final")
+     (agent-session-set-status session 'idle)
+     (let ((visible (agent-session-test--visible-transcript)))
+       (should (string-match-p "执行了 2 个操作" visible))
+       (should-not (string-match-p "step-1\\|step-2" visible))
+       (should (string-match-p "完成。" visible))
+       ;; 排队的消息发出后出现在末尾，并得到回复
+       (should (string-match-p "完成。\\(.\\|\n\\)*排队消息\\(.\\|\n\\)*收到：排队消息" visible))))))
+
+(ert-deftest agent-session-test-fold-interrupted-turn ()
+  "没有最终回复的回合（例如被打断）只折叠到下一条用户消息为止。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-test--type "hold")
+     (agent-session-tool session "c1" :kind 'command :title "step-1" :status 'ok)
+     (agent-session-set-status session 'idle)        ; 以工具调用结束，没有最终回复
+     (agent-session-test--type "下一个问题")
+     (agent-session-set-status session 'idle)
+     (let ((visible (agent-session-test--visible-transcript)))
+       (should-not (string-match-p "step-1" visible))
+       (should (string-match-p "下一个问题\\(.\\|\n\\)*收到：下一个问题" visible))))))
+
+(ert-deftest agent-session-test-fold-keeps-last-reply ()
+  "被打断的回合：最后一段说明保持可见，前后的过程都折叠。"
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-test--type "hold")
+     (agent-session-tool session "c1" :kind 'command :title "step-1" :status 'ok)
+     (agent-session-text session "m1" "我先改配置。")
+     (agent-session-text-done session "m1")
+     (agent-session-tool session "c2" :kind 'command :title "step-2" :status 'ok)
+     (agent-session-set-status session 'idle)        ; 没有最终回复就结束了
+     (agent-session-test--type "下一个问题")
+     (agent-session-set-status session 'idle)
+     (let ((visible (agent-session-test--visible-transcript)))
+       (should (string-match-p "执行了 2 个操作" visible))
+       (should (string-match-p "我先改配置。" visible))
+       (should-not (string-match-p "step-1\\|step-2" visible))
+       (should (string-match-p "下一个问题" visible)))
+     ;; 展开后两段过程都出现
+     (goto-char (point-min))
+     (search-forward "执行了")
+     (push-button (button-start (button-at (point))))
+     (should (string-match-p "step-1\\(.\\|\n\\)*我先改配置。\\(.\\|\n\\)*step-2"
+                             (agent-session-test--visible-transcript))))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

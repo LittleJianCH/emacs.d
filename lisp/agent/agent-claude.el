@@ -137,6 +137,15 @@
         (unless (plist-get entry :isSidechain)
           (let ((message (plist-get entry :message)))
             (pcase (plist-get entry :type)
+              ;; 回合进行中用户追加的消息，记录为 queued_command 附件。
+              ("attachment"
+               (let ((attachment (plist-get entry :attachment)))
+                 ;; 以 < 开头的是内部消息（例如子 agent 交回的报告），不显示为用户消息。
+                 (when (and (equal (plist-get attachment :type) "queued_command")
+                            (stringp (plist-get attachment :prompt))
+                            (not (string-prefix-p "<" (string-trim-left (plist-get attachment :prompt)))))
+                   (agent-session--new-block session (plist-get entry :uuid)
+                                             (list :type 'user :text (plist-get attachment :prompt))))))
               ("user"
                (if-let* ((text (agent-claude--user-text entry)))
                    (agent-session--new-block session (plist-get entry :uuid)

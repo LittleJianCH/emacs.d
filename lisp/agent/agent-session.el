@@ -370,7 +370,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 (defun agent-session--format (session id block)
   "把 BLOCK 渲染成字符串。"
   (pcase (plist-get block :type)
-    ('user (agent-session--format-user block))
+    ('user (agent-session--format-user id block))
     ('text (agent-session--format-text session id block))
     ('tool (agent-session--format-tool id block))
     ('notice (concat (propertize (plist-get block :text)
@@ -422,13 +422,25 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   "把 TEXT 每行缩进两格（用 line-prefix，不改变文本）。"
   (propertize text 'line-prefix "  " 'wrap-prefix "  "))
 
-(defun agent-session--format-user (block)
-  "用户消息。"
-  (concat (propertize "▍ 你" 'face 'agent-session-user)
-          (if (plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim) "")
-          "\n"
-          (agent-session--indent (plist-get block :text))
-          "\n"))
+(define-button-type 'agent-session-fold
+  'face nil 'follow-link t 'action #'agent-session--toggle-fold
+  'help-echo "展开 / 收起这一回合的过程")
+
+(defun agent-session--format-user (id block)
+  "用户消息；回合已折叠时，下方附一行过程摘要（可点击展开）。"
+  (let ((fold (plist-get block :fold)))
+    (concat (propertize "▍ 你" 'face 'agent-session-user)
+            (if (plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim) "")
+            "\n"
+            (agent-session--indent (plist-get block :text))
+            "\n"
+            (when (consp fold)
+              (concat "  "
+                      (make-text-button
+                       (concat (if (plist-get fold :collapsed) "▸ " "▾ ")
+                               (propertize (plist-get fold :summary) 'face 'agent-session-dim))
+                       nil 'type 'agent-session-fold 'agent-session-block id)
+                      "\n")))))
 
 (defun agent-session--format-text (session id block)
   "agent 的回复或思考。回复流式输出时显示原文，结束后渲染 markdown；
@@ -526,6 +538,113 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     (agent-session--update session id
                            :collapsed (not (agent-session--collapsed-p
                                             (agent-session--block session id))))))
+
+;;; 回合折叠（参考 T3 Code）
+;;
+;; 回合结束后，用户消息与最终回复之间的过程（工具调用、思考、中间说明）用一个
+;; 不可见的 overlay 收起，用户消息下方显示一行摘要，点击可展开。进行中的回合不折叠。
+
+(defconst agent-session--fold-kinds
+  '((command . "条命令") (edit . "次编辑") (read . "次读取") (search . "次搜索")
+    (web . "次网页访问") (mcp . "次工具调用") (task . "个子任务") (plan . "次计划更新")
+    (other . "次其他操作"))
+  "摘要中各类工具调用的量词。")
+
+(defun agent-session--blocks-in-order (session)
+  "SESSION 的 block，按在 buffer 中的位置排序：((ID . BLOCK) ...)。"
+  (let (entries)
+    (maphash (lambda (id block) (push (cons id block) entries)) (agent-session-blocks session))
+    (sort entries :key (lambda (entry) (marker-position (plist-get (cdr entry) :start))))))
+
+(defun agent-session--fold-summary (tools duration)
+  "由工具调用 TOOLS 与用时 DURATION 生成摘要。"
+  (let ((counts nil) (failed 0))
+    (dolist (tool tools)
+      (cl-incf (alist-get (plist-get tool :kind) counts 0))
+      (when (memq (plist-get tool :status) '(error declined)) (cl-incf failed)))
+    (string-join
+     (delq nil
+           (append
+            (list (format "执行了 %d 个操作" (length tools)))
+            (mapcar (pcase-lambda (`(,kind . ,unit))
+                      (when-let* ((n (alist-get kind counts))) (format "%d %s" n unit)))
+                    agent-session--fold-kinds)
+            (list (and (> failed 0) (format "%d 个失败" failed))
+                  (and duration (concat "用时 " duration)))))
+     " · ")))
+
+(defun agent-session--fold-overlay (session start end)
+  "在 START 到 END 之间建一个折叠用的不可见 overlay。"
+  (let ((overlay (make-overlay start end (agent-session-buffer session))))
+    (overlay-put overlay 'invisible t)
+    (overlay-put overlay 'agent-session-fold t)
+    (overlay-put overlay 'isearch-open-invisible (lambda (o) (overlay-put o 'invisible nil)))
+    overlay))
+
+(defun agent-session--fold-turn (session user-id activity limit &optional duration)
+  "折叠以用户消息 USER-ID 开始的回合；ACTIVITY 为其后的 block（按顺序）。
+LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合则是对话末尾）。
+回合中最后一段 agent 说明保持可见（被打断的回合，其后可能还有工具调用），
+它之前与之后的过程分别折叠；过程中没有工具调用时不折叠。"
+  (let* ((final (seq-find (lambda (entry) (and (eq (plist-get (cdr entry) :type) 'text)
+                                               (eq (plist-get (cdr entry) :kind) 'assistant)))
+                          (reverse activity)))
+         (before (if final (seq-take-while (lambda (entry) (not (eq entry final))) activity)
+                   activity))
+         (after (and final (cdr (memq final activity))))
+         (tools (seq-keep (lambda (entry) (and (eq (plist-get (cdr entry) :type) 'tool) (cdr entry)))
+                          (append before after)))
+         (start-of (lambda (entry) (marker-position (plist-get (cdr entry) :start)))))
+    (if (null tools)
+        (agent-session--update session user-id :fold 'none)
+      (agent-session--update
+       session user-id
+       :fold (list :collapsed t
+                   :summary (agent-session--fold-summary tools duration)
+                   :overlays
+                   (delq nil
+                         (list (and before
+                                    (agent-session--fold-overlay
+                                     session (funcall start-of (car before))
+                                     (if final (funcall start-of final) limit)))
+                               (and after
+                                    (agent-session--fold-overlay
+                                     session (funcall start-of (car after)) limit)))))))))
+
+(defun agent-session--fold-turns (session &optional duration)
+  "折叠所有已结束、尚未折叠的回合。DURATION 为最近一个回合的用时。"
+  (let ((turns nil) (current nil))
+    ;; 按用户消息切分回合：((USER-ID . ACTIVITY) ...)
+    (dolist (entry (agent-session--blocks-in-order session))
+      (cond
+       ;; 排队中的消息暂时夹在上一回合中间，发出时会移到末尾，不作为回合分界。
+       ((plist-get (cdr entry) :queued))
+       ((eq (plist-get (cdr entry) :type) 'user)
+        (when current (push current turns))
+        (setq current (list (car entry))))
+       (current (setcdr (last current) (list entry)))))
+    (when current (push current turns))
+    (let ((latest (car turns))
+          (turns (nreverse turns)))
+      (cl-loop for (turn . rest) on turns
+               do (let ((user (agent-session--block session (car turn)))
+                        (limit (if rest
+                                   (marker-position
+                                    (plist-get (agent-session--block session (caar rest)) :start))
+                                 (marker-position (agent-session-tail session)))))
+                    (unless (plist-get user :fold)
+                      (agent-session--fold-turn session (car turn) (cdr turn) limit
+                                                (and (eq turn latest) duration))))))))
+
+(defun agent-session--toggle-fold (button)
+  "展开或收起 BUTTON 所在回合的过程。"
+  (let* ((session agent-session--current)
+         (id (button-get button 'agent-session-block))
+         (fold (plist-get (agent-session--block session id) :fold))
+         (collapsed (not (plist-get fold :collapsed))))
+    (dolist (overlay (plist-get fold :overlays))
+      (overlay-put overlay 'invisible collapsed))
+    (agent-session--update session id :fold (plist-put (copy-sequence fold) :collapsed collapsed))))
 
 ;;; 界面 API（供后端调用）
 
@@ -637,9 +756,13 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                (not (get-buffer-window (agent-session-buffer session) t)))
       (setq info (plist-put info :unread t)))
     (setf (agent-session-info session) info))
-  (setf (agent-session-status session) status)
-  (when (memq status '(idle exited))
-    (agent-session--settle session))
+  (let ((finished (and (eq (agent-session-status session) 'running) (eq status 'idle)
+                       (plist-get (agent-session-info session) :started))))
+    (setf (agent-session-status session) status)
+    (when (memq status '(idle exited))
+      (agent-session--settle session)
+      ;; 回合结束：把已结束的回合折叠成摘要（恢复会话回放后也会走到这里）。
+      (agent-session--fold-turns session (and finished (agent-session--elapsed finished)))))
   (agent-session--refresh session)
   (when (and (eq status 'idle) (agent-session-queue session))
     (let ((next (pop (agent-session-queue session))))
@@ -990,8 +1113,11 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   "对话中各条消息（用户与 agent）的起点。"
   (let (positions)
     (maphash (lambda (_id block)
-               (when (memq (plist-get block :type) '(user text))
-                 (push (marker-position (plist-get block :start)) positions)))
+               (let ((pos (marker-position (plist-get block :start))))
+                 ;; 跳过被折叠（不可见）的中间说明。
+                 (when (and (memq (plist-get block :type) '(user text))
+                            (not (invisible-p pos)))
+                   (push pos positions))))
              (agent-session-blocks (agent-session--this)))
     (sort positions #'<)))
 
