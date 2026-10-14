@@ -58,7 +58,7 @@ function call(method, params = {}) {
         { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
     } catch (err) {
       const detail = (err.stderr && err.stderr.toString().trim()) || err.message;
-      throw new Error(`无法调用 Emacs（Emacs 是否已启动并运行 server？）：${detail}`);
+      throw new Error(`Cannot reach Emacs (is Emacs running with a server started?): ${detail}`);
     }
     const out = JSON.parse(fs.readFileSync(response, 'utf8'));
     if (!out.ok) throw new Error(out.error);
@@ -104,31 +104,34 @@ function help(name) {
   const methods = call('describe');
   if (name) {
     const m = methods.find((m) => m.name === name);
-    if (!m) throw new Error(`未知方法：${name}`);
-    return `${m.name}\n\n${m.description}\n\n参数：${JSON.stringify(m.inputSchema.properties, null, 2)}`;
+    if (!m) throw new Error(`Unknown method: ${name}`);
+    return `${m.name}\n\n${m.description}\n\nParameters: ${JSON.stringify(m.inputSchema.properties, null, 2)}`;
   }
-  const lines = ['用法：emx <method> [位置参数] [--key value ...]', ''];
+  const lines = ['Usage: emx <method> [positional args] [--key value ...]', ''];
   for (const m of methods) {
     lines.push(`${m.name}  ${m.description.split('\n')[0]}`);
     const required = new Set(m.inputSchema.required);
     for (const [key, prop] of Object.entries(m.inputSchema.properties)) {
-      lines.push(`    --${key} <${prop.type}>${required.has(key) ? ' (必填)' : ''}  ${prop.description}`);
+      lines.push(`    --${key} <${prop.type}>${required.has(key) ? ' (required)' : ''}  ${prop.description}`);
     }
   }
-  lines.push('', 'emx help <method>  查看完整说明', 'emx mcp  以 stdio MCP server 运行');
+  lines.push('', 'emx help <method>  Show the full description of a method',
+             'emx mcp            Run as a stdio MCP server');
   return lines.join('\n');
 }
 
 // ---------------------------------------------------------------- MCP
 
-const MCP_INSTRUCTIONS = `这些工具操作用户正在使用的 Emacs（你运行在它的终端里）。
-- 需要给用户看有排版的内容（方案对比、计划、审查结果、架构图、统计图表、进度）：
-  用 render 生成原生页面，比在终端里输出大段 markdown 清晰得多；
-  页面里可以放按钮，用户点击后指令会回到你的会话。之后用 patch 更新局部。
-- 想让用户看某段代码：用 open 打开并高亮，而不是只贴路径。
-- 展示已有的 org / markdown 文档或 diff 时用 show。
-- 先用 context 了解用户正在看的文件和选区，再决定怎么做。
-- 其他工具覆盖不到的编辑器操作，用 eval 执行 Elisp。`;
+const MCP_INSTRUCTIONS = `These tools operate the Emacs instance the user is working in (your session is hosted inside it).
+- To present formatted content (option comparisons, plans, review results, architecture
+  diagrams, charts, progress), use render to build a native page; it is far clearer than
+  long markdown in the chat. Pages can contain buttons whose prompts are sent back to your
+  session when the user clicks them. Use patch to update parts of a page afterwards.
+- To point the user at code, use open to show and highlight it instead of only citing a path.
+- Use show to display an existing org / markdown document or a diff.
+- Call context first to see which file, cursor position and selection the user is looking at.
+- For editor operations the other tools do not cover, run Elisp with eval.
+- The user reads Chinese: write page content and notifications in Chinese unless asked otherwise.`;
 
 function mcpServer() {
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');

@@ -74,7 +74,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
   (dolist (entry spec)
     (when (and (memq 'required entry)
                (null (plist-get params (intern (format ":%s" (car entry))))))
-      (error "%s 缺少参数 %s" name (car entry)))))
+      (error "%s: missing required parameter %s" name (car entry)))))
 
 (defun agent-ui--schema (spec)
   "把参数 SPEC 转为 JSON Schema。"
@@ -109,7 +109,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                                                   :false-object nil)))
                     (method (plist-get request :method))
                     (entry (or (alist-get method agent-ui--methods nil nil #'equal)
-                               (error "未知方法：%s" method)))
+                               (error "Unknown method: %s" method)))
                     (spec (plist-get entry :params))
                     (params (agent-ui--coerce (plist-get request :params) spec))
                     (agent-ui-caller (plist-get request :context)))
@@ -124,7 +124,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
         (error
          (erase-buffer)
          (json-insert (list :ok :false
-                            :error (format "结果无法序列化为 JSON：%S" err)))))
+                            :error (format "Result cannot be serialized as JSON: %S" err)))))
       (let ((coding-system-for-write 'utf-8))
         (write-region nil nil response-file nil 'silent)))
     t))
@@ -167,7 +167,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
 (defun agent-ui--abs (path)
   "PATH 的绝对路径；文件不存在时报错。"
   (let ((file (expand-file-name path)))
-    (unless (file-exists-p file) (error "文件不存在：%s" file))
+    (unless (file-exists-p file) (error "No such file: %s" file))
     file))
 
 ;;; 方法：查看用户上下文
@@ -183,7 +183,8 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                                               (1- (window-end window t)))))))
 
 (agent-ui-defmethod "context" ()
-  "返回用户当前在看什么：工作窗口的文件、光标行列、选区文本、项目根目录，以及所有可见窗口。"
+  "Return what the user is looking at: the file in the main window, cursor line and column,
+selected text, project root, and every visible window."
   (let* ((window (agent-ui--main-window))
          (buffer (window-buffer window)))
     (with-current-buffer buffer
@@ -203,7 +204,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                                          (window-list (agent-ui--frame) 'no-minibuf)))))))))
 
 (agent-ui-defmethod "buffers" ()
-  "列出打开的 buffer：名称、文件、是否有未保存修改、major mode。"
+  "List open buffers: name, file, whether there are unsaved changes, and major mode."
   (vconcat
    (seq-keep (lambda (buffer)
                (let ((name (buffer-name buffer)))
@@ -216,11 +217,11 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
              (buffer-list))))
 
 (agent-ui-defmethod "read_buffer"
-    ((name string "buffer 名称，例如 *compilation*" required)
-     (start_line integer "起始行（含），默认 1")
-     (end_line integer "结束行（含），默认到末尾"))
-  "读取 buffer 文本，适合看未保存的修改、编译输出、REPL 等非文件内容。"
-  (with-current-buffer (or (get-buffer name) (error "没有 buffer：%s" name))
+    ((name string "Buffer name, e.g. *compilation*" required)
+     (start_line integer "First line (inclusive), default 1")
+     (end_line integer "Last line (inclusive), default end of buffer"))
+  "Read buffer text: unsaved changes, compilation output, REPLs and other non-file content."
+  (with-current-buffer (or (get-buffer name) (error "No buffer named %s" name))
     (save-excursion
       (save-restriction
         (widen)
@@ -232,7 +233,7 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                       (point-max)))
                (text (buffer-substring-no-properties start (max start end))))
           (if (> (length text) agent-ui-max-text)
-              (concat (substring text 0 agent-ui-max-text) "\n…（已截断）")
+              (concat (substring text 0 agent-ui-max-text) "\n… (truncated)")
             text))))))
 
 (defun agent-ui--severity (type)
@@ -243,8 +244,8 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
     (_ "note")))
 
 (agent-ui-defmethod "diagnostics"
-    ((path string "文件路径；省略时为用户当前文件"))
-  "返回文件的 flymake / LSP 诊断（行、列、级别、信息）。"
+    ((path string "File path; defaults to the user's current file"))
+  "Return flymake / LSP diagnostics for a file (line, column, severity, message)."
   (let ((buffer (if path
                     (find-file-noselect (agent-ui--abs path))
                   (window-buffer (agent-ui--main-window)))))
@@ -261,11 +262,12 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
 ;;; 方法：操作编辑器
 
 (agent-ui-defmethod "open"
-    ((path string "文件路径" required)
-     (line integer "跳转到的行")
-     (end_line integer "高亮到的结束行")
-     (column integer "列"))
-  "在用户的工作窗口打开文件并跳到指定位置，高亮相关行，用来引导用户查看代码。"
+    ((path string "File path" required)
+     (line integer "Line to jump to")
+     (end_line integer "Last line of the highlighted range")
+     (column integer "Column"))
+  "Open a file in the user's main window, jump to a position and highlight the lines,
+to guide the user to a piece of code."
   (let* ((buffer (find-file-noselect (agent-ui--abs path)))
          (window (agent-ui--show-buffer buffer)))
     (with-selected-window window
@@ -297,12 +299,13 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                (t (text-mode)))))))
 
 (agent-ui-defmethod "show"
-    ((content string "要展示的文本")
-     (path string "从文件读取内容（与 content 二选一）")
-     (format string "org / markdown / diff / text，或语言名如 rust、json")
-     (title string "展示 buffer 的标题，同标题复用同一个 buffer"))
-  "在用户的工作窗口展示一段只读内容：报告、计划、表格（org）、diff、代码片段等。"
-  (unless (or content path) (error "需要 content 或 path"))
+    ((content string "Text to display")
+     (path string "Read the content from this file instead of content")
+     (format string "org / markdown / diff / text, or a language name such as rust or json")
+     (title string "Title of the view buffer; the same title reuses the same buffer"))
+  "Show read-only content in the user's main window: reports, plans, org tables, diffs,
+code snippets and so on."
+  (unless (or content path) (error "Either content or path is required"))
   (let ((buffer (agent-ui--view-buffer title)))
     (with-current-buffer buffer
       (if content
@@ -320,9 +323,10 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
 ;;; 方法：通用
 
 (agent-ui-defmethod "notify"
-    ((message string "通知内容" required)
-     (title string "标题，默认 Agent"))
-  "通知用户：在回显区显示；Emacs 不在前台时同时发系统通知。"
+    ((message string "Notification text" required)
+     (title string "Title, default Agent"))
+  "Notify the user in the echo area; also sends a system notification when Emacs is not
+in the foreground."
   (let ((title (or title "Agent")))
     (message "[%s] %s" title message)
     (when (and (eq system-type 'darwin)
@@ -332,13 +336,14 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
     t))
 
 (agent-ui-defmethod "eval"
-    ((code string "Emacs Lisp 代码，可包含多个表达式" required))
-  "在 Emacs 中执行任意 Elisp，返回最后一个表达式的打印结果。
-用于其他方法覆盖不到的操作，例如调整窗口布局、调用某个 mode 的命令。"
+    ((code string "Emacs Lisp code; may contain several forms" required))
+  "Evaluate arbitrary Elisp in Emacs and return the printed value of the last form.
+Use it for operations the other methods do not cover, such as changing the window
+layout or calling a mode's commands."
   (prin1-to-string (eval (car (read-from-string (concat "(progn " code "\n)"))) t)))
 
 (agent-ui-defmethod "describe" ()
-  "列出所有方法及其参数 schema（emx help / MCP tools/list 使用）。"
+  "List all methods with their parameter schemas (used by emx help and MCP tools/list)."
   (vconcat
    (seq-keep (pcase-lambda (`(,name . ,entry))
                (unless (equal name "describe")

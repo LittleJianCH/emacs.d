@@ -957,9 +957,9 @@
     (condition-case err
         (if renderer
             (funcall renderer block)
-          (error "未知的 block 类型：%s" type))
+          (error "unknown block type: %s" type))
       (error
-       (let ((message (format "%s%s：%s" (or type "?")
+       (let ((message (format "%s%s: %s" (or type "?")
                               (if (plist-get block :id) (format "#%s" (plist-get block :id)) "")
                               (error-message-string err)))
              (start (point)))
@@ -1097,31 +1097,36 @@
             :errors (vconcat (reverse agent-canvas--errors))))))
 
 (agent-ui-defmethod "render"
-    ((title string "页面标题；同标题会更新同一个页面" required)
-     (blocks array "页面内容：block 列表，格式见说明" required)
-     (append boolean "为 true 时追加到已有页面末尾，而不是整页替换"))
-  "在 Emacs 中渲染一个原生页面（不是网页）：配色跟随用户主题，代码按语言高亮，
-图表和流程图用 SVG 绘制，区块可折叠，按钮能把指令发回给你。适合方案对比、计划、
-代码审查结果、架构图、统计数据、进度汇报等需要排版的内容。返回 errors 列出渲染失败的 block。
+    ((title string "Page title; rendering the same title again updates that page" required)
+     (blocks array "Page content: a list of blocks, see the description for the format" required)
+     (append boolean "If true, append to the existing page instead of replacing it"))
+  "Render a native Emacs page (not a web page): colors follow the user's theme, code is
+syntax highlighted, charts and diagrams are drawn as SVG, sections fold, and buttons can
+send instructions back to you. Good for option comparisons, plans, code review results,
+architecture diagrams, statistics and progress reports. The returned errors list blocks
+that failed to render.
 
-每个 block 是一个对象，type 决定格式；任何 block 都可带 id，之后用 patch 局部更新：
+Each block is an object whose type selects the format; any block may carry an id so it
+can be updated later with patch:
 - {\"type\":\"heading\",\"text\":\"…\",\"level\":1|2|3}
-- {\"type\":\"text\",\"text\":\"支持 **粗体**、`代码`、[文件](src/main.rs:42)、[网址](https://…)\"}
-- {\"type\":\"list\",\"items\":[\"…\",{\"text\":\"…\",\"items\":[\"子项\"]},{\"text\":\"待办\",\"checked\":false}],\"ordered\":false}
-- {\"type\":\"code\",\"code\":\"…\",\"lang\":\"rust\",\"title\":\"可选\"}
-- {\"type\":\"code\",\"path\":\"src/lib.rs\",\"start\":10,\"end\":30}  引用文件片段，带行号，可点击跳转
-- {\"type\":\"table\",\"columns\":[\"模块\",\"耗时\"],\"rows\":[[\"parse\",12],[\"emit\",30]],\"caption\":\"可选\"}
-- {\"type\":\"kv\",\"items\":[[\"版本\",\"1.2.0\"],[\"状态\",\"**通过**\"]]}
+- {\"type\":\"text\",\"text\":\"supports **bold**, `code`, [file](src/main.rs:42), [url](https://…)\"}
+- {\"type\":\"list\",\"items\":[\"…\",{\"text\":\"…\",\"items\":[\"child\"]},{\"text\":\"todo\",\"checked\":false}],\"ordered\":false}
+- {\"type\":\"code\",\"code\":\"…\",\"lang\":\"rust\",\"title\":\"optional\"}
+- {\"type\":\"code\",\"path\":\"src/lib.rs\",\"start\":10,\"end\":30}  file excerpt with line numbers, clickable
+- {\"type\":\"table\",\"columns\":[\"module\",\"time\"],\"rows\":[[\"parse\",12],[\"emit\",30]],\"caption\":\"optional\"}
+- {\"type\":\"kv\",\"items\":[[\"version\",\"1.2.0\"],[\"status\",\"**passed**\"]]}
 - {\"type\":\"callout\",\"style\":\"info|success|warning|error\",\"title\":\"…\",\"text\":\"…\",\"blocks\":[…]}
-- {\"type\":\"chart\",\"kind\":\"bar|hbar|line\",\"labels\":[\"一月\",\"二月\"],\"series\":[{\"name\":\"耗时\",\"values\":[3,5]}],\"title\":\"…\",\"height\":240}
-- {\"type\":\"diagram\",\"nodes\":[{\"id\":\"a\",\"label\":\"客户端\\n第二行说明\",\"style\":\"primary|success|warning|error\"}],\"edges\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"HTTP\",\"style\":\"dashed\"}],\"direction\":\"LR|TB\"}
-- {\"type\":\"progress\",\"items\":[{\"label\":\"编译\",\"value\":3,\"max\":5}]}  或单项 {\"type\":\"progress\",\"label\":…,\"value\":…}
+- {\"type\":\"chart\",\"kind\":\"bar|hbar|line\",\"labels\":[\"Jan\",\"Feb\"],\"series\":[{\"name\":\"time\",\"values\":[3,5]}],\"title\":\"…\",\"height\":240}
+- {\"type\":\"diagram\",\"nodes\":[{\"id\":\"a\",\"label\":\"Client\\nsecond line\",\"style\":\"primary|success|warning|error\"}],\"edges\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"HTTP\",\"style\":\"dashed\"}],\"direction\":\"LR|TB\"}
+- {\"type\":\"progress\",\"items\":[{\"label\":\"build\",\"value\":3,\"max\":5}]}  or a single bar {\"type\":\"progress\",\"label\":…,\"value\":…}
 - {\"type\":\"section\",\"title\":\"…\",\"collapsed\":false,\"blocks\":[…]}
-- {\"type\":\"buttons\",\"buttons\":[{\"label\":\"按方案 A 实施\",\"prompt\":\"按方案 A 实施\"},{\"label\":\"看代码\",\"open\":\"src/main.rs:10\"}]}
-  用户点击 prompt 按钮时，prompt 会作为用户消息发送到你的会话（submit:false 则只填入输入区）
+- {\"type\":\"buttons\",\"buttons\":[{\"label\":\"Go with option A\",\"prompt\":\"Go with option A\"},{\"label\":\"View code\",\"open\":\"src/main.rs:10\"}]}
+  When the user clicks a prompt button, the prompt is sent to your session as a user
+  message (with submit:false it is only placed in the input area).
 - {\"type\":\"image\",\"path\":\"…\",\"width\":600}
 - {\"type\":\"divider\"}
-文件路径相对于项目根目录。"
+File paths are relative to the project root. The user reads Chinese, so write the page
+text in Chinese."
   (let* ((buffer (agent-canvas--buffer title))
          (agent (plist-get agent-ui-caller :agent_buffer)))
     (with-current-buffer buffer
@@ -1135,15 +1140,16 @@
     (agent-canvas--publish buffer)))
 
 (agent-ui-defmethod "patch"
-    ((title string "页面标题" required)
-     (id string "要替换的 block 的 id" required)
-     (block object "新的 block" required))
-  "替换已渲染页面中指定 id 的 block（可在嵌套区块内），用于更新进度、状态等局部内容。"
+    ((title string "Page title" required)
+     (id string "id of the block to replace" required)
+     (block object "The new block" required))
+  "Replace the block with the given id in a rendered page (nested blocks included), to
+update progress, status and other parts of the page."
   (let ((buffer (or (get-buffer (format "*agent-canvas: %s*" title))
-                    (error "没有标题为「%s」的页面" title))))
+                    (error "No page titled %s" title))))
     (with-current-buffer buffer
       (let ((result (agent-canvas--replace-block (plist-get agent-canvas--page :blocks) id block)))
-        (unless (car result) (error "页面中没有 id 为 %s 的 block" id))
+        (unless (car result) (error "No block with id %s on the page" id))
         (setq agent-canvas--page (plist-put agent-canvas--page :blocks (cdr result)))))
     (agent-canvas--publish buffer)))
 
