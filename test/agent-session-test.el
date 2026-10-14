@@ -512,12 +512,21 @@
     (let ((first (get-text-property (point) 'mouse-face))
           (second (progn (forward-line 1) (get-text-property (point) 'mouse-face))))
       (should (and first second (not (eq first second)))))
-    ;; 行尾的空白伸到窗口右边缘并带高亮（整行高亮），换行符不带高亮（不溢出到下一行）
+    ;; 行尾的空白伸到窗口右边缘并带高亮（整行高亮），条目最后的换行不带高亮（不溢出到下一行）
     (goto-char (point-min))
     (while (search-forward "\n" nil t)
       (should-not (get-text-property (1- (point)) 'mouse-face))
       (should (get-text-property (- (point) 2) 'mouse-face))
-      (should (equal (get-text-property (- (point) 2) 'display) '(space :align-to right))))))
+      (should (equal (get-text-property (- (point) 2) 'display) '(space :align-to right))))
+    ;; 多行条目：悬停任一行，整个条目连成一片高亮
+    (erase-buffer)
+    (agent-session-list--insert-entry '(:id "c") "  第一行\n    第二行\n")
+    (let ((face (get-text-property (point-min) 'mouse-face)))
+      (should (= (next-single-property-change (point-min) 'mouse-face)
+                 (1- (point-max))))
+      (goto-char (point-max))
+      (forward-line -1)
+      (should (eq (get-text-property (point) 'mouse-face) face)))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

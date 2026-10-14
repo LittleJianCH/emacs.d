@@ -97,8 +97,7 @@
   "插入一项，整段带上 ENTRY 属性；鼠标悬停高亮，单击打开。"
   (let ((start (point)))
     (apply #'insert strings)
-    ;; 每行末尾补一个伸到窗口右边缘的空白，悬停高亮占满整行；
-    ;; 换行符本身不高亮（见下），否则行尾会多出一小块。
+    ;; 每行末尾补一个伸到窗口右边缘的空白，悬停高亮占满整行。
     (save-excursion
       (let ((end (point-marker)))
         (goto-char start)
@@ -113,11 +112,10 @@
                          (list 'agent-session-entry entry
                                'mouse-face (list 'highlight)
                                'keymap agent-session-list-entry-map))
-    (save-excursion
-      (let ((end (point)))
-        (goto-char start)
-        (while (search-forward "\n" end t)
-          (remove-text-properties (1- (point)) (point) '(mouse-face nil)))))
+    ;; 条目内部的换行被补白挤到右边缘外（GUI 下在 fringe 里），保留高亮让多行条目
+    ;; 连成一片；最后一个换行不高亮，否则高亮会伸到下一行开头。
+    (when (eq (char-before) ?\n)
+      (remove-text-properties (1- (point)) (point) '(mouse-face nil)))
     ;; “点击打开”的提示只加在非按钮部分，不覆盖 × 自己的提示。
     (let ((pos start))
       (while (< pos (point))
