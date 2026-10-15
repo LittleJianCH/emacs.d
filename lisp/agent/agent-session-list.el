@@ -319,7 +319,7 @@ With CHOOSE (prefix argument), choose the agent first."
 Clicking it runs COMMAND in the session list window."
   (propertize label
               'face 'agent-session-assistant
-              'mouse-face 'header-line-highlight
+              'mouse-face 'highlight
               'help-echo help
               'local-map (let ((map (make-sparse-keymap)))
                            (define-key map [header-line mouse-1]
