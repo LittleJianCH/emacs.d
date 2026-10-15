@@ -251,6 +251,21 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
                       "草稿"))
        (kill-buffer new)))))
 
+(ert-deftest agent-session-test-select-agent-no-annotation ()
+  "Agent candidates are plain names: a title would only repeat them."
+  (agent-session-test--with-session
+   (let (annotate candidates)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (setq candidates collection
+                        annotate (plist-get completion-extra-properties
+                                            :annotation-function))
+                  "test-echo2")))
+       (agent-session-select-agent))
+     (should (member "test-echo2" candidates))
+     (should-not annotate)
+     (should (eq (agent-session-agent agent-session--current) 'test-echo2)))))
+
 (ert-deftest agent-session-test-mode-line ()
   "The mode line shows agent, model, effort, permission mode and status."
   (agent-session-test--with-session

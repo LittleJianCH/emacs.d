@@ -1894,11 +1894,12 @@ session carrying over the input draft."
   (interactive)
   (let* ((session (agent-session--this))
          (agent (or agent
-                    (intern (agent-session--completing-read
+                    ;; No annotations: a title only repeats the agent's name.
+                    (intern (completing-read
                              "Agent: "
-                             (mapcar (lambda (a) (cons (symbol-name (car a))
-                                                       (plist-get (cdr a) :title)))
+                             (mapcar (lambda (a) (symbol-name (car a)))
                                      (reverse agent-session-agents))
+                             nil t nil nil
                              (symbol-name (agent-session-agent session)))))))
     (unless (assq agent agent-session-agents) (user-error "未注册 agent：%s" agent))
     (unless (eq agent (agent-session-agent session))
