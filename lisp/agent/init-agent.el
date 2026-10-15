@@ -43,6 +43,12 @@
   :config
   (agent-session-define-agent codex :title "Codex"))
 
+(use-package agent-dsh
+  :after agent-session
+  :demand t
+  :config
+  (agent-session-define-agent dsh :title "DeepSeek"))
+
 (use-package agent-session-list
   :after agent-session
   :demand t)

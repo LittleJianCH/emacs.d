@@ -14,6 +14,7 @@
 (require 'agent-session-list)
 (require 'agent-claude)
 (require 'agent-codex)
+(require 'agent-dsh)
 
 (cl-defmethod agent-session-backend-start ((_ (eql test-echo)) session)
   (agent-session-set-status session 'idle))
@@ -758,6 +759,50 @@ Also mark that the context needs reloading."
        (agent-session-test--run-and-wait "■ 停止")
        (should (string-search "■ 已停止" (agent-session-test--transcript)))
        (should (string-search "↻ 重新运行" (agent-session-test--transcript)))))))
+
+(ert-deftest agent-session-test-dsh-messages ()
+  "Bridge messages render as streamed text, tool blocks and approvals."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (written nil))
+     (cl-letf (((symbol-function 'agent-session-write)
+                (lambda (_ object) (push object written))))
+       (dolist (message
+                '((:method "status" :params (:status "running"))
+                  (:method "text" :params (:id "a/0" :kind "thinking" :delta "想一想"))
+                  (:method "text" :params (:id "a/1" :kind "assistant" :delta "先列"))
+                  (:method "text" :params (:id "a/1" :kind "assistant" :delta "文件"))
+                  (:method "text/done" :params (:id "a/1" :text "先列文件"))
+                  (:method "text" :params (:id "b/1" :kind "assistant" :delta "重试前的残片"))
+                  (:method "discard" :params (:ids ["b/1"]))
+                  (:method "tool" :params (:id "c1" :name "bash"
+                                           :arguments "{\"command\":\"ls -la\\nwc -l\"}"))
+                  (:method "tool" :params (:id "c2" :name "read"
+                                           :arguments "{\"path\":\"/tmp/x/src/main.rs\"}"))))
+         (agent-session-backend-handle 'dsh session message))
+       (should (eq (agent-session-status session) 'running))
+       (should (string-search "先列文件" (agent-session-test--transcript)))
+       (should-not (string-search "重试前的残片" (agent-session-test--transcript)))
+       (should-not (agent-session--block session "b/1"))
+       (should (eq (plist-get (agent-session--block session "a/0") :kind) 'thinking))
+       ;; Multi-line commands show their first line
+       (let ((tool (agent-session--block session "c1")))
+         (should (eq (plist-get tool :kind) 'command))
+         (should (equal (plist-get tool :title) "ls -la"))
+         (should (eq (plist-get tool :status) 'running)))
+       (should (eq (plist-get (agent-session--block session "c2") :kind) 'read))
+       ;; The bridge asks for approval; the answer goes back as a decision
+       (agent-session-backend-handle
+        'dsh session '(:id "dsh-1" :method "approval"
+                       :params (:callId "c1" :toolName "bash" :reason "需要完全访问")))
+       (should (string-search "ls -la（需要完全访问）" (agent-session-test--footer)))
+       (agent-session-approve)
+       (should (equal (car written) '(:jsonrpc "2.0" :id "dsh-1" :result (:decision "allow"))))
+       (agent-session-backend-handle
+        'dsh session '(:method "tool/done" :params (:id "c1" :isError t :output "boom")))
+       (should (eq (plist-get (agent-session--block session "c1") :status) 'error))
+       (agent-session-backend-handle 'dsh session '(:method "status" :params (:status "idle")))
+       (should (eq (agent-session-status session) 'idle))))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

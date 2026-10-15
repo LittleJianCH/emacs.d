@@ -7,7 +7,7 @@ configuration the user's Emacs loads, so the files you edit are the ones it runs
 
 A modular Emacs config built for developing *with* agents:
 
-- Agent CLIs (Claude Code, Codex) run headless behind structured protocols; Emacs renders
+- Agent CLIs (Claude Code, Codex, DeepSeek Harness) run headless behind structured protocols; Emacs renders
   the whole conversation UI itself (T3 Code / telega style). We never embed an agent's
   own TUI.
 - Agents can drive Emacs back through `bin/emx` (CLI + stdio MCP server): open files,
@@ -55,6 +55,14 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
+- `agent-dsh.el` — DeepSeek Harness (`dsh`) backend. dsh's own SDK/ACP protocols are too
+  thin (SDK cannot cancel or approve), so we ship a dsh plugin, `dsh/emacs-bridge.mjs`,
+  mounted into the stock `sdk` profile by `dsh/emacs.yml` (`dsh --profile sdk --patch
+  ...`). It drives one dsh agent through dsh's internal API (`ctx.agents`,
+  `agent/assistant-stream`, `session/event`, `approval/request`) and speaks our own
+  line-delimited JSON-RPC, documented at the top of the plugin. It depends on dsh
+  internals, so expect to adjust it when dsh is upgraded. The API key lives in dsh's
+  `~/.dsh/.credentials.yaml`; never pass it through the environment.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's
@@ -93,7 +101,8 @@ emacs --batch --init-directory=. -l init.el --eval '
 
 No output means a clean compile. It must stay warning-free, including with evil disabled (declare evil functions
 with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macro).
-`node --check bin/emx` for the bridge.
+`node --check bin/emx` for the bridge, `node --check lisp/agent/dsh/emacs-bridge.mjs`
+for the dsh plugin.
 
 Add or update a regression test for every bug fix and UI behavior change. Tests that
 need the Claude/Codex backends should exercise their pure functions (as the sync and
@@ -111,7 +120,7 @@ emacsclient -e '(load (locate-user-emacs-file "lisp/agent/agent-session.el") nil
 `locate-user-emacs-file` resolves against the running Emacs's config directory, so
 the command names no machine-specific path.
 
-Load in dependency order: agent-session -> agent-claude / agent-codex ->
+Load in dependency order: agent-session -> agent-claude / agent-codex / agent-dsh ->
 agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
 
 - `defvar`, `defvar-keymap`, `defcustom` and `defface` do not re-evaluate on reload.

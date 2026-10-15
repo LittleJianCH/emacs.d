@@ -1,0 +1,10 @@
+# Patch for the shipped dsh `sdk` profile: serve Emacs instead of SDK clients.
+#   dsh --profile sdk --patch lisp/agent/dsh/emacs.yml
+
+- id: sdk-jsonrpc-server
+  disabled: true
+
+- insert:
+    - id: emacs-bridge
+      name: ./emacs-bridge.mjs
+      inject: [sdkAppStartup]
