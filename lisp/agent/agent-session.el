@@ -1947,8 +1947,11 @@ session carrying over the input draft."
                                                (plist-get item :title))
                                        (plist-get item :id)))
                                items))
-           (choice (completing-read "恢复会话: " candidates nil t)))
-      (agent-session-start agent nil (cdr (assoc choice candidates)) root))))
+           (choice (completing-read "恢复会话: " candidates nil t))
+           (id (cdr (assoc choice candidates))))
+      (agent-session-start agent nil id root
+                           (plist-get (seq-find (lambda (item) (equal (plist-get item :id) id)) items)
+                                      :title)))))
 
 ;;; Slash commands and completion
 
@@ -2258,10 +2261,11 @@ Visible one > most recent in this project > most recent anywhere."
   (intern (completing-read "Agent: " (reverse (mapcar #'car agent-session-agents)) nil t)))
 
 ;;;###autoload
-(defun agent-session-start (agent &optional new resume root)
+(defun agent-session-start (agent &optional new resume root title)
   "Open an AGENT session for the current project.
 With NEW non-nil (prefix arg), always create a new one.  RESUME is the id
-of a past session to resume; ROOT defaults to the current project root."
+of a past session to resume, TITLE its title, kept rather than taken from
+the next message.  ROOT defaults to the current project root."
   (interactive (list (agent-session--read-agent) current-prefix-arg))
   ;; Don't start the server in batch mode (tests): it would take over the user's
   ;; Emacs socket and delete it on exit.
@@ -2275,7 +2279,7 @@ of a past session to resume; ROOT defaults to the current project root."
                                       (agent-session-buffers))
                           (and (not new) (car (agent-session-buffers root agent))))))
         (select-window (agent-session-display existing))
-      (let ((buffer (agent-session-open agent root resume)))
+      (let ((buffer (agent-session-open agent root resume nil (and title (list :title title)))))
         (select-window (agent-session-display buffer))
         (goto-char (point-max))
         buffer))))

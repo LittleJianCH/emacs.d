@@ -234,13 +234,8 @@ Status changes often while output streams, so coalesce them into one redraw."
   (let ((entry (agent-session-list--entry)))
     (if-let* ((buffer (plist-get entry :buffer)))
         (select-window (agent-session-display buffer))
-      (let ((buffer (agent-session-start (plist-get entry :agent) nil (plist-get entry :id)
-                                         (plist-get entry :root))))
-        (when (bufferp buffer)
-          (let ((session (buffer-local-value 'agent-session--current buffer)))
-            (setf (agent-session-info session)
-                  (plist-put (agent-session-info session) :title (plist-get entry :title)))
-            (agent-session--refresh session)))))))
+      (agent-session-start (plist-get entry :agent) nil (plist-get entry :id)
+                           (plist-get entry :root) (plist-get entry :title)))))
 
 (defun agent-session-list-create (&optional choose)
   "Create a session in the list's project.

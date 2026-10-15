@@ -266,6 +266,20 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
      (should-not annotate)
      (should (eq (agent-session-agent agent-session--current) 'test-echo2)))))
 
+(ert-deftest agent-session-test-resume-keeps-title ()
+  "A resumed session keeps its title instead of taking the next message."
+  (agent-session-test--with-session
+   (cl-letf (((symbol-function 'agent-session-backend-history)
+              (lambda (_backend _root callback)
+                (funcall callback '((:id "old" :title "旧标题" :time 0)))))
+             ((symbol-function 'completing-read)
+              (lambda (_prompt candidates &rest _) (caar candidates))))
+     (agent-session-resume)
+     (let ((session agent-session--current))
+       (should (equal (agent-session-resume-id session) "old"))
+       (agent-session-test--type "新消息")
+       (should (equal (agent-session-display-title session) "旧标题"))))))
+
 (ert-deftest agent-session-test-mode-line ()
   "The mode line shows agent, model, effort, permission mode and status."
   (agent-session-test--with-session
