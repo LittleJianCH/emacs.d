@@ -197,12 +197,18 @@ Try to keep point on the same entry."
         (insert (propertize "  （没有历史会话）\n" 'face 'agent-session-dim))
       (pcase-dolist (`(,agent . ,item) history)
         (agent-session-list--insert-entry
-         (list :agent agent :id (plist-get item :id) :root root :title (plist-get item :title))
+         (list :agent agent :id (plist-get item :id) :root (or (plist-get item :root) root)
+               :title (plist-get item :title))
          "  "
          (propertize (format "%-7s %-5s " (agent-session-list--ago (plist-get item :time))
                              (or (agent-session--get agent :title) agent))
                      'face 'agent-session-dim)
-         (agent-session-list--truncate (plist-get item :title))
+         (agent-session-list--truncate
+          (concat (if-let* ((worktree (plist-get item :worktree)))
+                      (propertize (format "[%s] " (truncate-string-to-width worktree 16 nil nil "…"))
+                                  'face 'agent-session-dim)
+                    "")
+                  (plist-get item :title)))
          "\n")))
     ;; Return to the original entry
     (goto-char (point-min))

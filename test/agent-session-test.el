@@ -832,6 +832,101 @@ Also mark that the context needs reloading."
   (should (equal (agent-claude--project-dir "/ssh:dev:/srv/my.proj/")
                  "/ssh:dev:~/.claude/projects/-srv-my-proj")))
 
+;; Claude Desktop runs sessions in worktrees under .claude/worktrees.
+(ert-deftest agent-session-test-claude-worktree-dirs ()
+  "Claude history covers the project's git worktrees, removed ones too."
+  (let ((worktrees (agent-claude--parse-worktrees "\
+worktree /src/emacs.d
+HEAD 1111
+branch refs/heads/main
+
+worktree /src/emacs.d/.claude/worktrees/telega-ed2ff9
+HEAD 2222
+branch refs/heads/claude/telega-ed2ff9
+
+worktree /src/emacs.d-feature
+HEAD 3333
+detached
+"))
+        (names '("-src-emacs-d" "-src-emacs-d--claude-worktrees-telega-ed2ff9"
+                 "-src-emacs-d--claude-worktrees-gone-1a2b3c" "-src-other")))
+    (should (equal worktrees '("/src/emacs.d" "/src/emacs.d/.claude/worktrees/telega-ed2ff9"
+                               "/src/emacs.d-feature")))
+    (should (equal (agent-claude--history-dirs "/src/emacs.d/" worktrees names)
+                   '(("-src-emacs-d" "/src/emacs.d/" nil)
+                     ("-src-emacs-d--claude-worktrees-telega-ed2ff9"
+                      "/src/emacs.d/.claude/worktrees/telega-ed2ff9/" "telega-ed2ff9")
+                     ("-src-emacs-d-feature" "/src/emacs.d-feature/" "emacs.d-feature")
+                     ;; Removed: no longer listed by git, still filed by the CLI
+                     ("-src-emacs-d--claude-worktrees-gone-1a2b3c"
+                      "/src/emacs.d/.claude/worktrees/gone-1a2b3c/" "gone-1a2b3c"))))
+    ;; From a worktree, the main checkout is a worktree too.
+    (should (equal (mapcar #'car (agent-claude--history-dirs
+                                  "/src/emacs.d/.claude/worktrees/telega-ed2ff9/" worktrees nil))
+                   '("-src-emacs-d--claude-worktrees-telega-ed2ff9" "-src-emacs-d"
+                     "-src-emacs-d-feature")))
+    ;; A subdirectory of a repository is not one of its worktrees.
+    (should (equal (agent-claude--history-dirs "/src/emacs.d/lisp/" worktrees names)
+                   '(("-src-emacs-d-lisp" "/src/emacs.d/lisp/" nil))))))
+
+(ert-deftest agent-session-test-claude-worktree-history ()
+  "Sessions of all worktrees merge newest first; worktree ones carry their root."
+  (let* ((main (make-temp-file "agent-claude-main-" t))
+         (tree (make-temp-file "agent-claude-tree-" t))
+         (write (lambda (dir id text time)
+                  (let ((file (expand-file-name (concat id ".jsonl") dir))
+                        (coding-system-for-write 'no-conversion))
+                    (with-temp-file file
+                      (insert (json-serialize
+                               (list :type "user" :message (list :role "user" :content text)))
+                              "\n"))
+                    (set-file-times file (seconds-to-time time))))))
+    (unwind-protect
+        (progn
+          (funcall write main "a" "旧的" 1000)
+          (funcall write tree "b" "工作树里的" 2000)
+          (funcall write main "c" "新的" 3000)
+          (let ((items (agent-claude--history-items
+                        (list (list main "/src/p/" nil)
+                              (list tree "/src/p/.claude/worktrees/t/" "t")
+                              (list (expand-file-name "missing" main) "/x/" "x")))))
+            (should (equal (mapcar (lambda (item) (plist-get item :id)) items) '("c" "b" "a")))
+            (should (equal (nth 1 items) '(:id "b" :title "工作树里的" :time 2000.0
+                                           :root "/src/p/.claude/worktrees/t/" :worktree "t")))
+            (should-not (plist-member (car items) :root)))
+          (should (equal (length (agent-claude--history-items (list (list main "/src/p/" nil)) 1))
+                         1)))
+      (delete-directory main t)
+      (delete-directory tree t))))
+
+(ert-deftest agent-session-test-list-worktree-history ()
+  "A worktree session is labeled in the list and resumes in its worktree."
+  (let ((root (file-name-as-directory (make-temp-file "agent-list-root-" t)))
+        (agent-session-list--history (make-hash-table :test #'equal)))
+    (unwind-protect
+        (with-temp-buffer
+          (puthash (cons root 'claude)
+                   (list (list :id "wt-1" :title "维护状态" :time (float-time)
+                               :root (expand-file-name ".claude/worktrees/gone/" root)
+                               :worktree "gone"))
+                   agent-session-list--history)
+          (agent-session-list-mode)
+          (setq agent-session-list--root root)
+          (agent-session-list--render)
+          (should (string-match-p "\\[gone\\] 维护状态" (buffer-string)))
+          (goto-char (point-min))
+          (search-forward "维护状态")
+          (should (equal (plist-get (get-text-property (point) 'agent-session-entry) :root)
+                         (expand-file-name ".claude/worktrees/gone/" root)))
+          ;; The worktree was removed: say so instead of starting the CLI there.
+          (let ((err (should-error (agent-session-list-open) :type 'user-error)))
+            (should (string-match-p "已不存在" (cadr err))))
+          (should-not (seq-find (lambda (b) (equal (agent-session-resume-id
+                                                    (buffer-local-value 'agent-session--current b))
+                                                   "wt-1"))
+                                (agent-session-buffers))))
+      (delete-directory root t))))
+
 (ert-deftest agent-session-test-remote-mcp-commands ()
   "Remote agents reach emx through the relay; local ones run emx directly."
   (agent-session-test--with-session

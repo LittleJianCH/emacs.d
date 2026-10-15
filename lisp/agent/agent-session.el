@@ -223,7 +223,9 @@ caller falls back to \"interrupt, then send\"."
 (cl-defgeneric agent-session-backend-history (backend root callback)
   "List past sessions in project ROOT, calling CALLBACK with the list.
 CALLBACK may be called asynchronously.  Each item is (:id ID :title TITLE
-:time SECONDS), newest first."
+:time SECONDS), newest first.  A session that ran in another directory
+of the project, such as a git worktree, adds :root DIRECTORY (where to
+resume it) and :worktree LABEL."
   (ignore backend root)
   (funcall callback nil))
 
@@ -1942,16 +1944,18 @@ session carrying over the input draft."
       (while (eq items 'pending) (accept-process-output nil 0.05)))
     (unless items (user-error "本项目没有 %s 的历史会话" agent))
     (let* ((candidates (mapcar (lambda (item)
-                                 (cons (format "%s  %s" (format-time-string "%m-%d %H:%M"
-                                                                            (plist-get item :time))
+                                 (cons (format "%s  %s%s"
+                                               (format-time-string "%m-%d %H:%M"
+                                                                   (plist-get item :time))
+                                               (if-let* ((worktree (plist-get item :worktree)))
+                                                   (format "[%s] " worktree)
+                                                 "")
                                                (plist-get item :title))
-                                       (plist-get item :id)))
+                                       item))
                                items))
-           (choice (completing-read "恢复会话: " candidates nil t))
-           (id (cdr (assoc choice candidates))))
-      (agent-session-start agent nil id root
-                           (plist-get (seq-find (lambda (item) (equal (plist-get item :id) id)) items)
-                                      :title)))))
+           (item (cdr (assoc (completing-read "恢复会话: " candidates nil t) candidates))))
+      (agent-session-start agent nil (plist-get item :id) (or (plist-get item :root) root)
+                           (plist-get item :title)))))
 
 ;;; Slash commands and completion
 
@@ -2279,6 +2283,11 @@ the next message.  ROOT defaults to the current project root."
                                       (agent-session-buffers))
                           (and (not new) (car (agent-session-buffers root agent))))))
         (select-window (agent-session-display existing))
+      ;; A session from a worktree resumes there, and the worktree may have
+      ;; been removed since (worktrees are only listed for local projects).
+      (when (and resume (not (file-remote-p root)) (not (file-directory-p root)))
+        (user-error "会话所在的目录已不存在（工作树可能已删除）：%s"
+                    (abbreviate-file-name root)))
       (let ((buffer (agent-session-open agent root resume nil (and title (list :title title)))))
         (select-window (agent-session-display buffer))
         (goto-char (point-max))
