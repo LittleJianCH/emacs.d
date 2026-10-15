@@ -636,5 +636,75 @@ Also mark that the context needs reloading."
              (should-not (agent-session--clipboard-image))))
        (delete-directory agent-session-image-directory t)))))
 
+(ert-deftest agent-session-test-code-blocks ()
+  "Only shell code blocks are runnable; indentation and console prompts are stripped."
+  (let ((blocks (agent-session--code-blocks
+                 (concat "说明\n```bash\necho a\necho b\n```\n"
+                         "```python\nprint(1)\n```\n"
+                         "- 列表\n  ```sh\n  ls -a\n  ```\n"
+                         "```console\n$ git status\nOn branch main\n```"))))
+    (should (equal (mapcar (lambda (b) (nth 3 b)) blocks)
+                   '("echo a\necho b" "ls -a" "git status")))
+    (should (equal (mapcar #'car blocks) '(0 1 2)))))
+
+(defun agent-session-test--run-and-wait (label)
+  "Press the first transcript button labelled LABEL and wait for the command."
+  (goto-char (point-min))
+  (search-forward label)
+  (push-button (match-beginning 0))
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (seq-some (lambda (p) (and (equal (process-name p) "agent-run") (process-live-p p)))
+                          (process-list))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    ;; Let the sentinel finish.
+    (accept-process-output nil 0.05)))
+
+(ert-deftest agent-session-test-run-code ()
+  "Reply commands run with one click; output and exit status show below the block."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-text-done session "r1" "试试：\n```bash\necho hello\n```\n```sh\nexit 3\n```\n完毕")
+     (should (string-search "```bash  ▶ 运行  ⧉ 复制" (agent-session-test--transcript)))
+     (agent-session-test--run-and-wait "▶ 运行")
+     (let ((text (agent-session-test--transcript)))
+       ;; The output sits after the first code block and before the second.
+       (should (string-match-p "echo hello\n```\n✓ 完成 · [0-9.]+s\nhello\n```sh" text))
+       (should (string-search "```bash  ↻ 重新运行" text)))
+     (agent-session-test--run-and-wait "▶ 运行")
+     (should (string-match-p "exit 3\n```\n✗ 退出码 3" (agent-session-test--transcript)))
+     ;; Copy.
+     (goto-char (point-min))
+     (search-forward "⧉ 复制")
+     (push-button (match-beginning 0))
+     (should (equal (current-kill 0) "echo hello")))))
+
+(ert-deftest agent-session-test-run-code-tail ()
+  "Only the last `agent-session-run-output-lines' lines of output are shown."
+  (agent-session-test--with-session
+   (agent-session-text-done agent-session--current "r1" "```bash\nseq 1 8\n```")
+   (agent-session-test--run-and-wait "▶ 运行")
+   (should (string-match-p "…（省略 3 行）\n4\n5\n6\n7\n8"
+                           (agent-session-test--transcript)))))
+
+(ert-deftest agent-session-test-stop-code ()
+  "A running command can be stopped; redrawing keeps point in place."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-text-done session "r1" "```bash\nsleep 30\n```")
+     (goto-char (point-min))
+     (search-forward "▶ 运行")
+     (let ((pos (match-beginning 0)))
+       (push-button pos)
+       (should (string-search "■ 停止" (agent-session-test--transcript)))
+       (should (string-search "… 运行中" (agent-session-test--transcript)))
+       (with-selected-window (display-buffer (current-buffer))
+         (goto-char (1+ pos))
+         (agent-session--render session "r1")
+         (should (= (point) (1+ pos))))
+       (agent-session-test--run-and-wait "■ 停止")
+       (should (string-search "■ 已停止" (agent-session-test--transcript)))
+       (should (string-search "↻ 重新运行" (agent-session-test--transcript)))))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

@@ -26,6 +26,7 @@
 (require 'server)
 (require 'button)
 (require 'dnd)
+(require 'ansi-color)
 
 ;; Bound dynamically in a let so rendering code blocks doesn't prompt to install
 ;; tree-sitter grammars.
@@ -377,12 +378,24 @@ preserved."
   "Redraw block ID from its data."
   (let* ((block (agent-session--block session id))
          (start (plist-get block :start))
-         (end (plist-get block :end)))
+         (end (plist-get block :end))
+         (buffer (agent-session-buffer session))
+         ;; Windows whose point is inside the block: remember the offset and restore it
+         ;; after redrawing, so point doesn't jump to the block start.
+         (inside (and (buffer-live-p buffer)
+                      (seq-keep (lambda (window)
+                                  (let ((point (window-point window)))
+                                    (and (< start point end) (cons window (- point start)))))
+                                (get-buffer-window-list buffer nil t)))))
     (agent-session--with-buffer session
       (delete-region start end)
       (goto-char start)
       (insert (agent-session--ro (agent-session--format session id block)))
-      (set-marker end (point)))))
+      (set-marker end (point)))
+    (when inside
+      (with-current-buffer buffer
+        (pcase-dolist (`(,window . ,offset) inside)
+          (set-window-point window (min (+ start offset) end)))))))
 
 (defun agent-session--remove-block (session id)
   "Delete block ID from the transcript (along with its separating newline)."
@@ -500,8 +513,221 @@ done; thinking is folded into one line by default, click to expand."
       (concat
        (propertize (concat "● " (agent-session-title session)) 'face 'agent-session-assistant)
        "\n"
-       (agent-session--indent (if (plist-get block :done) (agent-session--markdown text) text))
+       (if (plist-get block :done)
+           (agent-session--format-reply session id block text)
+         (agent-session--indent text))
        "\n"))))
+
+;;; Running commands from replies
+;;
+;; Shell code blocks in replies (```bash etc.) get a run button after the opening
+;; fence line.  Clicking it runs the block in the project root (on the remote host
+;; for remote projects); status and output appear below the block, and the run can
+;; be stopped or repeated.  Runs live in the block's :runs as ((INDEX . RUN) ...),
+;; RUN being a plist (:command :process :output :start :end :exit :stopped :timer)
+;; that is modified in place while the command runs.
+
+(defcustom agent-session-runnable-languages
+  '("bash" "sh" "shell" "zsh" "console" "shell-session")
+  "Code block languages in replies that get a run button."
+  :type '(repeat string))
+
+(defcustom agent-session-run-output-lines 5
+  "Maximum number of output lines shown below a code block (the tail)."
+  :type 'integer)
+
+(defface agent-session-run-output '((t :inherit default))
+  "Command output shown below a code block.")
+
+(defun agent-session--code-blocks (text)
+  "Runnable fenced code blocks in TEXT: ((INDEX HEADER-END CLOSE-END CODE) ...).
+HEADER-END is the end of the opening fence line and CLOSE-END the end of the
+closing one, both as indices into TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((index 0) blocks)
+      (while (re-search-forward
+              "^\\([ \t]*\\)\\(`\\{3,\\}\\|~\\{3,\\}\\)[ \t]*\\([^ \t\n`{]*\\)[^\n]*$" nil t)
+        (let* ((indent (match-string 1))
+               (fence (match-string 2))
+               (lang (downcase (match-string 3)))
+               (header-end (point))
+               (close (re-search-forward
+                       (format "^[ \t]*%s%s*[ \t]*$" (regexp-quote fence)
+                               (regexp-quote (substring fence 0 1)))
+                       nil 'move)))
+          (when (and close (member lang agent-session-runnable-languages))
+            (let ((code (buffer-substring-no-properties
+                         (min (1+ header-end) (match-beginning 0)) (match-beginning 0))))
+              (push (list index (1- header-end) (1- close)
+                          (agent-session--code-command code indent lang))
+                    blocks)
+              (cl-incf index)))))
+      (nreverse blocks))))
+
+(defun agent-session--code-command (code indent lang)
+  "The command to run for code block contents CODE.
+Strip the fence indentation INDENT; for console-like LANG keep only the
+lines starting with $, without the prompt."
+  (let* ((lines (mapcar (lambda (line) (string-remove-prefix indent line))
+                        (split-string (string-trim-right code) "\n")))
+         (prompts (and (member lang '("console" "shell-session"))
+                       (seq-keep (lambda (line)
+                                   (and (string-match "\\`\\$ ?" line)
+                                        (substring line (match-end 0))))
+                                 lines))))
+    (string-join (or prompts lines) "\n")))
+
+(defun agent-session--format-reply (session id block text)
+  "Render a finished reply: markdown, plus run buttons and runs for code blocks.
+The highlighted markdown is cached in BLOCK's :markdown so redraws during a
+run don't highlight it again."
+  (let* ((cache (plist-get block :markdown))
+         (rendered (if (equal (car cache) text)
+                       (cdr cache)
+                     (let ((rendered (agent-session--markdown text)))
+                       (puthash id (plist-put block :markdown (cons text rendered))
+                                (agent-session-blocks session))
+                       rendered)))
+         (runs (plist-get block :runs))
+         (pos 0)
+         parts)
+    (pcase-dolist (`(,index ,header-end ,close-end ,_command) (agent-session--code-blocks text))
+      (let ((run (alist-get index runs)))
+        (push (agent-session--indent (substring rendered pos header-end)) parts)
+        (push (agent-session--run-buttons id index run) parts)
+        (push (agent-session--indent (substring rendered header-end close-end)) parts)
+        (when run (push (agent-session--format-run run) parts))
+        (setq pos close-end)))
+    (push (agent-session--indent (substring rendered pos)) parts)
+    (apply #'concat (nreverse parts))))
+
+(define-button-type 'agent-session-run
+  'follow-link t 'action #'agent-session--run-button)
+
+(defun agent-session--run-button (button)
+  "Run, stop or copy the code block command of BUTTON."
+  (let ((session agent-session--current)
+        (id (button-get button 'agent-session-block))
+        (index (button-get button 'agent-session-code)))
+    (pcase (button-get button 'agent-session-action)
+      ('run (agent-session-run-code session id index))
+      ('stop (agent-session-stop-code session id index))
+      ('copy (kill-new (agent-session--code-command-at session id index))
+             (message "已复制命令")))))
+
+(defun agent-session--run-buttons (id index run)
+  "Buttons after the opening fence line of code block INDEX."
+  (cl-flet ((button (label action help)
+              (concat "  " (make-text-button label nil 'type 'agent-session-run 'help-echo help
+                                             'agent-session-action action
+                                             'agent-session-block id 'agent-session-code index))))
+    (concat (if (process-live-p (plist-get run :process))
+                (button "■ 停止" 'stop "停止运行中的命令")
+              (button (if run "↻ 重新运行" "▶ 运行") 'run "在项目根目录运行这段命令"))
+            (button "⧉ 复制" 'copy "复制命令"))))
+
+(defun agent-session--clean-output (output)
+  "Clean command OUTPUT: drop ANSI escapes, keep each line's text after its
+last carriage return (progress bars)."
+  (mapconcat (lambda (line) (car (last (split-string line "\r" t))))
+             (split-string (ansi-color-filter-apply output) "\n")
+             "\n"))
+
+(defun agent-session--format-run (run)
+  "The record of RUN below a code block: a status line and the output tail."
+  (let* ((end (or (plist-get run :end) (float-time)))
+         (elapsed (format "%.1fs" (- end (plist-get run :start))))
+         (exit (plist-get run :exit))
+         (status
+          (cond ((process-live-p (plist-get run :process))
+                 (propertize "… 运行中" 'face 'agent-session-dim))
+                ((plist-get run :stopped)
+                 (propertize (concat "■ 已停止 · " elapsed) 'face 'agent-session-error))
+                ((eql exit 0)
+                 (propertize (concat "✓ 完成 · " elapsed) 'face 'agent-session-ok))
+                (t (propertize (format "✗ 退出码 %s · %s" exit elapsed)
+                               'face 'agent-session-error))))
+         (output (string-trim-right (agent-session--clean-output (plist-get run :output)))))
+    (concat
+     "\n"
+     (agent-session--indent status)
+     (unless (string-empty-p output)
+       (concat "\n"
+               (propertize (agent-session--tail-lines output agent-session-run-output-lines)
+                           'face 'agent-session-run-output
+                           'line-prefix (propertize "  │ " 'face 'agent-session-dim)
+                           'wrap-prefix (propertize "  │ " 'face 'agent-session-dim)))))))
+
+(defun agent-session--code-command-at (session id index)
+  "Command of the INDEXth runnable code block of message block ID in SESSION."
+  (nth 3 (assq index (agent-session--code-blocks
+                      (plist-get (agent-session--block session id) :text)))))
+
+(defun agent-session--rerender-run (session id run)
+  "Redraw block ID after RUN changed, at most once every 0.2 seconds."
+  (unless (plist-get run :timer)
+    (setf (plist-get run :timer)
+          (run-at-time 0.2 nil (lambda ()
+                                 (setf (plist-get run :timer) nil)
+                                 (when (agent-session--block session id)
+                                   (agent-session--render session id)))))))
+
+(defun agent-session-run-code (session id index)
+  "Run code block INDEX of message block ID in the project root of SESSION.
+The output is shown below the code block."
+  (let* ((block (agent-session--block session id))
+         (old (alist-get index (plist-get block :runs))))
+    (when (process-live-p (plist-get old :process))
+      (user-error "这段命令正在运行"))
+    (let* ((command (agent-session--code-command-at session id index))
+           ;; All keys exist up front so setf modifies the plist in place and
+           ;; the record stored in the block follows.
+           (run (list :command command :process nil :output "" :start (float-time)
+                      :end nil :exit nil :stopped nil :timer nil))
+           (default-directory (agent-session-root session))
+           (process-environment (append '("TERM=dumb" "NO_COLOR=1" "PAGER=cat" "GIT_PAGER=cat")
+                                        process-environment))
+           (process
+            (make-process
+             :name "agent-run"
+             ;; Tied to the session buffer, so closing the session ends it.
+             :buffer (agent-session-buffer session)
+             :command (list (if (file-remote-p default-directory) "/bin/sh" shell-file-name)
+                            shell-command-switch command)
+             :connection-type 'pipe
+             ;; Run on the remote host for remote projects.
+             :file-handler t
+             :noquery t
+             :filter (lambda (_process output)
+                       (setf (plist-get run :output) (concat (plist-get run :output) output))
+                       (agent-session--rerender-run session id run))
+             :sentinel (lambda (process _event)
+                         (unless (process-live-p process)
+                           (setf (plist-get run :end) (float-time)
+                                 (plist-get run :exit) (process-exit-status process))
+                           (when-let* ((timer (plist-get run :timer)))
+                             (cancel-timer timer)
+                             (setf (plist-get run :timer) nil))
+                           (when (agent-session--block session id)
+                             (agent-session--render session id)))))))
+      ;; No stdin, so a command waiting for input doesn't hang.
+      (process-send-eof process)
+      (setf (plist-get run :process) process)
+      (setf (alist-get index (plist-get block :runs)) run)
+      (puthash id block (agent-session-blocks session))
+      (agent-session--render session id))))
+
+(defun agent-session-stop-code (session id index)
+  "Stop the running command of code block INDEX in message block ID."
+  (let* ((run (alist-get index (plist-get (agent-session--block session id) :runs)))
+         (process (plist-get run :process)))
+    (when (process-live-p process)
+      (setf (plist-get run :stopped) t)
+      (interrupt-process process)
+      ;; Kill it if it ignores the interrupt.
+      (run-at-time 2 nil (lambda () (when (process-live-p process) (kill-process process)))))))
 
 (defconst agent-session--tool-icons
   '((command . "$") (edit . "✎") (read . "≡") (search . "⌕") (web . "◎")
