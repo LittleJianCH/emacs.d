@@ -177,12 +177,30 @@ In the transcript, jump to the end of the input area and enter insert state." co
     "[c" #'agent-review-previous-annotation
     "a" #'agent-review-annotate
     "dd" #'agent-review-delete-annotation
-    "s" #'agent-review-ask
+    "r" #'agent-review-toggle-reviewed
+    "o" #'agent-review-toggle-nav
+    "C" #'agent-review-list-annotations
     "f" #'agent-review-toggle-full
     "+" #'agent-review-more-context
     "-" #'agent-review-less-context
     "gr" #'revert-buffer
-    "q" #'quit-window))
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-nav-mode 'normal)
+  (evil-define-key* '(normal motion) agent-review-nav-mode-map
+    (kbd "RET") #'agent-review-nav-visit
+    "r" #'agent-review-nav-toggle-reviewed
+    "/" #'agent-review-nav-filter
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-notes-mode 'normal)
+  (evil-define-key* '(normal motion) agent-review-notes-mode-map
+    (kbd "RET") #'agent-review-notes-visit
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-note-mode 'insert))
 
 ;; Agents call back into this instance through emacsclient / emx.
 (use-package server

@@ -124,45 +124,64 @@
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (car around)) '(9)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (cdr around)) '(11))))))
 
+(defconst agent-review-test--change
+  (list (list :item "atomic-1" :file "a.txt" :side 'old :line 2 :kind ?- :code "line 2")
+        (list :item "atomic-1" :file "a.txt" :side 'new :line 2 :kind ?+ :code "line two"))
+  "The two diff lines of item 1, as selected in the review buffer.")
+
 (ert-deftest agent-review-test-annotate-and-reply ()
   (agent-review-test--with-repo repo
     (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
                                        "概览" (agent-review-test--plan)))
            (id (plist-get review :id))
-           (target (list :item "atomic-1" :file "a.txt" :side 'new :line 2 :code "line two"))
-           (comment (agent-review-annotate-line review target "为什么改")))
+           (comment (agent-review-annotate-lines review agent-review-test--change "为什么改")))
       (should (equal (plist-get comment :revision) 1))
-      (should (equal (plist-get comment :context) "-line 2\n+line two"))
-      (agent-review-annotate-line review target "改成别的")
+      (should (equal (plist-get comment :range) "新 2 · 旧 2"))
+      (should (equal (plist-get comment :code) "-line 2\n+line two"))
+      (should (equal (plist-get comment :anchor) '("atomic-1" "a.txt" new 2)))
+      ;; The message to the agent carries the selection and where it is.
+      (let ((message (agent-review--message review comment)))
+        (should (string-search "第 1 项「改第二行」" message))
+        (should (string-search "a.txt 新 2 · 旧 2" message))
+        (should (string-search "```diff\n-line 2\n+line two\n```\n为什么改" message))
+        (should (string-search (format "标注 id=%s，revision=1" (plist-get comment :id))
+                               message)))
+      ;; Selecting the same lines again edits the annotation.
+      (agent-review-annotate-lines review agent-review-test--change "改成别的")
+      (should (string-search "·修改标注" (agent-review--message
+                                          review (car (agent-review--comments id)))))
       ;; The answer was written for revision 1, but the user edited it since.
       (should-error (agent-review-reply id (plist-get comment :id) 1 "回答"))
       (agent-review-reply id (plist-get comment :id) 2 "回答")
       (let ((stored (agent-review--comments id)))
         (should (= (length stored) 1))
         (should (equal (plist-get (car stored) :status) "responded"))
-        (should (equal (plist-get (car stored) :response) "回答")))
-      ;; A context line of the item takes its context from the file.
-      (let ((context (agent-review-annotate-line
-                      review (list :item "atomic-1" :file "a.txt" :side 'new :line 5
-                                   :code "line 5")
-                      "上下文")))
-        (should (string-search " line 5" (plist-get context :context)))))))
+        (should (equal (plist-get (car stored) :response) "回答"))))))
+
+(defmacro agent-review-test--with-buffer (review &rest body)
+  "Run BODY in a review buffer showing REVIEW, with its sidebar."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (agent-review-mode)
+     (setq agent-review--review ,review)
+     (agent-review--load-state)
+     (let ((inhibit-read-only t)) (agent-review--render))
+     (unwind-protect (progn ,@body)
+       (agent-review--kill-nav))))
 
 (ert-deftest agent-review-test-render ()
   (agent-review-test--with-repo repo
     (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
                                       "概览" (agent-review-test--plan))))
-      (agent-review-annotate-line review (list :item "atomic-1" :file "a.txt" :side 'new
-                                               :line 2 :code "line two")
-                                  "为什么改")
-      (with-temp-buffer
-        (agent-review-mode)
-        (setq agent-review--review review)
-        (let ((inhibit-read-only t)) (agent-review--render))
+      (agent-review-annotate-lines review agent-review-test--change "为什么改")
+      (agent-review-test--with-buffer review
         (goto-char (point-min))
         (should (search-forward "1. [局部修复] 改第二行" nil t))
         (should (search-forward "+line two" nil t))
         (should (equal (plist-get (get-text-property (point) 'agent-review-target) :line) 2))
+        ;; The annotation is below the last selected line, with its range.
+        (forward-line 1)
+        (should (looking-at "  ┃ 标注 · 新 2 · 旧 2 · 待回应"))
         (should (search-forward "为什么改" nil t))
         ;; Context after the change, but nothing from the hunk at line 18.
         (should (search-forward " line 5\n" nil t))
@@ -172,6 +191,51 @@
         ;; They have no old-side number.
         (should (re-search-forward "^ +6  (b 6)$" nil t))
         (should (memq 'agent-review-other (ensure-list (get-text-property (1- (point)) 'face))))))))
+
+(ert-deftest agent-review-test-selection ()
+  (agent-review-test--with-repo repo
+    (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                      "概览" (agent-review-test--plan))))
+      (agent-review-test--with-buffer review
+        (goto-char (point-min))
+        (search-forward "-line 2")
+        (let ((start (line-beginning-position)))
+          (search-forward "+line two")
+          ;; A region ending at the start of the next line covers two lines.
+          (should (equal (mapcar (lambda (l) (plist-get l :line))
+                                 (agent-review--lines-between start (line-beginning-position 2)))
+                         '(2 2)))
+          (should (equal (mapcar (lambda (l) (plist-get l :kind))
+                                 (agent-review--lines-between start (point)))
+                         '(?- ?+))))))))
+
+(ert-deftest agent-review-test-view-state ()
+  (agent-review-test--with-repo repo
+    (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                      "概览" (agent-review-test--plan))))
+      (agent-review-test--with-buffer review
+        ;; Opened for the first time, only the first item is unfolded.
+        (should (equal agent-review--folded '("atomic-2" "atomic-3")))
+        (should (string-search "已审阅 0/3" (agent-review--header-line)))
+        (goto-char (agent-review--find 'agent-review-heading "atomic-1"))
+        (agent-review-toggle-reviewed)
+        (should (looking-at "✓ 1\\. "))
+        (should (string-search "已审阅 1/3" (agent-review--header-line)))
+        ;; Jumping to an item unfolds it.
+        (agent-review-goto "atomic-3")
+        (should (equal agent-review--folded '("atomic-2")))
+        ;; The sidebar lists every item and marks the reviewed one.
+        (with-current-buffer (agent-review--nav-buffer)
+          (goto-char (point-min))
+          (should (search-forward "✓ 1. [局部修复] 改第二行" nil t))
+          (should (search-forward "3. [新功能] b 的后半" nil t))
+          (agent-review-nav-filter "b.el")
+          (goto-char (point-min))
+          (should-not (search-forward "1. [局部修复]" nil t))
+          (should (search-forward "2. [新功能]" nil t))))
+      ;; The state is kept with the review.
+      (should (equal (plist-get (agent-review--state (plist-get review :id)) :reviewed)
+                     '("atomic-1"))))))
 
 (provide 'agent-review-test)
 ;;; agent-review-test.el ends here

@@ -4,9 +4,10 @@
 
 ;; An agent splits the committed changes of a branch into atomic review items,
 ;; one intent each.  Emacs pins the diff, checks that the items cover every
-;; changed line exactly once, and shows them in a review buffer.  The user
-;; annotates lines there and, when ready, asks the session that made the
-;; review to answer; its answers appear under the annotations.
+;; changed line exactly once, and shows them in a review buffer with a
+;; sidebar of its items.  The user selects lines there and writes an
+;; annotation, which goes straight to the session that made the review with
+;; the selected code; the agent's answers appear under the annotations.
 ;;
 ;; The agent-ui methods are
 ;;   review_snapshot  pin base and head, list the hunks to plan with
@@ -17,11 +18,12 @@
 ;; (tramp-rpc) projects need nothing installed on their host.  Snapshots,
 ;; reviews and annotations are Lisp data under `agent-review-directory'.
 ;;
-;; Keys in a review: TAB folds an item, n / p move between items, ] / [
-;; between annotations, a annotates the line at point (or edits its
-;; annotation), d deletes it, s asks the agent to answer, RET visits the line,
-;; + / - show more or less context, f toggles the full diff, g redraws, q
-;; quits.
+;; Keys in a review: a annotates the selected lines (or the line at point, or
+;; edits the annotation at point) in a buffer where C-c C-c sends it, d
+;; deletes an annotation, r marks the item reviewed, o shows the sidebar, C
+;; lists the annotations, TAB folds an item or a file, n / p move between
+;; items, ] / [ between annotations, RET visits the line, + / - show more or
+;; less context, f toggles the full diff, g redraws, q quits.
 
 ;;; Code:
 
@@ -577,55 +579,62 @@ review, so its annotations are kept."
     (seq-find (lambda (item) (equal (plist-get item :id) id)) (plist-get review :items))))
 
 ;;; Annotations
+;;
+;; An annotation covers the lines the user selected in one file of one item,
+;; and is shown below the last of them.  Writing one sends it straight to
+;; the session that made the review, with the selected code.
 
-(defun agent-review--comment-id (target)
-  "The ID of the annotation on TARGET, a line of an item."
-  (agent-review--hash (list (plist-get target :item) (plist-get target :file)
-                            (plist-get target :side) (plist-get target :line))))
+(defun agent-review--line-key (target)
+  "Key of the line TARGET, for finding the annotations shown below it."
+  (list (plist-get target :item) (plist-get target :file)
+        (plist-get target :side) (plist-get target :line)))
 
-(defun agent-review--context (review target)
-  "Up to three lines around TARGET in its item's diff, as diff text."
-  (let* ((side (if (eq (plist-get target :side) 'old) :old :new))
-         (file (plist-get target :file))
-         (match (lambda (line target) (equal (plist-get line side) (plist-get target :line))))
-         ;; Only the lines of the hunk holding TARGET: others may be far away.
-         (lines (seq-some
-                 (lambda (block)
-                   (when (equal (plist-get block :file) file)
-                     (seq-some (lambda (hunk)
-                                 (let ((lines (agent-review--hunk-lines file hunk)))
-                                   (and (seq-position lines target match) lines)))
-                               (plist-get block :hunks))))
-                 (agent-review--split-files
-                  (plist-get (agent-review--item review (plist-get target :item)) :diff))))
-         (index (and lines (seq-position lines target match))))
-    (if index
-        (mapconcat (lambda (line) (concat (string (plist-get line :kind)) (plist-get line :content)))
-                   (seq-subseq lines (max 0 (- index 3)) (min (length lines) (+ index 4)))
-                   "\n")
-      ;; A context line: take the lines around it in the head-side file.
-      (when-let* (((eq (plist-get target :side) 'new))
-                  (text (alist-get (plist-get target :file) (plist-get review :sources)
-                                   nil nil #'equal))
-                  (source (vconcat (split-string text "\n")))
-                  (n (plist-get target :line)))
-        (mapconcat (lambda (i) (concat " " (aref source (1- i))))
-                   (number-sequence (max 1 (- n 3)) (min (length source) (+ n 3)))
-                   "\n")))))
+(defun agent-review--range-text (lines)
+  "The line range LINES cover on each side, e.g. \"新 130-134\"."
+  (string-join
+   (delq nil
+         (mapcar (lambda (side)
+                   (when-let* ((numbers (seq-keep (lambda (line)
+                                                    (and (eq (plist-get line :side) side)
+                                                         (plist-get line :line)))
+                                                  lines)))
+                     (let ((low (apply #'min numbers)) (high (apply #'max numbers)))
+                       (format "%s %s" (if (eq side 'new) "新" "旧")
+                               (if (= low high) low (format "%d-%d" low high))))))
+                 '(new old)))
+   " · "))
 
-(defun agent-review-annotate-line (review target text)
-  "Store TEXT as the user's annotation on TARGET of REVIEW; return it."
-  (let* ((id (agent-review--comment-id target))
+(defun agent-review--comment-id (lines)
+  "The ID of the annotation on LINES."
+  (agent-review--hash (cons (plist-get (car lines) :item)
+                            (cons (plist-get (car lines) :file)
+                                  (mapcar (lambda (line)
+                                            (list (plist-get line :side) (plist-get line :line)))
+                                          lines)))))
+
+(defun agent-review-annotate-lines (review lines text)
+  "Store TEXT as the user's annotation on LINES of REVIEW; return it.
+LINES are line targets of one file of one item, in order."
+  (let* ((id (agent-review--comment-id lines))
+         (item (plist-get (car lines) :item))
          (comments (agent-review--comments (plist-get review :id)))
          (previous (seq-find (lambda (c) (equal (plist-get c :id) id)) comments))
          (comment (list :id id :revision (1+ (or (plist-get previous :revision) 0))
-                        :item (plist-get target :item)
-                        :item-title (plist-get (agent-review--item review (plist-get target :item))
-                                               :title)
-                        :file (plist-get target :file)
-                        :side (plist-get target :side) :line (plist-get target :line)
-                        :code (plist-get target :code)
-                        :context (agent-review--context review target)
+                        :item item
+                        :item-title (plist-get (agent-review--item review item) :title)
+                        :file (plist-get (car lines) :file)
+                        :lines (mapcar (lambda (line)
+                                         (list :side (plist-get line :side)
+                                               :line (plist-get line :line)
+                                               :kind (plist-get line :kind)
+                                               :code (plist-get line :code)))
+                                       lines)
+                        :anchor (agent-review--line-key (car (last lines)))
+                        :range (agent-review--range-text lines)
+                        :code (mapconcat (lambda (line)
+                                           (concat (string (plist-get line :kind))
+                                                   (plist-get line :code)))
+                                         lines "\n")
                         :comment text :status "open"
                         :response (plist-get previous :response)
                         :created (or (plist-get previous :created) (agent-review--now))
@@ -655,22 +664,88 @@ review_comments" id (plist-get comment :revision)))
                                    (mapcar (lambda (c) (if (eq c comment) answered c)) comments))
       answered)))
 
-;;; Review buffer
+(defun agent-review--message (review comment)
+  "The message telling the agent about the annotation COMMENT of REVIEW.
+Like the selection context IDE integrations send, it carries the selected
+code and where it is, so the agent can answer without looking it up."
+  (let ((item (agent-review--item review (plist-get comment :item))))
+    (format "[原子审查%s] %s · %s
+%s %s（base %s → head %s）
+```diff
+%s
+```
+%s
+
+（review=%s，标注 id=%s，revision=%d。回答后用 review_reply 把同样的结论写回审查。）"
+            (if (> (plist-get comment :revision) 1) "·修改标注" "·标注")
+            (plist-get review :title)
+            (if (equal (plist-get item :id) "full")
+                "完整 diff"
+              (format "第 %d 项「%s」" (plist-get item :order) (plist-get item :title)))
+            (plist-get comment :file) (plist-get comment :range)
+            (substring (plist-get review :base-sha) 0 10)
+            (substring (plist-get review :head-sha) 0 10)
+            (plist-get comment :code) (plist-get comment :comment)
+            (plist-get review :id) (plist-get comment :id) (plist-get comment :revision))))
+
+;;; Review state: items marked reviewed and folds, kept with the review
+
+(defun agent-review--state (id)
+  "The stored view state of the review with ID: (:reviewed :folded :folded-files)."
+  (agent-review--read (agent-review--path id "state.eld")))
 
 (defvar-local agent-review--review nil "The review shown in this buffer.")
 (defvar-local agent-review--full nil "Non-nil to show the full diff instead of the items.")
 (defvar-local agent-review--folded nil "IDs of the folded items.")
+(defvar-local agent-review--folded-files nil "Folded files: a list of (ITEM . FILE).")
+(defvar-local agent-review--reviewed nil "IDs of the items the user marked reviewed.")
+(defvar-local agent-review--counts nil "(ANNOTATIONS . PENDING) of the review shown.")
 (defvar-local agent-review--highlighted nil "Cache of highlighted hunks: text -> lines.")
 (defvar-local agent-review--context nil "Context lines shown around each hunk.")
 (defvar-local agent-review--files nil
-  "Per-file data of the review shown: FILE -> (:source VECTOR :added HASH).")
+  "Per-file data of the review shown, see `agent-review--file-data'.")
+(defvar-local agent-review--nav nil "The sidebar buffer of this review buffer.")
+(defvar-local agent-review--current nil "The item at point at the last command.")
+
+(defun agent-review--save-state ()
+  "Store the view state of this review buffer."
+  (agent-review--write (agent-review--path (plist-get agent-review--review :id) "state.eld")
+                       (list :reviewed agent-review--reviewed
+                             :folded agent-review--folded
+                             :folded-files agent-review--folded-files)))
+
+(defun agent-review--load-state ()
+  "Restore the view state of this review buffer.
+A review opened for the first time shows only its first item unfolded."
+  (let ((state (agent-review--state (plist-get agent-review--review :id))))
+    (setq agent-review--reviewed (plist-get state :reviewed)
+          agent-review--folded-files (plist-get state :folded-files)
+          agent-review--folded
+          (if state
+              (plist-get state :folded)
+            (mapcar (lambda (item) (plist-get item :id))
+                    (cdr (plist-get agent-review--review :items)))))))
+
+;;; Review buffer
 
 (defcustom agent-review-context 3
   "Lines of the file shown before and after each hunk of an item."
   :type 'natnum)
 
+(defcustom agent-review-nav-width 40
+  "Width of the review sidebar."
+  :type 'natnum)
+
 (defface agent-review-other '((t :inherit shadow :extend t))
   "Context line changed by another item.")
+(defface agent-review-selected '((t :inherit region :extend t))
+  "Lines an annotation is being written for.")
+(defface agent-review-done '((t :inherit success))
+  "Mark of an item the user reviewed.")
+(defface agent-review-button '((t :inherit (header-line-highlight bold)))
+  "Clickable part of the header line.")
+(defface agent-review-current '((t :inherit highlight :extend t))
+  "The sidebar entry of the item at point.")
 
 (defun agent-review--file-data (review)
   "Index the head-side lines of each changed file of REVIEW.
@@ -757,12 +832,13 @@ used, so context never repeats lines shown elsewhere in the item."
                  cache))))
 
 (defun agent-review--insert-comment (comment)
-  "Insert the annotation COMMENT and its answer below its line."
+  "Insert the annotation COMMENT and its answer below its last line."
   (let ((start (point))
         (bar (propertize "  ┃ " 'face 'agent-review-comment)))
     (insert bar
-            (propertize (format "标注 · %s" (alist-get (plist-get comment :status)
-                                                       agent-review-statuses nil nil #'equal))
+            (propertize (format "标注 · %s · %s" (or (plist-get comment :range) "")
+                                (alist-get (plist-get comment :status)
+                                           agent-review-statuses nil nil #'equal))
                         'face '(bold agent-review-comment))
             "\n")
     (dolist (line (split-string (plist-get comment :comment) "\n"))
@@ -774,9 +850,10 @@ used, so context never repeats lines shown elsewhere in the item."
     (put-text-property start (point) 'agent-review-comment (plist-get comment :id))))
 
 (defun agent-review--insert-hunk (item file hunk comments width around)
-  "Insert HUNK of FILE in ITEM, with COMMENTS under their lines.
-WIDTH is the width of the line number columns; AROUND is the context to
-show, see `agent-review--around'."
+  "Insert HUNK of FILE in ITEM, with COMMENTS under their last lines.
+COMMENTS maps a line key to the annotations ending there.  WIDTH is the
+width of the line number columns; AROUND is the context to show, see
+`agent-review--around'."
   (let* ((lines (append (car around) (agent-review--hunk-lines file hunk) (cdr around)))
          (codes (agent-review--highlight file lines))
          (data (gethash file agent-review--files))
@@ -796,7 +873,7 @@ show, see `agent-review--around'."
                (side (if (eq kind ?-) 'old 'new))
                (target (list :item (plist-get item :id) :file file :side side
                              :line (plist-get line (if (eq side 'old) :old :new))
-                             :code (plist-get line :content)))
+                             :kind kind :code (plist-get line :content)))
                (face (cond ((and (plist-get line :context) added
                                  (gethash (plist-get line :new) added))
                             'agent-review-other)
@@ -812,56 +889,75 @@ show, see `agent-review--around'."
                       (propertize " ⏎ 文件末尾无换行" 'face 'agent-review-meta))
                     "\n")
             (when face (add-face-text-property code-start (point) face t)))
-          (when-let* ((comment (gethash (agent-review--comment-id target) comments)))
-            (agent-review--insert-comment comment))
-          (put-text-property start (point) 'agent-review-target target)))))
+          (put-text-property start (point) 'agent-review-target target)
+          (dolist (comment (gethash (agent-review--line-key target) comments))
+            (agent-review--insert-comment comment))))))
+
+(defun agent-review--fold-overlay (start property id folded)
+  "Make the region from START to point foldable as ID under PROPERTY.
+FOLDED says whether it starts folded."
+  (let ((overlay (make-overlay start (point))))
+    (overlay-put overlay property id)
+    (overlay-put overlay 'evaporate t)
+    (overlay-put overlay 'invisible folded)))
 
 (defun agent-review--insert-item (item comments width)
   "Insert ITEM: its heading, intent and diff, with COMMENTS under their lines.
 WIDTH is the width of the line number columns."
-  (let ((id (plist-get item :id)))
-    (insert (propertize (if (equal id "full")
-                            "完整 diff\n"
-                          (format "%d. [%s] %s\n" (plist-get item :order)
-                                  (alist-get (plist-get item :type) agent-review-types)
-                                  (plist-get item :title)))
-                        'face 'agent-review-item
-                        'agent-review-heading id))
+  (let ((id (plist-get item :id))
+        (start (point)))
+    (insert (if (equal id "full")
+                (propertize "完整 diff\n" 'face 'agent-review-item 'agent-review-heading id)
+              (concat (if (member id agent-review--reviewed)
+                          (propertize "✓ " 'face '(agent-review-done agent-review-item))
+                        (propertize "○ " 'face '(agent-review-meta agent-review-item)))
+                      (propertize (format "%d. [%s] %s\n" (plist-get item :order)
+                                          (alist-get (plist-get item :type) agent-review-types)
+                                          (plist-get item :title))
+                                  'face 'agent-review-item)))
+            "")
+    (put-text-property start (point) 'agent-review-heading id)
     (let ((body (point)))
       (when-let* ((intent (plist-get item :intent)))
         (insert intent "\n"))
       (dolist (block (agent-review--split-files (plist-get item :diff)))
         (let* ((file (plist-get block :file))
+               (key (cons id file))
+               (file-start (point))
                (source (plist-get (gethash file agent-review--files) :source))
                ;; The full diff has its own context.
                (context (if (equal id "full") 0 agent-review--context))
                (from 1))
-          (insert "\n" (propertize (concat file "\n") 'face 'agent-review-file))
-          (if (plist-get block :hunks)
-              (cl-loop
-               for (hunk next) on (plist-get block :hunks)
-               do (let ((around (agent-review--around
-                                 hunk source context from
-                                 (if next
-                                     (pcase-let ((`(,_ ,_ ,new ,count)
-                                                  (agent-review--hunk-range next)))
-                                       (if (> count 0) new (1+ new)))
-                                   most-positive-fixnum))))
-                    (agent-review--insert-hunk item file hunk comments width around)
-                    (setq from (1+ (if (cdr around)
-                                       (plist-get (car (last (cdr around))) :new)
-                                     (pcase-let ((`(,_ ,_ ,new ,count)
-                                                  (agent-review--hunk-range hunk)))
-                                       (if (> count 0) (+ new count -1) new)))))))
-            ;; Binary or metadata-only: show what git says about the file.
-            (insert (propertize (string-join (cdr (split-string (plist-get block :header) "\n"))
-                                             "\n")
-                                'face 'agent-review-meta)))))
+          (insert "\n" (propertize (concat file "\n") 'face 'agent-review-file
+                                   'agent-review-file-heading key))
+          (let ((file-body (point)))
+            (if (plist-get block :hunks)
+                (cl-loop
+                 for (hunk next) on (plist-get block :hunks)
+                 do (let ((around (agent-review--around
+                                   hunk source context from
+                                   (if next
+                                       (pcase-let ((`(,_ ,_ ,new ,count)
+                                                    (agent-review--hunk-range next)))
+                                         (if (> count 0) new (1+ new)))
+                                     most-positive-fixnum))))
+                      (agent-review--insert-hunk item file hunk comments width around)
+                      (setq from (1+ (if (cdr around)
+                                         (plist-get (car (last (cdr around))) :new)
+                                       (pcase-let ((`(,_ ,_ ,new ,count)
+                                                    (agent-review--hunk-range hunk)))
+                                         (if (> count 0) (+ new count -1) new)))))))
+              ;; Binary or metadata-only: show what git says about the file.
+              (insert (propertize (string-join (cdr (split-string (plist-get block :header) "\n"))
+                                               "\n")
+                                  'face 'agent-review-meta)))
+            (agent-review--fold-overlay file-body 'agent-review-file-body key
+                                        (and (member key agent-review--folded-files) t)))
+          (put-text-property file-start (point) 'agent-review-file-in key)))
       (insert "\n")
-      (let ((overlay (make-overlay body (point))))
-        (overlay-put overlay 'agent-review-body id)
-        (overlay-put overlay 'evaporate t)
-        (overlay-put overlay 'invisible (and (member id agent-review--folded) t))))))
+      (agent-review--fold-overlay body 'agent-review-body id
+                                  (and (member id agent-review--folded) t)))
+    (put-text-property start (point) 'agent-review-in id)))
 
 (defun agent-review--number-width (review files)
   "Width of the line number columns of REVIEW, whose file data is FILES."
@@ -879,7 +975,7 @@ WIDTH is the width of the line number columns."
   (let* ((review agent-review--review)
          (stats (plist-get review :stats))
          (comments (agent-review--comments (plist-get review :id)))
-         (by-id (make-hash-table :test #'equal))
+         (by-line (make-hash-table :test #'equal))
          (items (if agent-review--full
                     (list (agent-review--item review "full"))
                   (plist-get review :items)))
@@ -887,7 +983,11 @@ WIDTH is the width of the line number columns."
                     (setq agent-review--files (agent-review--file-data review))))
          (width (agent-review--number-width review files)))
     (unless agent-review--context (setq agent-review--context agent-review-context))
-    (dolist (comment comments) (puthash (plist-get comment :id) comment by-id))
+    (dolist (comment (reverse comments))
+      (push comment (gethash (plist-get comment :anchor) by-line)))
+    (setq agent-review--counts
+          (cons (length comments)
+                (seq-count (lambda (c) (equal (plist-get c :status) "open")) comments)))
     (insert (propertize (plist-get review :title) 'face 'agent-review-title) "\n"
             (propertize (format "%s %s → %s %s · %d 个文件 · +%d −%d · %d 项\n"
                                 (plist-get review :target-ref)
@@ -897,17 +997,54 @@ WIDTH is the width of the line number columns."
                                 (plist-get stats :files) (plist-get stats :additions)
                                 (plist-get stats :deletions) (plist-get stats :items))
                         'face 'agent-review-meta)
-            (propertize (format "标注 %d 条，待回应 %d 条 · a 标注  s 请 agent 回应  \
-TAB 折叠  f %s  RET 打开文件\n"
-                                (length comments)
-                                (seq-count (lambda (c) (equal (plist-get c :status) "open"))
-                                           comments)
-                                (if agent-review--full "按审查项查看" "完整 diff"))
+            (propertize "选中代码行按 a 写标注，直接发给 agent · r 已审阅 · o 目录 · C 标注列表 · \
+TAB 折叠 · f 切换视图 · RET 打开文件\n"
                         'face 'agent-review-meta)
             "\n" (propertize "本次变更概览\n" 'face 'agent-review-heading)
             (plist-get review :summary) "\n\n")
     (dolist (item items)
-      (agent-review--insert-item item by-id width))))
+      (agent-review--insert-item item by-line width))))
+
+(defun agent-review--item-at (pos)
+  "The item ID at POS, or nil."
+  (get-text-property pos 'agent-review-in))
+
+(defun agent-review--header-button (label command help)
+  "Header line button LABEL running COMMAND when clicked, with HELP."
+  (propertize label 'face 'agent-review-button 'mouse-face 'highlight
+              'help-echo help
+              'local-map (let ((map (make-sparse-keymap)))
+                           (keymap-set map "<header-line> <mouse-1>"
+                                       (lambda (event)
+                                         (interactive "e")
+                                         (with-selected-window (posn-window (event-start event))
+                                           (call-interactively command))))
+                           map)))
+
+(defun agent-review--header-line ()
+  "Contents of the header line of a review buffer."
+  (let* ((items (plist-get agent-review--review :items))
+         (ids (mapcar (lambda (item) (plist-get item :id)) items))
+         (current (agent-review--item-at (point)))
+         (item (and current (not agent-review--full)
+                    (agent-review--item agent-review--review current))))
+    (concat " "
+            (agent-review--header-button " 目录 " #'agent-review-toggle-nav "显示或隐藏审查目录")
+            " "
+            (agent-review--header-button (if agent-review--full " 原子审查 " " 完整 diff ")
+                                         #'agent-review-toggle-full "切换视图")
+            " "
+            (agent-review--header-button (format " 标注 %d · 待回应 %d "
+                                                 (or (car agent-review--counts) 0)
+                                                 (or (cdr agent-review--counts) 0))
+                                         #'agent-review-list-annotations "列出全部标注")
+            (propertize (format "  已审阅 %d/%d"
+                                (length (seq-intersection agent-review--reviewed ids))
+                                (length items))
+                        'face 'agent-review-meta)
+            (when item
+              (propertize (format "  ·  %d. %s" (plist-get item :order) (plist-get item :title))
+                          'face 'agent-review-meta)))))
 
 (defun agent-review--redraw ()
   "Redraw this review buffer, keeping point on the same line."
@@ -923,7 +1060,8 @@ TAB 折叠  f %s  RET 打开文件\n"
     (move-to-column column)
     (pcase-dolist (`(,window . ,start) windows)
       (set-window-start window (min start (point-max)) t)
-      (set-window-point window (point)))))
+      (set-window-point window (point))))
+  (agent-review--nav-refresh))
 
 (defun agent-review--buffers (id)
   "Live buffers showing the review with ID."
@@ -937,18 +1075,512 @@ TAB 折叠  f %s  RET 打开文件\n"
     (with-current-buffer buffer (agent-review--redraw))))
 
 (defun agent-review-show (review)
-  "Show REVIEW in its buffer, without selecting it; return the buffer."
+  "Show REVIEW and its sidebar, without selecting them; return the buffer."
   (let ((buffer (or (car (agent-review--buffers (plist-get review :id)))
                     (generate-new-buffer (format "*review: %s*" (plist-get review :title))))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'agent-review-mode) (agent-review-mode))
       (setq agent-review--review review)
+      (agent-review--load-state)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (agent-review--render))
       (goto-char (point-min)))
     (agent-ui--show-buffer buffer)
+    (with-current-buffer buffer
+      (agent-review--display-nav (agent-review--nav-buffer)))
     buffer))
+
+;;; Folding and moving
+
+(defun agent-review--find (property value)
+  "Start of the text whose PROPERTY is VALUE, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((match (text-property-search-forward property value t)))
+      (prop-match-beginning match))))
+
+(defun agent-review--set-folded (id fold)
+  "Fold item ID, or the file ID of the form (ITEM . FILE), when FOLD.
+Unfold it otherwise."
+  (let ((file (consp id)))
+    (when-let* ((overlay (seq-find (lambda (o)
+                                     (equal (overlay-get o (if file 'agent-review-file-body
+                                                             'agent-review-body))
+                                            id))
+                                   (overlays-in (point-min) (point-max)))))
+      (overlay-put overlay 'invisible fold))
+    (if file
+        (setq agent-review--folded-files
+              (if fold (cl-adjoin id agent-review--folded-files :test #'equal)
+                (remove id agent-review--folded-files)))
+      (setq agent-review--folded
+            (if fold (cl-adjoin id agent-review--folded :test #'equal)
+              (remove id agent-review--folded))))
+    (agent-review--save-state)))
+
+(defun agent-review--reveal ()
+  "Unfold the item and file at point."
+  (when-let* ((id (agent-review--item-at (point))))
+    (when (member id agent-review--folded) (agent-review--set-folded id nil)))
+  (when-let* ((file (get-text-property (point) 'agent-review-file-in)))
+    (when (member file agent-review--folded-files) (agent-review--set-folded file nil))))
+
+(defun agent-review-goto (id)
+  "Unfold and move to item ID, or to the file ID of the form (ITEM . FILE)."
+  (let ((pos (or (agent-review--find (if (consp id) 'agent-review-file-heading
+                                       'agent-review-heading)
+                                     id)
+                 (user-error "当前视图里没有它"))))
+    (when (consp id) (agent-review--set-folded (car id) nil))
+    (agent-review--set-folded id nil)
+    (goto-char pos)
+    (when-let* ((window (get-buffer-window)))
+      (with-selected-window window (recenter 0)))))
+
+(defun agent-review-toggle ()
+  "Fold or unfold the file at point when on its name, else the item at point."
+  (interactive)
+  (if-let* ((file (get-text-property (point) 'agent-review-file-heading)))
+      (agent-review--set-folded file (not (member file agent-review--folded-files)))
+    (let* ((id (or (agent-review--item-at (point)) (user-error "这里不在审查项里")))
+           (fold (not (member id agent-review--folded))))
+      (agent-review--set-folded id fold)
+      (when fold (goto-char (agent-review--find 'agent-review-heading id))))))
+
+(defun agent-review--move (property forward)
+  "Move to the next start of text with PROPERTY, or the previous unless FORWARD."
+  (let ((match (if forward
+                   (save-excursion
+                     (when (get-text-property (point) property)
+                       (goto-char (or (next-single-property-change (point) property) (point-max))))
+                     (text-property-search-forward property nil (lambda (_ v) v) t))
+                 (save-excursion
+                   (when (get-text-property (point) property)
+                     (goto-char (or (previous-single-property-change (1+ (point)) property)
+                                    (point-min))))
+                   (text-property-search-backward property nil (lambda (_ v) v) t)))))
+    (if match (goto-char (prop-match-beginning match)) (message "没有了"))))
+
+(defun agent-review-next-item ()
+  "Move to the next item."
+  (interactive)
+  (agent-review--move 'agent-review-heading t))
+
+(defun agent-review-previous-item ()
+  "Move to the previous item."
+  (interactive)
+  (agent-review--move 'agent-review-heading nil))
+
+(defun agent-review-next-annotation ()
+  "Move to the next annotation, unfolding it."
+  (interactive)
+  (agent-review--move 'agent-review-comment t)
+  (agent-review--reveal))
+
+(defun agent-review-previous-annotation ()
+  "Move to the previous annotation, unfolding it."
+  (interactive)
+  (agent-review--move 'agent-review-comment nil)
+  (agent-review--reveal))
+
+(defun agent-review--imenu-index ()
+  "Index of the items, or of the files in the full diff, for imenu."
+  (let ((property (if agent-review--full 'agent-review-file-heading 'agent-review-heading))
+        index)
+    (save-excursion
+      (goto-char (point-min))
+      (while-let ((match (text-property-search-forward property nil (lambda (_ v) v) t)))
+        (push (cons (string-trim (buffer-substring-no-properties (prop-match-beginning match)
+                                                                 (prop-match-end match)))
+                    (prop-match-beginning match))
+              index)))
+    (nreverse index)))
+
+;;; Reviewed items
+
+(defun agent-review--mark-reviewed (id)
+  "Toggle whether item ID is marked reviewed; return the new state."
+  (when (equal id "full") (user-error "完整 diff 不能标记已审阅"))
+  (let ((done (not (member id agent-review--reviewed))))
+    (setq agent-review--reviewed (if done (cons id agent-review--reviewed)
+                                   (remove id agent-review--reviewed)))
+    (agent-review--save-state)
+    (agent-review--redraw)
+    done))
+
+(defun agent-review-toggle-reviewed ()
+  "Mark the item at point reviewed, or not reviewed again."
+  (interactive)
+  (let ((id (or (agent-review--item-at (point)) (user-error "这里不在审查项里"))))
+    (message (if (agent-review--mark-reviewed id) "已标记为已审阅" "已取消已审阅"))))
+
+;;; Sidebar
+
+(defvar-local agent-review-nav--review-buffer nil "The review buffer this sidebar lists.")
+(defvar-local agent-review-nav--filter nil "Only entries matching this text are listed.")
+(defvar-local agent-review-nav--overlay nil "Highlight of the entry of the current item.")
+
+(defun agent-review--nav-entries ()
+  "Sidebar entries of this review buffer: a list of (ID TITLE DETAIL TEXT).
+TEXT is what the filter matches."
+  (if agent-review--full
+      (mapcar (lambda (file)
+                (let ((name (plist-get file :file)))
+                  (list (cons "full" name) name nil name)))
+              (plist-get agent-review--review :full-files))
+    (mapcar (lambda (item)
+              (let ((files (string-join (plist-get item :files) " · ")))
+                (list (plist-get item :id)
+                      (format "%d. [%s] %s" (plist-get item :order)
+                              (alist-get (plist-get item :type) agent-review-types)
+                              (plist-get item :title))
+                      files
+                      (concat (plist-get item :title) " " (plist-get item :intent) " " files))))
+            (plist-get agent-review--review :items))))
+
+(defvar-keymap agent-review-nav-entry-map
+  :doc "Mouse keys on sidebar entries."
+  "<mouse-1>" #'agent-review-nav-click)
+
+(defun agent-review--nav-render ()
+  "Draw this sidebar from its review buffer."
+  (let* ((source agent-review-nav--review-buffer)
+         (filter agent-review-nav--filter)
+         (inhibit-read-only t))
+    (with-current-buffer source
+      (let* ((review agent-review--review)
+             (reviewed agent-review--reviewed)
+             (current agent-review--current)
+             (counts (make-hash-table :test #'equal))
+             (entries (agent-review--nav-entries))
+             (items (plist-get review :items)))
+        (dolist (comment (agent-review--comments (plist-get review :id)))
+          (cl-incf (gethash (plist-get comment :item) counts 0))
+          (cl-incf (gethash (cons (plist-get comment :item) (plist-get comment :file)) counts 0)))
+        (with-current-buffer (buffer-local-value 'agent-review--nav source)
+          (erase-buffer)
+          (insert (propertize "原子审查" 'face 'agent-review-heading)
+                  (propertize (format "  %d 项 · 已审阅 %d\n" (length items)
+                                      (seq-count (lambda (item)
+                                                   (member (plist-get item :id) reviewed))
+                                                 items))
+                              'face 'agent-review-meta))
+          (when filter
+            (insert (propertize (format "过滤：%s（/ 修改，空串清除）\n" filter)
+                                'face 'agent-review-meta)))
+          (insert "\n")
+          (pcase-dolist (`(,id ,title ,detail ,text) entries)
+            (when (or (null filter) (string-search (downcase filter) (downcase text)))
+              (let ((start (point))
+                    (n (gethash id counts 0)))
+                (insert (if (member id reviewed) (propertize "✓ " 'face 'agent-review-done) "  ")
+                        (propertize title 'mouse-face 'highlight
+                                    'keymap agent-review-nav-entry-map
+                                    'help-echo "跳到这一项")
+                        (if (> n 0) (propertize (format "  ✎%d" n) 'face 'agent-review-comment) "")
+                        "\n")
+                (when detail
+                  (insert (propertize (concat "    " detail "\n") 'face 'agent-review-meta)))
+                (put-text-property start (point) 'agent-review-nav id))))
+          (insert "\n" (propertize "RET 跳转 · r 已审阅 · / 过滤 · g 刷新 · q 关闭\n"
+                                   'face 'agent-review-meta))
+          (agent-review--nav-highlight current))))))
+
+(defun agent-review--nav-highlight (id)
+  "Highlight the sidebar entry of ID and keep it in view."
+  (let ((pos (and id (save-excursion
+                       (goto-char (point-min))
+                       (when-let* ((match (text-property-search-forward 'agent-review-nav id t)))
+                         (cons (prop-match-beginning match) (prop-match-end match)))))))
+    (if (null pos)
+        (when agent-review-nav--overlay (delete-overlay agent-review-nav--overlay))
+      (unless (overlayp agent-review-nav--overlay)
+        (setq agent-review-nav--overlay (make-overlay 1 1))
+        (overlay-put agent-review-nav--overlay 'face 'agent-review-current))
+      (move-overlay agent-review-nav--overlay (car pos) (cdr pos) (current-buffer))
+      (when-let* ((window (get-buffer-window)))
+        (set-window-point window (car pos))))))
+
+(defun agent-review--nav-buffer ()
+  "The sidebar buffer of this review buffer, drawn afresh."
+  (unless (buffer-live-p agent-review--nav)
+    (let ((source (current-buffer)))
+      (setq agent-review--nav
+            (generate-new-buffer (format "*review-nav: %s*" (plist-get agent-review--review :title))))
+      (with-current-buffer agent-review--nav
+        (agent-review-nav-mode)
+        (setq agent-review-nav--review-buffer source))))
+  (with-current-buffer agent-review--nav (agent-review--nav-render))
+  agent-review--nav)
+
+(defun agent-review--nav-refresh ()
+  "Redraw the sidebar of this review buffer, if it has one."
+  (when (buffer-live-p agent-review--nav)
+    (with-current-buffer agent-review--nav (agent-review--nav-render))))
+
+(defun agent-review--display-nav (buffer)
+  "Show the sidebar BUFFER in a side window on the left."
+  (display-buffer-in-side-window
+   buffer `((side . left) (slot . 1) (window-width . ,agent-review-nav-width)
+            (dedicated . t) (window-parameters (no-delete-other-windows . t)))))
+
+(defun agent-review-toggle-nav ()
+  "Show or hide the sidebar of this review."
+  (interactive)
+  (let ((buffer (agent-review--nav-buffer)))
+    (if-let* ((window (get-buffer-window buffer)))
+        (delete-window window)
+      (agent-review--display-nav buffer))))
+
+(defun agent-review--kill-nav ()
+  "Kill the sidebar of this review buffer with it."
+  (when (buffer-live-p agent-review--nav) (kill-buffer agent-review--nav)))
+
+(defun agent-review--track ()
+  "Highlight the sidebar entry of the item at point when it changes."
+  (let ((id (if agent-review--full
+                (get-text-property (point) 'agent-review-file-in)
+              (agent-review--item-at (point)))))
+    (unless (equal id agent-review--current)
+      (setq agent-review--current id)
+      (when (buffer-live-p agent-review--nav)
+        (with-current-buffer agent-review--nav (agent-review--nav-highlight id))))))
+
+(defun agent-review--nav-source ()
+  "The live review buffer of this sidebar."
+  (let ((buffer agent-review-nav--review-buffer))
+    (unless (buffer-live-p buffer) (user-error "审查 buffer 已关闭"))
+    buffer))
+
+(defun agent-review-nav-visit ()
+  "Show the entry at point in the review buffer."
+  (interactive)
+  (let ((id (or (get-text-property (point) 'agent-review-nav) (user-error "这里没有条目")))
+        (buffer (agent-review--nav-source)))
+    (select-window (or (get-buffer-window buffer) (agent-ui--show-buffer buffer)))
+    (agent-review-goto id)))
+
+(defun agent-review-nav-click (event)
+  "Show the entry clicked with EVENT in the review buffer."
+  (interactive "e")
+  (mouse-set-point event)
+  (agent-review-nav-visit))
+
+(defun agent-review-nav-toggle-reviewed ()
+  "Mark the item at point reviewed, or not reviewed again."
+  (interactive)
+  (let ((id (or (get-text-property (point) 'agent-review-nav) (user-error "这里没有条目"))))
+    (with-current-buffer (agent-review--nav-source)
+      (agent-review--mark-reviewed id))))
+
+(defun agent-review-nav-filter (text)
+  "List only the entries whose title, intent or files contain TEXT.
+An empty TEXT lists all of them."
+  (interactive (list (read-string "过滤（标题 / 意图 / 文件）：" agent-review-nav--filter)))
+  (setq agent-review-nav--filter (unless (string-blank-p text) (string-trim text)))
+  (agent-review--nav-render))
+
+(defvar-keymap agent-review-nav-mode-map
+  :doc "Keys for the review sidebar."
+  "RET" #'agent-review-nav-visit
+  "r" #'agent-review-nav-toggle-reviewed
+  "/" #'agent-review-nav-filter
+  "n" #'next-line
+  "p" #'previous-line)
+
+(define-derived-mode agent-review-nav-mode special-mode "Review-Nav"
+  "Sidebar listing the items of a review."
+  (setq-local truncate-lines t
+              revert-buffer-function (lambda (&rest _) (agent-review--nav-render))))
+
+;;; Annotation list
+
+(defvar-local agent-review-notes--review-buffer nil "The review buffer of this list.")
+
+(defun agent-review-notes--entries ()
+  "Rows of this annotation list."
+  (with-current-buffer (agent-review--notes-source)
+    (let ((review agent-review--review))
+      (mapcar (lambda (comment)
+                (let ((item (agent-review--item review (plist-get comment :item))))
+                  (list (plist-get comment :id)
+                        (vector (alist-get (plist-get comment :status) agent-review-statuses
+                                           nil nil #'equal)
+                                (format "%s %s" (file-name-nondirectory (plist-get comment :file))
+                                        (or (plist-get comment :range) ""))
+                                (if (equal (plist-get item :id) "full") "完整 diff"
+                                  (format "%d. %s" (plist-get item :order) (plist-get item :title)))
+                                (car (split-string (plist-get comment :comment) "\n"))))))
+              (agent-review--comments (plist-get review :id))))))
+
+(defun agent-review--notes-source ()
+  "The live review buffer of this annotation list."
+  (let ((buffer agent-review-notes--review-buffer))
+    (unless (buffer-live-p buffer) (user-error "审查 buffer 已关闭"))
+    buffer))
+
+(defun agent-review-list-annotations ()
+  "List all annotations of this review."
+  (interactive)
+  (let ((source (current-buffer))
+        (buffer (get-buffer-create (format "*review-notes: %s*"
+                                           (plist-get agent-review--review :title)))))
+    (with-current-buffer buffer
+      (agent-review-notes-mode)
+      (setq agent-review-notes--review-buffer source)
+      (revert-buffer))
+    (pop-to-buffer buffer '((display-buffer-below-selected) (window-height . 12)))))
+
+(defun agent-review-goto-annotation (id)
+  "Unfold and move to the annotation with ID."
+  (let ((comment (seq-find (lambda (c) (equal (plist-get c :id) id))
+                           (agent-review--comments (plist-get agent-review--review :id)))))
+    (when comment
+      (agent-review--set-folded (plist-get comment :item) nil)
+      (agent-review--set-folded (cons (plist-get comment :item) (plist-get comment :file)) nil))
+    (goto-char (or (agent-review--find 'agent-review-comment id)
+                   (user-error "当前视图里没有这条标注，按 f 切换视图试试")))
+    (when-let* ((window (get-buffer-window))) (with-selected-window window (recenter)))))
+
+(defun agent-review-notes-visit ()
+  "Show the annotation at point in the review buffer."
+  (interactive)
+  (let ((id (or (tabulated-list-get-id) (user-error "这里没有标注")))
+        (buffer (agent-review--notes-source)))
+    (select-window (or (get-buffer-window buffer) (agent-ui--show-buffer buffer)))
+    (agent-review-goto-annotation id)))
+
+(defvar-keymap agent-review-notes-mode-map
+  :doc "Keys for the annotation list."
+  "RET" #'agent-review-notes-visit)
+
+(define-derived-mode agent-review-notes-mode tabulated-list-mode "Review-Notes"
+  "List of the annotations of a review."
+  (setq tabulated-list-format [("状态" 6 t) ("位置" 30 t) ("审查项" 30 t) ("标注" 0 nil)]
+        tabulated-list-padding 1)
+  (add-hook 'tabulated-list-revert-hook
+            (lambda () (setq tabulated-list-entries (agent-review-notes--entries)))
+            nil t)
+  (tabulated-list-init-header))
+
+;;; Writing annotations
+
+(defvar-local agent-review--note nil
+  "In a note buffer: (:buffer REVIEW-BUFFER :lines LINES :overlay OVERLAY).")
+
+(defun agent-review--lines-between (start end)
+  "Line targets of the review lines from START to END, in order."
+  (save-excursion
+    (let ((last (progn (goto-char (if (> end start) (1- end) end)) (line-beginning-position)))
+          lines)
+      (goto-char start)
+      (beginning-of-line)
+      (while (and (<= (point) last) (not (eobp)))
+        (when-let* ((target (get-text-property (point) 'agent-review-target)))
+          (unless (member target lines) (push target lines)))
+        (forward-line 1))
+      (nreverse lines))))
+
+(defun agent-review--comment-at (pos)
+  "The annotation shown at POS, or nil."
+  (when-let* ((id (get-text-property pos 'agent-review-comment)))
+    (seq-find (lambda (c) (equal (plist-get c :id) id))
+              (agent-review--comments (plist-get agent-review--review :id)))))
+
+(defun agent-review--comment-lines (comment)
+  "The line targets the annotation COMMENT covers."
+  (mapcar (lambda (line)
+            (list :item (plist-get comment :item) :file (plist-get comment :file)
+                  :side (plist-get line :side) :line (plist-get line :line)
+                  :kind (plist-get line :kind) :code (plist-get line :code)))
+          (plist-get comment :lines)))
+
+(defun agent-review-annotate (start end)
+  "Write an annotation on the lines from START to END and send it to the agent.
+Without an active region, annotate the line at point; on an annotation,
+edit it.  The annotation is written in a buffer below; it goes to the
+session that made the review, with the selected code, when sent."
+  (interactive (if (use-region-p)
+                   (list (region-beginning) (region-end))
+                 (list (point) (point))))
+  (let* ((existing (and (= start end) (agent-review--comment-at start)))
+         (lines (if existing (agent-review--comment-lines existing)
+                  (agent-review--lines-between start end)))
+         (first (car lines)))
+    (unless lines (user-error "选中的地方没有代码行"))
+    (unless (seq-every-p (lambda (line)
+                           (and (equal (plist-get line :item) (plist-get first :item))
+                                (equal (plist-get line :file) (plist-get first :file))))
+                         lines)
+      (user-error "一条标注只能选同一审查项里同一个文件的行"))
+    (let* ((id (agent-review--comment-id lines))
+           (previous (or existing
+                         (seq-find (lambda (c) (equal (plist-get c :id) id))
+                                   (agent-review--comments (plist-get agent-review--review :id)))))
+           (overlay (make-overlay (save-excursion (goto-char start) (line-beginning-position))
+                                  (save-excursion (goto-char (if (> end start) (1- end) end))
+                                                  (line-beginning-position 2))))
+           (source (current-buffer))
+           (buffer (get-buffer-create "*review-note*")))
+      (overlay-put overlay 'face 'agent-review-selected)
+      (deactivate-mark)
+      (with-current-buffer buffer
+        (agent-review--note-cleanup)
+        (agent-review-note-mode)
+        (erase-buffer)
+        (when previous (insert (plist-get previous :comment)))
+        (setq agent-review--note (list :buffer source :lines lines :overlay overlay)
+              header-line-format
+              (format " %s %s%s · C-c C-c 发给 agent · C-c C-k 取消"
+                      (plist-get first :file) (agent-review--range-text lines)
+                      (if previous "（修改）" "")))
+        (add-hook 'kill-buffer-hook #'agent-review--note-cleanup nil t))
+      (select-window (display-buffer buffer '((display-buffer-below-selected)
+                                              (window-height . 8))))
+      (goto-char (point-max)))))
+
+(defun agent-review--note-cleanup ()
+  "Remove the highlight of the lines this note buffer annotates."
+  (when-let* ((overlay (plist-get agent-review--note :overlay)))
+    (delete-overlay overlay)))
+
+(defun agent-review--note-close ()
+  "Close this note buffer and its window."
+  (agent-review--note-cleanup)
+  (setq agent-review--note nil)
+  (quit-window t))
+
+(defun agent-review-note-send ()
+  "Save the annotation and send it to the agent session of the review."
+  (interactive)
+  (let* ((note agent-review--note)
+         (text (string-trim (buffer-string)))
+         (source (plist-get note :buffer)))
+    (when (string-empty-p text) (user-error "标注是空的"))
+    (unless (buffer-live-p source) (user-error "审查 buffer 已关闭"))
+    (let* ((session (agent-review--session-buffer (buffer-local-value 'agent-review--review source)))
+           (agent (buffer-local-value 'agent-session--current session)))
+      (when (eq (agent-session-status agent) 'exited) (user-error "agent 进程已退出"))
+      (let* ((review (buffer-local-value 'agent-review--review source))
+             (comment (agent-review-annotate-lines review (plist-get note :lines) text)))
+        (agent-review--note-close)
+        (agent-review--refresh (plist-get review :id))
+        (agent-session-submit agent (agent-review--message review comment))
+        (message "标注已发给 %s" (buffer-name session))))))
+
+(defun agent-review-note-cancel ()
+  "Close this note buffer without sending it."
+  (interactive)
+  (agent-review--note-close))
+
+(defvar-keymap agent-review-note-mode-map
+  :doc "Keys for writing an annotation."
+  "C-c C-c" #'agent-review-note-send
+  "C-c C-k" #'agent-review-note-cancel)
+
+(define-derived-mode agent-review-note-mode text-mode "Review-Note"
+  "Write an annotation: C-c C-c sends it to the agent, C-c C-k cancels.")
 
 ;;; Commands
 
@@ -957,29 +1589,10 @@ TAB 折叠  f %s  RET 打开文件\n"
   (or (get-text-property (point) 'agent-review-target)
       (user-error "这里不是代码行")))
 
-(defun agent-review--comment-at ()
-  "The annotation on the line at point, or nil."
-  (when-let* ((target (get-text-property (point) 'agent-review-target)))
-    (let ((id (agent-review--comment-id target)))
-      (seq-find (lambda (c) (equal (plist-get c :id) id))
-                (agent-review--comments (plist-get agent-review--review :id))))))
-
-(defun agent-review-annotate ()
-  "Annotate the code line at point, or edit its annotation."
-  (interactive)
-  (let* ((target (agent-review--target))
-         (old (agent-review--comment-at))
-         (text (string-trim (read-string (if old "修改标注：" "标注：")
-                                         (plist-get old :comment)))))
-    (when (string-empty-p text) (user-error "标注是空的"))
-    (agent-review-annotate-line agent-review--review target text)
-    (agent-review--refresh (plist-get agent-review--review :id))
-    (message "已保存标注；按 s 请 agent 回应")))
-
 (defun agent-review-delete-annotation ()
-  "Delete the annotation on the line at point."
+  "Delete the annotation at point."
   (interactive)
-  (let ((comment (or (agent-review--comment-at) (user-error "这一行没有标注")))
+  (let ((comment (or (agent-review--comment-at (point)) (user-error "光标不在标注上")))
         (id (plist-get agent-review--review :id)))
     (when (yes-or-no-p "删除这条标注？")
       (agent-review--save-comments id (remove comment (agent-review--comments id)))
@@ -1020,19 +1633,6 @@ the review's project first, and the choice is stored with the review."
           (agent-review--set-agent review name)
           (get-buffer name))))))
 
-(defun agent-review-ask ()
-  "Ask the session that made this review to answer the pending annotations."
-  (interactive)
-  (let* ((review agent-review--review)
-         (pending (seq-count (lambda (c) (equal (plist-get c :status) "open"))
-                             (agent-review--comments (plist-get review :id)))))
-    (when (zerop pending) (user-error "没有待回应的标注"))
-    (let ((buffer (agent-review--session-buffer review)))
-      (agent-session-submit (buffer-local-value 'agent-session--current buffer)
-                            (format "请回应原子审查「%s」中 %d 条待回应的标注（review_comments review=%s）。"
-                                    (plist-get review :title) pending (plist-get review :id)))
-      (agent-session-display buffer))))
-
 (defun agent-review-visit ()
   "Visit the line at point: the project file, or the base version of a removed line."
   (interactive)
@@ -1057,64 +1657,16 @@ the review's project first, and the choice is stored with the review."
     (goto-char (point-min))
     (forward-line (1- (plist-get target :line)))))
 
-(defun agent-review-toggle ()
-  "Fold or unfold the item at point."
-  (interactive)
-  (let* ((id (or (get-text-property (point) 'agent-review-heading)
-                 (seq-some (lambda (o) (overlay-get o 'agent-review-body)) (overlays-at (point)))
-                 (user-error "这里不在审查项里")))
-         (overlay (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) id))
-                            (overlays-in (point-min) (point-max))))
-         (fold (not (overlay-get overlay 'invisible))))
-    (overlay-put overlay 'invisible fold)
-    (setq agent-review--folded (if fold (cons id agent-review--folded)
-                                 (remove id agent-review--folded)))
-    (when fold
-      (goto-char (overlay-start overlay))
-      (forward-line -1))))
-
-(defun agent-review--move (property forward)
-  "Move to the next start of text with PROPERTY, or the previous unless FORWARD."
-  (let ((match (if forward
-                   (save-excursion
-                     (when (get-text-property (point) property)
-                       (goto-char (or (next-single-property-change (point) property) (point-max))))
-                     (text-property-search-forward property nil (lambda (_ v) v) t))
-                 (save-excursion
-                   (when (get-text-property (point) property)
-                     (goto-char (or (previous-single-property-change (1+ (point)) property)
-                                    (point-min))))
-                   (text-property-search-backward property nil (lambda (_ v) v) t)))))
-    (if match (goto-char (prop-match-beginning match)) (message "没有了"))))
-
-(defun agent-review-next-item ()
-  "Move to the next item."
-  (interactive)
-  (agent-review--move 'agent-review-heading t))
-
-(defun agent-review-previous-item ()
-  "Move to the previous item."
-  (interactive)
-  (agent-review--move 'agent-review-heading nil))
-
-(defun agent-review-next-annotation ()
-  "Move to the next annotation."
-  (interactive)
-  (agent-review--move 'agent-review-comment t))
-
-(defun agent-review-previous-annotation ()
-  "Move to the previous annotation."
-  (interactive)
-  (agent-review--move 'agent-review-comment nil))
-
 (defun agent-review-toggle-full ()
   "Switch between the items and the full diff."
   (interactive)
-  (setq agent-review--full (not agent-review--full))
+  (setq agent-review--full (not agent-review--full)
+        agent-review--current nil)
   (let ((inhibit-read-only t))
     (erase-buffer)
     (agent-review--render))
-  (goto-char (point-min)))
+  (goto-char (point-min))
+  (agent-review--nav-refresh))
 
 (defun agent-review-more-context (&optional n)
   "Show N more lines of context around each hunk; N defaults to 5.
@@ -1152,7 +1704,9 @@ A negative N shows fewer."
   "[" #'agent-review-previous-annotation
   "a" #'agent-review-annotate
   "d" #'agent-review-delete-annotation
-  "s" #'agent-review-ask
+  "r" #'agent-review-toggle-reviewed
+  "o" #'agent-review-toggle-nav
+  "C" #'agent-review-list-annotations
   "RET" #'agent-review-visit
   "f" #'agent-review-toggle-full
   "+" #'agent-review-more-context
@@ -1162,7 +1716,12 @@ A negative N shows fewer."
   "Review the atomic items of a branch's changes and annotate their lines."
   (setq-local truncate-lines nil
               word-wrap t
-              revert-buffer-function (lambda (&rest _) (agent-review--redraw))))
+              header-line-format '(:eval (agent-review--header-line))
+              imenu-create-index-function #'agent-review--imenu-index
+              revert-buffer-function (lambda (&rest _) (agent-review--redraw)))
+  (add-hook 'post-command-hook #'agent-review--track nil t)
+  (add-hook 'imenu-after-jump-hook #'agent-review--reveal nil t)
+  (add-hook 'kill-buffer-hook #'agent-review--kill-nav nil t))
 
 ;;; Methods
 
@@ -1175,9 +1734,9 @@ A negative N shows fewer."
   (list :id (plist-get comment :id) :revision (plist-get comment :revision)
         :status (plist-get comment :status)
         :item (plist-get comment :item) :item_title (plist-get comment :item-title)
-        :file (plist-get comment :file) :side (symbol-name (plist-get comment :side))
-        :line (plist-get comment :line) :code (plist-get comment :code)
-        :context (agent-ui--json-value (plist-get comment :context))
+        :file (plist-get comment :file)
+        :lines (or (plist-get comment :range) "")
+        :code (plist-get comment :code)
         :comment (plist-get comment :comment)
         :response (agent-ui--json-value (plist-get comment :response))))
 
@@ -1227,7 +1786,7 @@ Every changed line must be covered exactly once. When review_build reports a cov
      (summary string "Overview of the whole compared change, in Chinese" required)
      (items array "The atomic items, see review_snapshot for the format" required)
      (title string "Review title. Default: <head> → <base>"))
-  "Assemble your plan for a snapshot (item format: see review_snapshot), check that every changed line is covered exactly once, and show the review in Emacs. Building the same plan again reopens the existing review with its annotations; a changed plan makes a new review and leaves the old one. Afterwards give the user the base/head and a short result, and tell them to annotate lines in the review buffer (a on a line) and press s when they want you to answer. Do not wait or poll for annotations."
+  "Assemble your plan for a snapshot (item format: see review_snapshot), check that every changed line is covered exactly once, and show the review in Emacs. Building the same plan again reopens the existing review with its annotations; a changed plan makes a new review and leaves the old one. Afterwards give the user the base/head and a short result, and tell them to select lines in the review buffer and press a to write an annotation. Each annotation arrives in this session as a user message carrying the selected code, its file and line range, and the review and annotation ids: answer it there and write the same answer to the review with review_reply. Do not wait or poll for annotations."
   (let* ((snap (agent-review--load-snapshot snapshot))
          (review (agent-review-build snap summary items title
                                      (plist-get agent-ui-caller :agent_buffer)))
@@ -1239,7 +1798,7 @@ Every changed line must be covered exactly once. When review_build reports a cov
 (agent-ui-defmethod "review_comments"
     ((review string "Review id. Default: every review made by this session")
      (all boolean "Include annotations already answered"))
-  "Read the user's annotations of atomic reviews: item, file, side (old: removed line at the merge base, new: line at head), line, the code and its diff context, revision and the user's text. Treat them as the user's review comments: check each against the pinned commits, answer in this session, and write the same answer to the review with review_reply. Answering is not permission to change the code; change it only when the user asks."
+  "Read the user's annotations of atomic reviews: item, file, the line range they cover (新: lines at head, 旧: lines at the merge base), the selected code as diff lines, revision and the user's text. Each annotation was also sent to the session as a message when written; use this to re-read them. Treat them as the user's review comments: check each against the pinned commits, answer in this session, and write the same answer to the review with review_reply. Answering is not permission to change the code; change it only when the user asks."
   (let* ((agent (plist-get agent-ui-caller :agent_buffer))
          (root (agent-ui--caller-root))
          (ids (cond (review (list review))

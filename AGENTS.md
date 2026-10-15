@@ -90,8 +90,9 @@ var/                     runtime state (history, backups, pasted images...); git
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
 - `agent-review.el` — atomic reviews of a branch: `review_snapshot` pins base/head and
   lists hunks, the agent plans items, `review_build` checks every changed line is covered
-  exactly once and shows a review buffer where the user annotates lines; `s` there asks
-  the originating session to answer (`review_comments` / `review_reply`). Git runs in the
+  exactly once and shows a review buffer with a sidebar of items. The user selects lines
+  and writes an annotation, which is sent straight to the originating session with the
+  selected code; the agent answers with `review_reply`. Git runs in the
   caller's root through its file handler, so remote projects need nothing on the host.
   Data lives under `var/reviews/` as Lisp data.
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
