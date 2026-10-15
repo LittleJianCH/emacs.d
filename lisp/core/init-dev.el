@@ -1,4 +1,4 @@
-;;; init-dev.el --- 项目、git、语言服务 -*- lexical-binding: t; -*-
+;;; init-dev.el --- Projects, git, language servers -*- lexical-binding: t; -*-
 
 (use-package project
   :custom
@@ -7,7 +7,7 @@
                              (project-dired "Dired" ?d)
                              (magit-project-status "Magit" ?m))))
 
-;;; Git：审查 agent 的改动主要靠这两个
+;;; Git: the main tools for reviewing agent changes
 
 (use-package magit
   :ensure t
@@ -16,7 +16,7 @@
   (magit-display-buffer-function #'magit-display-buffer-same-window-except-diff-v1)
   (magit-diff-refine-hunk 'all))
 
-;; 行号旁的改动标记，agent 改了哪里一眼可见。
+;; Change markers next to line numbers show at a glance what an agent changed.
 (use-package diff-hl
   :ensure t
   :demand t
@@ -30,7 +30,7 @@
   (ediff-window-setup-function #'ediff-setup-windows-plain)
   (ediff-split-window-function #'split-window-horizontally))
 
-;;; 语言服务与诊断
+;;; Language servers and diagnostics
 
 (use-package eglot
   :commands (eglot eglot-ensure)
@@ -44,8 +44,9 @@
   (eglot-events-buffer-config '(:size 0)))
 
 (defun my/eglot-format-on-save ()
-  "保存前用语言服务器格式化当前 buffer（eglot 已连接时才生效）。
-语言模块把它挂到各自的 mode hook 上。"
+  "Format the current buffer with the language server before saving.
+Only takes effect when eglot is connected.  Language modules add this
+to their own mode hooks."
   (add-hook 'before-save-hook
             (lambda ()
               (when (and (fboundp 'eglot-managed-p) (eglot-managed-p))
@@ -63,14 +64,15 @@
   (compilation-ask-about-save nil)
   :hook (compilation-filter . ansi-color-compilation-filter))
 
-;; 优先使用 tree-sitter 模式（Emacs 31）；缺少语法时询问后自动安装到 tree-sitter/。
+;; Prefer tree-sitter modes (Emacs 31); when a grammar is missing, ask and then
+;; install it into tree-sitter/.
 (use-package treesit
   :custom
   (treesit-font-lock-level 4)
   (treesit-enabled-modes t)
   (treesit-auto-install-grammar 'ask))
 
-;;; 文档
+;;; Documents
 
 (use-package markdown-mode
   :ensure t

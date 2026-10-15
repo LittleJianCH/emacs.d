@@ -1,13 +1,17 @@
-;;; agent-claude.el --- Claude Code 后端（stream-json） -*- lexical-binding: t; -*-
+;;; agent-claude.el --- Claude Code backend (stream-json) -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; 以 `claude -p --input-format stream-json --output-format stream-json' 运行一个长驻进程：
-;;   - 用户消息：{"type":"user","message":{"role":"user","content":...}}
-;;   - 输出：stream_event（流式增量）、assistant / user（完整消息、工具结果）、result（回合结束）
-;;   - 权限：--permission-prompt-tool stdio，CLI 发来 control_request(can_use_tool)，
-;;     我们回复 control_response；启动后需先发 initialize 控制请求。
-;; emacs MCP server 通过 --mcp-config 只注入给本进程，不改全局配置。
+;; Runs a long-lived process via
+;; `claude -p --input-format stream-json --output-format stream-json':
+;;   - User messages: {"type":"user","message":{"role":"user","content":...}}
+;;   - Output: stream_event (streaming deltas), assistant / user (complete
+;;     messages, tool results), result (end of turn)
+;;   - Permissions: --permission-prompt-tool stdio; the CLI sends
+;;     control_request(can_use_tool) and we reply with control_response.
+;;     An initialize control request must be sent first after startup.
+;; The emacs MCP server is injected into this process only via --mcp-config;
+;; the global configuration is left untouched.
 
 ;;; Code:
 
@@ -17,29 +21,30 @@
 (require 'agent-session)
 
 (defgroup agent-claude nil
-  "Claude Code 后端。"
+  "Claude Code backend."
   :group 'agent-session
   :prefix "agent-claude-")
 
 (defcustom agent-claude-executable "claude"
-  "claude 命令。"
+  "The claude command."
   :type 'string)
 
 (defcustom agent-claude-extra-args nil
-  "额外的命令行参数。"
+  "Extra command-line arguments."
   :type '(repeat string))
 
 (defconst agent-claude--modes
   '((ask . "default") (edits . "acceptEdits") (auto . "auto")
     (full . "bypassPermissions") (plan . "plan"))
-  "统一权限模式到 Claude permission mode 的映射。")
+  "Mapping from unified permission modes to Claude permission modes.")
 
 (defun agent-claude--mode (session)
-  "SESSION 当前权限模式对应的 Claude 取值。"
+  "Return the Claude value for SESSION's current permission mode."
   (alist-get (agent-session-setting session :mode) agent-claude--modes "default"))
 
 (defun agent-claude--command (session)
-  "启动 SESSION 的命令行。模型、推理强度、权限模式取自会话设置。"
+  "Return the command line that starts SESSION.
+Model, reasoning effort and permission mode come from the session settings."
   (append
    (list agent-claude-executable "-p"
          "--input-format" "stream-json" "--output-format" "stream-json"
@@ -49,7 +54,8 @@
                          (list :mcpServers
                                (list :emacs (list :command (car (agent-session-emx-command))
                                                   :args (vconcat (cdr (agent-session-emx-command))))))))
-   ;; 允许之后在会话中切换到“完全访问”；是否启用由 --permission-mode 决定。
+   ;; Allow switching to full access later in the session; --permission-mode
+   ;; decides whether it is enabled.
    (list "--allow-dangerously-skip-permissions"
          "--permission-mode" (agent-claude--mode session))
    (when-let* ((model (agent-session-setting session :model)))
@@ -61,31 +67,33 @@
    agent-claude-extra-args))
 
 (defun agent-claude--state (session key)
-  "读取 SESSION 的后端状态 KEY。"
+  "Return backend state KEY of SESSION."
   (plist-get (agent-session-state session) key))
 
 (defun agent-claude--set (session key value)
-  "设置 SESSION 的后端状态 KEY。"
+  "Set backend state KEY of SESSION to VALUE."
   (setf (agent-session-state session) (plist-put (agent-session-state session) key value)))
 
 (defun agent-claude--control (session request &optional callback)
-  "向 CLI 发送控制请求 REQUEST；收到成功响应后以响应内容调用 CALLBACK。"
+  "Send control request REQUEST to the CLI for SESSION.
+On a successful response, call CALLBACK with the response contents."
   (let ((id (symbol-name (gensym "emacs-"))))
     (when callback
       (agent-claude--set session :callbacks
                          (cons (cons id callback) (agent-claude--state session :callbacks))))
     (agent-session-write session (list :type "control_request" :request_id id :request request))))
 
-;;; 历史会话（~/.claude/projects/<编码后的项目路径>/<session-id>.jsonl）
+;;; Past sessions (~/.claude/projects/<encoded-project-path>/<session-id>.jsonl)
 
 (defun agent-claude--project-dir (root)
-  "项目 ROOT 的会话目录：路径中非字母数字的字符都替换为 -。"
+  "Return the session directory of project ROOT.
+Every non-alphanumeric character in the path is replaced with -."
   (expand-file-name (replace-regexp-in-string "[^[:alnum:]]" "-" (directory-file-name
                                                                    (expand-file-name root)))
                     "~/.claude/projects/"))
 
 (defun agent-claude--json-lines (file &optional beg end)
-  "FILE 中 BEG 到 END 字节范围内能完整解析的 JSON 行。"
+  "Return the JSON lines of FILE between bytes BEG and END that parse fully."
   (with-temp-buffer
     (insert-file-contents file nil beg end)
     (let (result)
@@ -96,8 +104,10 @@
           (push object result))))))
 
 (defun agent-claude--user-text (entry)
-  "ENTRY 若是用户亲自输入的消息则返回其文本（排除元信息、命令标签、子 agent）。
-带图片的消息内容是列表（文字与图片），图片显示为 [图片]；工具结果不算。"
+  "Return the text of ENTRY if it is a message typed by the user.
+Meta entries, command tags and subagent messages are excluded.  The
+content of a message with images is a list (text and images); images
+are shown as [图片].  Tool results do not count."
   (let* ((content (plist-get (plist-get entry :message) :content))
          (text (cond
                 ((stringp content) content)
@@ -117,7 +127,8 @@
       text)))
 
 (defun agent-claude--session-title (file)
-  "会话文件 FILE 的标题：Claude 生成的标题，否则取第一条用户消息。"
+  "Return the title of session file FILE.
+Use the title generated by Claude, or else the first user message."
   (let* ((size (file-attribute-size (file-attributes file)))
          (tail (agent-claude--json-lines file (max 0 (- size 65536)) size))
          (custom (seq-find (lambda (e) (equal (plist-get e :type) "custom-title")) (reverse tail))))
@@ -140,13 +151,14 @@
                      files))))
 
 (defun agent-claude--transcript (session)
-  "SESSION 的会话记录文件；还不知道会话 id 时为 nil。"
+  "Return the transcript file of SESSION, or nil if its session id is unknown."
   (when-let* ((id (agent-claude--state session :resume)))
     (expand-file-name (concat id ".jsonl") (agent-claude--project-dir (agent-session-root session)))))
 
 (defun agent-claude--read-entries (file beg)
-  "读取 FILE 从字节 BEG 开始的完整行：返回 (条目列表 . 读到的字节位置)。
-最后一行若还没写完（没有换行）留到下次再读。"
+  "Read the complete lines of FILE starting at byte BEG.
+Return (ENTRIES . END), where END is the byte position read up to.  An
+unfinished last line (no trailing newline) is left for the next read."
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (insert-file-contents-literally file nil beg)
@@ -165,15 +177,16 @@
               end)))))
 
 (defun agent-claude--render-entry (session entry)
-  "把会话记录中的一条 ENTRY 渲染到 SESSION。"
+  "Render transcript entry ENTRY into SESSION."
   (unless (plist-get entry :isSidechain)
     (let ((message (plist-get entry :message))
           (uuid (plist-get entry :uuid)))
       (pcase (plist-get entry :type)
-        ;; 回合进行中用户追加的消息，记录为 queued_command 附件。
+        ;; Messages added by the user mid-turn are queued_command attachments.
         ("attachment"
          (let ((attachment (plist-get entry :attachment)))
-           ;; 以 < 开头的是内部消息（例如子 agent 交回的报告），不显示为用户消息。
+           ;; Prompts starting with < are internal (e.g. a subagent's report);
+           ;; don't show them as user messages.
            (when (and (equal (plist-get attachment :type) "queued_command")
                       (stringp (plist-get attachment :prompt))
                       (not (string-prefix-p "<" (string-trim-left (plist-get attachment :prompt)))))
@@ -196,7 +209,7 @@
           (plist-get message :content)))))))
 
 (defun agent-claude--replay (session)
-  "把恢复的会话的历史记录渲染到 SESSION 中。"
+  "Render the history of a resumed session into SESSION."
   (let ((file (agent-claude--transcript session)))
     (when (and file (file-exists-p file))
       (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file 0)))
@@ -205,24 +218,26 @@
         (agent-claude--set session :sync-offset end)))
     (agent-session-notice session "—— 以上为历史记录 ——")))
 
-;;; 与其他客户端同步（同一会话同时在 Claude Desktop、终端等处打开）
+;;; Syncing with other clients (same session open in Claude Desktop, a terminal...)
 ;;
-;; 各客户端都把对话追加到同一个会话记录文件。监视这个文件，把不是本 Emacs 的
-;; CLI 写入的消息显示出来；CLI 进程的上下文在内存里，看不到这些消息，所以下次
-;; 发送前先以 --resume 重启，让它重新读取完整的会话记录。
+;; Every client appends the conversation to the same transcript file.  Watch
+;; that file and display messages written by CLIs other than this Emacs's.  The
+;; CLI process keeps its context in memory and can't see those messages, so
+;; before the next send, restart it with --resume to reread the full transcript.
 
 (defconst agent-claude--own-entrypoint "sdk-cli"
-  "本 Emacs 启动的 CLI 在会话记录中的 entrypoint。")
+  "Entrypoint recorded in the transcript by the CLI this Emacs starts.")
 
 (defun agent-claude--source-name (entrypoint)
-  "会话记录中 ENTRYPOINT 对应的客户端名称。"
+  "Return the client name for transcript ENTRYPOINT."
   (pcase entrypoint
     ("claude-desktop" "Claude Desktop")
     ("cli" "终端中的 Claude Code")
     (_ (or entrypoint "其他客户端"))))
 
 (defun agent-claude--watch (session)
-  "开始监视 SESSION 的会话记录文件（已在监视或文件还不存在时什么也不做）。"
+  "Start watching SESSION's transcript file.
+Do nothing if it is already watched or the file doesn't exist yet."
   (let ((file (agent-claude--transcript session)))
     (when (and file (file-exists-p file)
                (not (agent-claude--state session :watch))
@@ -239,13 +254,13 @@
                                 (agent-claude--sync session)))))))))
 
 (defun agent-claude--unwatch (session)
-  "停止监视 SESSION 的会话记录文件。"
+  "Stop watching SESSION's transcript file."
   (when-let* ((watch (agent-claude--state session :watch)))
     (file-notify-rm-watch watch)
     (agent-claude--set session :watch nil)))
 
 (defun agent-claude--sync (session)
-  "显示会话记录中其他客户端新写入的消息。"
+  "Display messages newly written to SESSION's transcript by other clients."
   (let ((file (agent-claude--transcript session))
         (offset (agent-claude--state session :sync-offset)))
     (when (and file offset (file-exists-p file))
@@ -259,7 +274,7 @@
                 (agent-session-notice session (format "以下来自 %s"
                                                       (agent-claude--source-name source))))
               (agent-claude--render-entry session entry)
-              ;; 其他客户端推进了对话，本进程的上下文已经落后。
+              ;; Another client advanced the conversation; our context is now stale.
               (when (member (plist-get entry :type) '("user" "assistant"))
                 (agent-claude--set session :external t)))))))))
 
@@ -272,10 +287,12 @@
   (agent-claude--control
    session (list :subtype "initialize")
    (lambda (response)
-     ;; 初始化结果里有模型列表（含各模型支持的推理强度）和斜杠命令。
+     ;; The initialize result contains the model list (with each model's
+     ;; supported reasoning efforts) and the slash commands.
      (agent-claude--set session :models (plist-get response :models))
      (agent-claude--set session :commands (plist-get response :commands))
-     ;; 重启后可能已经发出了消息（见 `agent-session-backend-send'），不要覆盖 running。
+     ;; After a restart a message may already have been sent (see
+     ;; `agent-session-backend-send'); don't overwrite running.
      (when (eq (agent-session-status session) 'starting)
        (agent-session-set-status session 'idle)))))
 
@@ -308,7 +325,8 @@
   (when (memq :mode changed)
     (agent-claude--control session (list :subtype "set_permission_mode"
                                          :mode (agent-claude--mode session))))
-  ;; 推理强度只能在启动时指定：空闲时立即以 --resume 重启，运行中等回合结束。
+  ;; Reasoning effort can only be set at startup: restart with --resume now
+  ;; if idle, otherwise wait for the turn to end.
   (when (memq :effort changed)
     (if (eq (agent-session-status session) 'running)
         (progn (agent-claude--set session :restart-pending t)
@@ -316,7 +334,9 @@
       (agent-session-restart-process session))))
 
 (defun agent-claude--content (text)
-  "用户消息 TEXT 的 content：没有图片时是字符串，否则是图片在前、文字在后的列表。"
+  "Return the content of user message TEXT.
+A string when there are no images, otherwise a vector with the images
+first and the text last."
   (let ((images (agent-session-message-images text))
         (plain (agent-session-message-text text)))
     (if (null images)
@@ -336,7 +356,8 @@
          (list (list :type "text" :text plain)))))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql claude)) session text)
-  ;; 其他客户端写入过消息：先重启，让 CLI 读到完整的会话记录。
+  ;; Other clients wrote messages: restart first so the CLI reads the full
+  ;; transcript.
   (when (agent-claude--state session :external)
     (agent-claude--set session :external nil)
     (agent-session-notice session "载入其他客户端的消息后继续")
@@ -348,7 +369,8 @@
                                                     :content (agent-claude--content text)))))
 
 (cl-defmethod agent-session-backend-steer ((_ (eql claude)) session text)
-  ;; 回合进行中写入的用户消息，CLI 会在下一个间隙（如工具调用之间）插入当前回合。
+  ;; A user message written mid-turn is inserted into the current turn by
+  ;; the CLI at the next gap (e.g. between tool calls).
   (agent-session-write session (list :type "user"
                                      :message (list :role "user"
                                                     :content (agent-claude--content text))))
@@ -357,16 +379,16 @@
 (cl-defmethod agent-session-backend-interrupt ((_ (eql claude)) session)
   (agent-claude--control session (list :subtype "interrupt")))
 
-;;; 工具调用的展示
+;;; Displaying tool calls
 
 (defun agent-claude--relative (session path)
-  "PATH 相对于项目根目录的形式。"
+  "Return PATH relative to the project root of SESSION."
   (if (and (stringp path) (file-name-absolute-p path))
       (file-relative-name path (agent-session-root session))
     path))
 
 (defun agent-claude--diff (path old new)
-  "由替换前后的文本 OLD / NEW 生成简单的 diff。"
+  "Make a simple diff for PATH from the text before (OLD) and after (NEW)."
   (cl-flet ((lines (prefix text)
               (when (and text (not (string-empty-p text)))
                 (mapconcat (lambda (line) (concat prefix line))
@@ -378,7 +400,8 @@
                  "\n")))
 
 (defun agent-claude--tool-view (session name input)
-  "工具 NAME 及参数 INPUT 的展示：(:kind :title [:diff])。"
+  "Return how to display tool NAME with arguments INPUT.
+The value is a plist (:kind :title [:diff])."
   (let ((path (agent-claude--relative session (plist-get input :file_path))))
     (pcase name
       ("Bash" (list :kind 'command
@@ -411,19 +434,19 @@
       (_ (list :kind 'other :title name)))))
 
 (defun agent-claude--result-text (content)
-  "工具结果 CONTENT（字符串或内容块数组）转成文本。"
+  "Convert tool result CONTENT (a string or content block array) to text."
   (if (stringp content)
       content
     (mapconcat (lambda (part) (or (plist-get part :text) "")) content "\n")))
 
-;;; 消息处理
+;;; Message handling
 
 (defun agent-claude--block-id (session index)
-  "当前消息中第 INDEX 个内容块对应的 block id。"
+  "Return the block id of the INDEXth content block in the current message."
   (format "%s-%s" (agent-claude--state session :message) index))
 
 (defun agent-claude--stream-event (session event)
-  "处理流式事件 EVENT。"
+  "Handle streaming event EVENT for SESSION."
   (pcase (plist-get event :type)
     ("message_start"
      (let ((message (plist-get event :message)))
@@ -450,7 +473,7 @@
     ("message_delta" (agent-claude--usage session (plist-get event :usage)))))
 
 (defun agent-claude--usage (session usage)
-  "根据 USAGE 更新上下文 token 数。"
+  "Update SESSION's context token count from USAGE."
   (when usage
     (let ((tokens (+ (or (plist-get usage :input_tokens) 0)
                      (or (plist-get usage :cache_creation_input_tokens) 0)
@@ -459,21 +482,22 @@
       (when (> tokens 0) (agent-session-set-info session :tokens tokens)))))
 
 (defun agent-claude--assistant (session message)
-  "完整的 assistant 消息：补全工具调用的参数展示。"
+  "Handle complete assistant MESSAGE: fill in the tool call argument display."
   (seq-doseq (part (plist-get message :content))
     (when (equal (plist-get part :type) "tool_use")
       (apply #'agent-session-tool session (plist-get part :id) :status 'running
              (agent-claude--tool-view session (plist-get part :name) (plist-get part :input))))))
 
 (defun agent-claude--tool-results (session message)
-  "user 消息中的工具结果：更新对应工具的状态与输出。"
+  "Handle tool results in user MESSAGE: update each tool's status and output."
   (let ((content (plist-get message :content)))
     (unless (stringp content)
       (seq-doseq (part content)
         (when (equal (plist-get part :type) "tool_result")
           (let* ((id (plist-get part :tool_use_id))
                  (declined (member id (agent-claude--state session :declined))))
-            ;; 只更新已显示的工具；同步时可能只读到结果而没读到调用（开始监视之前写入的）。
+            ;; Only update tools already shown; when syncing we may read a result
+            ;; without its call (written before watching started).
             (when (agent-session--block session id)
               (agent-session-tool session id
                                 :status (cond (declined 'declined)
@@ -482,12 +506,13 @@
                                 :output (agent-claude--result-text (plist-get part :content))))))))))
 
 (defun agent-claude--permission (session request-id request)
-  "处理权限请求：在会话中询问用户，再回复 CLI。"
+  "Handle permission REQUEST with id REQUEST-ID.
+Ask the user in SESSION, then reply to the CLI."
   (let* ((input (plist-get request :input))
          (tool-id (plist-get request :tool_use_id))
          (view (agent-claude--tool-view session (plist-get request :tool_name) input))
          (suggestions (plist-get request :permission_suggestions))
-         ;; 回传给 CLI 的参数必须与原始 JSON 完全一致。
+         ;; Arguments sent back to the CLI must match the original JSON exactly.
          (raw-input (agent-session-raw-json "request" "input"))
          (raw-suggestions (agent-session-raw-json "request" "permission_suggestions")))
     (agent-session-ask
@@ -520,7 +545,8 @@
                                              (list :updatedPermissions raw-suggestions))))))))))))
 
 (cl-defmethod agent-session-backend-handle ((_ (eql claude)) session message)
-  ;; 子 agent（parent_tool_use_id 非空）的过程不展开显示，只看它的最终结果。
+  ;; Don't show the steps of subagents (non-nil parent_tool_use_id), only
+  ;; their final result.
   (unless (plist-get message :parent_tool_use_id)
     (pcase (plist-get message :type)
       ("system"
@@ -540,7 +566,7 @@
                                                              (plist-get message :subtype)))
                                'agent-session-error))
        (agent-session-set-status session 'idle)
-       ;; 新会话的记录文件在第一个回合中才创建。
+       ;; A new session's transcript file is only created during the first turn.
        (agent-claude--watch session)
        (when (agent-claude--state session :restart-pending)
          (agent-claude--set session :restart-pending nil)

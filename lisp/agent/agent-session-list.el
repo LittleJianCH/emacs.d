@@ -1,12 +1,15 @@
-;;; agent-session-list.el --- 会话列表侧边栏 -*- lexical-binding: t; -*-
+;;; agent-session-list.el --- Session list sidebar -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; 左侧的会话列表（参考 T3 Code 的 thread sidebar）：
-;;   进行中  所有打开的会话：状态（工作中 / 等待确认 / 完成 / 空闲）、agent、标题
-;;   历史    当前项目中各 agent 的历史会话（Claude 与 Codex），可直接恢复
+;; A session list on the left (modeled on T3 Code's thread sidebar):
+;;   Active   all open sessions: status (working / awaiting approval / done /
+;;            idle), agent, title
+;;   History  past sessions of each agent (Claude and Codex) in the current
+;;            project; they can be resumed directly
 ;;
-;; 按键：RET 打开 / 恢复，c 新建，k 结束会话，g 刷新，n / p 上下移动，q 关闭。
+;; Keys: RET open / resume, c new, k end session, g refresh, n / p move
+;; down / up, q quit.
 
 ;;; Code:
 
@@ -15,27 +18,27 @@
 (require 'agent-session)
 
 (defgroup agent-session-list nil
-  "agent 会话列表。"
+  "Agent session list."
   :group 'agent-session
   :prefix "agent-session-list-")
 
 (defcustom agent-session-list-width 40
-  "会话列表侧边栏的宽度。"
+  "Width of the session list sidebar."
   :type 'integer)
 
 (defconst agent-session-list--buffer-name "*agent-sessions*")
 
 (defvar agent-session-list--history (make-hash-table :test #'equal)
-  "历史会话缓存：(ROOT . AGENT) → 列表。")
+  "Cache of past sessions: (ROOT . AGENT) → list of items.")
 
-(defvar-local agent-session-list--root nil "列表当前对应的项目根目录。")
+(defvar-local agent-session-list--root nil "Project root the list shows.")
 
-(defvar agent-session-list--timer nil "定时刷新（更新“工作中”的计时）。")
+(defvar agent-session-list--timer nil "Periodic refresh timer (updates working time).")
 
-;;; 数据
+;;; Data
 
 (defun agent-session-list--fetch (root)
-  "异步获取 ROOT 中各 agent 的历史会话，到达后重绘。"
+  "Fetch each agent's past sessions in ROOT asynchronously; redraw on arrival."
   (dolist (entry agent-session-agents)
     (let ((agent (car entry)))
       (agent-session-backend-history
@@ -45,7 +48,8 @@
          (agent-session-list--refresh-soon))))))
 
 (defun agent-session-list--history-items (root)
-  "ROOT 中尚未打开的历史会话，按时间倒序：((AGENT . ITEM) ...)。"
+  "Return past sessions in ROOT that aren't open, newest first.
+The value is ((AGENT . ITEM) ...)."
   (let ((open (delq nil (mapcar (lambda (b) (agent-session-resume-id
                                              (buffer-local-value 'agent-session--current b)))
                                 (agent-session-buffers))))
@@ -57,7 +61,7 @@
     (sort result :key (lambda (x) (- (or (plist-get (cdr x) :time) 0))))))
 
 (defun agent-session-list--ago (time)
-  "TIME（秒）距今的简短描述。"
+  "Return a short description of how long ago TIME (in seconds) was."
   (let ((seconds (- (float-time) time)))
     (cond ((< seconds 60) "刚刚")
           ((< seconds 3600) (format "%d分钟前" (/ seconds 60)))
@@ -65,20 +69,22 @@
           ((< seconds (* 7 86400)) (format "%d天前" (/ seconds 86400)))
           (t (format-time-string "%m-%d" time)))))
 
-;;; 渲染
+;;; Rendering
 
 (defface agent-session-list-heading '((t :inherit (bold shadow)))
-  "分组标题。")
+  "Face for group headings.")
 
 (defface agent-session-list-title '((t :inherit bold))
-  "进行中的会话标题。")
+  "Face for titles of active sessions.")
 
 (defun agent-session-list--project-name (root)
-  "ROOT 的项目名。"
+  "Return the project name of ROOT."
   (file-name-nondirectory (directory-file-name root)))
 
 (defun agent-session-list-mouse-open (event)
-  "鼠标点击会话条目：点在按钮（如 ×）上时执行按钮，否则打开该会话。"
+  "Handle mouse click EVENT on a session entry.
+Push the button if the click is on one (such as ×), otherwise open the
+session."
   (interactive "e")
   (let* ((posn (event-start event))
          (pos (posn-point posn)))
@@ -89,15 +95,18 @@
       (agent-session-list-open))))
 
 (defvar-keymap agent-session-list-entry-map
-  :doc "会话条目上的鼠标操作（键盘按键仍由 `agent-session-list-mode-map' 处理）。"
+  :doc "Mouse bindings on session entries.
+Keyboard keys are still handled by `agent-session-list-mode-map'."
   "<mouse-1>" #'agent-session-list-mouse-open
   "<mouse-2>" #'agent-session-list-mouse-open)
 
 (defun agent-session-list--insert-entry (entry &rest strings)
-  "插入一项，整段带上 ENTRY 属性；鼠标悬停高亮，单击打开。"
+  "Insert STRINGS as one item carrying the ENTRY property.
+The item is highlighted on mouse hover and opens on click."
   (let ((start (point)))
     (apply #'insert strings)
-    ;; 每行末尾补一个伸到窗口右边缘的空白，悬停高亮占满整行。
+    ;; Pad each line end with space up to the window's right edge so the
+    ;; hover highlight covers the whole line.
     (save-excursion
       (let ((end (point-marker)))
         (goto-char start)
@@ -106,17 +115,20 @@
           (insert (propertize " " 'display '(space :align-to right)))
           (forward-char))
         (set-marker end nil)))
-    ;; Emacs 把相邻且 mouse-face 相同（eq）的文字当成一片一起高亮，
-    ;; 每项用新建的列表，悬停时只高亮这一项。
+    ;; Emacs highlights adjacent text with the same (eq) mouse-face as one
+    ;; region; use a fresh list per item so hovering highlights only it.
     (add-text-properties start (point)
                          (list 'agent-session-entry entry
                                'mouse-face (list 'highlight)
                                'keymap agent-session-list-entry-map))
-    ;; 条目内部的换行被补白挤到右边缘外（GUI 下在 fringe 里），保留高亮让多行条目
-    ;; 连成一片；最后一个换行不高亮，否则高亮会伸到下一行开头。
+    ;; The padding pushes newlines inside the entry past the right edge (into
+    ;; the fringe on GUI); keep their highlight so a multi-line entry forms
+    ;; one block.  Don't highlight the final newline, or the highlight would
+    ;; spill onto the start of the next line.
     (when (eq (char-before) ?\n)
       (remove-text-properties (1- (point)) (point) '(mouse-face nil)))
-    ;; “点击打开”的提示只加在非按钮部分，不覆盖 × 自己的提示。
+    ;; Add the click-to-open tooltip only to non-button parts so it doesn't
+    ;; override the tooltip of × itself.
     (let ((pos start))
       (while (< pos (point))
         (let ((next (next-single-property-change pos 'button nil (point))))
@@ -125,7 +137,7 @@
           (setq pos next))))))
 
 (defun agent-session-list--kill-button (buffer)
-  "结束会话 BUFFER 的 × 按钮。"
+  "Return a × button that ends the session in BUFFER."
   (make-text-button " ×" nil 'face 'agent-session-dim 'follow-link t
                     'help-echo "结束这个会话"
                     'action (lambda (_)
@@ -134,11 +146,12 @@
                                 (agent-session-list--refresh)))))
 
 (defun agent-session-list--truncate (string)
-  "按窗口宽度截断 STRING。"
+  "Truncate STRING to fit the window width."
   (truncate-string-to-width string (max 10 (- (window-body-width) 4)) nil nil "…"))
 
 (defun agent-session-list--render ()
-  "重绘当前 buffer 的会话列表，尽量保持光标所在的条目。"
+  "Redraw the session list in the current buffer.
+Try to keep point on the same entry."
   (let* ((inhibit-read-only t)
          (current (get-text-property (point) 'agent-session-entry))
          (root agent-session-list--root)
@@ -174,7 +187,7 @@
                      'face 'agent-session-dim)
          (agent-session-list--truncate (plist-get item :title))
          "\n")))
-    ;; 回到原来的条目
+    ;; Return to the original entry
     (goto-char (point-min))
     (when current
       (let ((pos (point-min)))
@@ -184,34 +197,36 @@
     (unless (get-text-property (point) 'agent-session-entry)
       (agent-session-list-next))))
 
-(defvar agent-session-list--pending nil "已安排的重绘计时器。")
+(defvar agent-session-list--pending nil "Timer for a scheduled redraw.")
 
 (defun agent-session-list--refresh-soon ()
-  "稍后重绘会话列表；流式输出时状态频繁变化，合并为一次。"
+  "Redraw the session list shortly.
+Status changes often while output streams, so coalesce them into one redraw."
   (unless (timerp agent-session-list--pending)
     (setq agent-session-list--pending
-          ;; 用普通计时器而不是空闲计时器：Emacs 已空闲时新建的空闲计时器会立即触发。
+          ;; Use a plain timer, not an idle timer: an idle timer created while
+          ;; Emacs is already idle fires immediately.
           (run-with-timer 0.3 nil (lambda ()
                                     (setq agent-session-list--pending nil)
                                     (agent-session-list--refresh))))))
 
 (defun agent-session-list--refresh ()
-  "会话列表打开时重绘。"
+  "Redraw the session list if it is open."
   (when-let* ((buffer (get-buffer agent-session-list--buffer-name)))
     (with-current-buffer buffer
       (if-let* ((window (get-buffer-window buffer t)))
           (with-selected-window window (agent-session-list--render))
         (agent-session-list--render)))))
 
-;;; 命令
+;;; Commands
 
 (defun agent-session-list--entry ()
-  "光标所在的条目。"
+  "Return the entry at point."
   (or (get-text-property (point) 'agent-session-entry)
       (user-error "光标不在会话上")))
 
 (defun agent-session-list-open ()
-  "打开光标所在的会话；历史会话则恢复它。"
+  "Open the session at point; resume it if it is a past session."
   (interactive)
   (let ((entry (agent-session-list--entry)))
     (if-let* ((buffer (plist-get entry :buffer)))
@@ -225,13 +240,14 @@
             (agent-session--refresh session)))))))
 
 (defun agent-session-list-create (&optional choose)
-  "在列表对应的项目中新建会话；CHOOSE（前缀参数）时先选择 agent。"
+  "Create a session in the list's project.
+With CHOOSE (prefix argument), choose the agent first."
   (interactive "P")
   (let ((default-directory agent-session-list--root))
     (select-window (or (get-buffer-window (agent-session-create choose)) (selected-window)))))
 
 (defun agent-session-list-kill ()
-  "结束光标所在的会话。"
+  "End the session at point."
   (interactive)
   (let ((buffer (or (plist-get (agent-session-list--entry) :buffer)
                     (user-error "历史会话无需结束"))))
@@ -240,13 +256,13 @@
       (agent-session-list--refresh))))
 
 (defun agent-session-list-refresh ()
-  "重新获取历史会话并重绘。"
+  "Refetch past sessions and redraw."
   (interactive)
   (agent-session-list--fetch agent-session-list--root)
   (agent-session-list--render))
 
 (defun agent-session-list-next ()
-  "移到下一个会话。"
+  "Move to the next session."
   (interactive)
   (let ((pos (point)))
     (when (get-text-property pos 'agent-session-entry)
@@ -255,7 +271,7 @@
     (when pos (goto-char pos))))
 
 (defun agent-session-list--entry-start (pos)
-  "POS 所在条目的起点。"
+  "Return the start of the entry at POS."
   (let ((entry (get-text-property pos 'agent-session-entry)))
     (while (and (> pos (point-min))
                 (equal (get-text-property (1- pos) 'agent-session-entry) entry))
@@ -263,7 +279,7 @@
     pos))
 
 (defun agent-session-list-previous ()
-  "移到上一个会话。"
+  "Move to the previous session."
   (interactive)
   (let ((pos (1- (agent-session-list--entry-start (point)))))
     (while (and (> pos (point-min)) (not (get-text-property pos 'agent-session-entry)))
@@ -272,7 +288,7 @@
       (goto-char (agent-session-list--entry-start pos)))))
 
 (defvar-keymap agent-session-list-mode-map
-  :doc "会话列表的按键。"
+  :doc "Keymap for the session list."
   "RET" #'agent-session-list-open
   "c" #'agent-session-list-create
   "k" #'agent-session-list-kill
@@ -281,7 +297,8 @@
   "p" #'agent-session-list-previous)
 
 (defun agent-session-list--header-button (label command help)
-  "标题栏上可点击的按钮：点击时在会话列表窗口中执行 COMMAND。"
+  "Return a clickable header-line button showing LABEL with tooltip HELP.
+Clicking it runs COMMAND in the session list window."
   (propertize label
               'face 'agent-session-assistant
               'mouse-face 'header-line-highlight
@@ -295,7 +312,7 @@
                            map)))
 
 (define-derived-mode agent-session-list-mode special-mode "Sessions"
-  "agent 会话列表。"
+  "Major mode for the agent session list."
   (setq-local truncate-lines t
               cursor-type 'bar
               revert-buffer-function (lambda (&rest _) (agent-session-list-refresh))
@@ -312,7 +329,8 @@
 
 ;;;###autoload
 (defun agent-session-list ()
-  "在左侧打开会话列表：进行中的会话与当前项目的历史会话。"
+  "Open the session list on the left.
+It shows active sessions and past sessions of the current project."
   (interactive)
   (let* ((root (if-let* ((session agent-session--current))
                    (agent-session-root session)

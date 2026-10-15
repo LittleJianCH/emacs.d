@@ -1,13 +1,14 @@
-;;; init.el --- 面向 agent 协作开发的 Emacs 配置 -*- lexical-binding: t; -*-
+;;; init.el --- Emacs config for working with coding agents -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; 目录结构：
-;;   lisp/core/   基础层：默认行为、界面、补全、通用开发工具
-;;   lisp/lang/   语言模块，一个语言一个文件：lang-NAME.el
-;;   lisp/agent/  agent 支持：终端会话、agent → Emacs 的桥
+;; Layout:
+;;   lisp/core/   base layer: defaults, UI, completion, general dev tools
+;;   lisp/lang/   language modules, one file per language: lang-NAME.el
+;;   lisp/agent/  agent support: terminal sessions, the agent -> Emacs bridge
 ;;
-;; 增加语言：新建 lisp/lang/lang-NAME.el（末尾 provide），再把 NAME 加入 `my/languages'。
+;; To add a language: create lisp/lang/lang-NAME.el (ending with `provide'),
+;; then add NAME to `my/languages'.
 
 ;;; Code:
 
@@ -17,7 +18,7 @@
 (dolist (dir '("core" "lang" "agent"))
   (add-to-list 'load-path (expand-file-name (concat "lisp/" dir) user-emacs-directory)))
 
-;;; 插件源：GNU / NonGNU ELPA 优先，MELPA 只补充少数包
+;;; Package archives: GNU / NonGNU ELPA first, MELPA only for a few extras
 
 (require 'package)
 (setq package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
@@ -28,25 +29,25 @@
 (require 'use-package)
 (setq use-package-expand-minimally t)
 
-;;; 模块
+;;; Modules
 
 (defvar my/languages '(elisp rust)
-  "启用的语言模块，对应 lisp/lang/lang-NAME.el。")
+  "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
 
-(require 'init-base)        ; 默认行为、路径、macOS 环境
-(require 'init-ui)          ; 主题、字体、窗口
+(require 'init-base)        ; defaults, paths, macOS environment
+(require 'init-ui)          ; theme, fonts, windows
 (when my/use-evil
-  (require 'init-evil))     ; Vim 键位（evil），默认关闭；M-x my/toggle-evil 切换
+  (require 'init-evil))     ; Vim keys (evil), off by default; M-x my/toggle-evil
 (require 'init-completion)  ; vertico / consult / corfu
-(require 'init-dev)         ; 项目、git、eglot、tree-sitter
+(require 'init-dev)         ; projects, git, eglot, tree-sitter
 (require 'init-remote)      ; remote editing: tramp-rpc
 
 (dolist (lang my/languages)
   (require (intern (format "lang-%s" lang))))
 
-(require 'init-agent)       ; agent 终端会话、agent → Emacs 桥
+(require 'init-agent)       ; agent terminal sessions, agent -> Emacs bridge
 
-;; 启动完成后恢复正常 GC。
+;; Restore normal GC settings once startup finishes.
 (add-hook 'emacs-startup-hook
           (lambda ()
             (setq gc-cons-threshold (* 64 1024 1024)

@@ -1,18 +1,18 @@
-;;; init-ui.el --- 主题、字体、窗口 -*- lexical-binding: t; -*-
+;;; init-ui.el --- Theme, fonts, windows -*- lexical-binding: t; -*-
 
-;; 内置 Modus 主题；浅色可改为 modus-operandi。
+;; Built-in Modus theme; switch to modus-operandi for a light theme.
 (setq modus-themes-mixed-fonts t
       modus-themes-bold-constructs t)
 (load-theme 'modus-vivendi t)
 
-;;; 字体：从候选中选第一个已安装的
+;;; Fonts: pick the first installed candidate
 
 (defun my/first-font (fonts)
-  "返回 FONTS 中第一个已安装的字体名。"
+  "Return the first font family in FONTS that is installed."
   (seq-find (lambda (f) (find-font (font-spec :family f))) fonts))
 
 (defun my/setup-fonts (&optional frame)
-  "为 FRAME 设置等宽字体与中文字体。"
+  "Set up the monospace and CJK fonts for FRAME."
   (with-selected-frame (or frame (selected-frame))
     (when (display-graphic-p)
       (when-let* ((mono (my/first-font '("JetBrains Mono" "Iosevka" "Fira Code"
@@ -29,19 +29,19 @@
     (add-hook 'after-make-frame-functions #'my/setup-fonts)
   (my/setup-fonts))
 
-;;; 交互细节
+;;; Interaction details
 
 (when (display-graphic-p)
   (pixel-scroll-precision-mode 1))
 (blink-cursor-mode -1)
 (setq-default cursor-in-non-selected-windows nil)
 
-;; 左右分屏比上下分屏更适合“代码 | agent”的布局。
+;; Side-by-side splits suit a "code | agent" layout better than stacked ones.
 (setq split-width-threshold 140
       split-height-threshold nil
       window-combination-resize t)
 
-;; C-c <left> / C-c <right> 撤销 / 重做窗口布局变化。
+;; C-c <left> / C-c <right> undo / redo window layout changes.
 (winner-mode 1)
 (keymap-global-set "M-o" #'other-window)
 

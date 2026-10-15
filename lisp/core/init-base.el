@@ -1,4 +1,4 @@
-;;; init-base.el --- 基础行为 -*- lexical-binding: t; -*-
+;;; init-base.el --- Basic behavior -*- lexical-binding: t; -*-
 
 (setq inhibit-startup-screen t
       initial-scratch-message nil
@@ -22,14 +22,14 @@
               fill-column 88)
 (prefer-coding-system 'utf-8-unix)
 
-;;; 状态文件集中在 var/，不进 git
+;;; Keep state files together under var/, out of git
 
 (defconst my/var-dir (expand-file-name "var/" user-emacs-directory))
 (dolist (dir '("" "backups/" "auto-save/"))
   (make-directory (expand-file-name dir my/var-dir) t))
 
 (defun my/var (name)
-  "返回 var/ 下 NAME 的完整路径。"
+  "Return the full path of NAME under var/."
   (expand-file-name name my/var-dir))
 
 (setq backup-directory-alist `(("." . ,(my/var "backups/")))
@@ -48,7 +48,7 @@
       custom-file (expand-file-name "custom.el" user-emacs-directory))
 (load custom-file 'noerror 'nomessage)
 
-;;; 常用内置模式
+;;; Common built-in modes
 
 (delete-selection-mode 1)
 (show-paren-mode 1)
@@ -60,7 +60,8 @@
 (recentf-mode 1)
 (repeat-mode 1)
 
-;; agent 在外部改文件，buffer 需要及时刷新；非文件 buffer（dired 等）也一起刷新。
+;; Agents modify files externally, so buffers must refresh promptly;
+;; non-file buffers (dired etc.) are refreshed too.
 (setq auto-revert-interval 1
       auto-revert-avoid-polling t
       auto-revert-check-vc-info t
@@ -74,7 +75,8 @@
 
 ;;; macOS
 
-;; 图形界面从 Dock 启动时继承登录 shell 的 PATH，才能找到 claude / codex / rg。
+;; When the GUI is launched from the Dock, inherit PATH from a login shell
+;; so claude / codex / rg can be found.
 (use-package exec-path-from-shell
   :ensure t
   :if (or (daemonp) (memq window-system '(mac ns x)))
@@ -84,16 +86,19 @@
   :config
   (exec-path-from-shell-initialize))
 
-;;; Vim 键位开关
+;;; Vim keybinding toggle
 
 (defcustom my/use-evil nil
-  "非 nil 时启动加载 evil（Vim 键位，见 init-evil.el）；nil 时使用 Emacs 原生键位。
-运行中可用 `my/toggle-evil' 切换。"
+  "Non-nil means load evil (Vim keys, see init-evil.el) at startup.
+nil means use the native Emacs keybindings.  Toggle it in a running
+session with `my/toggle-evil'."
   :type 'boolean
   :group 'convenience)
 
 (defun my/toggle-evil (&optional save)
-  "在当前 Emacs 中开启或关闭 evil。SAVE（前缀参数）时同时保存为以后启动的默认值。"
+  "Turn evil on or off in the current Emacs.
+With SAVE (prefix argument), also save the new state as the default
+for future sessions."
   (interactive "P")
   (let ((on (not (bound-and-true-p evil-mode))))
     (if on
@@ -103,10 +108,10 @@
     (when save (customize-save-variable 'my/use-evil on))
     (message "evil 已%s%s" (if on "开启" "关闭") (if save "，并保存为默认" ""))))
 
-;;; 便捷命令
+;;; Convenience commands
 
 (defun my/open-init-file ()
-  "打开配置目录。"
+  "Open init.el in the config directory."
   (interactive)
   (find-file (expand-file-name "init.el" user-emacs-directory)))
 (keymap-global-set "C-c i" #'my/open-init-file)

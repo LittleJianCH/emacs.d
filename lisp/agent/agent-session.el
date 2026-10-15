@@ -1,17 +1,21 @@
-;;; agent-session.el --- Emacs 自己渲染的 agent 会话 -*- lexical-binding: t; -*-
+;;; agent-session.el --- Agent sessions rendered by Emacs itself -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; agent CLI 以后台进程运行（Claude: stream-json，Codex: app-server），
-;; 对话由这里渲染成 Emacs buffer：上方是只读的对话记录，下方是输入区。
+;; The agent CLI runs as a background process (Claude: stream-json, Codex:
+;; app-server), and the conversation is rendered here into an Emacs buffer:
+;; a read-only transcript on top, an input area below.
 ;;
-;; 分层：
-;;   - 本文件：会话管理、界面、输入；对后端暴露“界面 API”（agent-session-text、
-;;     agent-session-tool、agent-session-ask ...），不关心具体协议。
-;;   - 后端（agent-claude.el、agent-codex.el）：实现 agent-session-backend-* 泛型函数，
-;;     把各自协议的消息翻译成界面 API 调用。
+;; Layers:
+;;   - This file: session management, UI, input; exposes a "UI API" to backends
+;;     (agent-session-text, agent-session-tool, agent-session-ask ...) and does
+;;     not care about the concrete protocol.
+;;   - Backends (agent-claude.el, agent-codex.el): implement the
+;;     agent-session-backend-* generic functions, translating their protocol's
+;;     messages into UI API calls.
 ;;
-;; 新增 agent：实现一个后端，再用 `agent-session-define-agent' 注册。
+;; To add an agent: implement a backend, then register it with
+;; `agent-session-define-agent'.
 
 ;;; Code:
 
@@ -23,153 +27,163 @@
 (require 'button)
 (require 'dnd)
 
-;; 在 let 中动态绑定，渲染代码块时不弹出安装 tree-sitter 语法的询问。
+;; Bound dynamically in a let so rendering code blocks doesn't prompt to install
+;; tree-sitter grammars.
 (defvar treesit-auto-install-grammar)
 (declare-function evil-insert-state "evil-states")
 (require 'transient)
 
 (defgroup agent-session nil
-  "Emacs 渲染的 agent 会话。"
+  "Agent sessions rendered by Emacs."
   :group 'tools
   :prefix "agent-session-")
 
 (defcustom agent-session-window-width 0.42
-  "会话窗口的宽度，小数为占框架宽度的比例。"
+  "Width of the session window; a fraction means a ratio of the frame width."
   :type 'number)
 
 (defcustom agent-session-bin-directory (expand-file-name "bin" user-emacs-directory)
-  "前置到后台进程 PATH 的目录，其中放 emx。"
+  "Directory prepended to the background process's PATH; it holds emx."
   :type 'directory)
 
 (defcustom agent-session-output-lines 20
-  "工具输出展开时最多显示的行数（显示末尾部分）。"
+  "Maximum lines of tool output shown when expanded (the tail is shown)."
   :type 'integer)
 
 ;;; Faces
 
 (defface agent-session-user '((t :inherit (bold font-lock-keyword-face)))
-  "用户消息标题。")
+  "User message heading.")
 (defface agent-session-assistant '((t :inherit (bold font-lock-function-name-face)))
-  "agent 消息标题。")
+  "Agent message heading.")
 (defface agent-session-thinking '((t :inherit (italic shadow)))
-  "思考过程。")
+  "Thinking process.")
 (defface agent-session-tool '((t :inherit font-lock-type-face))
-  "工具调用标题。")
+  "Tool call heading.")
 (defface agent-session-dim '((t :inherit shadow))
-  "次要信息。")
+  "Secondary information.")
 (defface agent-session-ok '((t :inherit success))
-  "成功状态。")
+  "Success status.")
 (defface agent-session-error '((t :inherit error))
-  "失败状态。")
+  "Failure status.")
 (defface agent-session-ask '((t :inherit (bold warning)))
-  "等待用户确认。")
+  "Awaiting user confirmation.")
 (defface agent-session-button
   '((t :inherit (mode-line-inactive bold)
        :box (:line-width (6 . 2) :style released-button)))
-  "按钮。")
+  "Button.")
 
-;;; 会话对象
+;;; Session object
 
 (cl-defstruct (agent-session (:constructor agent-session--make))
-  agent          ; 注册名，如 claude
-  backend        ; 后端符号，用于泛型分派
-  root           ; 项目根目录
+  agent          ; registered name, e.g. claude
+  backend        ; backend symbol, used for generic dispatch
+  root           ; project root directory
   buffer
   process
   (status 'starting)   ; starting / idle / running / exited
-  info           ; 显示在 header-line 的信息 plist：:model :tokens :cost ...
-  state          ; 后端私有状态 plist
+  info           ; info plist shown in the header line: :model :tokens :cost ...
+  state          ; backend-private state plist
   (blocks (make-hash-table :test #'equal))
-  tail           ; 对话记录末尾（新 block 插入处）
-  input          ; 输入区起点（页脚之后）
-  asks           ; 确认请求（按出现先后），显示在页脚而不是对话中
-  queue          ; 运行中输入的消息，回合结束后依次发送
+  tail           ; end of the transcript (where new blocks are inserted)
+  input          ; start of the input area (after the footer)
+  asks           ; confirmation requests (in order), shown in the footer, not transcript
+  queue          ; messages typed while running, sent one by one after the turn ends
   history
-  settings)      ; 用户选择：:model :effort :mode（nil 表示用 agent 的默认值）
+  settings)      ; user choices: :model :effort :mode (nil means the agent's default)
 
-(defvar-local agent-session--current nil "本 buffer 的会话对象。")
+(defvar-local agent-session--current nil "The session object of this buffer.")
 (put 'agent-session--current 'permanent-local t)
 
 (defvar agent-session-agents nil
-  "已注册的 agent：((NAME . PLIST) ...)。PLIST 支持 :backend :title :key。")
+  "Registered agents: ((NAME . PLIST) ...).
+PLIST supports :backend :title :key.")
 
 (defun agent-session--get (agent prop)
-  "读取已注册 AGENT 的属性 PROP。"
+  "Return property PROP of the registered AGENT."
   (plist-get (alist-get agent agent-session-agents) prop))
 
 (defun agent-session-display-title (session)
-  "SESSION 的标题：恢复时带来的标题，否则取第一条用户消息。"
+  "Title of SESSION: the one carried over on resume, else the first message."
   (or (plist-get (agent-session-info session) :title) "新会话"))
 
 (defun agent-session--title-seed (text)
-  "由用户消息 TEXT 生成标题：合并空白，截取前 50 个字符（图片显示为 [图片] 文字）。"
+  "Make a title from user message TEXT.
+Collapse whitespace and keep the first 50 characters (images show as the
+text [图片])."
   (let ((text (string-trim (replace-regexp-in-string "[ \t\n]+" " "
                                                      (substring-no-properties text)))))
     (if (> (length text) 50) (concat (substring text 0 50) "…") text)))
 
 (defun agent-session-resume-id (session)
-  "SESSION 对应的 agent 原生会话 id（Claude session id / Codex thread id），可能为 nil。"
+  "The agent-native session id of SESSION, possibly nil.
+That is the Claude session id or the Codex thread id."
   (and session (plist-get (agent-session-state session) :resume)))
 
 (defun agent-session-title (session)
-  "SESSION 的显示名，如 Claude。"
+  "Display name of SESSION, e.g. Claude."
   (or (agent-session--get (agent-session-agent session) :title)
       (symbol-name (agent-session-agent session))))
 
-;;; 后端接口
+;;; Backend interface
 
 (cl-defgeneric agent-session-backend-start (backend session)
-  "启动 SESSION 的后台进程。BACKEND 为后端符号。")
+  "Start the background process of SESSION.  BACKEND is the backend symbol.")
 
 (cl-defgeneric agent-session-backend-send (backend session text)
-  "把用户消息 TEXT 发给 agent。")
+  "Send user message TEXT to the agent.")
 
 (cl-defgeneric agent-session-backend-interrupt (backend session)
-  "中断当前回合。")
+  "Interrupt the current turn.")
 
 (cl-defgeneric agent-session-backend-handle (backend session message)
-  "处理后台进程输出的一条 JSON 消息 MESSAGE（plist）。")
+  "Handle one JSON MESSAGE (a plist) output by the background process.")
 
 (cl-defgeneric agent-session-backend-stop (backend session)
-  "结束会话。默认直接结束进程。"
+  "End the session.  By default just kill the process."
   (ignore backend)
   (when-let* ((process (agent-session-process session)))
-    ;; 先解除关联，旧进程的 sentinel 据此忽略这次退出。
+    ;; Detach first, so the old process's sentinel ignores this exit.
     (setf (agent-session-process session) nil)
     (when (process-live-p process) (delete-process process))))
 
 (cl-defgeneric agent-session-backend-models (backend session)
-  "可选模型：((:id ID :name 显示名 :description 说明 :efforts (强度...) :default-effort E) ...)。"
+  "Available models.
+A list of (:id ID :name NAME :description DESC :efforts (EFFORT...)
+:default-effort E)."
   (ignore backend session)
   nil)
 
 (cl-defgeneric agent-session-backend-modes (backend session)
-  "支持的权限模式（`agent-session-modes' 的键）。"
+  "Supported permission modes (keys of `agent-session-modes')."
   (ignore backend session)
   '(ask edits full))
 
 (cl-defgeneric agent-session-backend-commands (backend session)
-  "agent 提供的斜杠命令：((:name N :description D :hint H) ...)。"
+  "Slash commands offered by the agent: ((:name N :description D :hint H) ...)."
   (ignore backend session)
   nil)
 
 (cl-defgeneric agent-session-backend-apply-settings (backend session changed)
-  "设置变化后生效。CHANGED 为变化的键列表（:model :effort :mode）。"
+  "Apply changed settings.  CHANGED is the list of changed keys.
+The keys are among :model :effort :mode."
   (ignore backend session changed))
 
 (cl-defgeneric agent-session-backend-steer (backend session text)
-  "把用户消息 TEXT 送进正在进行的回合（引导）。支持时返回非 nil；
-默认不支持，由调用方退回到“中断后再发送”。"
+  "Feed user message TEXT into the ongoing turn (steering).
+Return non-nil if supported.  Unsupported by default, in which case the
+caller falls back to \"interrupt, then send\"."
   (ignore backend session text)
   nil)
 
 (cl-defgeneric agent-session-backend-history (backend root callback)
-  "列出项目 ROOT 中的历史会话，以列表调用 CALLBACK（可异步）。
-每项为 (:id ID :title 标题 :time 秒数)，按时间倒序。"
+  "List past sessions in project ROOT, calling CALLBACK with the list.
+CALLBACK may be called asynchronously.  Each item is (:id ID :title TITLE
+:time SECONDS), newest first."
   (ignore backend root)
   (funcall callback nil))
 
-;;; 设置：模型、推理强度、权限模式
+;;; Settings: model, reasoning effort, permission mode
 
 (defconst agent-session-modes
   '((ask "需确认" "命令和文件改动都需要确认")
@@ -177,30 +191,32 @@
     (auto "自动审查" "由 agent 的自动审查放行常规操作，其余询问")
     (full "完全访问" "命令和改动都不再询问")
     (plan "计划" "只读规划，不做改动"))
-  "统一的权限模式（参考 T3 Code），由各后端映射到自己的设置。")
+  "Unified permission modes (after T3 Code), mapped by each backend.")
 
 (defcustom agent-session-default-mode 'auto
-  "新会话默认的权限模式。默认“自动审查”：由 agent 的自动审查放行常规操作，
-只在风险较高时询问（与 Claude Code 桌面端的 auto mode 相同）。"
+  "Default permission mode for new sessions.
+The default is “自动审查” (auto review): the agent's auto review lets
+routine operations through and only asks when the risk is higher (same as
+auto mode in the Claude Code desktop app)."
   :type '(choice (const ask) (const edits) (const auto) (const full)))
 
 (defvar agent-session-default-agent nil
-  "新建会话时默认使用的 agent：最近一次使用的那个。")
+  "Agent used by default for new sessions: the most recently used one.")
 
 (defvar agent-session-last-settings nil
-  "每个 agent 最近一次使用的设置：((AGENT . PLIST) ...)，新会话沿用。")
+  "Latest settings per agent: ((AGENT . PLIST) ...); new sessions reuse them.")
 (defvar savehist-additional-variables)
 (with-eval-after-load 'savehist
   (add-to-list 'savehist-additional-variables 'agent-session-last-settings)
   (add-to-list 'savehist-additional-variables 'agent-session-default-agent))
 
 (defun agent-session-setting (session key)
-  "SESSION 的设置 KEY；未设置模式时用默认模式。"
+  "Setting KEY of SESSION; the mode falls back to the default mode."
   (or (plist-get (agent-session-settings session) key)
       (and (eq key :mode) agent-session-default-mode)))
 
 (defun agent-session-configure (session &rest props)
-  "修改 SESSION 的设置（:model :effort :mode）并让后端生效。"
+  "Change settings of SESSION (:model :effort :mode) and apply them."
   (let (changed)
     (cl-loop for (key value) on props by #'cddr
              unless (equal value (agent-session-setting session key))
@@ -215,22 +231,23 @@
     changed))
 
 (defun agent-session-model-info (session &optional model)
-  "SESSION 中模型 MODEL（默认当前模型）的信息 plist。"
+  "Info plist of model MODEL (default the current model) in SESSION."
   (let ((models (agent-session-backend-models (agent-session-backend session) session))
         (model (or model (agent-session-setting session :model))))
     (or (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
         (car models))))
 
 (defun agent-session-restart-process (session)
-  "重启 SESSION 的后台进程（例如切换只能在启动时指定的设置）。"
+  "Restart the background process of SESSION.
+E.g. to switch settings that can only be given at startup."
   (agent-session-backend-stop (agent-session-backend session) session)
   (setf (agent-session-status session) 'starting)
   (agent-session-backend-start (agent-session-backend session) session))
 
-;;; 后台进程
+;;; Background process
 
 (defun agent-session-environment (session)
-  "后台进程的环境：能找到 emx，并能连回本 Emacs。"
+  "Environment of the background process: it can find emx and reach this Emacs."
   (append
    (list (concat "PATH=" agent-session-bin-directory path-separator (getenv "PATH"))
          (concat "EMACS_SOCKET_NAME=" (expand-file-name server-name server-socket-dir))
@@ -238,11 +255,12 @@
    process-environment))
 
 (defun agent-session-emx-command ()
-  "启动 emx MCP server 的命令行。"
+  "Command line that starts the emx MCP server."
   (list (expand-file-name "emx" agent-session-bin-directory) "mcp"))
 
 (defun agent-session-start-process (session command)
-  "以 COMMAND 启动 SESSION 的后台进程；每行 JSON 交给后端处理。"
+  "Start the background process of SESSION with COMMAND.
+Each JSON line is handed to the backend."
   (let* ((buffer (agent-session-buffer session))
          (default-directory (agent-session-root session))
          (process-environment (agent-session-environment session))
@@ -266,7 +284,8 @@
            :sentinel
            (lambda (process _event)
              (unless (process-live-p process)
-               ;; 已被替换或主动结束的进程，不算意外退出。
+               ;; A process that was replaced or stopped on purpose isn't an
+               ;; unexpected exit.
                (when (and (buffer-live-p buffer) (eq process (agent-session-process session)))
                  (agent-session-set-status session 'exited)
                  (agent-session-notice
@@ -276,19 +295,22 @@
     (setf (agent-session-process session) process)))
 
 (defvar agent-session-raw-message nil
-  "正在处理的消息的原始 JSON 行。
-plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传给 agent 时，
-用 `agent-session-raw-json' 从这里重新解析。")
+  "Raw JSON line of the message being handled.
+Parsing into a plist loses the difference between false / null / {}; when
+data must be sent back to the agent verbatim, re-parse it from here with
+`agent-session-raw-json'.")
 
 (defun agent-session-raw-json (&rest path)
-  "按键 PATH 从当前原始消息中取值，保留 JSON 的 false / null / 空对象。"
+  "Get the value at key PATH from the current raw message.
+JSON false / null / empty objects are preserved."
   (let ((value (json-parse-string agent-session-raw-message :object-type 'hash-table
                                   :null-object :null :false-object :false)))
     (dolist (key path value)
       (setq value (and (hash-table-p value) (gethash key value))))))
 
 (defun agent-session--dispatch (session line)
-  "解析一行 JSON 并交给后端；出错时记录到会话中而不中断进程。"
+  "Parse one JSON LINE and hand it to the backend.
+Errors are recorded in the session without interrupting the process."
   (when (buffer-live-p (agent-session-buffer session))
     (condition-case err
         (let ((agent-session-raw-message line))
@@ -301,27 +323,29 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                              'agent-session-error)))))
 
 (defun agent-session-write (session object)
-  "把 OBJECT 序列化为一行 JSON 写给后台进程。"
+  "Serialize OBJECT as one JSON line and write it to the background process."
   (let ((process (agent-session-process session)))
     (unless (process-live-p process) (user-error "agent 进程未运行"))
     (process-send-string process (concat (json-serialize object :null-object :null :false-object :false)
                                          "\n"))))
 
-;;; 对话记录：block 的插入与重绘
+;;; Transcript: inserting and redrawing blocks
 
 (defvar-keymap agent-session-transcript-map
-  :doc "对话记录与页脚上的按键：在其中打字会跳到输入区。"
+  :doc "Keys on the transcript and footer: typing jumps to the input area."
   :parent button-map
   "RET" #'agent-session-ret
   "<remap> <self-insert-command>" #'agent-session-self-insert-to-input)
 
 (defun agent-session--ro (string)
-  "把 STRING 标为对话记录：只读，打字时跳到输入区。"
+  "Mark STRING as transcript: read-only, typing jumps to the input area."
   (propertize string 'read-only t 'front-sticky '(read-only) 'rear-nonsticky t
               'keymap agent-session-transcript-map))
 
 (defmacro agent-session--with-buffer (session &rest body)
-  "在 SESSION 的 buffer 中执行 BODY，允许修改只读的对话记录，并保持各窗口的光标。"
+  "Run BODY in the buffer of SESSION.
+Modifying the read-only transcript is allowed, and each window's point is
+preserved."
   (declare (indent 1))
   (let ((buffer (make-symbol "buffer")))
     `(let ((,buffer (agent-session-buffer ,session)))
@@ -332,24 +356,25 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
              (save-excursion ,@body)))))))
 
 (defun agent-session--block (session id)
-  "SESSION 中 ID 对应的 block 数据（plist），没有时返回 nil。"
+  "Block data (a plist) for ID in SESSION, or nil if there is none."
   (gethash id (agent-session-blocks session)))
 
 (defun agent-session--new-block (session id data)
-  "在对话末尾新建 block ID，内容由 DATA 渲染。"
+  "Create block ID at the end of the transcript, rendered from DATA."
   (agent-session--with-buffer session
     (let ((tail (agent-session-tail session)))
       (goto-char tail)
       (let ((start (copy-marker (point)))
             (end (copy-marker (point))))
         (insert (agent-session--ro "\n"))
-        ;; start / end 都不随插入移动；内容渲染在两者之间，末尾的换行把相邻 block 隔开。
+        ;; Neither start nor end moves on insertion; content is rendered between
+        ;; them, and the trailing newline separates adjacent blocks.
         (puthash id (plist-put (plist-put data :start start) :end end)
                  (agent-session-blocks session))
         (agent-session--render session id)))))
 
 (defun agent-session--render (session id)
-  "按 block ID 的数据重绘它。"
+  "Redraw block ID from its data."
   (let* ((block (agent-session--block session id))
          (start (plist-get block :start))
          (end (plist-get block :end)))
@@ -360,14 +385,14 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
       (set-marker end (point)))))
 
 (defun agent-session--remove-block (session id)
-  "从对话记录中删除 block ID（连同其后的分隔换行）。"
+  "Delete block ID from the transcript (along with its separating newline)."
   (when-let* ((block (agent-session--block session id)))
     (agent-session--with-buffer session
       (delete-region (plist-get block :start) (1+ (plist-get block :end))))
     (remhash id (agent-session-blocks session))))
 
 (defun agent-session--update (session id &rest props)
-  "合并 PROPS 到 block ID 并重绘；block 不存在时新建。"
+  "Merge PROPS into block ID and redraw it; create the block if missing."
   (let ((block (agent-session--block session id)))
     (if (null block)
         (agent-session--new-block session id props)
@@ -377,7 +402,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
       (agent-session--render session id))))
 
 (defun agent-session--format (session id block)
-  "把 BLOCK 渲染成字符串。"
+  "Render BLOCK into a string."
   (pcase (plist-get block :type)
     ('user (agent-session--format-user id block))
     ('text (agent-session--format-text session id block))
@@ -386,10 +411,10 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                                  'face (or (plist-get block :face) 'agent-session-dim))
                      "\n"))))
 
-;;; markdown 与代码高亮
+;;; Markdown and code highlighting
 
 (defun agent-session-fontify (text mode)
-  "用 major MODE 高亮 TEXT，返回带 face 的字符串。"
+  "Highlight TEXT with major MODE and return a string with faces."
   (if (not (fboundp mode))
       text
     (with-temp-buffer
@@ -398,7 +423,8 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
         (ignore-errors
           (delay-mode-hooks (funcall mode))
           (font-lock-ensure)))
-      ;; 有些模式用 font-lock-face，统一转成 face，展示时不依赖 font-lock。
+      ;; Some modes use font-lock-face; convert it to face so display doesn't
+      ;; depend on font-lock.
       (let ((pos (point-min)))
         (while (< pos (point-max))
           (let ((next (next-single-property-change pos 'font-lock-face nil (point-max)))
@@ -412,13 +438,13 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 (defvar markdown-fontify-code-blocks-natively)
 
 (defun agent-session--markdown (text)
-  "把 markdown TEXT 高亮（代码块按语言高亮）。"
+  "Highlight markdown TEXT (code blocks by their language)."
   (if (require 'markdown-mode nil t)
       (let ((markdown-fontify-code-blocks-natively t))
         (agent-session-fontify text 'gfm-mode))
     text))
 
-;;; 各类 block 的格式
+;;; Formats of each block type
 
 (define-button-type 'agent-session-toggle
   'face nil 'follow-link t 'action #'agent-session--toggle-block
@@ -428,7 +454,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   'face 'agent-session-button 'follow-link t)
 
 (defun agent-session--indent (text)
-  "把 TEXT 每行缩进两格（用 line-prefix，不改变文本）。"
+  "Indent each line of TEXT by two spaces (via line-prefix, text unchanged)."
   (propertize text 'line-prefix "  " 'wrap-prefix "  "))
 
 (define-button-type 'agent-session-fold
@@ -436,7 +462,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
   'help-echo "展开 / 收起这一回合的过程")
 
 (defun agent-session--format-user (id block)
-  "用户消息；回合已折叠时，下方附一行过程摘要（可点击展开）。"
+  "Format a user message.
+When the turn is folded, a one-line summary of the process follows below
+\(click to expand)."
   (let ((fold (plist-get block :fold)))
     (concat (propertize "▍ 你" 'face 'agent-session-user)
             (cond ((plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim))
@@ -454,8 +482,9 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
                       "\n")))))
 
 (defun agent-session--format-text (session id block)
-  "agent 的回复或思考。回复流式输出时显示原文，结束后渲染 markdown；
-思考默认折叠成一行，可点击展开。"
+  "Format an agent reply or thinking.
+A reply shows raw text while streaming and is rendered as markdown when
+done; thinking is folded into one line by default, click to expand."
   (let ((text (string-trim-right (or (plist-get block :text) ""))))
     (if (eq (plist-get block :kind) 'thinking)
         (let ((collapsed (agent-session--collapsed-p block)))
@@ -477,10 +506,10 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
 (defconst agent-session--tool-icons
   '((command . "$") (edit . "✎") (read . "≡") (search . "⌕") (web . "◎")
     (mcp . "⚙") (task . "◆") (plan . "☰") (other . "•"))
-  "工具类型的图标。")
+  "Icons for tool kinds.")
 
 (defun agent-session--diff-stat (diff)
-  "统计 DIFF 的增删行数。"
+  "Count added and removed lines in DIFF."
   (let ((added 0) (removed 0))
     (dolist (line (split-string (or diff "") "\n"))
       (cond ((string-match-p "\\`\\+\\(?:[^+]\\|\\'\\)" line) (cl-incf added))
@@ -490,7 +519,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
             (propertize (format "-%d" removed) 'face 'diff-removed))))
 
 (defun agent-session--tail-lines (text n)
-  "TEXT 的最后 N 行。"
+  "The last N lines of TEXT."
   (let ((lines (split-string (string-trim-right text) "\n")))
     (if (> (length lines) n)
         (concat (propertize (format "…（省略 %d 行）\n" (- (length lines) n))
@@ -499,14 +528,16 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
       (string-join lines "\n"))))
 
 (defun agent-session--collapsed-p (block)
-  "BLOCK 是否折叠：用户切换过则按其选择；思考默认折叠；
-工具调用默认折叠，有 diff 或出错时展开。"
+  "Return non-nil if BLOCK is folded.
+If the user toggled it, follow that choice; thinking is folded by default;
+tool calls are folded by default but expanded when they have a diff or failed."
   (cond ((plist-member block :collapsed) (plist-get block :collapsed))
         ((eq (plist-get block :kind) 'thinking) t)
         (t (not (or (plist-get block :diff) (eq (plist-get block :status) 'error))))))
 
 (defun agent-session--format-tool (id block)
-  "工具调用：标题行可点击折叠，展开后显示 diff 或输出。"
+  "Format a tool call.
+Clicking the header line folds it; when expanded, the diff or output is shown."
   (let* ((status (plist-get block :status))
          (diff (plist-get block :diff))
          (output (plist-get block :output))
@@ -543,32 +574,34 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
         "\n")))))
 
 (defun agent-session--toggle-block (button)
-  "折叠或展开 BUTTON 所在的 block（工具调用、思考）。"
+  "Fold or expand the block (tool call, thinking) that BUTTON is in."
   (let* ((session agent-session--current)
          (id (button-get button 'agent-session-block)))
     (agent-session--update session id
                            :collapsed (not (agent-session--collapsed-p
                                             (agent-session--block session id))))))
 
-;;; 回合折叠（参考 T3 Code）
+;;; Turn folding (after T3 Code)
 ;;
-;; 回合结束后，用户消息与最终回复之间的过程（工具调用、思考、中间说明）用一个
-;; 不可见的 overlay 收起，用户消息下方显示一行摘要，点击可展开。进行中的回合不折叠。
+;; After a turn ends, the process between the user message and the final reply
+;; (tool calls, thinking, intermediate remarks) is hidden with an invisible
+;; overlay, and a one-line summary appears under the user message; clicking it
+;; expands. Turns in progress are not folded.
 
 (defconst agent-session--fold-kinds
   '((command . "条命令") (edit . "次编辑") (read . "次读取") (search . "次搜索")
     (web . "次网页访问") (mcp . "次工具调用") (task . "个子任务") (plan . "次计划更新")
     (other . "次其他操作"))
-  "摘要中各类工具调用的量词。")
+  "Measure words for each tool-call kind in the summary.")
 
 (defun agent-session--blocks-in-order (session)
-  "SESSION 的 block，按在 buffer 中的位置排序：((ID . BLOCK) ...)。"
+  "Blocks of SESSION sorted by buffer position: ((ID . BLOCK) ...)."
   (let (entries)
     (maphash (lambda (id block) (push (cons id block) entries)) (agent-session-blocks session))
     (sort entries :key (lambda (entry) (marker-position (plist-get (cdr entry) :start))))))
 
 (defun agent-session--fold-summary (tools duration)
-  "由工具调用 TOOLS 与用时 DURATION 生成摘要。"
+  "Make a summary from tool calls TOOLS and elapsed time DURATION."
   (let ((counts nil) (failed 0))
     (dolist (tool tools)
       (cl-incf (alist-get (plist-get tool :kind) counts 0))
@@ -585,7 +618,7 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
      " · ")))
 
 (defun agent-session--fold-overlay (session start end)
-  "在 START 到 END 之间建一个折叠用的不可见 overlay。"
+  "Create an invisible folding overlay from START to END."
   (let ((overlay (make-overlay start end (agent-session-buffer session))))
     (overlay-put overlay 'invisible t)
     (overlay-put overlay 'agent-session-fold t)
@@ -593,10 +626,13 @@ plist 解析会丢失 false / null / {} 的区别；需要把数据原样回传�
     overlay))
 
 (defun agent-session--fold-turn (session user-id activity limit &optional duration)
-  "折叠以用户消息 USER-ID 开始的回合；ACTIVITY 为其后的 block（按顺序）。
-LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合则是对话末尾）。
-回合中最后一段 agent 说明保持可见（被打断的回合，其后可能还有工具调用），
-它之前与之后的过程分别折叠；过程中没有工具调用时不折叠。"
+  "Fold the turn starting at user message USER-ID.
+ACTIVITY is the blocks that follow it (in order).  LIMIT is the end of the
+turn (the start of the next user message, or the end of the transcript for
+the last turn).  The turn's last agent remark stays visible (an interrupted
+turn may have tool calls after it); the process before and after it is
+folded separately.  Nothing is folded when the process has no tool calls.
+DURATION is the turn's elapsed time, used in the summary."
   (let* ((final (seq-find (lambda (entry) (and (eq (plist-get (cdr entry) :type) 'text)
                                                (eq (plist-get (cdr entry) :kind) 'assistant)))
                           (reverse activity)))
@@ -623,12 +659,14 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                      session (funcall start-of (car after)) limit)))))))))
 
 (defun agent-session--fold-turns (session &optional duration)
-  "折叠所有已结束、尚未折叠的回合。DURATION 为最近一个回合的用时。"
+  "Fold all finished turns that aren't folded yet.
+DURATION is the elapsed time of the latest turn."
   (let ((turns nil) (current nil))
-    ;; 按用户消息切分回合：((USER-ID . ACTIVITY) ...)
+    ;; Split into turns by user message: ((USER-ID . ACTIVITY) ...)
     (dolist (entry (agent-session--blocks-in-order session))
       (cond
-       ;; 排队中的消息暂时夹在上一回合中间，发出时会移到末尾，不作为回合分界。
+       ;; Queued messages sit inside the previous turn for now and move to the
+       ;; end when sent, so they don't delimit turns.
        ((plist-get (cdr entry) :queued))
        ((eq (plist-get (cdr entry) :type) 'user)
         (when current (push current turns))
@@ -648,7 +686,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                                 (and (eq turn latest) duration))))))))
 
 (defun agent-session--toggle-fold (button)
-  "展开或收起 BUTTON 所在回合的过程。"
+  "Expand or collapse the process of the turn that BUTTON is in."
   (let* ((session agent-session--current)
          (id (button-get button 'agent-session-block))
          (fold (plist-get (agent-session--block session id) :fold))
@@ -657,10 +695,10 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       (overlay-put overlay 'invisible collapsed))
     (agent-session--update session id :fold (plist-put (copy-sequence fold) :collapsed collapsed))))
 
-;;; 界面 API（供后端调用）
+;;; UI API (called by backends)
 
 (defun agent-session-text (session id text &optional kind)
-  "把 TEXT 追加到消息 block ID；KIND 为 assistant（默认）或 thinking。"
+  "Append TEXT to message block ID; KIND is assistant (default) or thinking."
   (let ((block (agent-session--block session id)))
     (if (null block)
         (agent-session--new-block session id (list :type 'text :kind (or kind 'assistant)
@@ -668,41 +706,47 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       (puthash id (plist-put block :text (concat (plist-get block :text) text))
                (agent-session-blocks session))
       (if (eq (plist-get block :kind) 'thinking)
-          ;; 思考通常折叠，只需重绘（折叠时只有一行）。
+          ;; Thinking is usually folded, so just redraw (one line when folded).
           (when (not (agent-session--collapsed-p block))
             (agent-session--render session id))
-        ;; 回复流式输出：直接在 block 末尾追加，不整段重绘。
+        ;; Streaming reply: append at the end of the block, no full redraw.
         (agent-session--with-buffer session
           (let ((end (plist-get block :end)))
-            (goto-char (1- end))                    ; 末尾换行之前
+            (goto-char (1- end))                    ; before the trailing newline
             (insert (agent-session--ro (agent-session--indent text)))))))))
 
 (defun agent-session-text-done (session id &optional text)
-  "消息 block ID 输出完毕；TEXT 非空时以它为最终全文。重绘为 markdown。"
+  "Mark message block ID as finished and redraw it as markdown.
+When TEXT is non-nil, it becomes the final full text."
   (if (agent-session--block session id)
       (apply #'agent-session--update session id :done t (and text (list :text text)))
     (when (and text (not (string-blank-p text)))
       (agent-session--new-block session id (list :type 'text :kind 'assistant :text text :done t)))))
 
 (defun agent-session-tool (session id &rest props)
-  "创建或更新工具 block ID。PROPS：:kind :title :status :output :diff :note。"
+  "Create or update tool block ID.
+PROPS: :kind :title :status :output :diff :note."
   (apply #'agent-session--update session id
          (if (agent-session--block session id) props (append (list :type 'tool) props))))
 
 (defun agent-session-tool-output (session id delta)
-  "把输出增量 DELTA 追加到工具 block ID。"
+  "Append output increment DELTA to tool block ID."
   (when-let* ((block (agent-session--block session id)))
     (agent-session--update session id :output (concat (plist-get block :output) delta))))
 
 (cl-defun agent-session-ask (session &key title detail diff choices callback tool)
-  "请用户确认。CHOICES 为 ((KEY 标签) ...)，用户选择后以 KEY 调用 CALLBACK。
-请求显示在页脚的辅助行；TOOL 为关联的工具 block id，等待与回答的结果标注在它上面，
-对话中不再单独插入记录。DIFF 已由工具 block 展示，这里不再重复。"
+  "Ask the user to confirm.
+CHOICES is ((KEY LABEL) ...); after the user picks one, CALLBACK is called
+with KEY.  The request is shown in the footer's auxiliary line; TOOL is the
+id of the related tool block, on which the waiting state and the answer are
+noted, with no separate entry in the transcript.  TITLE and DETAIL describe
+the request.  DIFF is already shown by the tool block, so it isn't repeated."
   (ignore diff)
   (let ((id (symbol-name (gensym "ask-"))))
     (setf (agent-session-asks session)
           (append (agent-session-asks session)
-                  ;; :answer 预先占位，回答时原地修改，列表中的这一项随之更新。
+                  ;; :answer is a placeholder modified in place when answered,
+                  ;; so this list entry updates with it.
                   (list (list :id id :title title :detail detail :choices choices
                               :callback callback :tool tool :answer nil))))
     (when (and tool (agent-session--block session tool))
@@ -713,18 +757,18 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     id))
 
 (defun agent-session--ask (session id)
-  "SESSION 中的确认请求 ID。"
+  "The confirmation request ID in SESSION."
   (seq-find (lambda (ask) (equal (plist-get ask :id) id)) (agent-session-asks session)))
 
 (defun agent-session--close-ask (session ask label)
-  "把确认请求 ASK 标为已处理，结果 LABEL 标注在关联的工具上。"
+  "Mark confirmation request ASK as handled; note result LABEL on its tool."
   (plist-put ask :answer label)
   (when-let* ((tool (plist-get ask :tool))
               ((agent-session--block session tool)))
     (agent-session--update session tool :note label)))
 
 (defun agent-session--answer (session id key)
-  "以 KEY 回答确认请求 ID。"
+  "Answer confirmation request ID with KEY."
   (let ((ask (agent-session--ask session id)))
     (unless (or (null ask) (plist-get ask :answer))
       (agent-session--close-ask session ask (cadr (assq key (plist-get ask :choices))))
@@ -732,19 +776,20 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       (agent-session--refresh session))))
 
 (defun agent-session-notice (session text &optional face)
-  "在对话中插入一行提示。"
+  "Insert a notice line TEXT with FACE into the transcript."
   (agent-session--new-block session (format "notice-%s" (random)) (list :type 'notice :text text
                                                                        :face face)))
 
 (defun agent-session-set-info (session &rest props)
-  "更新 header-line 上的信息：:model :tokens :cost 等。"
+  "Update the header-line info PROPS: :model :tokens :cost etc."
   (cl-loop for (key value) on props by #'cddr
            do (setf (agent-session-info session)
                     (plist-put (agent-session-info session) key value)))
   (agent-session--refresh session))
 
 (defun agent-session--settle (session)
-  "回合结束或进程退出时收尾：仍在运行的工具标为中断，未回答的确认作废。"
+  "Wrap up when a turn ends or the process exits.
+Tools still running are marked interrupted; unanswered confirmations expire."
   (maphash (lambda (id block)
              (pcase (plist-get block :type)
                ('tool (when (eq (plist-get block :status) 'running)
@@ -757,12 +802,13 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       (agent-session--close-ask session ask "已失效"))))
 
 (defun agent-session-set-status (session status)
-  "设置会话状态：idle / running / exited。空闲时发送排队的消息。"
+  "Set the session STATUS: idle / running / exited.
+Send queued messages when idle."
   (let ((previous (agent-session-status session))
         (info (agent-session-info session)))
     (when (and (eq status 'running) (not (eq previous 'running)))
       (setq info (plist-put info :started (current-time))))
-    ;; 回合在后台完成时标记为未读，打开会话时清除。
+    ;; Mark as unread when a turn finishes in the background; cleared on opening.
     (when (and (eq previous 'running) (eq status 'idle)
                (not (get-buffer-window (agent-session-buffer session) t)))
       (setq info (plist-put info :unread t)))
@@ -772,32 +818,34 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (setf (agent-session-status session) status)
     (when (memq status '(idle exited))
       (agent-session--settle session)
-      ;; 回合结束：把已结束的回合折叠成摘要（恢复会话回放后也会走到这里）。
+      ;; Turn ended: fold finished turns into summaries (also reached after
+      ;; replaying a resumed session).
       (agent-session--fold-turns session (and finished (agent-session--elapsed finished)))))
   (agent-session--refresh session)
   (when (and (eq status 'idle) (agent-session-queue session))
     (let ((next (pop (agent-session-queue session))))
-      ;; 排队时显示在当时的末尾；真正发出时移到对话末尾，保持记录顺序与实际一致。
+      ;; Shown at the then-end when queued; move it to the end of the
+      ;; transcript when actually sent so the order matches reality.
       (agent-session--remove-block session (car next))
       (agent-session--new-block session (car next) (list :type 'user :text (cdr next)))
       (agent-session--deliver session (cdr next)))))
 
-;;; 状态栏：agent / 模型 / 推理强度 / 权限模式 / 用量 / 状态
+;;; Mode line: agent / model / reasoning effort / permission mode / usage / status
 
 (defun agent-session--pending-asks (session)
-  "SESSION 中尚未回答的确认请求 id，按出现先后排列。"
+  "Ids of unanswered confirmation requests in SESSION, in order of appearance."
   (mapcar (lambda (ask) (plist-get ask :id))
           (seq-remove (lambda (ask) (plist-get ask :answer)) (agent-session-asks session))))
 
 (defun agent-session--elapsed (since)
-  "从 SINCE 到现在的简短时长，如 5s、3m、1h2m。"
+  "Short duration from SINCE until now, e.g. 5s, 3m, 1h2m."
   (let ((seconds (round (float-time (time-since since)))))
     (cond ((< seconds 60) (format "%ds" seconds))
           ((< seconds 3600) (format "%dm" (/ seconds 60)))
           (t (format "%dh%dm" (/ seconds 3600) (/ (% seconds 3600) 60))))))
 
 (defun agent-session-status-label (session)
-  "SESSION 的状态标签（带 face），状态栏与会话列表共用。"
+  "Status label of SESSION (with faces), shared by mode line and session list."
   (cond ((agent-session--pending-asks session)
          (propertize "● 等待确认" 'face 'agent-session-ask))
         (t (pcase (agent-session-status session)
@@ -813,14 +861,15 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
              ('exited (propertize "○ 已退出" 'face 'agent-session-error))))))
 
 (defun agent-session--model-label (session)
-  "当前模型的显示名。"
+  "Display name of the current model of SESSION."
   (let ((info (agent-session-model-info session)))
     (or (plist-get info :name)
         (plist-get (agent-session-info session) :model)
         "默认模型")))
 
 (defun agent-session--mode-line-control (label command help)
-  "状态栏中可点击的一段：鼠标点击执行 COMMAND。"
+  "Clickable mode-line segment LABEL: a mouse click runs COMMAND.
+HELP is the help echo."
   (propertize label
               'mouse-face 'mode-line-highlight
               'help-echo (concat help "（鼠标点击）")
@@ -831,7 +880,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                        (call-interactively command))))))
 
 (defun agent-session--mode-line (session)
-  "会话 buffer 的状态栏内容。"
+  "Mode-line contents of the SESSION buffer."
   (let* ((info (agent-session-info session))
          (mode (agent-session-setting session :mode))
          (sep (propertize " · " 'face 'agent-session-dim)))
@@ -865,12 +914,13 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                  'face 'agent-session-dim))))
 
 (defvar agent-session--list-refresh-function nil
-  "会话列表的刷新函数（由会话列表设置），会话状态变化时调用。")
+  "Refresh function of the session list (set by it), called on status changes.")
 
-(defvar agent-session--clock nil "运行中的会话存在时，定时刷新计时。")
+(defvar agent-session--clock nil "Timer refreshing elapsed times of running sessions.")
 
 (defun agent-session--tick ()
-  "刷新运行中会话的状态栏与分隔线上的计时；没有运行中的会话时停止计时器。"
+  "Refresh elapsed times on mode lines and separators of running sessions.
+Stop the timer when no session is running."
   (let ((running (seq-filter (lambda (b) (eq (agent-session-status
                                               (buffer-local-value 'agent-session--current b))
                                              'running))
@@ -883,7 +933,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       (setq agent-session--clock nil))))
 
 (defun agent-session--refresh (session)
-  "刷新 SESSION 的页脚与状态栏，并通知会话列表。"
+  "Refresh the footer and mode line of SESSION and notify the session list."
   (when (buffer-live-p (agent-session-buffer session))
     (agent-session--render-footer session)
     (with-current-buffer (agent-session-buffer session)
@@ -893,19 +943,22 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (when agent-session--list-refresh-function
       (funcall agent-session--list-refresh-function))))
 
-;;; 页脚：分隔线、辅助行、提示符（参考 telega 的 chatbuf）
+;;; Footer: separator, auxiliary lines, prompt (after telega's chatbuf)
 ;;
-;; buffer 结构：对话记录 | tail | 分隔线 · 辅助行 · 提示符 | input | 输入
-;; 对话记录与页脚只读；提示符不可进入（cursor-intangible），其后到 buffer 末尾是输入区。
+;; Buffer layout:
+;;   transcript | tail | separator · auxiliary lines · prompt | input | input text
+;; Transcript and footer are read-only; the prompt can't be entered
+;; (cursor-intangible), and from it to the end of buffer is the input area.
 
 (defface agent-session-separator '((t :inherit shadow :underline t))
-  "对话与输入之间的分隔线。")
+  "Separator line between transcript and input.")
 
 (defface agent-session-prompt '((t :inherit (bold font-lock-function-name-face)))
-  "输入提示符。")
+  "Input prompt.")
 
 (defun agent-session--footer (session)
-  "页脚文本：分隔线（左侧为进行中的状态）、辅助行、提示符。"
+  "Footer text of SESSION.
+That is the separator (ongoing status on its left), auxiliary lines, prompt."
   (let* ((status (agent-session-status session))
          (asks (agent-session--pending-asks session))
          (state (cond (asks (agent-session-status-label session))
@@ -913,12 +966,12 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                        (agent-session-status-label session)))))
     (concat
      "\n"
-     ;; 分隔线：贯穿窗口宽度的下划线，左侧显示进行中的状态。
+     ;; Separator: an underline spanning the window width, ongoing status on the left.
      (propertize (concat (if state (concat " " state " ") "")
                          (propertize " " 'display '(space :align-to right)))
                  'face 'agent-session-separator)
      "\n"
-     ;; 辅助行：待确认的请求（带选项按钮）与排队中的消息。
+     ;; Auxiliary lines: pending requests (with choice buttons) and queued messages.
      (when-let* ((id (car asks)))
        (let ((ask (agent-session--ask session id)))
          (concat
@@ -929,7 +982,8 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                          'action (lambda (_) (agent-session--answer session id key))))
                      (plist-get ask :choices) " ")
           "\n"
-          ;; 没有关联工具 block 时，详情（例如命令）只能在这里看到。
+          ;; Without a related tool block, the detail (e.g. the command) is only
+          ;; visible here.
           (when-let* ((detail (and (not (agent-session--block session (plist-get ask :tool)))
                                    (plist-get ask :detail))))
             (propertize (concat "   " (truncate-string-to-width
@@ -949,20 +1003,22 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                      'action (lambda (_) (agent-session-cancel-queued (car queued))))
                    "\n"))
                 (agent-session-queue session) "")
-     ;; 提示符：只读、不可进入；其后的文本可编辑。
+     ;; Prompt: read-only and can't be entered; the text after it is editable.
      (propertize (concat (agent-session-title session) " ❯ ")
                  'face 'agent-session-prompt
                  'cursor-intangible t 'field 'agent-session-prompt))))
 
 (defun agent-session--render-footer (session)
-  "重绘 SESSION 的页脚，保持各窗口中输入区内的光标位置与输入内容。"
+  "Redraw the footer of SESSION.
+Point inside the input area of each window and the input text are preserved."
   (let ((buffer (agent-session-buffer session)))
     (when (and (buffer-live-p buffer) (agent-session-input session))
       (with-current-buffer buffer
         (let* ((input (agent-session-input session))
                (tail (agent-session-tail session))
                (windows (get-buffer-window-list buffer nil t))
-               ;; 输入区中的光标记为相对输入起点的偏移，重绘后恢复。
+               ;; Record point in the input area as an offset from the input
+               ;; start, restored after redrawing.
                (offsets (mapcar (lambda (w) (let ((p (window-point w)))
                                               (and (>= p input) (- p input))))
                                 windows))
@@ -979,12 +1035,14 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
           (when offset (goto-char (+ input offset)))
           (cl-mapc (lambda (w o) (when o (set-window-point w (+ input o)))) windows offsets))))))
 
-;;; 输入：页脚之后的输入区
+;;; Input: the input area after the footer
 
-(defvar-local agent-session--history-index nil "当前浏览到的输入历史位置。")
+(defvar-local agent-session--history-index nil "Current position in the input history.")
 
 (defun agent-session--input-text (session)
-  "输入区的文本；图片附件保留为带 `agent-session-image' 属性的占位文字。"
+  "Text of the input area of SESSION.
+Image attachments remain as placeholder text with an `agent-session-image'
+property."
   (with-current-buffer (agent-session-buffer session)
     (let* ((start (agent-session-input session))
            (text (buffer-substring-no-properties start (point-max)))
@@ -999,23 +1057,25 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
           (setq pos end)))
       text)))
 
-;;; 图片附件
+;;; Image attachments
 ;;
-;; 输入区中的图片是一段占位文字“[图片]”，带 `agent-session-image' 属性（文件路径），
-;; GUI 中显示为缩略图。消息文本在排队、引导、历史中都保留这个属性，
-;; 后端用 `agent-session-message-images' / `agent-session-message-text' 取出图片和文字。
+;; An image in the input area is the placeholder text “[图片]” with an
+;; `agent-session-image' property (the file path), shown as a thumbnail in the
+;; GUI. Message text keeps this property when queued, steered and in history;
+;; backends extract images and text with `agent-session-message-images' /
+;; `agent-session-message-text'.
 
 (defcustom agent-session-image-directory (locate-user-emacs-file "var/agent-images/")
-  "粘贴的图片保存在这里。"
+  "Directory where pasted images are saved."
   :type 'directory :group 'agent-session)
 
 (defconst agent-session--clipboard-image-types
   '((image/png . "png") (image/jpeg . "jpg") (image/gif . "gif") (image/webp . "webp")
     (image/tiff . "tiff"))
-  "剪贴板中可作为图片粘贴的类型及扩展名，按优先顺序。")
+  "Clipboard types pasteable as images, with extensions, in priority order.")
 
 (defun agent-session--image-string (file)
-  "图片附件 FILE 的占位文字；GUI 中显示为缩略图。"
+  "Placeholder text for image attachment FILE; shown as a thumbnail in the GUI."
   (apply #'propertize "[图片]"
          'agent-session-image file
          'help-echo (abbreviate-file-name file)
@@ -1026,7 +1086,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
                                         :ascent 'center)))))
 
 (defun agent-session-message-images (text)
-  "消息 TEXT 中的图片文件，按出现顺序。"
+  "Image files in message TEXT, in order of appearance."
   (let ((pos 0) files)
     (while (setq pos (text-property-not-all pos (length text) 'agent-session-image nil text))
       (push (get-text-property pos 'agent-session-image text) files)
@@ -1034,7 +1094,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (nreverse files)))
 
 (defun agent-session-message-text (text)
-  "消息 TEXT 去掉图片占位后的纯文字。"
+  "Plain text of message TEXT with image placeholders removed."
   (let ((pos 0) parts)
     (while (< pos (length text))
       (let ((next (next-single-property-change pos 'agent-session-image text (length text))))
@@ -1044,7 +1104,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (string-trim (apply #'concat (nreverse parts)))))
 
 (defun agent-session-image-media-type (file)
-  "图片 FILE 的 MIME 类型。"
+  "MIME type of image FILE."
   (pcase (downcase (or (file-name-extension file) ""))
     ((or "jpg" "jpeg") "image/jpeg")
     ("gif" "image/gif")
@@ -1052,8 +1112,9 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (_ "image/png")))
 
 (defun agent-session--clipboard-image ()
-  "剪贴板中有图片（且没有文字）时保存为文件并返回路径，否则返回 nil。
-有文字时按文字粘贴：例如从 Finder 复制的文件，剪贴板里同时有文件名和图标。"
+  "Save the clipboard image to a file and return its path, else nil.
+Only when the clipboard has an image and no text.  With text, paste as
+text: e.g. a file copied in Finder puts both its name and icon there."
   (when-let* ((targets (ignore-errors (gui-get-selection 'CLIPBOARD 'TARGETS)))
               ((not (seq-some (lambda (type) (seq-contains-p targets type))
                               '(STRING UTF8_STRING text/plain))))
@@ -1067,7 +1128,8 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
            (file (concat base "." (cdr type))))
       (let ((coding-system-for-write 'no-conversion))
         (write-region data nil file nil 'silent))
-      ;; macOS 截图有时只有 TIFF，agent 不支持，转成 PNG。
+      ;; macOS screenshots sometimes come only as TIFF, which agents don't
+      ;; support; convert to PNG.
       (when (equal (cdr type) "tiff")
         (let ((png (concat base ".png")))
           (when (eq 0 (call-process "sips" nil nil nil "-s" "format" "png" file "--out" png))
@@ -1076,7 +1138,8 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       file)))
 
 (defun agent-session-insert-image (file)
-  "在输入区插入图片附件 FILE（光标不在输入区时插到末尾）。"
+  "Insert image attachment FILE in the input area.
+If point isn't in the input area, insert at the end."
   (interactive (list (read-file-name "图片：" nil nil t nil
                                      (lambda (f) (or (file-directory-p f)
                                                      (string-match-p (image-file-name-regexp) f))))))
@@ -1084,7 +1147,8 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
   (insert (agent-session--image-string (expand-file-name file))))
 
 (defun agent-session-yank (&optional arg)
-  "粘贴：剪贴板中是图片时作为图片附件插入输入区，否则同 `yank'。"
+  "Paste: insert a clipboard image as an attachment, else like `yank'.
+ARG is passed to `yank'."
   (interactive "*P")
   (if-let* ((file (agent-session--clipboard-image)))
       (agent-session-insert-image file)
@@ -1093,23 +1157,24 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (yank arg)))
 
 (defun agent-session--dnd-file (uri action)
-  "拖进会话 buffer 的图片作为附件；其他文件照常打开。"
+  "Attach an image dropped into the session buffer; open other files as usual.
+URI and ACTION are as for `dnd-open-file'."
   (let ((file (dnd-get-local-file-name uri t)))
     (if (and file (string-match-p (image-file-name-regexp) file))
         (progn (agent-session-insert-image file) 'private)
       (dnd-open-file uri action))))
 
 (defun agent-session--in-input-p ()
-  "光标是否在输入区。"
+  "Return non-nil if point is in the input area."
   (and agent-session--current (>= (point) (agent-session-input agent-session--current))))
 
 (defun agent-session--deliver (session text)
-  "把 TEXT 交给后端发送。"
+  "Hand TEXT to the backend of SESSION for sending."
   (agent-session-set-status session 'running)
   (agent-session-backend-send (agent-session-backend session) session text))
 
 (defun agent-session-submit (session text)
-  "以用户身份发送 TEXT：显示在对话中；agent 正忙时排队。"
+  "Send TEXT as the user: show it in the transcript; queue it if busy."
   (unless (plist-get (agent-session-info session) :title)
     (setf (agent-session-info session)
           (plist-put (agent-session-info session) :title (agent-session--title-seed text))))
@@ -1124,7 +1189,8 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
       (agent-session--deliver session text))))
 
 (defun agent-session-send (session text)
-  "处理用户输入的 TEXT：本地 /命令在 Emacs 中执行，其余发给 agent。"
+  "Handle user input TEXT.
+Local /commands run in Emacs; everything else goes to the agent."
   (let ((text (string-trim text)))
     (unless (string-empty-p text)
       (when (eq (agent-session-status session) 'exited) (user-error "agent 进程已退出"))
@@ -1132,7 +1198,7 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
         (agent-session-submit session text)))))
 
 (defun agent-session-send-input ()
-  "发送输入区的内容。"
+  "Send the contents of the input area."
   (interactive)
   (let* ((session (agent-session--this))
          (text (string-trim (agent-session--input-text session))))
@@ -1144,12 +1210,13 @@ LIMIT 为回合的终点（下一条用户消息的起点，最后一个回合�
     (agent-session-send session text)))
 
 (defun agent-session-steer (session text)
-  "把 TEXT 送进 SESSION 正在进行的回合（引导）。
-agent 不在运行时等同普通发送；后端不支持引导时，中断当前回合后优先发送。"
+  "Feed TEXT into the ongoing turn of SESSION (steering).
+When the agent isn't running, this is an ordinary send; when the backend
+doesn't support steering, interrupt the current turn and send TEXT first."
   (cond
    ((not (eq (agent-session-status session) 'running))
     (agent-session-send session text))
-   ;; /model 等本地命令照常在 Emacs 中执行。
+   ;; Local commands like /model run in Emacs as usual.
    ((agent-session--run-local-command session text))
    (t
     (if (agent-session-backend-steer (agent-session-backend session) session text)
@@ -1163,7 +1230,9 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (agent-session--refresh session))))
 
 (defun agent-session-steer-input ()
-  "以引导方式发送输入区内容：agent 运行中时立刻送进当前回合，而不是排队。"
+  "Send the input area contents as steering.
+While the agent is running, feed it into the current turn right away
+instead of queueing."
   (interactive)
   (let* ((session (agent-session--this))
          (text (string-trim (agent-session--input-text session))))
@@ -1175,7 +1244,8 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (agent-session-steer session text)))
 
 (defun agent-session--take-queued (session id)
-  "从排队中取出 ID（默认最早一条）并删除其显示，返回 (ID . TEXT)。"
+  "Take ID (default the oldest) out of the queue of SESSION.
+Delete its display and return (ID . TEXT)."
   (let ((entry (if id (assoc id (agent-session-queue session)) (car (agent-session-queue session)))))
     (unless entry (user-error "没有排队的消息"))
     (setf (agent-session-queue session) (delq entry (agent-session-queue session)))
@@ -1183,13 +1253,13 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     entry))
 
 (defun agent-session-steer-queued (&optional id)
-  "把排队的消息 ID（默认最早一条）转为引导，立刻送进当前回合。"
+  "Turn queued message ID (default the oldest) into steering right away."
   (interactive)
   (let ((session (agent-session--this)))
     (agent-session-steer session (cdr (agent-session--take-queued session id)))))
 
 (defun agent-session-cancel-queued (&optional id)
-  "撤回排队的消息 ID（默认最早一条），放回输入区以便修改。"
+  "Withdraw queued message ID (default the oldest) back into the input area."
   (interactive)
   (let* ((session (agent-session--this))
          (entry (agent-session--take-queued session id)))
@@ -1197,25 +1267,25 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (agent-session-insert-input (agent-session-buffer session) (cdr entry))))
 
 (defun agent-session-goto-input ()
-  "跳到输入区末尾。"
+  "Go to the end of the input area."
   (interactive)
   (goto-char (point-max)))
 
 (defun agent-session-ret ()
-  "输入区中发送；按钮上执行按钮；对话中其他位置跳到输入区。"
+  "Send in the input area; push a button on one; else go to the input area."
   (interactive)
   (cond ((agent-session--in-input-p) (agent-session-send-input))
         ((button-at (point)) (push-button))
         (t (agent-session-goto-input))))
 
 (defun agent-session-self-insert-to-input ()
-  "在对话记录中打字时，跳到输入区末尾并输入。"
+  "When typing in the transcript, go to the end of the input area and insert."
   (interactive)
   (goto-char (point-max))
   (call-interactively #'self-insert-command))
 
 (defun agent-session-cancel-dwim ()
-  "有输入时清空输入区；没有输入时中断 agent。"
+  "Clear the input area if it has input; otherwise interrupt the agent."
   (interactive)
   (let ((session (agent-session--this)))
     (if (string-blank-p (agent-session--input-text session))
@@ -1224,7 +1294,7 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
         (delete-region (agent-session-input session) (point-max))))))
 
 (defun agent-session--history-step (step)
-  "在输入历史中移动 STEP。"
+  "Move STEP entries in the input history."
   (let* ((session (agent-session--this))
          (history (agent-session-history session))
          (index (+ (or agent-session--history-index -1) step)))
@@ -1239,17 +1309,17 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
           (t (user-error "没有更早的输入")))))
 
 (defun agent-session-previous-input ()
-  "上一条输入。"
+  "Recall the previous input."
   (interactive)
   (agent-session--history-step 1))
 
 (defun agent-session-next-input ()
-  "下一条输入。"
+  "Recall the next input."
   (interactive)
   (agent-session--history-step -1))
 
 (defun agent-session-focus-input (&optional session)
-  "聚焦 SESSION（默认当前或目标会话）的输入区。"
+  "Focus the input area of SESSION (default the current or target session)."
   (interactive)
   (let* ((session (or session agent-session--current
                       (when-let* ((buffer (agent-session-target)))
@@ -1262,14 +1332,14 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
       (evil-insert-state))))
 
 (defun agent-session-tab ()
-  "输入区中补全，对话记录中跳到下一个按钮。"
+  "Complete in the input area; move to the next button in the transcript."
   (interactive)
   (if (agent-session--in-input-p)
       (completion-at-point)
     (forward-button 1 t)))
 
 (defun agent-session-interrupt ()
-  "中断 agent 当前的回合，并清空排队的消息。"
+  "Interrupt the agent's current turn and clear queued messages."
   (interactive)
   (let ((session (agent-session--this)))
     (setf (agent-session-queue session) nil)
@@ -1277,28 +1347,28 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (agent-session-notice session "已中断")))
 
 (defun agent-session--answer-latest (key-fn)
-  "用 KEY-FN 从最早的待确认请求的选项中挑一个作答。"
+  "Answer the oldest pending request with the choice KEY-FN picks."
   (let* ((session (agent-session--this))
          (id (or (car (agent-session--pending-asks session)) (user-error "没有待确认的请求")))
          (choices (plist-get (agent-session--ask session id) :choices)))
     (agent-session--answer session id (funcall key-fn choices))))
 
 (defun agent-session-approve ()
-  "允许最早的待确认请求（第一个选项）。"
+  "Allow the oldest pending request (first choice)."
   (interactive)
   (agent-session--answer-latest #'caar))
 
 (defun agent-session-deny ()
-  "拒绝最早的待确认请求（最后一个选项）。"
+  "Deny the oldest pending request (last choice)."
   (interactive)
   (agent-session--answer-latest (lambda (choices) (car (car (last choices))))))
 
 (defun agent-session--message-positions ()
-  "对话中各条消息（用户与 agent）的起点。"
+  "Start positions of the messages (user and agent) in the transcript."
   (let (positions)
     (maphash (lambda (_id block)
                (let ((pos (marker-position (plist-get block :start))))
-                 ;; 跳过被折叠（不可见）的中间说明。
+                 ;; Skip intermediate remarks that are folded (invisible).
                  (when (and (memq (plist-get block :type) '(user text))
                             (not (invisible-p pos)))
                    (push pos positions))))
@@ -1306,22 +1376,22 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (sort positions #'<)))
 
 (defun agent-session-next-message ()
-  "跳到下一条消息；没有时跳到输入区。"
+  "Go to the next message, or to the input area if there is none."
   (interactive)
   (if-let* ((pos (seq-find (lambda (p) (> p (point))) (agent-session--message-positions))))
       (goto-char pos)
     (agent-session-goto-input)))
 
 (defun agent-session-previous-message ()
-  "跳到上一条消息。"
+  "Go to the previous message."
   (interactive)
   (when-let* ((pos (seq-find (lambda (p) (< p (point))) (reverse (agent-session--message-positions)))))
     (goto-char pos)))
 
-;;; 切换 agent / 模型 / 推理强度 / 权限模式
+;;; Switching agent / model / reasoning effort / permission mode
 
 (defun agent-session--has-conversation (session)
-  "SESSION 是否已经有对话（用户消息或 agent 回复）。"
+  "Return non-nil if SESSION has a conversation (user messages or replies)."
   (catch 'found
     (maphash (lambda (_id block)
                (when (memq (plist-get block :type) '(user text tool))
@@ -1330,11 +1400,12 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     nil))
 
 (defun agent-session--mode-label (mode)
-  "权限模式 MODE 的显示名。"
+  "Display name of permission mode MODE."
   (or (cadr (assq mode agent-session-modes)) (symbol-name mode)))
 
 (defun agent-session--completing-read (prompt candidates &optional default)
-  "带说明的 completing-read。CANDIDATES 为 ((值 . 说明) ...)。"
+  "A `completing-read' with annotations, using PROMPT and DEFAULT.
+CANDIDATES is ((VALUE . NOTE) ...)."
   (let ((completion-extra-properties
          (list :annotation-function
                (lambda (candidate)
@@ -1343,7 +1414,7 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (completing-read prompt (mapcar #'car candidates) nil t nil nil default)))
 
 (defun agent-session-select-model (&optional model)
-  "切换当前会话的模型。"
+  "Switch the model of the current session to MODEL."
   (interactive)
   (let* ((session (agent-session--this))
          (models (or (agent-session-backend-models (agent-session-backend session) session)
@@ -1360,14 +1431,14 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (unless (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
       (user-error "没有模型 %s" model))
     (agent-session-configure session :model model)
-    ;; 新模型不支持当前强度时恢复默认。
+    ;; Reset to the default if the new model doesn't support the current effort.
     (let ((efforts (plist-get (agent-session-model-info session) :efforts))
           (effort (agent-session-setting session :effort)))
       (when (and effort efforts (not (member effort efforts)))
         (agent-session-configure session :effort nil)))))
 
 (defun agent-session-select-effort (&optional effort)
-  "切换当前会话的推理强度。"
+  "Switch the reasoning effort of the current session to EFFORT."
   (interactive)
   (let* ((session (agent-session--this))
          (info (agent-session-model-info session))
@@ -1384,12 +1455,13 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (agent-session-configure session :effort effort)))
 
 (defun agent-session-select-mode (&optional mode)
-  "切换当前会话的权限模式。"
+  "Switch the permission mode of the current session to MODE."
   (interactive)
   (let* ((session (agent-session--this))
          (modes (agent-session-backend-modes (agent-session-backend session) session))
          (mode (or mode
-                   ;; 候选同时带中文名与英文名，输入任一种都能匹配，例如“完全访问 full”。
+                   ;; Candidates carry both the Chinese and English names so
+                   ;; either matches, e.g. “完全访问 full”.
                    (let* ((candidates (mapcar (lambda (m) (cons (format "%s %s"
                                                                        (agent-session--mode-label m) m)
                                                                  (nth 2 (assq m agent-session-modes))))
@@ -1406,7 +1478,7 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     (agent-session-configure session :mode mode)))
 
 (defun agent-session-plan-on ()
-  "进入计划模式（/plan）：只规划，不改动。"
+  "Enter plan mode (/plan): plan only, make no changes."
   (interactive)
   (let* ((session (agent-session--this))
          (mode (agent-session-setting session :mode)))
@@ -1416,7 +1488,7 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
       (agent-session-configure session :before-plan mode :mode 'plan))))
 
 (defun agent-session-plan-off ()
-  "退出计划模式（/default），回到进入前的权限模式。"
+  "Leave plan mode (/default), restoring the previous permission mode."
   (interactive)
   (let ((session (agent-session--this)))
     (when (eq (agent-session-setting session :mode) 'plan)
@@ -1425,14 +1497,16 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
                                                  agent-session-default-mode)))))
 
 (defun agent-session-toggle-plan ()
-  "切换计划模式。"
+  "Toggle plan mode."
   (interactive)
   (if (eq (agent-session-setting (agent-session--this) :mode) 'plan)
       (agent-session-plan-off)
     (agent-session-plan-on)))
 
 (defun agent-session-select-agent (&optional agent)
-  "切换 agent。还没有对话时原地替换；否则新开会话并带上输入区草稿。"
+  "Switch to AGENT.
+Replace in place if there is no conversation yet; otherwise open a new
+session carrying over the input draft."
   (interactive)
   (let* ((session (agent-session--this))
          (agent (or agent
@@ -1463,13 +1537,13 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
         (agent-session-backend-start (agent-session-backend session) session)))))
 
 (defun agent-session-new ()
-  "在同一项目中用同一个 agent 新开会话。"
+  "Open a new session in the same project with the same agent."
   (interactive)
   (let ((session (agent-session--this)))
     (agent-session-start (agent-session-agent session) t nil (agent-session-root session))))
 
 (defun agent-session-resume (&optional agent)
-  "从 AGENT（默认当前 agent）在本项目的历史会话中选择一个恢复。"
+  "Resume a past session of AGENT (default the current one) in this project."
   (interactive)
   (let* ((session agent-session--current)
          (agent (or agent (and session (agent-session-agent session)) (agent-session--read-agent)))
@@ -1489,7 +1563,7 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
            (choice (completing-read "恢复会话: " candidates nil t)))
       (agent-session-start agent nil (cdr (assoc choice candidates)) root))))
 
-;;; 斜杠命令与补全
+;;; Slash commands and completion
 
 (defvar agent-session-local-commands
   '(("model" agent-session-select-model "切换模型" agent-session--model-ids)
@@ -1501,28 +1575,30 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
     ("new" agent-session-new "新开会话")
     ("resume" agent-session-resume "恢复历史会话")
     ("interrupt" agent-session-interrupt "中断当前回合"))
-  "在 Emacs 中执行、不发给 agent 的命令：(名称 函数 说明 [参数候选函数])。
-带参数时以参数字符串（模式、agent 转为符号）调用函数。")
+  "Commands run in Emacs, not sent to the agent.
+Each is (NAME FUNCTION DESCRIPTION [ARG-CANDIDATES-FUNCTION]).  With an
+argument, FUNCTION is called with the argument string (converted to a
+symbol for mode and agent).")
 
 (defun agent-session--model-ids (session)
-  "SESSION 可选的模型 id。"
+  "Model ids available in SESSION."
   (mapcar (lambda (m) (plist-get m :id))
           (agent-session-backend-models (agent-session-backend session) session)))
 
 (defun agent-session--effort-names (session)
-  "SESSION 当前模型支持的推理强度。"
+  "Reasoning efforts supported by the current model of SESSION."
   (plist-get (agent-session-model-info session) :efforts))
 
 (defun agent-session--mode-names (session)
-  "SESSION 支持的权限模式名。"
+  "Names of permission modes supported by SESSION."
   (mapcar #'symbol-name (agent-session-backend-modes (agent-session-backend session) session)))
 
 (defun agent-session--agent-names (_session)
-  "已注册的 agent 名。"
+  "Names of registered agents."
   (mapcar (lambda (a) (symbol-name (car a))) (reverse agent-session-agents)))
 
 (defun agent-session--run-local-command (session text)
-  "TEXT 若是本地命令则执行并返回非 nil。"
+  "If TEXT is a local command, run it in SESSION and return non-nil."
   (when (string-match "\\`/\\([[:alnum:]-]+\\)\\(?:[ \t]+\\(.*\\)\\)?\\'" text)
     (when-let* ((entry (assoc (match-string 1 text) agent-session-local-commands)))
       (let ((arg (match-string 2 text)))
@@ -1536,7 +1612,8 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
       t)))
 
 (defun agent-session--command-candidates (session)
-  "斜杠命令候选：((\"/name\" 说明 参数提示 来源) ...)。"
+  "Slash command candidates for SESSION.
+A list of (\"/name\" DESCRIPTION ARG-HINT SOURCE)."
   (append
    (mapcar (lambda (c) (list (concat "/" (car c)) (nth 2 c) nil 'local)) agent-session-local-commands)
    (mapcar (lambda (c) (list (concat "/" (plist-get c :name)) (plist-get c :description)
@@ -1544,22 +1621,26 @@ agent 不在运行时等同普通发送；后端不支持引导时，中断当�
            (agent-session-backend-commands (agent-session-backend session) session))))
 
 (defun agent-session--project-files (session)
-  "SESSION 项目中的文件（相对路径），用于 @ 补全。"
+  "Files in the project of SESSION (relative paths), for @ completion."
   (let ((default-directory (agent-session-root session)))
     (when-let* ((project (project-current nil default-directory)))
       (mapcar (lambda (f) (file-relative-name f default-directory))
               (seq-take (project-files project) 20000)))))
 
 (defun agent-session--annotation-width (names)
-  "补全弹窗中注释列的宽度：窗口宽度减去最长的命令名，限制在 10 到 70 列。
-同时把 corfu 弹窗的最大宽度限制在会话窗口内（agent 列通常较窄）。"
+  "Width of the annotation column in the completion popup.
+That is the window width minus the longest of NAMES, clamped to 10-70
+columns.  Also limit the corfu popup's maximum width to the session window
+\(the agent column is usually narrow)."
   (let ((window (window-body-width)))
     (setq-local corfu-max-width (max 20 (1- window)))
     (max 10 (min 70 (- window (apply #'max 0 (mapcar #'string-width names)) 6)))))
 
 (defun agent-session--command-annotation (command width)
-  "命令 COMMAND 的注释：参数提示与说明，补齐或截断到恰好 WIDTH 列。
-corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成一列。"
+  "Annotation for COMMAND: argument hint and description.
+Padded or truncated to exactly WIDTH columns.  corfu right-aligns
+annotations to the popup edge, so rows line up only if annotations have
+equal width."
   (pcase-let ((`(,_name ,description ,hint ,source) command))
     (concat "  "
             (truncate-string-to-width
@@ -1571,21 +1652,22 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
              width nil ?\s "…"))))
 
 (defun agent-session-completion-at-point ()
-  "输入区的补全：行首的 /命令、命令参数、@文件。
-“行首”指提示符之后或换行之后，提示符与输入在同一行。"
+  "Completion in the input area: /commands at line start, arguments, @files.
+\"Line start\" means after the prompt or after a newline, since the prompt
+shares a line with the input."
   (when-let* ((session agent-session--current)
               ((agent-session--in-input-p)))
     (let* ((start (max (line-beginning-position) (agent-session-input session)))
            (text (buffer-substring-no-properties start (point)))
            (exit (lambda (_name status) (when (eq status 'finished) (insert " ")))))
       (cond
-       ;; 命令参数：/model xxx
+       ;; Command argument: /model xxx
        ((and (string-match "\\`/\\([[:alnum:]-]+\\)[ \t]+\\([^ \t\n]*\\)\\'" text)
              (nth 3 (assoc (match-string 1 text) agent-session-local-commands)))
         (list (+ start (match-beginning 2)) (point)
               (funcall (nth 3 (assoc (match-string 1 text) agent-session-local-commands)) session)
               :exclusive 'no))
-       ;; 行首的 /命令
+       ;; /command at line start
        ((string-match "\\`/[^ \t\n]*\\'" text)
         (let* ((candidates (agent-session--command-candidates session))
                (width (agent-session--annotation-width (mapcar #'car candidates))))
@@ -1596,7 +1678,7 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
                   (when-let* ((c (assoc name candidates)))
                     (agent-session--command-annotation c width)))
                 :exit-function exit)))
-       ;; @文件
+       ;; @file
        ((string-match "\\(?:\\`\\|[ \t]\\)@\\([^ \t\n]*\\)\\'" text)
         (list (+ start (match-beginning 1)) (point)
               (completion-table-with-cache
@@ -1605,10 +1687,10 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
               :category 'file
               :exit-function exit))))))
 
-;;; 设置菜单（C-c C-o）
+;;; Settings menu (C-c C-o)
 
 (defun agent-session--menu-value (key)
-  "菜单中显示的当前设置值。"
+  "Current value of setting KEY, as shown in the menu."
   (when-let* ((session agent-session--current))
     (propertize
      (pcase key
@@ -1619,7 +1701,7 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
      'face 'transient-value)))
 
 (transient-define-prefix agent-session-menu ()
-  "会话设置：agent、模型、推理强度、权限模式，以及会话操作。"
+  "Session settings (agent, model, effort, permission mode) and actions."
   [["设置"
     ("a" agent-session-select-agent
      :description (lambda () (concat "Agent     " (agent-session--menu-value :agent))))
@@ -1640,10 +1722,10 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
     ("y" "允许" agent-session-approve)
     ("d" "拒绝" agent-session-deny)]])
 
-;;; 模式
+;;; Mode
 
 (defvar-keymap agent-session-mode-map
-  :doc "agent 会话的按键：输入区中 RET 发送，C-j 换行。"
+  :doc "Keys of agent sessions: RET sends in the input area, C-j adds a newline."
   "RET" #'agent-session-ret
   "C-j" #'newline
   "M-p" #'agent-session-previous-input
@@ -1665,7 +1747,8 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
   "<remap> <yank>" #'agent-session-yank)
 
 (define-derived-mode agent-session-mode fundamental-mode "Agent"
-  "Emacs 渲染的 agent 会话（参考 telega）：上方是对话，页脚之后是输入区。
+  "Agent session rendered by Emacs (after telega).
+The transcript is on top, the input area follows the footer.
 \\{agent-session-mode-map}"
   (setq-local truncate-lines nil
               word-wrap t
@@ -1677,53 +1760,58 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
   (setq-local dnd-protocol-alist (cons '("^file:" . agent-session--dnd-file) dnd-protocol-alist))
   (add-hook 'post-command-hook #'agent-session--keep-point-out-of-prompt nil t)
   (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
-  ;; 输入 / 后立即弹出补全。
+  ;; Pop up completion right after typing /.
   (setq-local corfu-auto-prefix 1
               corfu-auto-delay 0.1)
-  ;; 对话记录不断插入到输入区之前，undo 记录的位置会错乱，所以关闭 undo。
+  ;; Transcript text keeps being inserted before the input area, which would
+  ;; garble undo positions, so disable undo.
   (buffer-disable-undo))
 
 (defun agent-session--keep-point-out-of-prompt ()
-  "光标落在提示符内时移到输入区起点（与 telega 相同，不依赖 cursor-intangible 的重绘时机）。"
+  "Move point to the input start when it lands inside the prompt.
+Same as telega; doesn't rely on when cursor-intangible redisplays."
   (when (and agent-session--current
              (eq (get-text-property (point) 'field) 'agent-session-prompt))
     (goto-char (agent-session-input agent-session--current))))
 
 (defun agent-session--this ()
-  "当前 buffer 的会话，没有时报错。"
+  "Session of the current buffer; signal an error if there is none."
   (or agent-session--current (user-error "不在 agent 会话中")))
 
 (defun agent-session--setup-buffer (session)
-  "初始化会话 buffer：对话记录、页脚（分隔线、辅助行、提示符）、输入区。"
+  "Set up the buffer of SESSION.
+That is the transcript, footer (separator, auxiliary lines, prompt) and input
+area."
   (with-current-buffer (agent-session-buffer session)
     (agent-session-mode)
     (setq agent-session--current session)
     (let ((inhibit-read-only t))
       (erase-buffer))
-    ;; 对话记录插在 tail 处（随插入后移）；页脚位于 tail 与 input 之间，
-    ;; 由 `agent-session--render-footer' 维护两个标记。
+    ;; The transcript is inserted at tail (which advances on insertion); the
+    ;; footer sits between tail and input, and `agent-session--render-footer'
+    ;; maintains both markers.
     (setf (agent-session-tail session) (copy-marker (point-min) t)
           (agent-session-input session) (copy-marker (point-min)))
     (agent-session--render-footer session)
     (goto-char (point-max))))
 
-;;; 会话管理
+;;; Session management
 
 (defun agent-session-buffer-p (buffer)
-  "BUFFER 是否为 agent 会话。"
+  "Return non-nil if BUFFER is an agent session."
   (and (buffer-live-p buffer)
        (buffer-local-value 'agent-session--current buffer)
        t))
 
 (defun agent-session--root ()
-  "当前上下文的项目根目录，没有项目时用 `default-directory'。"
+  "Project root of the current context, else `default-directory'."
   (expand-file-name
    (if-let* ((project (project-current)))
        (project-root project)
      default-directory)))
 
 (defun agent-session-buffers (&optional root agent)
-  "按最近使用排序的会话 buffer；可按 ROOT 和 AGENT 过滤。"
+  "Session buffers, most recently used first; optionally filtered by ROOT, AGENT."
   (seq-filter (lambda (buffer)
                 (when-let* ((session (and (buffer-live-p buffer)
                                           (buffer-local-value 'agent-session--current buffer))))
@@ -1732,19 +1820,20 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
               (buffer-list)))
 
 (defun agent-session--visible-window ()
-  "当前框架中显示会话的窗口。"
+  "Window in the current frame showing a session."
   (seq-find (lambda (window) (agent-session-buffer-p (window-buffer window)))
             (window-list nil 'no-minibuf)))
 
 (defun agent-session-target ()
-  "当前操作的目标会话 buffer：可见的 > 本项目最近的 > 任意最近的。"
+  "Target session buffer for commands.
+Visible one > most recent in this project > most recent anywhere."
   (or (when-let* ((window (agent-session--visible-window)))
         (window-buffer window))
       (car (agent-session-buffers (agent-session--root)))
       (car (agent-session-buffers))))
 
 (defun agent-session-display (buffer)
-  "在右侧的 agent 列显示 BUFFER，返回窗口。"
+  "Show BUFFER in the agent column on the right and return the window."
   (when-let* ((session (buffer-local-value 'agent-session--current buffer)))
     (when (plist-get (agent-session-info session) :unread)
       (setf (agent-session-info session) (plist-put (agent-session-info session) :unread nil))
@@ -1760,15 +1849,17 @@ corfu 把注释右对齐到弹窗边缘，注释等宽时各行才能对齐成�
                         (window-width . ,agent-session-window-width)))))
 
 (defun agent-session--read-agent ()
-  "选择一个已注册的 agent。"
+  "Choose a registered agent."
   (intern (completing-read "Agent: " (reverse (mapcar #'car agent-session-agents)) nil t)))
 
 ;;;###autoload
 (defun agent-session-start (agent &optional new resume root)
-  "打开当前项目的 AGENT 会话；NEW 非空（前缀参数）时总是新建。
-RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
+  "Open an AGENT session for the current project.
+With NEW non-nil (prefix arg), always create a new one.  RESUME is the id
+of a past session to resume; ROOT defaults to the current project root."
   (interactive (list (agent-session--read-agent) current-prefix-arg))
-  ;; 批处理（测试）中不启动 server：否则会占用用户 Emacs 的 socket，退出时把它删掉。
+  ;; Don't start the server in batch mode (tests): it would take over the user's
+  ;; Emacs socket and delete it on exit.
   (unless (or noninteractive (server-running-p)) (server-start))
   (setq agent-session-default-agent agent)
   (let ((root (or root (agent-session--root))))
@@ -1795,7 +1886,7 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
           (add-hook 'kill-buffer-hook
                     (lambda ()
                       (agent-session-backend-stop (agent-session-backend session) session)
-                      ;; buffer 此时尚未删除，稍后再刷新会话列表。
+                      ;; The buffer isn't deleted yet; refresh the session list later.
                       (when agent-session--list-refresh-function
                         (run-at-time 0 nil agent-session--list-refresh-function)))
                     nil t))
@@ -1806,22 +1897,24 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
 
 ;;;###autoload
 (defun agent-session-create (&optional choose)
-  "在当前项目新建会话，使用最近用过的 agent；CHOOSE（前缀参数）时先选择 agent。
-会话中随时可以用 /agent 或工具栏切换 agent、模型与推理强度。"
+  "Create a session in the current project with the most recently used agent.
+With CHOOSE (prefix arg), choose the agent first.  Within a session, agent,
+model and reasoning effort can be switched any time with /agent or the
+toolbar."
   (interactive "P")
   (let ((buffer (agent-session-start
                  (if (or choose (not (assq agent-session-default-agent agent-session-agents)))
                      (agent-session--read-agent)
                    agent-session-default-agent)
                  t)))
-    ;; 交互调用时直接开始输入第一条消息。
+    ;; When called interactively, start typing the first message right away.
     (when (called-interactively-p 'interactive)
       (agent-session-focus-input (buffer-local-value 'agent-session--current buffer)))
     buffer))
 
 ;;;###autoload
 (defun agent-session-toggle ()
-  "显示或隐藏 agent 列；没有会话时先选择 agent 启动。"
+  "Show or hide the agent column; without sessions, choose an agent to start."
   (interactive)
   (if-let* ((window (agent-session--visible-window)))
       (if (one-window-p) (switch-to-buffer (other-buffer)) (delete-window window))
@@ -1831,7 +1924,7 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
 
 ;;;###autoload
 (defun agent-session-switch ()
-  "在所有会话之间切换。"
+  "Switch among all sessions."
   (interactive)
   (let ((buffers (mapcar #'buffer-name (agent-session-buffers))))
     (unless buffers (user-error "还没有 agent 会话"))
@@ -1839,7 +1932,7 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
                     (get-buffer (completing-read "会话: " buffers nil t))))))
 
 (defun agent-session-kill ()
-  "结束当前（或目标）会话。"
+  "End the current (or target) session."
   (interactive)
   (let ((buffer (if (agent-session-buffer-p (current-buffer))
                     (current-buffer)
@@ -1848,10 +1941,10 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
     (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
       (kill-buffer buffer))))
 
-;;; 从代码 buffer 引用到输入区
+;;; Referencing code buffers into the input area
 
 (defun agent-session-insert-input (buffer text)
-  "把 TEXT 插入会话 BUFFER 的输入区末尾，并聚焦输入区。"
+  "Insert TEXT at the end of the input area of session BUFFER and focus it."
   (with-current-buffer buffer
     (goto-char (point-max))
     (unless (or (= (point) (agent-session-input agent-session--current))
@@ -1863,7 +1956,8 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
 
 ;;;###autoload
 (defun agent-session-insert-reference ()
-  "把当前文件（有选区时带行号范围）的引用带入会话输入。"
+  "Bring a reference to the current file into the session input.
+With an active region, include its line range."
   (interactive)
   (let* ((buffer (or (agent-session-target) (user-error "没有 agent 会话")))
          (root (agent-session-root (buffer-local-value 'agent-session--current buffer)))
@@ -1876,7 +1970,7 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
 
 ;;;###autoload
 (defun agent-session-insert-region (start end)
-  "把选区代码连同出处，作为代码块带入会话输入。"
+  "Bring code from START to END and its origin into the input as a code block."
   (interactive "r")
   (let* ((buffer (or (agent-session-target) (user-error "没有 agent 会话")))
          (root (agent-session-root (buffer-local-value 'agent-session--current buffer)))
@@ -1890,10 +1984,10 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
     (deactivate-mark)
     (agent-session-insert-input buffer (format "\n%s\n```%s\n%s\n```\n" where lang code))))
 
-;;; 注册 agent
+;;; Registering agents
 
 (defvar-keymap agent-session-command-map
-  :doc "agent 命令前缀表（C-c a）。"
+  :doc "Prefix map of agent commands (C-c a)."
   "a" #'agent-session-toggle
   "i" #'agent-session-focus-input
   "n" #'agent-session-create
@@ -1903,9 +1997,9 @@ RESUME 为要恢复的历史会话 id；ROOT 默认为当前项目根目录。"
   "r" #'agent-session-insert-region)
 
 (defmacro agent-session-define-agent (name &rest plist)
-  "注册 agent NAME，并定义命令 agent-session-NAME。
-PLIST：:backend 后端符号（默认同 NAME），:title 显示名，:key 在
-`agent-session-command-map' 中的启动键。"
+  "Register agent NAME and define the command agent-session-NAME.
+PLIST: :backend the backend symbol (default NAME), :title the display
+name, :key the key that starts it in `agent-session-command-map'."
   (declare (indent 1))
   (let ((command (intern (format "agent-session-%s" name)))
         (key (plist-get plist :key)))
@@ -1915,7 +2009,8 @@ PLIST：:backend 后端符号（默认同 NAME），:title 显示名，:key 在
                    :title ,(or (plist-get plist :title) (capitalize (symbol-name name)))
                    :key ,key))
        (defun ,command (&optional new)
-         ,(format "打开当前项目的 %s 会话；前缀参数时新建。" name)
+         ,(format "Open a %s session for the current project.
+With a prefix arg, create a new one." name)
          (interactive "P")
          (agent-session-start ',name new))
        ,(when key `(keymap-set agent-session-command-map ,key #',command))

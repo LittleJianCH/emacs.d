@@ -1,19 +1,19 @@
-;;; lang-elisp.el --- Emacs Lisp 开发环境 -*- lexical-binding: t; -*-
+;;; lang-elisp.el --- Emacs Lisp development environment -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; emacs-lisp-mode 中的按键：
+;; Keys in emacs-lisp-mode:
 ;;   C-c C-b  eval-buffer
-;;   C-c C-e  对上一个表达式求值并美化输出
-;;   C-c C-m  展开光标处的宏（macrostep，q 退出）
-;;   C-c C-z  打开 IELM
-;; C-h f / v / k / x 换成 helpful，显示源码与引用。
+;;   C-c C-e  evaluate the previous sexp and pretty-print the result
+;;   C-c C-m  expand the macro at point (macrostep, q to quit)
+;;   C-c C-z  open IELM
+;; C-h f / v / k / x use helpful instead, which shows source and references.
 
 ;;; Code:
 
 (defun my/elisp-setup ()
-  "elisp buffer 的通用设置。"
-  ;; 字节编译检查需要能找到本配置的模块。
+  "Common setup for Emacs Lisp buffers."
+  ;; The byte-compile checker needs to find this config's modules.
   (setq-local elisp-flymake-byte-compile-load-path (cons "./" load-path))
   (when buffer-file-name
     (flymake-mode 1)))

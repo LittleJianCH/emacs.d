@@ -1,32 +1,34 @@
-;;; init-evil.el --- Vim 键位（evil） -*- lexical-binding: t; -*-
+;;; init-evil.el --- Vim keybindings (evil) -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; evil + evil-collection（为 magit、dired、help 等常用模式提供 Vim 键位）。
-;; leader 键为 SPC（normal / motion 状态）：
-;;   SPC f  找文件          SPC b  切换 buffer      SPC r  最近文件
-;;   SPC s  搜索当前文件    SPC /  项目内搜索       SPC p  项目命令
-;;   SPC g  magit           SPC a  agent 命令（同 C-c a）
-;;   SPC w  窗口命令        SPC u  前缀参数（C-u 被用于向上翻页）
-;; minibuffer 中不启用 evil，保持普通编辑。
+;; evil + evil-collection (Vim keys for common modes like magit, dired, help).
+;; The leader key is SPC (in normal / motion state):
+;;   SPC f  find file       SPC b  switch buffer    SPC r  recent files
+;;   SPC s  search buffer   SPC /  search project   SPC p  project commands
+;;   SPC g  magit           SPC a  agent commands (same as C-c a)
+;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
+;; evil is not enabled in the minibuffer, which keeps normal editing.
 ;;
-;; 是否加载由 init-base.el 中的 `my/use-evil' 决定（默认关闭）；
-;; 运行中用 M-x my/toggle-evil 开关，加前缀参数 C-u 同时保存为默认。
+;; Whether it loads is controlled by `my/use-evil' in init-base.el (off by
+;; default); toggle at runtime with M-x my/toggle-evil, and with a C-u prefix
+;; argument also save that as the default.
 
 ;;; Code:
 
-;; 默认不加载 evil，编译本文件时声明一下其函数（运行时随 evil 加载）。
+;; evil isn't loaded by default, so declare its functions for the byte-compiler
+;; (they are loaded along with evil at runtime).
 (declare-function evil-set-leader "evil-core")
 (declare-function evil-define-key* "evil-core")
 
 (use-package evil
   :ensure t
-  ;; NonGNU 上的 1.15.0 在 Emacs 31 下会报 void-variable evil-mode-buffers
-  ;; （Emacs 31 的全局 minor mode 不再定义 MODE-buffers），MELPA 版已修复。
+  ;; 1.15.0 from NonGNU signals void-variable evil-mode-buffers on Emacs 31
+  ;; (Emacs 31 global minor modes no longer define MODE-buffers); fixed on MELPA.
   :pin melpa
   :demand t
   :init
-  ;; evil-collection 要求在 evil 加载前设置。
+  ;; evil-collection requires these to be set before evil loads.
   (setq evil-want-integration t
         evil-want-keybinding nil)
   :custom

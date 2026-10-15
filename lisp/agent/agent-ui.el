@@ -1,15 +1,17 @@
-;;; agent-ui.el --- agent 操作 Emacs 的接口 -*- lexical-binding: t; -*-
+;;; agent-ui.el --- Interface for agents to operate Emacs -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; agent 通过 bin/emx（命令行或 MCP）调用这里注册的方法。
+;; Agents call the methods registered here through bin/emx (command line or MCP).
 ;;
-;; 调用协议：emx 把 {"method": ..., "params": {...}} 写入请求文件，
-;; 执行 emacsclient --eval '(agent-ui-rpc REQ RES)'，再从响应文件读取
-;; {"ok": true, "result": ...} 或 {"ok": false, "error": "..."}。
-;; 走文件而不是命令行参数，HTML / 代码等任意内容都无需转义。
+;; Protocol: emx writes {"method": ..., "params": {...}} to a request file,
+;; runs emacsclient --eval '(agent-ui-rpc REQ RES)', then reads
+;; {"ok": true, "result": ...} or {"ok": false, "error": "..."} from the response file.
+;; Going through files instead of command-line arguments means arbitrary content
+;; such as HTML or code needs no escaping.
 ;;
-;; 扩展：用 `agent-ui-defmethod' 定义新方法，MCP 工具列表会自动包含它。
+;; Extending: define a new method with `agent-ui-defmethod'; the MCP tool list
+;; picks it up automatically.
 
 ;;; Code:
 
@@ -21,28 +23,30 @@
 
 
 (defgroup agent-ui nil
-  "agent 操作 Emacs 的接口。"
+  "Interface for agents to operate Emacs."
   :group 'tools
   :prefix "agent-ui-")
 
 (defcustom agent-ui-max-text 200000
-  "读取 buffer 文本时返回的最大字符数。"
+  "Maximum number of characters returned when reading buffer text."
   :type 'integer)
 
-;;; 方法注册
+;;; Method registration
 
 (defvar agent-ui-caller nil
-  "当前调用方信息，例如 (:agent_buffer \"*agent:claude@proj*\")。
-emx 根据所在 agent 会话的环境变量自动填写，方法内可直接读取。")
+  "Current caller info, e.g. (:agent_buffer \"*agent:claude@proj*\").
+emx fills it in from the environment of the agent session it runs in;
+methods can read it directly.")
 
 (defvar agent-ui--methods nil
-  "已注册方法：((NAME . (:function F :description D :params SPEC)) ...)。")
+  "Registered methods: ((NAME . (:function F :description D :params SPEC)) ...).")
 
 (defmacro agent-ui-defmethod (name params docstring &rest body)
-  "定义 agent 可调用的方法 NAME（字符串）。
-PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
-类型符号：string、integer、boolean、array（对象数组）、object。BODY 中可直接使用与参数同名的变量，
-返回值（plist / vector / 字符串 / 数字）会序列化为 JSON。"
+  "Define NAME (a string) as a method callable by agents.
+Each entry of PARAMS is (SYMBOL TYPE DESCRIPTION [required]), where TYPE is a
+JSON Schema type symbol: string, integer, boolean, array (an array of objects)
+or object.  BODY can use variables named after the parameters directly; its
+return value (plist / vector / string / number) is serialized as JSON."
   (declare (indent 2) (doc-string 3))
   (let ((fn (intern (format "agent-ui--method-%s" name)))
         (vars (mapcar #'car params)))
@@ -59,7 +63,8 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
        ,name)))
 
 (defun agent-ui--coerce (params spec)
-  "按 SPEC 把 PARAMS 中的字符串转换成声明的类型（命令行传入的都是字符串）。"
+  "Convert strings in PARAMS to the types declared in SPEC.
+Everything passed on the command line arrives as a string."
   (dolist (entry spec params)
     (let* ((key (intern (format ":%s" (car entry))))
            (value (plist-get params key)))
@@ -70,14 +75,15 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
                                              (member value '("true" "1" "yes"))))))))))
 
 (defun agent-ui--check-required (name params spec)
-  "缺少 SPEC 中必填参数时报错。"
+  "Signal an error if PARAMS lacks a parameter that SPEC marks as required.
+NAME is the method name used in the error message."
   (dolist (entry spec)
     (when (and (memq 'required entry)
                (null (plist-get params (intern (format ":%s" (car entry))))))
       (error "%s: missing required parameter %s" name (car entry)))))
 
 (defun agent-ui--schema (spec)
-  "把参数 SPEC 转为 JSON Schema。"
+  "Convert the parameter SPEC to a JSON Schema."
   (let (properties required)
     (dolist (entry spec)
       (setq properties
@@ -93,12 +99,13 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
           :required (vconcat (nreverse required)))))
 
 (defun agent-ui--json-value (value)
-  "把 nil 转为 JSON null，其余原样返回。"
+  "Return VALUE, converting nil to JSON null."
   (if (null value) :null value))
 
 ;;;###autoload
 (defun agent-ui-rpc (request-file response-file)
-  "执行 REQUEST-FILE 中的调用，把结果写入 RESPONSE-FILE。供 emx 使用。"
+  "Run the call in REQUEST-FILE and write the result to RESPONSE-FILE.
+Used by emx."
   (let ((response
          (condition-case err
              (let* ((request (with-temp-buffer
@@ -129,16 +136,17 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
         (write-region nil nil response-file nil 'silent)))
     t))
 
-;;; 窗口
+;;; Windows
 
 (defun agent-ui--frame ()
-  "agent 操作的目标框架：优先可见的图形界面框架。"
+  "Return the frame agents operate on, preferring a visible graphical frame."
   (or (seq-find (lambda (frame) (and (frame-visible-p frame) (display-graphic-p frame)))
                 (cons (selected-frame) (frame-list)))
       (selected-frame)))
 
 (defun agent-ui--main-window ()
-  "用户的工作窗口：最近使用的非 agent 窗口；没有时在 agent 列左侧新开。"
+  "Return the user's working window: the most recently used non-agent window.
+If there is none, split a new one to the left of the agent column."
   (let* ((frame (agent-ui--frame))
          (windows (seq-remove (lambda (window)
                                 (or (agent-session-buffer-p (window-buffer window))
@@ -149,14 +157,14 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
         (split-window (frame-root-window frame) nil 'left))))
 
 (defun agent-ui--show-buffer (buffer)
-  "在工作窗口显示 BUFFER，不抢焦点，返回该窗口。"
+  "Show BUFFER in the working window without stealing focus; return the window."
   (let ((window (agent-ui--main-window)))
     (with-selected-window window
       (switch-to-buffer buffer nil t))
     window))
 
 (defun agent-ui--view-buffer (title)
-  "名为 TITLE 的内容展示 buffer，已存在时清空复用。"
+  "Return the view buffer named after TITLE, erasing it if it already exists."
   (let ((buffer (get-buffer-create (format "*agent-view: %s*" (or title "agent")))))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
@@ -165,15 +173,15 @@ PARAMS 每项为 (SYMBOL TYPE DESCRIPTION [required])，TYPE 为 JSON Schema
     buffer))
 
 (defun agent-ui--abs (path)
-  "PATH 的绝对路径；文件不存在时报错。"
+  "Return the absolute path of PATH; signal an error if the file does not exist."
   (let ((file (expand-file-name path)))
     (unless (file-exists-p file) (error "No such file: %s" file))
     file))
 
-;;; 方法：查看用户上下文
+;;; Methods: inspect the user's context
 
 (defun agent-ui--window-info (window)
-  "WINDOW 的可序列化描述。"
+  "Return a serializable description of WINDOW."
   (with-current-buffer (window-buffer window)
     (list :buffer (buffer-name)
           :file (agent-ui--json-value buffer-file-name)
@@ -237,7 +245,7 @@ selected text, project root, and every visible window."
             text))))))
 
 (defun agent-ui--severity (type)
-  "flymake 诊断类型 TYPE 的简短名称。"
+  "Return a short name for the flymake diagnostic type TYPE."
   (pcase (flymake--lookup-type-property type 'flymake-category)
     ('flymake-error "error")
     ('flymake-warning "warning")
@@ -259,7 +267,7 @@ selected text, project root, and every visible window."
                          :message (flymake-diagnostic-text diag))))
                (sort (flymake-diagnostics) :key #'flymake-diagnostic-beg))))))
 
-;;; 方法：操作编辑器
+;;; Methods: operate the editor
 
 (agent-ui-defmethod "open"
     ((path string "File path" required)
@@ -284,7 +292,7 @@ to guide the user to a piece of code."
     (list :buffer (buffer-name buffer))))
 
 (defun agent-ui--setup-view (format)
-  "按 FORMAT 设置当前展示 buffer 的模式。"
+  "Set the mode of the current view buffer according to FORMAT."
   (pcase format
     ("org" (org-mode))
     ((or "markdown" "md")
@@ -320,7 +328,7 @@ code snippets and so on."
     (agent-ui--show-buffer buffer)
     (list :buffer (buffer-name buffer))))
 
-;;; 方法：通用
+;;; Methods: general
 
 (agent-ui-defmethod "notify"
     ((message string "Notification text" required)
@@ -352,10 +360,10 @@ layout or calling a mode's commands."
                        :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
 
-;;; 交互命令
+;;; Interactive commands
 
 (defun agent-ui-last-view ()
-  "回到最近一次 agent 展示的内容。"
+  "Go back to the content an agent displayed most recently."
   (interactive)
   (let ((buffer (seq-find (lambda (buffer)
                             (string-match-p "\\`\\*agent-\\(view\\|canvas\\):"

@@ -1,16 +1,16 @@
-;;; early-init.el --- 首帧之前的设置 -*- lexical-binding: t; -*-
+;;; early-init.el --- Settings applied before the first frame -*- lexical-binding: t; -*-
 
-;; 启动期间放宽 GC，启动完成后在 init.el 中恢复。
+;; Relax GC during startup; init.el restores it once startup finishes.
 (setq gc-cons-threshold most-positive-fixnum
       gc-cons-percentage 0.6)
 
-;; 插件统一在 init.el 中初始化。
+;; Packages are initialized in init.el.
 (setq package-enable-at-startup nil)
 
-;; 原生编译的警告不弹窗，只记录到 *Warnings*。
+;; Don't pop up native-comp warnings; just log them to *Warnings*.
 (setq native-comp-async-report-warnings-errors 'silent)
 
-;; 首帧创建前关闭多余控件，避免闪烁。
+;; Disable unneeded UI elements before the first frame is created, to avoid flicker.
 (setq frame-inhibit-implied-resize t
       frame-resize-pixelwise t)
 (push '(tool-bar-lines . 0) default-frame-alist)

@@ -1,19 +1,19 @@
 #!/usr/bin/env node
-// emx — agent 操作 Emacs 的桥（命令行 + MCP server）。
+// emx — bridge for agents to operate Emacs (command line + MCP server).
 //
-//   emx help [method]                列出全部方法 / 查看某个方法的完整说明
-//   emx <method> [位置参数] [--key value ...]
-//   emx render page.json             渲染原生页面（JSON：{title, blocks}；- 为标准输入）
-//   emx open src/main.rs 42          打开文件并跳到第 42 行
-//   emx show report.org              展示 org / markdown / diff 等内容
-//   echo '* 标题' | emx show - --format org   从标准输入读取内容
-//   emx context                      用户当前在看的文件、光标、选区
-//   emx eval '(buffer-list)'         执行任意 Elisp
-//   emx mcp                          以 stdio MCP server 运行
+//   emx help [method]                list all methods / show a method's full description
+//   emx <method> [positional args] [--key value ...]
+//   emx render page.json             native page from JSON {title, blocks} (- = stdin)
+//   emx open src/main.rs 42          open a file and jump to line 42
+//   emx show report.org              show org / markdown / diff etc. content
+//   echo '* Title' | emx show - --format org   read the content from stdin
+//   emx context                      the user's current file, cursor, selection
+//   emx eval '(buffer-list)'         evaluate arbitrary Elisp
+//   emx mcp                          run as a stdio MCP server
 //
-// 方法定义在 lisp/agent/agent-ui.el，用 agent-ui-defmethod 扩展。
-// 环境变量：EMACS_SOCKET_NAME 指定 server（agent 会话内已自动设置），
-//           EMX_EMACSCLIENT 指定 emacsclient 路径。
+// Methods are defined in lisp/agent/agent-ui.el; extend them with agent-ui-defmethod.
+// Environment: EMACS_SOCKET_NAME selects the server (set automatically inside agent
+//              sessions), EMX_EMACSCLIENT sets the emacsclient path.
 
 'use strict';
 const { execFileSync } = require('node:child_process');
@@ -25,7 +25,7 @@ const readline = require('node:readline');
 const EMACSCLIENT = process.env.EMX_EMACSCLIENT || 'emacsclient';
 const VERSION = '0.1.0';
 
-// 位置参数到参数名的映射；其余参数用 --key value。
+// Maps positional arguments to parameter names; other parameters use --key value.
 const POSITIONAL = {
   open: ['path', 'line', 'end_line'],
   show: ['path'],
@@ -35,12 +35,13 @@ const POSITIONAL = {
   diagnostics: ['path'],
 };
 
-// 这些方法的参数是结构化数据：位置参数为 JSON 文件（或 - 表示标准输入），整体并入参数。
+// These methods take structured data: the positional argument is a JSON file (or - for
+// stdin) whose contents are merged into the parameters.
 const JSON_INPUT = new Set(['render', 'patch']);
 
 const lispString = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 
-// 调用 Emacs 中的 agent-ui 方法，返回 result 或抛出错误。
+// Call an agent-ui method in Emacs; return the result or throw an error.
 function call(method, params = {}) {
   params = { ...params };
   if (typeof params.path === 'string') params.path = path.resolve(params.path);
@@ -49,7 +50,8 @@ function call(method, params = {}) {
   const request = path.join(dir, 'request.json');
   const response = path.join(dir, 'response.json');
   try {
-    // 告诉 Emacs 是哪个 agent 会话在调用，页面按钮等据此把消息发回该会话。
+    // Tell Emacs which agent session is calling, so page buttons etc. can send
+    // messages back to that session.
     const context = { agent_buffer: process.env.EMX_AGENT_BUFFER || null };
     fs.writeFileSync(request, JSON.stringify({ method, params, context }));
     try {
@@ -71,7 +73,7 @@ function call(method, params = {}) {
 const render = (result) =>
   typeof result === 'string' ? result : JSON.stringify(result, null, 2);
 
-// ---------------------------------------------------------------- 命令行
+// ---------------------------------------------------------------- Command line
 
 function parseArgs(method, argv) {
   const params = {};
@@ -92,7 +94,7 @@ function parseArgs(method, argv) {
   (POSITIONAL[method] || []).forEach((key, i) => {
     if (positional[i] !== undefined && params[key] === undefined) params[key] = positional[i];
   });
-  // "-" 表示从标准输入读取内容。
+  // "-" means read the content from stdin.
   if (params.path === '-') {
     delete params.path;
     params.content = fs.readFileSync(0, 'utf8');
@@ -172,7 +174,7 @@ function mcpServer() {
     } catch {
       return fail(null, -32700, 'Parse error');
     }
-    if (msg.id === undefined) return; // 通知无需回复
+    if (msg.id === undefined) return; // notifications need no reply
     const handler = handlers[msg.method];
     if (!handler) return fail(msg.id, -32601, `Method not found: ${msg.method}`);
     try {
@@ -183,7 +185,7 @@ function mcpServer() {
   });
 }
 
-// ---------------------------------------------------------------- 入口
+// ---------------------------------------------------------------- Entry point
 
 function main() {
   const [method, ...rest] = process.argv.slice(2);

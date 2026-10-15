@@ -1,10 +1,10 @@
-;;; agent-session-test.el --- agent-session 的回归测试 -*- lexical-binding: t; -*-
+;;; agent-session-test.el --- Tests for agent-session -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; 用一个假后端（立即回显）测试会话界面，不调用真实 agent。
-;; 布局参考 telega：对话 | 页脚（分隔线、辅助行、提示符）| 输入区。
-;; 运行：
+;; Tests the session UI with a fake backend (echoes immediately) instead of a real agent.
+;; Layout modeled on telega: conversation | footer (separator, aux line, prompt) | input.
+;; Run:
 ;;   emacs --batch -L lisp/agent -l test/agent-session-test.el -f ert-run-tests-batch-and-exit
 
 ;;; Code:
@@ -25,8 +25,8 @@
 
 (cl-defmethod agent-session-backend-stop ((_ (eql test-echo)) _session) nil)
 
-(defvar agent-session-test--steered nil "假后端收到的引导消息。")
-(defvar agent-session-test--interrupted nil "假后端是否被中断。")
+(defvar agent-session-test--steered nil "Steer messages received by the fake backend.")
+(defvar agent-session-test--interrupted nil "Whether the fake backend was interrupted.")
 
 (cl-defmethod agent-session-backend-steer ((_ (eql test-echo)) _session text)
   (push text agent-session-test--steered)
@@ -49,9 +49,9 @@
 (agent-session-define-agent test-echo2 :title "Echo2" :backend test-echo)
 
 (defmacro agent-session-test--with-session (&rest body)
-  "在一个新的假会话 buffer 中执行 BODY。"
+  "Run BODY in a new fake session buffer."
   `(let ((default-directory temporary-file-directory)
-         ;; 每个测试从默认设置开始，互不影响。
+         ;; Each test starts from default settings, independent of the others.
          (agent-session-last-settings nil)
          (before (agent-session-buffers))
          (buffer nil))
@@ -61,31 +61,33 @@
            (with-current-buffer buffer
              (goto-char (point-max))
              ,@body))
-       ;; 清理本测试新建的所有会话（包括切换 agent 时新开的）。
+       ;; Clean up all sessions this test created (including those from switching agent).
        (dolist (b (agent-session-buffers))
          (unless (memq b before) (kill-buffer b))))))
 
 (defun agent-session-test--type (string)
-  "在输入区末尾输入 STRING 并发送。"
+  "Type STRING at the end of the input area and send it."
   (goto-char (point-max))
   (insert string)
   (agent-session-send-input))
 
 (defun agent-session-test--transcript ()
-  "对话记录部分（页脚之前）的纯文本。"
+  "Return the plain text of the transcript (before the footer)."
   (buffer-substring-no-properties (point-min) (agent-session-tail agent-session--current)))
 
 (defun agent-session-test--footer ()
-  "页脚（分隔线、辅助行、提示符）的纯文本。"
+  "Return the plain text of the footer (separator, aux line, prompt)."
   (buffer-substring-no-properties (agent-session-tail agent-session--current)
                                   (agent-session-input agent-session--current)))
 
 (defun agent-session-test--mode-line ()
-  "状态栏的纯文本（batch 中 `format-mode-line' 不求值 :eval，直接调用生成函数）。"
+  "Return the plain text of the mode line.
+In batch mode `format-mode-line' does not evaluate :eval, so call the
+generating function directly."
   (substring-no-properties (agent-session--mode-line agent-session--current)))
 
 (ert-deftest agent-session-test-multiple-messages ()
-  "可以连续发送多条消息，对话按顺序追加。"
+  "Several messages can be sent in a row; the conversation appends them in order."
   (agent-session-test--with-session
    (agent-session-test--type "one")
    (agent-session-test--type "two")
@@ -93,7 +95,7 @@
                            (agent-session-test--transcript)))))
 
 (ert-deftest agent-session-test-transcript-read-only ()
-  "对话记录与页脚只读，输入区可编辑。"
+  "The transcript and footer are read-only; the input area is editable."
   (agent-session-test--with-session
    (agent-session-test--type "one")
    (goto-char (point-min))
@@ -105,7 +107,7 @@
    (should (equal (agent-session--input-text agent-session--current) "ok"))))
 
 (ert-deftest agent-session-test-footer ()
-  "页脚：分隔线、提示符；排队消息与待确认请求显示在辅助行。"
+  "Footer: separator and prompt; queued messages and requests go on the aux line."
   (agent-session-test--with-session
    (should (string-match-p "\\`\n *\n.*Echo ❯ \\'" (agent-session-test--footer)))
    (agent-session-test--type "hold")
@@ -117,7 +119,7 @@
    (should (string-match-p "⚠ Write：a.txt +允许 +拒绝" (agent-session-test--footer)))))
 
 (ert-deftest agent-session-test-typing-in-transcript ()
-  "在对话记录中打字会跳到输入区末尾。"
+  "Typing in the transcript jumps to the end of the input area."
   (agent-session-test--with-session
    (agent-session-test--type "one")
    (switch-to-buffer (current-buffer))
@@ -126,7 +128,7 @@
    (should (equal (agent-session--input-text agent-session--current) "xy"))))
 
 (ert-deftest agent-session-test-point-out-of-prompt ()
-  "光标不会停在提示符内。"
+  "Point never stays inside the prompt."
   (agent-session-test--with-session
    (switch-to-buffer (current-buffer))
    (goto-char (point-max))
@@ -134,7 +136,7 @@
    (should (>= (point) (agent-session-input agent-session--current)))))
 
 (ert-deftest agent-session-test-footer-keeps-input ()
-  "重绘页脚（例如状态变化）时保留输入区内容与光标。"
+  "Redrawing the footer (e.g. on status change) keeps the input and point."
   (agent-session-test--with-session
    (goto-char (point-max))
    (insert "草稿中")
@@ -146,9 +148,10 @@
    (should (equal (char-after) ?中))))
 
 (ert-deftest agent-session-test-queue-order ()
-  "忙时输入的消息排队，发出时移到对话末尾，记录顺序与实际一致。"
+  "Messages typed while busy are queued and moved to the end when sent.
+The transcript order matches the actual order."
   (agent-session-test--with-session
-   (agent-session-test--type "hold")            ; 后端不回应，会话保持运行中
+   (agent-session-test--type "hold")            ; no reply: session keeps running
    (agent-session-test--type "q1")
    (agent-session-test--type "q2")
    (should (equal (mapcar #'cdr (agent-session-queue agent-session--current)) '("q1" "q2")))
@@ -159,7 +162,8 @@
                            (agent-session-test--transcript)))))
 
 (defun agent-session-test--complete (_session input)
-  "在会话输入区输入 INPUT（提示符与输入同一行），返回补全候选，随后清空输入。"
+  "Type INPUT in the input area of SESSION and return the completion candidates.
+The prompt is on the same line as the input.  Clear the input afterwards."
   (goto-char (point-max))
   (insert input)
   (prog1 (pcase-let ((`(,beg ,end ,table . ,_) (agent-session-completion-at-point)))
@@ -167,25 +171,25 @@
     (delete-region (agent-session-input agent-session--current) (point-max))))
 
 (ert-deftest agent-session-test-local-command ()
-  "本地命令在 Emacs 中执行，不作为消息发出。"
+  "Local commands run in Emacs and are not sent as messages."
   (agent-session-test--with-session
    (let ((agent-session-last-settings nil))
      (agent-session-test--type "/model big")
      (should (equal (agent-session-setting agent-session--current :model) "big"))
      (agent-session-test--type "/effort max")
      (should (equal (agent-session-setting agent-session--current :effort) "max"))
-     ;; 换到不支持当前强度的模型时，强度恢复默认。
+     ;; Switching to a model that lacks the current effort resets the effort to default.
      (agent-session-test--type "/model small")
      (should-not (agent-session-setting agent-session--current :effort))
      (agent-session-test--type "/mode full")
      (should (eq (agent-session-setting agent-session--current :mode) 'full))
      (should-not (agent-session--has-conversation agent-session--current))
-     ;; agent 自己的命令照常发出。
+     ;; The agent's own commands are sent as usual.
      (agent-session-test--type "/compact")
      (should (string-match-p "收到：/compact" (agent-session-test--transcript))))))
 
 (ert-deftest agent-session-test-completion ()
-  "/ 补全命令名与参数，@ 不在行首也能触发。"
+  "/ completes command names and arguments; @ triggers even mid-line."
   (agent-session-test--with-session
    (let ((session agent-session--current))
      (should (member "/model" (agent-session-test--complete session "/mo")))
@@ -193,11 +197,12 @@
      (should (equal (sort (agent-session-test--complete session "/model ") #'string<)
                     '("big" "small")))
      (should (equal (agent-session-test--complete session "/effort h") '("high")))
-     ;; 第二行行首的 / 同样可以补全。
+     ;; A / at the start of the second line also completes.
      (should (member "/model" (agent-session-test--complete session "说明\n/mo"))))))
 
 (ert-deftest agent-session-test-completion-annotation-width ()
-  "/ 补全的注释等宽（corfu 右对齐注释，等宽才能对齐成一列），弹窗不超出窗口。"
+  "/ completion annotations have equal width; the popup stays within the window.
+corfu right-aligns annotations, so they need equal width to line up in a column."
   (agent-session-test--with-session
    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 50))
              ((symbol-function 'agent-session-backend-commands)
@@ -217,7 +222,7 @@
        (should (<= corfu-max-width 49))))))
 
 (ert-deftest agent-session-test-switch-agent ()
-  "没有对话时原地切换 agent；有对话后新开会话并带上草稿。"
+  "Switch agent in place when empty; otherwise open a new session with the draft."
   (agent-session-test--with-session
    (let ((buffer (current-buffer)))
      (agent-session-select-agent 'test-echo2)
@@ -239,7 +244,7 @@
        (kill-buffer new)))))
 
 (ert-deftest agent-session-test-mode-line ()
-  "状态栏显示 agent、模型、推理强度、权限模式与状态。"
+  "The mode line shows agent, model, effort, permission mode and status."
   (agent-session-test--with-session
    (let ((agent-session-last-settings nil))
      (should (string-match-p "空闲.*Echo · Small · 推理 默认 · 自动审查"
@@ -252,7 +257,8 @@
      (should (eq (agent-session-setting agent-session--current :mode) 'full)))))
 
 (ert-deftest agent-session-test-approval ()
-  "待确认的请求只显示在页脚；对话中只在关联的工具上标注等待与结果。"
+  "Pending requests show only in the footer.
+The transcript only marks waiting and the outcome on the related tool."
   (agent-session-test--with-session
    (let (answer)
      (agent-session-tool agent-session--current "t1" :kind 'edit :title "a.txt" :status 'running)
@@ -272,7 +278,7 @@
      (should-not (string-match-p "⚠" (agent-session-test--footer))))))
 
 (ert-deftest agent-session-test-thinking-collapsed ()
-  "思考默认折叠为一行，展开后显示全文。"
+  "Thinking is folded to one line by default; expanding shows the full text."
   (agent-session-test--with-session
    (agent-session-text agent-session--current "th" "第一段思考。" 'thinking)
    (agent-session-text agent-session--current "th" "第二段思考。" 'thinking)
@@ -284,7 +290,7 @@
    (should (string-match-p "▾ 思考\n.*第一段思考。第二段思考。" (agent-session-test--transcript)))))
 
 (ert-deftest agent-session-test-list ()
-  "会话列表显示进行中的会话及其标题。"
+  "The session list shows live sessions and their titles."
   (agent-session-test--with-session
    (agent-session-test--type "修复输入区的问题")
    (let ((buffer (current-buffer)))
@@ -299,7 +305,8 @@
        (should (eq (plist-get (get-text-property (point) 'agent-session-entry) :buffer) buffer))))))
 
 (ert-deftest agent-session-test-list-debounce ()
-  "防抖重绘的回调只重绘一次，不会再次安排自己（曾导致 Emacs 卡死）。"
+  "The debounced refresh callback refreshes once and does not reschedule itself.
+It used to hang Emacs."
   (let ((agent-session-list--pending nil)
         (scheduled 0) (refreshed 0))
     (agent-session-list--refresh-soon)
@@ -317,7 +324,7 @@
         (should-not agent-session-list--pending)))))
 
 (defun agent-session-test--visible-transcript ()
-  "对话记录中可见（未被折叠）的文本。"
+  "Return the visible (not folded) text of the transcript."
   (let ((end (agent-session-tail agent-session--current)) (pos (point-min)) (parts nil))
     (while (< pos end)
       (let ((next (next-single-char-property-change pos 'invisible nil end)))
@@ -326,10 +333,11 @@
     (apply #'concat (nreverse parts))))
 
 (ert-deftest agent-session-test-fold-turn ()
-  "回合结束后，过程折叠成摘要，最终回复保持可见；摘要可展开。"
+  "A finished turn folds its steps into a summary; the final reply stays visible.
+The summary can be expanded."
   (agent-session-test--with-session
    (let ((session agent-session--current))
-     (agent-session-test--type "hold")              ; 回合进行中
+     (agent-session-test--type "hold")              ; turn in progress
      (agent-session-tool session "c1" :kind 'command :title "cargo test" :status 'ok)
      (agent-session-text session "mid" "先跑一下测试。")
      (agent-session-text-done session "mid")
@@ -337,30 +345,30 @@
      (agent-session-tool session "e2" :kind 'edit :title "b.rs" :status 'error)
      (agent-session-text session "final" "改好了。")
      (agent-session-text-done session "final")
-     ;; 进行中的回合不折叠
+     ;; A turn in progress is not folded
      (should (string-match-p "cargo test" (agent-session-test--visible-transcript)))
      (agent-session-set-status session 'idle)
      (let ((visible (agent-session-test--visible-transcript)))
        (should (string-match-p "执行了 3 个操作 · 1 条命令 · 2 次编辑 · 1 个失败 · 用时" visible))
        (should (string-match-p "改好了。" visible))
        (should-not (string-match-p "cargo test\\|先跑一下测试\\|a.rs" visible)))
-     ;; 展开
+     ;; Expand
      (goto-char (point-min))
      (search-forward "执行了")
      (push-button (button-start (button-at (point))))
      (should (string-match-p "▾ 执行了.*\\(.\\|\n\\)*cargo test\\(.\\|\n\\)*a.rs"
                              (agent-session-test--visible-transcript)))
-     ;; 下一回合：之前的折叠不受影响，新回合结束后同样折叠
+     ;; Next turn: earlier folds are untouched; the new turn folds too when it ends
      (agent-session-test--type "第二个问题")
      (should (string-match-p "收到：第二个问题" (agent-session-test--visible-transcript))))))
 
 (ert-deftest agent-session-test-fold-skips-queued ()
-  "排队中的消息夹在上一回合中间时，不会把上一回合切断。"
+  "A queued message inside the previous turn does not split that turn."
   (agent-session-test--with-session
    (let ((session agent-session--current))
      (agent-session-test--type "hold")
      (agent-session-tool session "c1" :kind 'command :title "step-1" :status 'ok)
-     (agent-session-test--type "排队消息")          ; 运行中输入，排队
+     (agent-session-test--type "排队消息")          ; typed while running, queued
      (agent-session-tool session "c2" :kind 'command :title "step-2" :status 'ok)
      (agent-session-text session "final" "完成。")
      (agent-session-text-done session "final")
@@ -369,16 +377,16 @@
        (should (string-match-p "执行了 2 个操作" visible))
        (should-not (string-match-p "step-1\\|step-2" visible))
        (should (string-match-p "完成。" visible))
-       ;; 排队的消息发出后出现在末尾，并得到回复
+       ;; Once sent, the queued message appears at the end and gets a reply
        (should (string-match-p "完成。\\(.\\|\n\\)*排队消息\\(.\\|\n\\)*收到：排队消息" visible))))))
 
 (ert-deftest agent-session-test-fold-interrupted-turn ()
-  "没有最终回复的回合（例如被打断）只折叠到下一条用户消息为止。"
+  "A turn with no final reply (e.g. interrupted) folds only until the next message."
   (agent-session-test--with-session
    (let ((session agent-session--current))
      (agent-session-test--type "hold")
      (agent-session-tool session "c1" :kind 'command :title "step-1" :status 'ok)
-     (agent-session-set-status session 'idle)        ; 以工具调用结束，没有最终回复
+     (agent-session-set-status session 'idle)        ; tool call last, no final reply
      (agent-session-test--type "下一个问题")
      (agent-session-set-status session 'idle)
      (let ((visible (agent-session-test--visible-transcript)))
@@ -386,7 +394,7 @@
        (should (string-match-p "下一个问题\\(.\\|\n\\)*收到：下一个问题" visible))))))
 
 (ert-deftest agent-session-test-fold-keeps-last-reply ()
-  "被打断的回合：最后一段说明保持可见，前后的过程都折叠。"
+  "Interrupted turn: the last explanation stays visible; steps around it fold."
   (agent-session-test--with-session
    (let ((session agent-session--current))
      (agent-session-test--type "hold")
@@ -394,7 +402,7 @@
      (agent-session-text session "m1" "我先改配置。")
      (agent-session-text-done session "m1")
      (agent-session-tool session "c2" :kind 'command :title "step-2" :status 'ok)
-     (agent-session-set-status session 'idle)        ; 没有最终回复就结束了
+     (agent-session-set-status session 'idle)        ; ended without a final reply
      (agent-session-test--type "下一个问题")
      (agent-session-set-status session 'idle)
      (let ((visible (agent-session-test--visible-transcript)))
@@ -402,7 +410,7 @@
        (should (string-match-p "我先改配置。" visible))
        (should-not (string-match-p "step-1\\|step-2" visible))
        (should (string-match-p "下一个问题" visible)))
-     ;; 展开后两段过程都出现
+     ;; After expanding, both stretches of steps appear
      (goto-char (point-min))
      (search-forward "执行了")
      (push-button (button-start (button-at (point))))
@@ -410,7 +418,7 @@
                              (agent-session-test--visible-transcript))))))
 
 (ert-deftest agent-session-test-steer-queued ()
-  "排队的消息可以转为引导：立刻送进当前回合，不再排队。"
+  "A queued message can become a steer, sent into the current turn at once."
   (agent-session-test--with-session
    (let ((session agent-session--current)
          (agent-session-test--steered nil))
@@ -425,12 +433,12 @@
      (should (eq (agent-session-status session) 'running)))))
 
 (ert-deftest agent-session-test-steer-input ()
-  "M-RET：运行中直接以引导方式发送；空闲时等同普通发送。"
+  "M-RET sends as a steer while running; when idle it is a normal send."
   (agent-session-test--with-session
    (let ((session agent-session--current)
          (agent-session-test--steered nil))
      (goto-char (point-max)) (insert "先别发")
-     (agent-session-steer-input)                    ; 空闲：普通发送
+     (agent-session-steer-input)                    ; idle: normal send
      (should (string-match-p "收到：先别发" (agent-session-test--transcript)))
      (should-not agent-session-test--steered)
      (agent-session-test--type "hold")
@@ -440,7 +448,7 @@
      (should-not (agent-session-queue session)))))
 
 (ert-deftest agent-session-test-steer-fallback ()
-  "后端不支持引导时，中断当前回合并把消息排到最前。"
+  "Without backend steer support, interrupt the turn and queue the message first."
   (agent-session-test--with-session
    (let ((session agent-session--current)
          (agent-session-test--interrupted nil))
@@ -450,13 +458,13 @@
        (agent-session-steer session "请先做这个"))
      (should agent-session-test--interrupted)
      (should (equal (mapcar #'cdr (agent-session-queue session)) '("请先做这个" "排在后面")))
-     ;; 中断后回合结束：先发引导的消息
+     ;; The turn ends after the interrupt: the steer message is sent first
      (agent-session-set-status session 'idle)
      (should (string-match-p "收到：请先做这个\\(.\\|\n\\)*收到：排在后面"
                              (agent-session-test--transcript))))))
 
 (ert-deftest agent-session-test-cancel-queued ()
-  "撤回排队的消息：从队列与对话中移除，放回输入区。"
+  "Withdrawing a queued message moves it from queue and transcript to the input."
   (agent-session-test--with-session
    (let ((session agent-session--current))
      (agent-session-test--type "hold")
@@ -467,7 +475,7 @@
      (should (equal (agent-session--input-text session) "写错了")))))
 
 (ert-deftest agent-session-test-list-mouse ()
-  "会话列表：单击条目打开会话，单击 × 结束会话。"
+  "Session list: clicking an entry opens the session, clicking × ends it."
   (agent-session-test--with-session
    (agent-session-test--type "鼠标测试")
    (let ((session-buffer (current-buffer))
@@ -478,11 +486,11 @@
            (agent-session-list-mode)
            (setq agent-session-list--root temporary-file-directory)
            (agent-session-list--render)
-           ;; batch 中没有真实显示，直接构造带位置的鼠标事件。
+           ;; No real display in batch mode; build positioned mouse events directly.
            (cl-flet ((click (pos)
                        (agent-session-list-mouse-open
                         (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))))
-             ;; 单击条目的标题处：打开会话
+             ;; Click on the entry's title: open the session
              (goto-char (point-min))
              (search-forward "鼠标测试")
              (let (opened)
@@ -490,7 +498,8 @@
                           (lambda (b) (setq opened b) (selected-window))))
                  (click (match-beginning 0)))
                (should (eq opened session-buffer)))
-             ;; 单击本会话那一条的 ×：确认后结束会话（列表中可能还有其他会话）
+             ;; Click the × on this session's entry: end it after confirming (the list may
+             ;; contain other sessions)
              (with-current-buffer list-buffer
                (goto-char (point-min))
                (let* ((start (text-property-search-forward
@@ -504,9 +513,10 @@
              (should-not (buffer-live-p session-buffer))))
        (kill-buffer list-buffer)))))
 
-;; 回归：所有条目共用同一个 mouse-face 时，悬停会把相邻条目连成一片高亮。
+;; Regression: when all entries shared one mouse-face, hovering highlighted adjacent
+;; entries as one block.
 (ert-deftest agent-session-test-list-hover-one-entry ()
-  "会话列表：相邻两项的鼠标高亮区域互不相连。"
+  "Session list: the mouse highlights of two adjacent entries do not touch."
   (with-temp-buffer
     (agent-session-list--insert-entry '(:id "a") "  第一项\n")
     (agent-session-list--insert-entry '(:id "b") "  第二项\n")
@@ -514,13 +524,14 @@
     (let ((first (get-text-property (point) 'mouse-face))
           (second (progn (forward-line 1) (get-text-property (point) 'mouse-face))))
       (should (and first second (not (eq first second)))))
-    ;; 行尾的空白伸到窗口右边缘并带高亮（整行高亮），条目最后的换行不带高亮（不溢出到下一行）
+    ;; Trailing whitespace stretches to the window's right edge and is highlighted (whole
+    ;; line highlight); the entry's final newline is not (no spill onto the next line)
     (goto-char (point-min))
     (while (search-forward "\n" nil t)
       (should-not (get-text-property (1- (point)) 'mouse-face))
       (should (get-text-property (- (point) 2) 'mouse-face))
       (should (equal (get-text-property (- (point) 2) 'display) '(space :align-to right))))
-    ;; 多行条目：悬停任一行，整个条目连成一片高亮
+    ;; Multi-line entry: hovering any line highlights the whole entry as one block
     (erase-buffer)
     (agent-session-list--insert-entry '(:id "c") "  第一行\n    第二行\n")
     (let ((face (get-text-property (point-min) 'mouse-face)))
@@ -530,9 +541,11 @@
       (forward-line -1)
       (should (eq (get-text-property (point) 'mouse-face) face)))))
 
-;; 同一会话在 Claude Desktop 等处同时打开时，显示它们写入会话记录的消息。
+;; When the same session is also open in Claude Desktop etc., show the messages they
+;; write to the session log.
 (ert-deftest agent-session-test-claude-sync ()
-  "会话同步：只显示其他客户端的消息，半行留到下次，标记需要重新载入上下文。"
+  "Session sync: show other clients' messages only; keep partial lines for later.
+Also mark that the context needs reloading."
   (agent-session-test--with-session
    (let* ((session agent-session--current)
           (file (make-temp-file "agent-sync-" nil ".jsonl"))
@@ -552,20 +565,20 @@
      (unwind-protect
          (cl-letf (((symbol-function 'agent-claude--transcript) (lambda (_) file)))
            (agent-claude--set session :sync-offset 0)
-           ;; 最后一行还没写完
+           ;; The last line is not fully written yet
            (with-temp-file file
              (insert own orphan desktop-user (substring desktop-reply 0 20)))
            (agent-claude--sync session)
            (let ((text (agent-session-test--transcript)))
              (should-not (string-search "Emacs 里发的" text))
-             ;; 没读到调用的工具结果不单独显示
+             ;; Tool results whose call was not read are not shown on their own
              (should-not (string-search "无主结果" text))
              (should-not (agent-session--block session "t0"))
              (should (string-search "以下来自 Claude Desktop" text))
              (should (string-search "桌面端发的\n[图片]" text))
              (should-not (string-search "桌面端回复" text)))
            (should (agent-claude--state session :external))
-           ;; 写完之后再同步：补上回复，来源提示不重复
+           ;; Sync after it is written: the reply is added, the source notice not repeated
            (with-temp-file file
              (insert own orphan desktop-user desktop-reply))
            (agent-claude--sync session)
@@ -576,9 +589,10 @@
                       (file-attribute-size (file-attributes file)))))
        (delete-file file)))))
 
-;; 图片：粘贴剪贴板中的图片、插入文件；发送时 Claude 用 base64，Codex 用本地路径。
+;; Images: paste clipboard images or insert files; on send Claude uses base64 and
+;; Codex uses local paths.
 (ert-deftest agent-session-test-images ()
-  "图片附件：剪贴板粘贴、随消息发送、各后端的格式。"
+  "Image attachments: clipboard paste, sending with messages, backend formats."
   (agent-session-test--with-session
    (let* ((agent-session-image-directory (make-temp-file "agent-images-" t))
           (png "\x89PNG\r\n\x1a\nfake")
@@ -589,7 +603,7 @@
                     (lambda (_ type) (if (eq type 'TARGETS) [TARGETS image/png] png)))
                    ((symbol-function 'agent-session-backend-send)
                     (lambda (_ _ text) (setq sent text))))
-           ;; 粘贴：剪贴板图片保存为文件，输入区插入占位
+           ;; Paste: the clipboard image is saved to a file and a placeholder is inserted
            (goto-char (point-max))
            (insert "看这张图 ")
            (agent-session-yank)
@@ -599,24 +613,24 @@
                                               (insert-file-contents-literally file) (buffer-string))
                             png))
              (agent-session-send-input)
-             ;; 发出的消息带着图片；对话中显示占位
+             ;; The sent message carries the image; the transcript shows the placeholder
              (should (equal (agent-session-message-images sent) (list file)))
              (should (equal (agent-session-message-text sent) "看这张图"))
              (should (string-search "看这张图 [图片]" (agent-session-test--transcript)))
-             ;; Claude：图片在前（base64），文字在后
+             ;; Claude: image first (base64), then text
              (let ((content (agent-claude--content sent)))
                (should (equal (plist-get (aref content 0) :type) "image"))
                (should (equal (base64-decode-string
                                (plist-get (plist-get (aref content 0) :source) :data))
                               png))
                (should (equal (aref content 1) '(:type "text" :text "看这张图"))))
-             ;; Codex：文字与本地图片路径
+             ;; Codex: text and the local image path
              (should (equal (agent-codex--input sent)
                             (vector '(:type "text" :text "看这张图")
                                     (list :type "localImage" :path file))))
-             ;; 没有图片时 Claude 仍发字符串
+             ;; Without images Claude still sends a plain string
              (should (equal (agent-claude--content "纯文字") "纯文字")))
-           ;; 剪贴板里有文字时按文字粘贴（例如 Finder 复制的文件）
+           ;; If the clipboard has text, paste it as text (e.g. files copied in Finder)
            (cl-letf (((symbol-function 'gui-get-selection)
                       (lambda (_ type) (if (eq type 'TARGETS) [TARGETS STRING image/tiff] png))))
              (should-not (agent-session--clipboard-image))))

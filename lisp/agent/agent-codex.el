@@ -1,12 +1,15 @@
-;;; agent-codex.el --- Codex 后端（app-server JSON-RPC） -*- lexical-binding: t; -*-
+;;; agent-codex.el --- Codex backend (app-server JSON-RPC) -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; 以 `codex app-server' 运行，stdio 上逐行 JSON-RPC：
+;; Runs `codex app-server', speaking line-delimited JSON-RPC over stdio:
 ;;   initialize → initialized → thread/start → turn/start / turn/interrupt
-;;   通知：turn/*、item/started、item/completed、item/*/delta、thread/tokenUsage/updated
-;;   服务端请求：item/commandExecution/requestApproval、item/fileChange/requestApproval
-;; emacs MCP server 通过 -c mcp_servers.emacs.* 只注入本进程，不改 ~/.codex/config.toml。
+;;   Notifications: turn/*, item/started, item/completed, item/*/delta,
+;;     thread/tokenUsage/updated
+;;   Server requests: item/commandExecution/requestApproval,
+;;     item/fileChange/requestApproval
+;; The emacs MCP server is injected into this process only via
+;; -c mcp_servers.emacs.*; ~/.codex/config.toml is left untouched.
 
 ;;; Code:
 
@@ -16,40 +19,45 @@
 (require 'agent-session)
 
 (defgroup agent-codex nil
-  "Codex 后端。"
+  "Codex backend."
   :group 'agent-session
   :prefix "agent-codex-")
 
 (defcustom agent-codex-executable "codex"
-  "codex 命令。"
+  "The codex command."
   :type 'string)
 
 (defconst agent-codex--modes
-  ;; 与 T3 Code 相同的映射：(审批策略 沙箱 thread/start 用的沙箱名 审批者)
+  ;; Same mapping as T3 Code:
+  ;; (approval policy, sandbox, sandbox name for thread/start, reviewer)
   '((ask "untrusted" "readOnly" "read-only" "user")
     (edits "on-request" "workspaceWrite" "workspace-write" "user")
     (auto "on-request" "workspaceWrite" "workspace-write" "auto_review")
     (full "never" "dangerFullAccess" "danger-full-access" "user"))
-  "统一权限模式到 Codex 审批策略与沙箱的映射。")
+  "Mapping from unified permission modes to Codex approval policy and sandbox.")
 
 (defun agent-codex--mode (session)
-  "SESSION 当前权限模式的 Codex 设置：(审批策略 沙箱策略类型 沙箱名 审批者)。"
+  "Return the Codex settings for SESSION's current permission mode.
+The value is (APPROVAL-POLICY SANDBOX-POLICY-TYPE SANDBOX-NAME REVIEWER)."
   (or (alist-get (agent-session-setting session :mode) agent-codex--modes)
       (alist-get 'edits agent-codex--modes)))
 
 (defcustom agent-codex-extra-args nil
-  "额外的命令行参数（放在 app-server 之后），例如 (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")。"
+  "Extra command-line arguments (placed after app-server).
+For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
   :type '(repeat string))
 
 (defun agent-codex--toml-string (string)
-  "STRING 的 TOML 字符串字面量。"
+  "Return STRING as a TOML string literal."
   (concat "\"" (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" string) "\""))
 
 (defun agent-codex--command (session)
-  "启动 SESSION 的命令行。"
+  "Return the command line that starts SESSION."
   (let* ((emx (agent-session-emx-command))
-         ;; codex 启动 MCP server 时不会传递全部环境变量，emx 需要的显式给出。
-         ;; 环境列表中同名变量可能出现多次，前面的生效，TOML 表里只能写一次。
+         ;; codex doesn't pass the whole environment to MCP servers, so give
+         ;; the variables emx needs explicitly.  A variable may appear several
+         ;; times in the environment list (the first one wins), but a TOML
+         ;; table may contain it only once.
          (env (mapcar (lambda (name)
                         (let ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
                                                (agent-session-environment session))))
@@ -67,15 +75,16 @@
 ;;; JSON-RPC
 
 (defun agent-codex--state (session key)
-  "读取 SESSION 的后端状态 KEY。"
+  "Return backend state KEY of SESSION."
   (plist-get (agent-session-state session) key))
 
 (defun agent-codex--set (session key value)
-  "设置 SESSION 的后端状态 KEY。"
+  "Set backend state KEY of SESSION to VALUE."
   (setf (agent-session-state session) (plist-put (agent-session-state session) key value)))
 
 (defun agent-codex--request (session method params &optional callback)
-  "发送 JSON-RPC 请求；收到结果后以 result 调用 CALLBACK。"
+  "Send a JSON-RPC request for METHOD with PARAMS.
+When the result arrives, call CALLBACK with it."
   (let ((id (1+ (or (agent-codex--state session :next-id) 0))))
     (agent-codex--set session :next-id id)
     (when callback
@@ -86,15 +95,15 @@
                                        :params (or params (make-hash-table))))))
 
 (defun agent-codex--notify (session method &optional params)
-  "发送 JSON-RPC 通知。"
+  "Send a JSON-RPC notification for METHOD with PARAMS."
   (agent-session-write session (append (list :jsonrpc "2.0" :method method)
                                        (when params (list :params params)))))
 
 (defun agent-codex--respond (session id result)
-  "回复服务端请求 ID。"
+  "Reply to server request ID with RESULT."
   (agent-session-write session (list :jsonrpc "2.0" :id id :result result)))
 
-;;; 后端接口
+;;; Backend interface
 
 (cl-defmethod agent-session-backend-start ((_ (eql codex)) session)
   (agent-session-start-process session (agent-codex--command session))
@@ -126,7 +135,7 @@
             (agent-session-set-status session 'idle))))))))
 
 (defun agent-codex--replay (session)
-  "取回恢复的会话的历史回合并渲染，完成后进入空闲。"
+  "Fetch and render the past turns of a resumed session, then go idle."
   (agent-codex--request
    session "thread/turns/list"
    (list :threadId (agent-codex--state session :thread)
@@ -144,7 +153,7 @@
      (agent-session-notice session "—— 以上为历史记录 ——")
      (agent-session-set-status session 'idle))))
 
-;;; 历史会话列表：临时启动一个 app-server 调用 thread/list
+;;; Past session list: start a temporary app-server and call thread/list
 
 (cl-defmethod agent-session-backend-history ((_ (eql codex)) root callback)
   (let* ((pending "")
@@ -208,12 +217,12 @@
   (mapcar #'car agent-codex--modes))
 
 (cl-defmethod agent-session-backend-apply-settings ((_ (eql codex)) session changed)
-  ;; 设置随每次 turn/start 发送，下一条消息起生效。
+  ;; Settings are sent with every turn/start and apply from the next message.
   (when (memq :model changed)
     (agent-session-set-info session :model (agent-session-setting session :model))))
 
 (defun agent-codex--input (text)
-  "用户消息 TEXT 的输入项：文字与图片（本地文件）。"
+  "Return the input items of user message TEXT: text and images (local files)."
   (let ((plain (agent-session-message-text text)))
     (vconcat (unless (string-empty-p plain) (list (list :type "text" :text plain)))
              (mapcar (lambda (file) (list :type "localImage" :path file))
@@ -226,9 +235,10 @@
      (append
       (list :threadId (agent-codex--state session :thread)
             :input (agent-codex--input text)
-            ;; 要求推理摘要，才会有 item/reasoning/summaryTextDelta。
+            ;; Request reasoning summaries to get item/reasoning/summaryTextDelta.
             :summary "detailed"
-            ;; 审批相关设置每回合都显式发送，避免恢复会话后沿用旧值。
+            ;; Send approval settings explicitly every turn so a resumed
+            ;; session doesn't keep stale values.
             :approvalPolicy approval
             :approvalsReviewer reviewer
             :sandboxPolicy (list :type sandbox))
@@ -238,14 +248,16 @@
      (agent-codex--set session :turn (plist-get (plist-get result :turn) :id)))))
 
 (defun agent-codex--interrupt (session)
-  "中断当前回合；还不知道回合 id 时，等 turn/started 到达再中断。"
+  "Interrupt the current turn of SESSION.
+If the turn id isn't known yet, interrupt once turn/started arrives."
   (if-let* ((turn (agent-codex--state session :turn)))
       (agent-codex--request session "turn/interrupt"
                             (list :threadId (agent-codex--state session :thread) :turnId turn))
     (agent-codex--set session :interrupt-pending t)))
 
 (cl-defmethod agent-session-backend-steer ((_ (eql codex)) session text)
-  ;; turn/steer 需要当前回合 id；还不知道时返回 nil，由调用方退回到中断后发送。
+  ;; turn/steer needs the current turn id; if it is unknown, return nil so
+  ;; the caller falls back to interrupting and then sending.
   (when-let* ((turn (agent-codex--state session :turn)))
     (agent-codex--request session "turn/steer"
                           (list :threadId (agent-codex--state session :thread)
@@ -256,16 +268,16 @@
 (cl-defmethod agent-session-backend-interrupt ((_ (eql codex)) session)
   (agent-codex--interrupt session))
 
-;;; item 的展示
+;;; Displaying items
 
 (defun agent-codex--relative (session path)
-  "PATH 相对于项目根目录的形式。"
+  "Return PATH relative to the project root of SESSION."
   (if (and (stringp path) (file-name-absolute-p path))
       (file-relative-name path (agent-session-root session))
     path))
 
 (defun agent-codex--changes-diff (session changes)
-  "文件改动 CHANGES 合成的 diff。"
+  "Return a diff combining file CHANGES."
   (mapconcat
    (lambda (change)
      (let ((path (agent-codex--relative session (plist-get change :path)))
@@ -278,7 +290,8 @@
    changes "\n"))
 
 (defun agent-codex--command-title (command)
-  "命令 COMMAND 的简短标题：去掉 bash -lc 包装，多行时只取第一行。"
+  "Return a short title for COMMAND.
+Strip the bash -lc wrapper and keep only the first line."
   (let* ((command (or command ""))
          (inner (if (string-match "\\`\\(?:/bin/\\)?\\(?:ba\\|z\\)?sh -l?c '\\(\\(?:.\\|\n\\)*\\)'\\'" command)
                     (match-string 1 command)
@@ -287,7 +300,7 @@
     (concat (car lines) (if (cdr lines) " …" ""))))
 
 (defun agent-codex--item-view (session item)
-  "item 的工具展示属性；不是工具调用时返回 nil。"
+  "Return the tool display properties of ITEM, or nil if it isn't a tool call."
   (pcase (plist-get item :type)
     ("commandExecution"
      (list :kind 'command :title (agent-codex--command-title (plist-get item :command))))
@@ -306,7 +319,7 @@
     ("collabAgentToolCall" (list :kind 'task :title (or (plist-get item :prompt) "子任务")))))
 
 (defun agent-codex--item-status (item)
-  "item 的完成状态。"
+  "Return the completion status of ITEM."
   (pcase (plist-get item :status)
     ((or "failed" "error") 'error)
     ("declined" 'declined)
@@ -314,7 +327,7 @@
     (_ (if (and (plist-get item :exitCode) (/= (plist-get item :exitCode) 0)) 'error 'ok))))
 
 (defun agent-codex--item-output (item)
-  "item 的输出文本。"
+  "Return the output text of ITEM."
   (pcase (plist-get item :type)
     ("commandExecution" (plist-get item :aggregatedOutput))
     ("mcpToolCall" (let ((result (plist-get item :result)) (err (plist-get item :error)))
@@ -324,12 +337,12 @@
     ("plan" (plist-get item :text))))
 
 (defun agent-codex--item-started (session item)
-  "item 开始。"
+  "Handle the start of ITEM."
   (when-let* ((view (agent-codex--item-view session item)))
     (apply #'agent-session-tool session (plist-get item :id) :status 'running view)))
 
 (defun agent-codex--item-completed (session item)
-  "item 完成。"
+  "Handle the completion of ITEM."
   (let ((id (plist-get item :id)))
     (pcase (plist-get item :type)
       ("agentMessage" (agent-session-text-done session id (plist-get item :text)))
@@ -340,10 +353,10 @@
               (append (when-let* ((output (agent-codex--item-output item))) (list :output output))
                       (agent-codex--item-view session item)))))))
 
-;;; 审批
+;;; Approvals
 
 (defun agent-codex--approval (session id method params)
-  "处理服务端的审批请求。"
+  "Handle the server's approval request ID for METHOD with PARAMS."
   (let* ((item-id (plist-get params :itemId))
          (command (equal method "item/commandExecution/requestApproval"))
          (tool (agent-session--block session item-id)))
@@ -361,14 +374,14 @@
      :callback (lambda (choice)
                  (agent-codex--respond session id (list :decision (symbol-name choice)))))))
 
-;;; 消息处理
+;;; Message handling
 
 (cl-defmethod agent-session-backend-handle ((_ (eql codex)) session message)
   (let ((id (plist-get message :id))
         (method (plist-get message :method))
         (params (plist-get message :params)))
     (cond
-     ;; 我们发出的请求的响应
+     ;; Responses to our requests
      ((and id (not method))
       (if-let* ((err (plist-get message :error)))
           (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
@@ -377,7 +390,7 @@
                     (callback (gethash id callbacks)))
           (remhash id callbacks)
           (funcall callback (plist-get message :result)))))
-     ;; 服务端请求
+     ;; Server requests
      (id
       (if (member method '("item/commandExecution/requestApproval"
                            "item/fileChange/requestApproval"))
@@ -385,7 +398,7 @@
         (agent-session-write session (list :jsonrpc "2.0" :id id
                                            :error (list :code -32601
                                                         :message (format "Emacs 不支持 %s" method))))))
-     ;; 通知
+     ;; Notifications
      (t
       (pcase method
         ("turn/started"
