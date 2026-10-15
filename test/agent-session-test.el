@@ -234,6 +234,8 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
      (agent-session-select-agent 'test-echo2)
      (should (eq (agent-session-agent agent-session--current) 'test-echo2))
      (should (eq (current-buffer) buffer))
+     ;; The placeholder handle follows the new agent.
+     (should (equal (agent-session-handle agent-session--current) "test-echo2"))
      (agent-session-test--type "hi")
      (goto-char (point-max))
      (insert "草稿")

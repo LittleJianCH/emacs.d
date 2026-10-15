@@ -1910,10 +1910,12 @@ session carrying over the input draft."
         (setf (agent-session-agent session) agent
               (agent-session-backend session) (agent-session--get agent :backend)
               (agent-session-state session) nil
-              (agent-session-info session) (list :handle (agent-session-handle session))
+              (agent-session-info session) nil
               (agent-session-settings session)
               (copy-sequence (alist-get agent agent-session-last-settings))
               (agent-session-status session) 'starting)
+        ;; Without a conversation the handle is still the old agent's placeholder.
+        (agent-session-set-handle session (symbol-name agent))
         (with-current-buffer (agent-session-buffer session)
           (rename-buffer (format "*%s@%s*" agent (file-name-nondirectory
                                                    (directory-file-name (agent-session-root session))))
