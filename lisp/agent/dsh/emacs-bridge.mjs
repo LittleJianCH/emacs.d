@@ -8,12 +8,37 @@
 // Wire format: newline-delimited JSON-RPC 2.0. One process drives one session.
 //
 // Requests (Emacs -> dsh):
-//   initialize {cwd, resume?, provider?, model?, effort?} -> {sessionId, provider, model}
-//   prompt     {text}                                      -> {messageId}
-//   cancel     {}                                          -> {}
+//   initialize {cwd, resume?, model?, effort?, preset?, plan?, mcpServers?}
+//                -> {sessionId, title, config, models, presets, plan, commands,
+//                    history, warnings}
+//   configure  {model?, effort?, preset?, plan?}         -> {config}
+//   prompt     {text, images?}       -> {messageId} | {command: {kind, text?}, status}
+//   steer      {text, images?}                           -> {messageId}
+//   cancel     {}                                        -> {}
+//   sessions/list {cwd}             -> {sessions: [{id, title, time}]}  (no initialize needed)
+//
+// images are absolute file paths. A prompt naming a dsh slash command runs
+// the command instead of starting a turn. mcpServers are stdio servers
+// [{name, command, args, env}] mounted for this agent only. commands is
+// [{name, description, hint?}]. history (resumed sessions only) replays the
+// transcript as a list of {method, params} in the notification vocabulary
+// below, plus `user` {id, text, images}.
+//
+// A model is named "provider/model". config is {model, effort, preset, plan};
+// models is [{id, name, description?, efforts: [{id, name}], defaultEffort?}];
+// presets lists the permission presets that can be selected (read-only,
+// workspace-write, danger-full-access, and auto when auto-review is loaded);
+// plan says whether plan mode is available.
+// A model, effort or preset that initialize cannot apply falls back to the
+// default and is reported in warnings. configure calls apply in order; an
+// omitted effort keeps the current one for the same model, null selects the
+// model's default.
 //
 // Requests (dsh -> Emacs):
 //   approval   {callId?, toolName, reason?}                -> {decision: allow|reject}
+//   question   {callId?, questions: [{id, question, header?, detail?,
+//               options?: [{label, description?}], multiSelect?, intent?}]}
+//                                     -> {answers: [{id, selected: [label], custom?}]}
 //
 // Notifications (dsh -> Emacs):
 //   status     {status: running|idle}
@@ -24,25 +49,52 @@
 //   tool/done  {id, isError, output}                       tool result
 //   turn/end   {reason, error?}
 //   usage      {usage}
+//   config     {config}                                    settings changed by dsh
 //   error      {message}
 
 import { createRequire } from 'node:module'
 import { realpathSync } from 'node:fs'
+import { readFile, realpath } from 'node:fs/promises'
+import { extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 
 export const name = 'emacs-bridge'
-export const inject = ['agents', 'sessions', 'sessionPersistence']
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'llm', 'permissionPresets']
 
 // Plugin files outside the dsh installation cannot import its packages by
 // name, so resolve them from the running dsh binary.
 const dshRequire = createRequire(realpathSync(process.argv[1]))
-const { createUserMessage } = await import(dshRequire.resolve('@deepseek-ai/dsh-llm'))
+const { createUserMessage, ReasoningEffortId } = await import(dshRequire.resolve('@deepseek-ai/dsh-llm'))
+const { installModelSelection } = await import(dshRequire.resolve('@deepseek-ai/dsh-agent'))
+const McpClient = await import(dshRequire.resolve('@deepseek-ai/dsh-mcp-client'))
+
+const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                      '.gif': 'image/gif', '.webp': 'image/webp' }
+
+// Session events whose user/message is something the user typed.
+const isTypedMessage = (message) => message?.source?.kind === 'user'
 
 /** Plain text of a content block list. */
 function contentText(content) {
   if (typeof content === 'string') return content
   return (content ?? []).map((block) => block.type === 'text' ? block.text : '').join('')
+}
+
+/** tool/done params for a tool/result event; NAMES maps call ids to tool names. */
+function toolResult(data, names) {
+  const id = data.message.toolCallId
+  const output = data.error?.reason ?? contentText(data.message.content)
+  // bash reports a failing command as a successful result ending in
+  // "[exit code: N]".
+  const exit = names.get(id) === 'bash' ? /\[exit code: (\d+)\]\s*$/.exec(output) : null
+  names.delete(id)
+  return {
+    id,
+    isError: data.message.isError === true || data.error !== undefined
+      || (exit !== null && exit[1] !== '0'),
+    output,
+  }
 }
 
 /** Human-readable message of an unknown failure. */
@@ -57,6 +109,9 @@ export function apply(ctx) {
   let handle = null
   let nextId = 0
   const pending = new Map()
+  // Model for the agent's next step; installModelSelection reads it.
+  const selection = { current: undefined, assembled: undefined }
+  let configuring = Promise.resolve()
   // attemptId -> Map(block index -> {id, kind, text})
   const attempts = new Map()
 
@@ -135,21 +190,12 @@ export function apply(ctx) {
         toolNames.set(data.callId, data.name)
         notify('tool', { id: data.callId, name: data.name, arguments: data.arguments })
         break
-      case 'tool/result': {
-        const id = data.message.toolCallId
-        const output = data.error?.reason ?? contentText(data.message.content)
-        // bash reports a failing command as a successful result ending in
-        // "[exit code: N]".
-        const exit = toolNames.get(id) === 'bash' ? /\[exit code: (\d+)\]\s*$/.exec(output) : null
-        toolNames.delete(id)
-        notify('tool/done', {
-          id,
-          isError: data.message.isError === true || data.error !== undefined
-            || (exit !== null && exit[1] !== '0'),
-          output,
-        })
+      case 'tool/result':
+        notify('tool/done', toolResult(data, toolNames))
         break
-      }
+      case 'plan/mode':
+        notify('config', { config: currentConfig() })
+        break
       case 'turn/end': {
         const reason = data.reason ?? {}
         notify('turn/end', {
@@ -176,33 +222,284 @@ export function apply(ctx) {
             () => 'cancelled')
   })
 
+  /** Validate MODEL ("provider/model") and an optional EFFORT into a full selection. */
+  const resolveSelection = async (model, effort) => {
+    const slash = model.indexOf('/')
+    if (slash <= 0) throw new Error(`model must be "provider/model": ${model}`)
+    const resolved = await ctx.llm.resolveCallConfig({
+      provider: model.slice(0, slash),
+      model: model.slice(slash + 1),
+      ...effort ? { reasoningEffort: ReasoningEffortId(effort) } : {},
+    })
+    return {
+      provider: resolved.provider,
+      model: resolved.model,
+      ...resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort },
+    }
+  }
+
+  /** Every model of every provider, with its reasoning efforts. */
+  const listModels = async () => {
+    const groups = await Promise.all(ctx.llm.listProviders().map(async (provider) => {
+      try {
+        return await Promise.all((await ctx.llm.listModels(provider.id)).map(async (model) => {
+          const info = await ctx.llm.resolveModelInfo(provider.id, model.id).catch(() => undefined)
+          return {
+            id: `${provider.id}/${model.id}`,
+            name: model.name,
+            ...model.description === undefined ? {} : { description: model.description },
+            efforts: (info?.reasoning?.efforts ?? []).map((e) => ({ id: String(e.id), name: e.name })),
+            ...info?.reasoning?.defaultEffort === undefined
+              ? {} : { defaultEffort: String(info.reasoning.defaultEffort) },
+          }
+        }))
+      } catch {
+        return []
+      }
+    }))
+    return groups.flat()
+  }
+
+  /** Whether plan mode is on, counting a selection that takes effect at the next step. */
+  const planWanted = (agent) => {
+    const state = ctx.get('planMode')?.get(agent)
+    return state !== undefined && (state.pending === true ? !state.active : state.active)
+  }
+
+  const currentConfig = () => {
+    const current = selection.current
+    return {
+      model: current === undefined ? null : `${current.provider}/${current.model}`,
+      effort: current?.reasoningEffort === undefined ? null : String(current.reasoningEffort),
+      preset: handle === null ? null : ctx.permissionPresets.current(handle.agent.session),
+      plan: handle !== null && planWanted(handle.agent),
+    }
+  }
+
+  /** User message content for TEXT and image file PATHS. */
+  const promptContent = async (text, paths = []) => {
+    const content = []
+    if (paths.length > 0) {
+      const attachments = ctx.get('attachments')
+      if (attachments === undefined) throw new Error('no attachment store for images')
+      const images = await Promise.all(paths.map(async (path) => {
+        const mediaType = IMAGE_TYPES[extname(path).toLowerCase()]
+        if (mediaType === undefined) throw new Error(`unsupported image type: ${path}`)
+        return { data: await readFile(path), mediaType }
+      }))
+      for (const ref of await attachments.saveImages(images)) content.push({ type: 'image', attachment: ref })
+    }
+    if (text) content.push({ type: 'text', text })
+    if (content.length === 0) throw new Error('empty message')
+    return content
+  }
+
+  /**
+   * Title of session ID: a generated or user-given title, else the first typed
+   * message in EVENTS (dsh's own fallback cuts it short); null for a session
+   * without messages.
+   */
+  const sessionTitle = async (id, events) => {
+    const first = events.find((event) => event.type === 'user/message' && isTypedMessage(event.data))
+    if (first === undefined) return null
+    const stored = await ctx.get('sessionQuery')?.readTitle(id).catch(() => undefined)
+    return stored?.title && stored.source?.kind !== 'fallback' ? stored.title : contentText(first.data.content)
+  }
+
+  /** The transcript of a resumed session, in notification form. */
+  const historyOf = (session) => {
+    const items = []
+    const toolNamesById = new Map()
+    for (const event of session.snapshotEvents()) {
+      const data = event.data
+      switch (event.type) {
+        case 'user/message':
+          if (isTypedMessage(data)) {
+            items.push({ method: 'user', params: {
+              id: data.id,
+              text: contentText(data.content),
+              images: (data.content ?? []).filter((block) => block.type === 'image').length,
+            } })
+          }
+          break
+        case 'assistant/message':
+          (data.message?.content ?? []).forEach((block, index) => {
+            if ((block.type === 'text' || block.type === 'reasoning') && block.text) {
+              items.push({ method: 'text/done', params: {
+                id: `${event.seq}/${index}`,
+                kind: block.type === 'text' ? 'assistant' : 'thinking',
+                text: block.text,
+              } })
+            }
+          })
+          break
+        case 'tool/call':
+          toolNamesById.set(data.callId, data.name)
+          items.push({ method: 'tool', params: { id: data.callId, name: data.name, arguments: data.arguments } })
+          break
+        case 'tool/result':
+          items.push({ method: 'tool/done', params: toolResult(data, toolNamesById) })
+          break
+      }
+    }
+    return items
+  }
+
+  ctx.on('user-questions/request', (req, next) => {
+    if (req.agent === undefined || !owns(req.agent)) return next()
+    return request('question', { callId: req.wait?.callId, questions: req.questions })
+  })
+
   const methods = {
     async initialize(params) {
       if (handle !== null) throw new Error('already initialized')
-      // Unspecified fields fall back to the profile's default selection.
-      const agentOptions = { ...ctx.get('agentDefaultModel')?.currentSelection() }
-      if (params.provider) agentOptions.provider = params.provider
-      if (params.model) agentOptions.model = params.model
-      if (params.effort) agentOptions.reasoningEffort = params.effort
-      handle = params.resume
-        ? await ctx.agents.resume({ resumeSessionId: params.resume, agentOptions })
-        : await ctx.agents.create({
+      const warnings = []
+      const setup = async (agentCtx) => {
+        installModelSelection(agentCtx, selection)
+        for (const server of params.mcpServers ?? []) {
+          try {
+            await agentCtx.plugin(McpClient, McpClient.Config({
+              transport: 'stdio',
+              serverName: server.name,
+              command: server.command,
+              args: server.args ?? [],
+              env: server.env ?? {},
+              cwd: params.cwd,
+              failOnStartupError: false,
+            }))
+          } catch (error) {
+            warnings.push(`MCP ${server.name}: ${errorMessage(error)}`)
+          }
+        }
+      }
+      const fallback = ctx.get('agentDefaultModel')?.currentSelection()
+      const fallbackModel = fallback && `${fallback.provider}/${fallback.model}`
+      if (params.resume) {
+        handle = await ctx.agents.resume({
+          resumeSessionId: params.resume,
+          setup: async (agentCtx, agent) => {
+            // Continue with the model the session last used.
+            const logged = agent.session.requestHeader()
+            if (logged !== undefined) {
+              selection.current = {
+                provider: logged.config.provider,
+                model: logged.config.model,
+                ...logged.config.reasoningEffort === undefined || logged.adapterDefaults?.reasoningEffort === true
+                  ? {} : { reasoningEffort: logged.config.reasoningEffort },
+              }
+            }
+            await setup(agentCtx)
+          },
+        })
+        // A session that never reached the model has no logged route.
+        selection.current ??= fallback && await resolveSelection(fallbackModel, fallback.reasoningEffort)
+      } else {
+        // Unspecified fields fall back to the profile's default selection.
+        try {
+          selection.current = await resolveSelection(params.model ?? fallbackModel,
+                                                     params.effort ?? fallback?.reasoningEffort)
+        } catch (error) {
+          if (!params.model && !params.effort) throw error
+          warnings.push(`${params.model ?? fallbackModel} ${params.effort ?? ''}: ${errorMessage(error)}`)
+          selection.current = await resolveSelection(fallbackModel, fallback?.reasoningEffort)
+        }
+        handle = await ctx.agents.create({
           sessionId: randomUUID(),
           meta: { cwd: params.cwd },
-          agentOptions,
+          agentOptions: { ...selection.current },
+          setup,
         })
+      }
+      if (params.preset) {
+        try {
+          ctx.permissionPresets.set(handle.agent.session, params.preset)
+        } catch (error) {
+          warnings.push(`${params.preset}: ${errorMessage(error)}`)
+        }
+      }
+      if (params.plan !== undefined) ctx.get('planMode')?.set(handle.agent, params.plan)
       await ctx.sessions.flush(handle.agent.session)
-      const options = handle.agent.options
-      return { sessionId: handle.agent.session.id, provider: options.provider, model: options.model }
+      const agent = handle.agent
+      return {
+        sessionId: agent.session.id,
+        title: params.resume ? await sessionTitle(agent.session.id, agent.session.snapshotEvents()) : null,
+        config: currentConfig(),
+        models: await listModels(),
+        presets: [...ctx.permissionPresets.names],
+        plan: ctx.get('planMode') !== undefined,
+        commands: (ctx.get('commands')?.list(agent) ?? []).map((command) => ({
+          name: command.name,
+          description: command.description,
+          ...command.input?.hint === undefined ? {} : { hint: command.input.hint },
+        })),
+        history: params.resume ? historyOf(agent.session) : [],
+        warnings,
+      }
     },
-    prompt(params) {
+    configure(params) {
+      const run = async () => {
+        if (handle === null) throw new Error('not initialized')
+        if (params.model != null || params.effort !== undefined) {
+          const current = selection.current
+          const currentModel = current && `${current.provider}/${current.model}`
+          const model = params.model ?? currentModel
+          if (!model) throw new Error('no model selected')
+          const effort = params.effort !== undefined ? params.effort
+            : model === currentModel ? current?.reasoningEffort : undefined
+          selection.current = await resolveSelection(model, effort ?? undefined)
+        }
+        if (params.preset) ctx.permissionPresets.set(handle.agent.session, params.preset)
+        if (params.plan !== undefined) ctx.get('planMode')?.set(handle.agent, params.plan)
+        return { config: currentConfig() }
+      }
+      const result = configuring.then(run)
+      configuring = result.catch(() => {})
+      return result
+    },
+    async prompt(params) {
       if (handle === null) throw new Error('not initialized')
+      const commands = ctx.get('commands')
+      const name = /^\/([a-z0-9_-]+)(?:\s|$)/.exec(params.text ?? '')?.[1]
+      if (commands !== undefined && name !== undefined && commands.find(handle.agent, name) !== undefined) {
+        const execution = await commands.execute(handle.agent, params.text, [], new AbortController().signal)
+        if (execution !== undefined) return { command: execution.result, status: handle.agent.status }
+      }
       const message = createUserMessage({
-        content: [{ type: 'text', text: params.text }],
+        content: await promptContent(params.text, params.images),
         source: { kind: 'user' },
       })
       handle.agent.followup(message)
       return { messageId: message.id }
+    },
+    async steer(params) {
+      if (handle === null) throw new Error('not initialized')
+      const message = createUserMessage({
+        content: await promptContent(params.text, params.images),
+        source: { kind: 'user' },
+      })
+      handle.agent.steer(message)
+      return { messageId: message.id }
+    },
+    async 'sessions/list'(params) {
+      const query = ctx.get('sessionQuery')
+      if (query === undefined) return { sessions: [] }
+      const cwd = await realpath(params.cwd).catch(() => params.cwd)
+      const roots = []
+      for (const { header } of await query.listSessions()) {
+        if (header.origin === 'subagent' || header.parentSession !== undefined || !header.cwd) continue
+        if ((await realpath(header.cwd).catch(() => header.cwd)) === cwd) roots.push(header)
+      }
+      roots.sort((a, b) => b.createdAt - a.createdAt)
+      const recent = roots.slice(0, 50)
+      const sessions = await Promise.all(recent.map(async (header) => {
+        const events = (await query.readSession(header.id).catch(() => undefined))?.events ?? []
+        return {
+          id: header.id,
+          title: await sessionTitle(header.id, events),
+          time: (events.at(-1)?.time ?? header.createdAt) / 1000,
+        }
+      }))
+      return { sessions: sessions.filter((session) => session.title !== null).sort((a, b) => b.time - a.time) }
     },
     cancel() {
       handle?.agent.cancel({ kind: 'user' })

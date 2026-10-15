@@ -804,5 +804,86 @@ Also mark that the context needs reloading."
        (agent-session-backend-handle 'dsh session '(:method "status" :params (:status "idle")))
        (should (eq (agent-session-status session) 'idle))))))
 
+(ert-deftest agent-session-test-dsh-tool-views ()
+  "dsh tool calls show diffs, the todo list and MCP names; quiet results stay hidden."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (let ((write (agent-dsh--tool-view session "write" '(:file_path "x/a.txt" :content "alpha\nbeta"))))
+       (should (eq (plist-get write :kind) 'edit))
+       (should (equal (plist-get write :diff) "--- x/a.txt\n+++ x/a.txt\n+alpha\n+beta")))
+     (should (equal (plist-get (agent-dsh--tool-view session "edit" '(:file_path "b" :old_string "x"
+                                                                       :new_string "y"))
+                               :diff)
+                    "--- b\n+++ b\n-x\n+y"))
+     (should (equal (plist-get (agent-dsh--tool-view
+                                session "todo_write"
+                                '(:todos [(:content "做 A" :status "completed")
+                                          (:content "做 B" :status "in_progress")]))
+                               :output)
+                    "☑ 做 A\n▶ 做 B"))
+     (should (equal (agent-dsh--tool-view session "mcp__emacs__open" nil)
+                    '(:kind mcp :title "emacs · open")))
+     ;; A successful write keeps its diff but not the echoed file
+     (agent-dsh--notification session "tool" '(:id "w1" :name "write"
+                                              :arguments "{\"file_path\":\"a.txt\",\"content\":\"hi\"}"))
+     (agent-dsh--notification session "tool/done" '(:id "w1" :isError nil :output "<path>a.txt</path>"))
+     (should (eq (plist-get (agent-session--block session "w1") :status) 'ok))
+     (should-not (plist-get (agent-session--block session "w1") :output))
+     ;; A result for a call never shown is ignored
+     (agent-dsh--notification session "tool/done" '(:id "ghost" :isError nil :output "x"))
+     (should-not (agent-session--block session "ghost")))))
+
+(ert-deftest agent-session-test-dsh-replay ()
+  "A resumed dsh session replays users, thinking, replies and tools."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (dolist (item '(("user" (:id "u1" :text "看图" :images 1))
+                     ("text/done" (:id "3/0" :kind "thinking" :text "想"))
+                     ("text/done" (:id "3/1" :kind "assistant" :text "好的"))
+                     ("tool" (:id "c1" :name "bash" :arguments "{\"command\":\"ls\"}"))
+                     ("tool/done" (:id "c1" :isError t :output "boom"))))
+       (agent-dsh--notification session (car item) (cadr item)))
+     (should (string-search "[图片] 看图" (agent-session-test--transcript)))
+     (should (eq (plist-get (agent-session--block session "3/0") :kind) 'thinking))
+     (should (string-search "好的" (agent-session-test--transcript)))
+     (should (eq (plist-get (agent-session--block session "c1") :status) 'error)))))
+
+(ert-deftest agent-session-test-dsh-modes ()
+  "Modes map to dsh presets; plan keeps the preset of the mode before it and
+an approved plan review switches the session back."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (setf (agent-session-settings session) (list :mode 'auto))
+     (should (equal (agent-dsh--preset session) "auto"))
+     (setf (agent-session-settings session) (list :mode 'plan :before-plan 'full))
+     (should (equal (agent-dsh--preset session) "danger-full-access"))
+     ;; Presets the bridge lacks are not offered
+     (setf (agent-session-state session) (list :presets '("read-only" "workspace-write") :plan t))
+     (should (equal (agent-session-backend-modes 'dsh session) '(ask edits plan)))
+     ;; dsh left plan mode (plan approved): follow it
+     (cl-letf (((symbol-function 'agent-session-backend-apply-settings) #'ignore))
+       (agent-dsh--apply-config session '(:model "p/m" :plan nil)))
+     (should (eq (agent-session-setting session :mode) 'full)))))
+
+(ert-deftest agent-session-test-dsh-question ()
+  "dsh questions become footer choices; a declined plan carries feedback."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (written nil))
+     (cl-letf (((symbol-function 'agent-session-write) (lambda (_ object) (push object written)))
+               ((symbol-function 'read-string) (lambda (&rest _) "再细一点")))
+       (agent-session-backend-handle
+        'dsh session
+        '(:id "dsh-2" :method "question"
+          :params (:questions [(:id "review" :question "Approve?" :detail "# Plan"
+                                :options [(:label "Approve") (:label "Keep planning")]
+                                :intent (:kind "plan-review" :approve "Approve"))])))
+       (should (string-search "批准这个计划" (agent-session-test--footer)))
+       (agent-session-deny)
+       (should (equal (car written)
+                      '(:jsonrpc "2.0" :id "dsh-2"
+                        :result (:answers [(:id "review" :selected ["Keep planning"]
+                                                :custom "再细一点")]))))))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

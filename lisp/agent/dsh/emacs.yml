@@ -8,3 +8,8 @@
     - id: emacs-bridge
       name: ./emacs-bridge.mjs
       inject: [sdkAppStartup]
+
+    # Experimental LLM review of each tool call; adds the `auto` permission
+    # preset (agent-session's "自动审查" mode). Ships with dsh, off by default.
+    - id: auto-review
+      name: '@deepseek-ai/dsh-experimental-auto-review'

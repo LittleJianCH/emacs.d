@@ -33,9 +33,39 @@
   (expand-file-name "dsh/emacs.yml" (file-name-directory (or load-file-name buffer-file-name)))
   "Profile patch that mounts the Emacs bridge plugin.")
 
+(defconst agent-dsh--presets
+  '((ask . "read-only")
+    (edits . "workspace-write")
+    (auto . "auto")
+    (full . "danger-full-access"))
+  "Unified permission modes mapped to dsh permission presets.
+`auto' comes from dsh's experimental auto-review plugin, which emacs.yml loads.")
+
+(defun agent-dsh--preset (session)
+  "The dsh permission preset for the current mode of SESSION.
+Plan mode is separate in dsh; it keeps the preset of the mode before it."
+  (let ((mode (agent-session-setting session :mode)))
+    (alist-get (if (eq mode 'plan)
+                   (or (plist-get (agent-session-settings session) :before-plan)
+                       agent-session-default-mode)
+                 mode)
+               agent-dsh--presets "workspace-write")))
+
 (defun agent-dsh--command ()
   "Command line that starts the bridge."
   (list agent-dsh-executable "--profile" "sdk" "--patch" agent-dsh--patch))
+
+(defun agent-dsh--mcp-servers (session)
+  "MCP servers mounted for the agent of SESSION: the emx bridge back to Emacs."
+  (let ((emx (agent-session-emx-command)))
+    (vector
+     (list :name "emacs" :command (car emx) :args (vconcat (cdr emx))
+           ;; MCP servers don't inherit the whole environment; pass what emx needs.
+           :env (let ((env (make-hash-table :test #'equal)))
+                  (dolist (name '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER") env)
+                    (when-let* ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
+                                                 (agent-session-environment session))))
+                      (puthash name (substring entry (1+ (length name))) env))))))))
 
 ;;; JSON-RPC
 
@@ -65,24 +95,154 @@
 ;;; Backend interface
 
 (cl-defmethod agent-session-backend-start ((_ (eql dsh)) session)
+  (agent-dsh--set session :ready nil)
   (agent-session-start-process session (agent-dsh--command))
   (agent-dsh--request
    session "initialize"
-   (append (list :cwd (directory-file-name (expand-file-name (agent-session-root session))))
+   (append (list :cwd (directory-file-name (expand-file-name (agent-session-root session)))
+                 :preset (agent-dsh--preset session)
+                 :plan (if (eq (agent-session-setting session :mode) 'plan) t :false)
+                 :mcpServers (agent-dsh--mcp-servers session))
            (when-let* ((resume (agent-dsh--state session :resume))) (list :resume resume))
            (when-let* ((model (agent-session-setting session :model))) (list :model model))
            (when-let* ((effort (agent-session-setting session :effort))) (list :effort effort)))
    (lambda (result)
+     (agent-dsh--set session :ready t)
      (agent-dsh--set session :resume (plist-get result :sessionId))
-     (agent-session-set-info session :model (plist-get result :model))
+     (agent-dsh--set session :models (plist-get result :models))
+     (agent-dsh--set session :presets (append (plist-get result :presets) nil))
+     (agent-dsh--set session :plan (plist-get result :plan))
+     (agent-dsh--set session :commands (plist-get result :commands))
+     (agent-dsh--apply-config session (plist-get result :config))
+     (when-let* ((title (plist-get result :title)))
+       (unless (plist-get (agent-session-info session) :title)
+         (agent-session-set-info session :title (agent-session--title-seed title))))
+     ;; A restarted process resumes a session that is already on screen.
+     (when (and (length> (plist-get result :history) 0)
+                (zerop (hash-table-count (agent-session-blocks session))))
+       (seq-doseq (item (plist-get result :history))
+         (agent-dsh--notification session (plist-get item :method) (plist-get item :params)))
+       (agent-session-notice session "—— 以上为历史记录 ——"))
+     (seq-doseq (warning (plist-get result :warnings))
+       (agent-session-notice session (format "dsh：%s" warning) 'agent-session-error))
      (agent-session-set-status session 'idle))))
 
-(cl-defmethod agent-session-backend-modes ((_ (eql dsh)) _session)
-  ;; Permission modes are not wired to dsh presets yet; approvals always ask.
-  '(ask))
+;;; Past sessions: a short-lived bridge answers sessions/list
+
+(cl-defmethod agent-session-backend-history ((_ (eql dsh)) root callback)
+  (let* ((pending "")
+         (done nil)
+         (default-directory root)
+         (process
+          (make-process
+           :name "agent-dsh-list"
+           :command (agent-dsh--command)
+           :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           :stderr (get-buffer-create " *agent-dsh-list stderr*")
+           :filter
+           (lambda (process output)
+             (setq pending (concat pending output))
+             (let ((lines (split-string pending "\n")))
+               (setq pending (car (last lines)))
+               (dolist (line (butlast lines))
+                 (when-let* ((message (ignore-errors
+                                        (json-parse-string line :object-type 'plist
+                                                           :null-object nil :false-object nil)))
+                             ((equal (plist-get message :id) 1)))
+                   (setq done t)
+                   (delete-process process)
+                   (funcall callback
+                            (mapcar (lambda (item)
+                                      (list :id (plist-get item :id)
+                                            :title (car (split-string (string-trim (plist-get item :title))
+                                                                      "\n"))
+                                            :time (plist-get item :time)))
+                                    (plist-get (plist-get message :result) :sessions)))))))
+           :sentinel (lambda (_process _event)
+                       (unless done (setq done t) (funcall callback nil))))))
+    (process-send-string
+     process (concat (json-serialize
+                      (list :jsonrpc "2.0" :id 1 :method "sessions/list"
+                            :params (list :cwd (directory-file-name (expand-file-name root)))))
+                     "\n"))))
+
+(defun agent-dsh--apply-config (session config)
+  "Follow CONFIG, the settings the bridge reports, in SESSION."
+  (agent-session-set-info session :model (plist-get config :model))
+  ;; An approved plan review leaves plan mode on the dsh side.
+  (when (and (not (plist-get config :plan))
+             (eq (agent-session-setting session :mode) 'plan)
+             (not (agent-dsh--state session :configuring)))
+    (agent-session-configure session :mode (or (plist-get (agent-session-settings session)
+                                                          :before-plan)
+                                               agent-session-default-mode))))
+
+(cl-defmethod agent-session-backend-models ((_ (eql dsh)) session)
+  (mapcar (lambda (model)
+            (list :id (plist-get model :id)
+                  :name (plist-get model :name)
+                  :description (plist-get model :description)
+                  :efforts (mapcar (lambda (e) (plist-get e :id)) (plist-get model :efforts))
+                  :default-effort (plist-get model :defaultEffort)))
+          (agent-dsh--state session :models)))
+
+(cl-defmethod agent-session-backend-modes ((_ (eql dsh)) session)
+  ;; Before the bridge reports its presets, offer every mode.
+  (let ((presets (agent-dsh--state session :presets)))
+    (append (seq-keep (pcase-lambda (`(,mode . ,preset))
+                        (and (or (null presets) (member preset presets)) mode))
+                      agent-dsh--presets)
+            (when (agent-dsh--state session :plan) '(plan)))))
+
+(cl-defmethod agent-session-backend-apply-settings ((_ (eql dsh)) session changed)
+  ;; Before initialize the settings travel with it instead.
+  (when (and (agent-dsh--state session :ready)
+             (seq-intersection changed '(:model :effort :mode)))
+    ;; Until the reply arrives, a reported plan state may predate this change.
+    (agent-dsh--set session :configuring (1+ (or (agent-dsh--state session :configuring) 0)))
+    (agent-dsh--request
+     session "configure"
+     (append (when (or (memq :model changed) (memq :effort changed))
+               ;; Both together: nil selects the agent's default.
+               (list :model (or (agent-session-setting session :model) :null)
+                     :effort (or (agent-session-setting session :effort) :null)))
+             (when (memq :mode changed)
+               (list :preset (agent-dsh--preset session)
+                     :plan (if (eq (agent-session-setting session :mode) 'plan) t :false))))
+     (lambda (result)
+       (let ((pending (1- (agent-dsh--state session :configuring))))
+         (agent-dsh--set session :configuring (and (> pending 0) pending)))
+       (agent-dsh--apply-config session (plist-get result :config))))))
+
+(cl-defmethod agent-session-backend-commands ((_ (eql dsh)) session)
+  (mapcar (lambda (command)
+            (list :name (plist-get command :name)
+                  :description (plist-get command :description)
+                  :hint (plist-get command :hint)))
+          (agent-dsh--state session :commands)))
+
+(defun agent-dsh--message (text)
+  "Prompt parameters for user message TEXT: its text and image files."
+  (list :text (agent-session-message-text text)
+        :images (vconcat (agent-session-message-images text))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql dsh)) session text)
-  (agent-dsh--request session "prompt" (list :text (agent-session-message-text text))))
+  (agent-dsh--request
+   session "prompt" (agent-dsh--message text)
+   (lambda (result)
+     ;; A dsh slash command runs without a turn; show its result.
+     (when-let* ((command (plist-get result :command)))
+       (let ((output (plist-get command :text)))
+         (if (equal (plist-get command :kind) "error")
+             (agent-session-notice session (format "命令失败：%s" output) 'agent-session-error)
+           (agent-session-notice session (or output "命令已执行"))))
+       (when (equal (plist-get result :status) "idle")
+         (agent-session-set-status session 'idle))))))
+
+(cl-defmethod agent-session-backend-steer ((_ (eql dsh)) session text)
+  ;; dsh takes steering at the next step boundary of the running turn.
+  (agent-dsh--request session "steer" (agent-dsh--message text))
+  t)
 
 (cl-defmethod agent-session-backend-interrupt ((_ (eql dsh)) session)
   (agent-dsh--request session "cancel" nil))
@@ -101,21 +261,57 @@
       (file-relative-name path (agent-session-root session))
     path))
 
+(defun agent-dsh--diff (path old new)
+  "A simple diff for PATH from the text before (OLD) and after (NEW)."
+  (cl-flet ((lines (prefix text)
+              (when (and text (not (string-empty-p text)))
+                (mapconcat (lambda (line) (concat prefix line))
+                           (split-string (string-remove-suffix "\n" text) "\n")
+                           "\n"))))
+    (string-join (delq nil (list (concat "--- " path "\n+++ " path)
+                                 (lines "-" old)
+                                 (lines "+" new)))
+                 "\n")))
+
 (defun agent-dsh--tool-view (session name arguments)
   "Display properties of tool NAME called with ARGUMENTS (a plist)."
-  (let ((path (agent-dsh--relative session (or (plist-get arguments :path)
-                                               (plist-get arguments :file_path)))))
+  (let ((path (agent-dsh--relative session (or (plist-get arguments :file_path)
+                                               (plist-get arguments :path)))))
     (pcase name
       ("bash" (list :kind 'command
                     :title (car (split-string (string-trim (or (plist-get arguments :command) ""))
                                               "\n"))))
       ((or "read" "read_image") (list :kind 'read :title path))
-      ((or "edit" "write") (list :kind 'edit :title path))
-      ((or "grep" "glob") (list :kind 'search :title (plist-get arguments :pattern)))
-      ((or "web_fetch" "web_search")
-       (list :kind 'web :title (or (plist-get arguments :url) (plist-get arguments :query))))
-      ("todo_write" (list :kind 'plan :title "待办"))
+      ("write" (list :kind 'edit :title path
+                     :diff (agent-dsh--diff path nil (plist-get arguments :content))))
+      ("edit" (list :kind 'edit :title path
+                    :diff (agent-dsh--diff path (plist-get arguments :old_string)
+                                           (plist-get arguments :new_string))))
+      ((or "grep" "glob")
+       (list :kind 'search :title (format "%s %s" name (or (plist-get arguments :pattern) ""))))
+      ("web_fetch" (list :kind 'web :title (plist-get arguments :url)))
+      ("web_search" (list :kind 'web
+                          :title (mapconcat #'identity (plist-get arguments :queries) " · ")))
+      ((or "subagent" "subagent_fork")
+       (list :kind 'task :title (or (plist-get arguments :description) name)))
+      ("todo_write"
+       (list :kind 'plan :title "更新计划"
+             :output (mapconcat (lambda (todo)
+                                  (format "%s %s"
+                                          (pcase (plist-get todo :status)
+                                            ("completed" "☑") ("in_progress" "▶") (_ "☐"))
+                                          (plist-get todo :content)))
+                                (plist-get arguments :todos) "\n")))
+      ("exit_plan_mode" (list :kind 'plan :title "提交计划" :output (plist-get arguments :plan)))
+      ("skill" (list :kind 'other :title (format "技能 %s" (plist-get arguments :name))))
+      ((pred (string-prefix-p "mcp__"))
+       (list :kind 'mcp :title (string-join (cdr (split-string name "__")) " · ")))
       (_ (list :kind 'other :title (or path name))))))
+
+;; Results that would only repeat what the call already shows (the plan, the
+;; diff); failures are still shown.
+(defconst agent-dsh--quiet-results '("todo_write" "exit_plan_mode" "write" "edit")
+  "Tools whose successful result text is not shown.")
 
 ;;; Approvals
 
@@ -132,7 +328,114 @@
      :callback (lambda (choice)
                  (agent-dsh--respond session id (list :decision (symbol-name choice)))))))
 
+;;; Questions (e.g. the plan review when the agent leaves plan mode)
+
+(defun agent-dsh--question-choices (question)
+  "Choices for QUESTION: one per option, plus free text.
+A plan review has no free-text choice: declining it asks for feedback, and
+the last choice is what `agent-session-deny' picks."
+  (append (seq-map-indexed (lambda (option index)
+                             (list (intern (format "option-%d" index)) (plist-get option :label)))
+                           (plist-get question :options))
+          (unless (equal (plist-get (plist-get question :intent) :kind) "plan-review")
+            '((custom "其他…")))))
+
+(defun agent-dsh--answer-question (question choice)
+  "The answer to QUESTION for CHOICE, a key of `agent-dsh--question-choices'."
+  (let* ((options (plist-get question :options))
+         (intent (plist-get question :intent))
+         (label (and (not (eq choice 'custom))
+                     (plist-get (seq-elt options (string-to-number
+                                                  (substring (symbol-name choice) 7)))
+                                :label))))
+    (append
+     (list :id (plist-get question :id) :selected (if label (vector label) []))
+     (cond
+      ((eq choice 'custom)
+       (list :custom (read-string (format "%s " (plist-get question :question)))))
+      ;; Declining a plan can carry feedback for the next revision.
+      ((and (equal (plist-get intent :kind) "plan-review")
+            (not (equal label (plist-get intent :approve))))
+       (let ((feedback (string-trim (read-string "修改意见（可留空）："))))
+         (unless (string-empty-p feedback) (list :custom feedback))))))))
+
+(defun agent-dsh--question (session id params)
+  "Ask the user the bridge's questions in request ID with PARAMS, one by one."
+  (let ((questions (append (plist-get params :questions) nil))
+        (answers nil))
+    (cl-labels
+        ((next ()
+           (if (null questions)
+               (agent-dsh--respond session id (list :answers (vconcat (nreverse answers))))
+             (let ((question (pop questions)))
+               (agent-session-ask
+                session
+                :title (if (equal (plist-get (plist-get question :intent) :kind) "plan-review")
+                           "批准这个计划并开始执行？"
+                         (plist-get question :question))
+                :detail (unless (plist-get (plist-get question :intent) :kind)
+                          (plist-get question :detail))
+                :choices (agent-dsh--question-choices question)
+                :tool (plist-get params :callId)
+                :callback (lambda (choice)
+                            (push (agent-dsh--answer-question question choice) answers)
+                            (next)))))))
+      (next))))
+
 ;;; Message handling
+
+(defun agent-dsh--notification (session method params)
+  "Handle notification METHOD with PARAMS (also used to replay history)."
+  (pcase method
+    ("status"
+     (agent-session-set-status session (if (equal (plist-get params :status) "running")
+                                           'running 'idle)))
+    ("user"
+     (agent-session--new-block
+      session (plist-get params :id)
+      (list :type 'user
+            :text (string-join (append (make-list (or (plist-get params :images) 0) "[图片]")
+                                       (list (plist-get params :text)))
+                               " "))))
+    ("text"
+     (agent-session-text session (plist-get params :id) (plist-get params :delta)
+                         (if (equal (plist-get params :kind) "thinking") 'thinking 'assistant)))
+    ("text/done"
+     (let ((id (plist-get params :id)))
+       ;; Replayed thinking has no streamed block yet to carry its kind.
+       (when (and (equal (plist-get params :kind) "thinking")
+                  (not (agent-session--block session id)))
+         (agent-session-text session id (plist-get params :text) 'thinking))
+       (agent-session-text-done session id (plist-get params :text))))
+    ("discard"
+     (seq-doseq (block (plist-get params :ids))
+       (agent-session--remove-block session block)))
+    ("tool"
+     (apply #'agent-session-tool session (plist-get params :id) :status 'running
+            ;; The tool name is kept on the block to interpret its result.
+            :dsh-tool (plist-get params :name)
+            (agent-dsh--tool-view session (plist-get params :name)
+                                  (agent-dsh--arguments (plist-get params :arguments)))))
+    ("tool/done"
+     (let* ((id (plist-get params :id))
+            (quiet (member (plist-get (agent-session--block session id) :dsh-tool)
+                           agent-dsh--quiet-results)))
+       (when (agent-session--block session id)
+         (apply #'agent-session-tool session id
+                :status (if (plist-get params :isError) 'error 'ok)
+                (unless (and quiet (not (plist-get params :isError)))
+                  (list :output (plist-get params :output)))))))
+    ;; Failed turns are already reported through "error".
+    ("turn/end"
+     (when (equal (plist-get params :reason) "max-tokens")
+       (agent-session-notice session "输出达到 token 上限" 'agent-session-error)))
+    ("config" (agent-dsh--apply-config session (plist-get params :config)))
+    ("usage"
+     (agent-session-set-info session :tokens
+                             (plist-get (plist-get params :usage) :totalTokens)))
+    ("error"
+     (agent-session-notice session (format "出错：%s" (plist-get params :message))
+                           'agent-session-error))))
 
 (cl-defmethod agent-session-backend-handle ((_ (eql dsh)) session message)
   (let ((id (plist-get message :id))
@@ -150,43 +453,14 @@
           (funcall callback (plist-get message :result)))))
      ;; Request from the bridge
      (id
-      (if (equal method "approval")
-          (agent-dsh--approval session id params)
-        (agent-session-write session (list :jsonrpc "2.0" :id id
-                                           :error (list :code -32601
-                                                        :message (format "unsupported: %s" method))))))
-     ;; Notification
-     (t
       (pcase method
-        ("status"
-         (agent-session-set-status session (if (equal (plist-get params :status) "running")
-                                               'running 'idle)))
-        ("text"
-         (agent-session-text session (plist-get params :id) (plist-get params :delta)
-                             (if (equal (plist-get params :kind) "thinking") 'thinking 'assistant)))
-        ("text/done"
-         (agent-session-text-done session (plist-get params :id) (plist-get params :text)))
-        ("discard"
-         (seq-doseq (block (plist-get params :ids))
-           (agent-session--remove-block session block)))
-        ("tool"
-         (apply #'agent-session-tool session (plist-get params :id) :status 'running
-                (agent-dsh--tool-view session (plist-get params :name)
-                                      (agent-dsh--arguments (plist-get params :arguments)))))
-        ("tool/done"
-         (agent-session-tool session (plist-get params :id)
-                             :status (if (plist-get params :isError) 'error 'ok)
-                             :output (plist-get params :output)))
-        ;; Failed turns are already reported through "error".
-        ("turn/end"
-         (when (equal (plist-get params :reason) "max-tokens")
-           (agent-session-notice session "输出达到 token 上限" 'agent-session-error)))
-        ("usage"
-         (agent-session-set-info session :tokens
-                                 (plist-get (plist-get params :usage) :totalTokens)))
-        ("error"
-         (agent-session-notice session (format "出错：%s" (plist-get params :message))
-                               'agent-session-error)))))))
+        ("approval" (agent-dsh--approval session id params))
+        ("question" (agent-dsh--question session id params))
+        (_ (agent-session-write session (list :jsonrpc "2.0" :id id
+                                           :error (list :code -32601
+                                                        :message (format "unsupported: %s" method)))))))
+     ;; Notification
+     (t (agent-dsh--notification session method params)))))
 
 (provide 'agent-dsh)
 ;;; agent-dsh.el ends here

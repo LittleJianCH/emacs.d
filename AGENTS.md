@@ -60,8 +60,13 @@ var/                     runtime state (history, backups, pasted images...); git
   mounted into the stock `sdk` profile by `dsh/emacs.yml` (`dsh --profile sdk --patch
   ...`). It drives one dsh agent through dsh's internal API (`ctx.agents`,
   `agent/assistant-stream`, `session/event`, `approval/request`) and speaks our own
-  line-delimited JSON-RPC, documented at the top of the plugin. It depends on dsh
-  internals, so expect to adjust it when dsh is upgraded. The API key lives in dsh's
+  line-delimited JSON-RPC, documented at the top of the plugin. Modes map to dsh
+  permission presets (`auto` is dsh's experimental auto-review plugin, also mounted by
+  `emacs.yml`); plan mode is dsh's own, and its `exit_plan_mode` review arrives as a
+  `question`. History and replay go through the bridge too (`sessions/list`, resume
+  returns the transcript); dsh's session logs are zstd-compressed, don't parse them in
+  Elisp. emx is mounted per agent with dsh's MCP client. It depends on dsh internals,
+  so expect to adjust it when dsh is upgraded. The API key lives in dsh's
   `~/.dsh/.credentials.yaml`; never pass it through the environment.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
