@@ -85,6 +85,7 @@ Called by eglot each time it connects to rust-analyzer."
   `(,@my/rust-analyzer-command :initializationOptions ,my/rust-analyzer-options))
 
 (defvar eglot-server-programs)
+(defvar eglot-server-programs)
 (with-eval-after-load 'eglot
   (add-to-list 'eglot-server-programs
                '((rust-ts-mode rust-mode) . my/rust-analyzer-contact)))
