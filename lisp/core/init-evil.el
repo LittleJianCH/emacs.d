@@ -61,5 +61,10 @@
   :config
   (evil-collection-init))
 
+;; Keep the Emacs beginning-of-line key while entering text.
+(with-eval-after-load 'evil
+  (evil-define-key* 'insert 'global
+    (kbd "C-a") #'move-beginning-of-line))
+
 (provide 'init-evil)
 ;;; init-evil.el ends here
