@@ -20,5 +20,25 @@
   (tramp-rpc-deploy-git-build-policy 'release)
   (tramp-rpc-deploy-local-cache-directory (my/var "tramp-rpc/")))
 
+;;; No synchronous remote calls on the typing path
+
+;; Every remote call waits a full network round trip (30-300ms to dev), and Emacs
+;; is single-threaded.  Same principle as VS Code: refresh remote state on events
+;; such as visiting or saving a file, never by polling.
+
+;; autorevert does not revert remote files (`auto-revert-remote-files' is nil),
+;; but `auto-revert-check-vc-info' still runs `vc-refresh-state' on remote buffers
+;; every second: a dozen remote calls per round, enough to keep Emacs busy in that
+;; timer forever.  Remote buffers refresh VC state only when visited and saved.
+(defun my/remote-buffer-setup ()
+  "Turn off polling-style remote access in remote buffers."
+  (when (file-remote-p default-directory)
+    (setq-local auto-revert-check-vc-info nil)))
+(add-hook 'find-file-hook #'my/remote-buffer-setup)
+
+;; `vc-registered' tries every backend in turn, and on a remote file each attempt
+;; is another network round trip.
+(setq vc-handled-backends '(Git))
+
 (provide 'init-remote)
 ;;; init-remote.el ends here
