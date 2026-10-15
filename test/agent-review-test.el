@@ -401,7 +401,11 @@
         (should-not (funcall shown 6))
         (should (save-excursion (search-forward "隐藏 15 行" nil t)))
         ;; Opening downward from the hunk keeps point above the new lines.
-        (agent-review-expand-down)
+        ;; Other items are left as they are.
+        (let ((other (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) "atomic-2"))
+                               (overlays-in (point-min) (point-max)))))
+          (agent-review-expand-down)
+          (should (overlay-buffer other)))
         (should (equal (plist-get (get-text-property (point) 'agent-review-target) :line) 5))
         (should (funcall shown 10))
         (should-not (funcall shown 11))
@@ -412,7 +416,9 @@
         (should (funcall shown 20))
         (should-not (save-excursion
                       (goto-char (point-min))
-                      (text-property-search-forward 'agent-review-gap-info nil (lambda (_ v) v))))
+                      (when-let* ((match (text-property-search-forward
+                                          'agent-review-gap-info nil (lambda (_ v) v))))
+                        (equal (agent-review--item-at (prop-match-beginning match)) "atomic-1"))))
         ;; Item 2's hunk at line 18 opens upward; point stays on its header.
         (agent-review-goto "atomic-2")
         (search-forward "隐藏 14 行")
@@ -445,12 +451,14 @@
                    (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) id))
                              (overlays-in (point-min) (point-max))))))
       (agent-review-test--with-buffer review
-        ;; Folded items are drawn when first unfolded, then kept: folding
-        ;; again only hides them.
+        ;; Folded items are drawn without syntax faces, highlighted when
+        ;; first unfolded, then kept: folding again only hides them.
         (goto-char (point-min))
-        (should-not (search-forward "+line eighteen" nil t))
+        (should (search-forward "+line eighteen" nil t))
+        (should (overlay-get (funcall body "atomic-2") 'agent-review-plain))
         (goto-char (agent-review--find 'agent-review-heading "atomic-2"))
         (agent-review-toggle)
+        (should-not (overlay-get (funcall body "atomic-2") 'agent-review-plain))
         (should (search-forward "+line eighteen" nil t))
         (should (equal (agent-review--item-at (point)) "atomic-2"))
         (let ((overlay (funcall body "atomic-2"))
@@ -462,19 +470,33 @@
           (should (eq (funcall body "atomic-2") overlay))
           (should-not (overlay-get overlay 'invisible))
           (should (equal (buffer-string) text)))
-        ;; A file of an item not drawn yet can be gone to directly.
-        (should-not (funcall body "atomic-3"))
-        (agent-review-goto '("atomic-3" . "b.el"))
-        (should (looking-at "b\\.el$"))
-        (should (funcall body "atomic-3")))
+        ;; A search finds the code of a folded item; ending it there
+        ;; unfolds and highlights the item, and point stays on its line.
+        (goto-char (point-min))
+        (should (search-forward "+(b 7)" nil t))
+        (let ((search-invisible 'open)
+              (isearch-opened-overlays nil))
+          (should-not (isearch-range-invisible (match-beginning 0) (match-end 0)))
+          (isearch-clean-overlays))
+        (should-not (member "atomic-3" agent-review--folded))
+        (should-not (overlay-get (funcall body "atomic-3") 'agent-review-plain))
+        (should (equal (plist-get (get-text-property (point) 'agent-review-target) :line) 7))
+        (should (looking-back "(b 7)" (line-beginning-position)))
+        ;; A file of an item not highlighted yet can be gone to directly.
+        (agent-review--set-folded "atomic-1" t)
+        (agent-review--redraw)
+        (should (overlay-get (funcall body "atomic-1") 'agent-review-plain))
+        (agent-review-goto '("atomic-1" . "a.txt"))
+        (should (looking-at "a\\.txt$"))
+        (should-not (overlay-get (funcall body "atomic-1") 'agent-review-plain)))
       ;; A folded item with annotations is drawn, so moving between
       ;; annotations finds them.
       (agent-review-annotate-lines review agent-review-test--change "为什么改")
       (agent-review--write (agent-review--path (plist-get review :id) "state.eld")
                            (list :folded '("atomic-1" "atomic-2" "atomic-3")))
       (agent-review-test--with-buffer review
-        (should (funcall body "atomic-1"))
-        (should-not (funcall body "atomic-2"))
+        (should-not (overlay-get (funcall body "atomic-1") 'agent-review-plain))
+        (should (overlay-get (funcall body "atomic-2") 'agent-review-plain))
         (goto-char (point-min))
         (agent-review-next-annotation)
         (should (equal (agent-review--item-at (point)) "atomic-1"))

@@ -1122,6 +1122,9 @@ number of lines it hides and the directions, `up' and `down', it opens in."
                          (list 'agent-review-gap key
                                'agent-review-gap-info (and (> hidden 0) (cons hidden directions))))))
 
+(defvar agent-review--plain nil
+  "While drawing an item, non-nil to leave its code without syntax faces.")
+
 (defun agent-review--insert-hunk (item block hunk comments width around gap)
   "Insert HUNK of the file BLOCK in ITEM, with COMMENTS under their last lines.
 COMMENTS maps a line key to the annotations ending there.  WIDTH is the
@@ -1131,7 +1134,9 @@ it, see `agent-review--insert-gap'."
   (let* ((start (point))
          (file (plist-get block :file))
          (lines (append (car around) (agent-review--hunk-lines file hunk) (cdr around)))
-         (codes (agent-review--line-codes block lines))
+         (codes (if agent-review--plain
+                    (mapcar (lambda (line) (plist-get line :content)) lines)
+                  (agent-review--line-codes block lines)))
          (data (gethash file agent-review--files))
          (added (plist-get data :added))
          (number (format "%%%ds %%%ds " width width)))
@@ -1179,7 +1184,14 @@ FOLDED says whether it starts folded."
   (let ((overlay (make-overlay start (point))))
     (overlay-put overlay property id)
     (overlay-put overlay 'evaporate t)
-    (overlay-put overlay 'invisible folded)))
+    (overlay-put overlay 'invisible folded)
+    (overlay-put overlay 'isearch-open-invisible #'agent-review--isearch-open)
+    (when (and agent-review--plain (eq property 'agent-review-body))
+      (overlay-put overlay 'agent-review-plain t))))
+
+(defun agent-review--isearch-open (_overlay)
+  "Unfold the item and file at point, where a search ended in a fold."
+  (agent-review--reveal))
 
 (defvar agent-review--shown nil
   "While drawing a review, the IDs of the annotations inserted so far.")
@@ -1212,13 +1224,14 @@ WIDTH is the width of the line number columns."
       (add-face-text-property start (point) face t))
     (put-text-property start (point) 'agent-review-heading id)
     ;; Highlighting whole files is slow for large reviews, so a folded item
-    ;; is drawn when it is first unfolded.
-    (unless (agent-review--deferred-p id)
+    ;; is drawn without syntax faces, to be searched, and highlighted when
+    ;; it is first unfolded.
+    (let ((agent-review--plain (agent-review--deferred-p id)))
       (agent-review--insert-body item comments width))
     (put-text-property start (point) 'agent-review-in id)))
 
 (defun agent-review--deferred-p (id)
-  "Whether item ID is folded and can wait to be drawn until it is unfolded.
+  "Whether item ID is folded and can wait to be highlighted until unfolded.
 Items with annotations are drawn, so moving between annotations finds them."
   (and (member id agent-review--folded)
        (not (seq-find (lambda (c) (equal (plist-get c :item) id))
@@ -1311,23 +1324,40 @@ WIDTH is the width of the line number columns."
     (dolist (comment (reverse comments) by-line)
       (push comment (gethash (plist-get comment :anchor) by-line)))))
 
-(defun agent-review--draw-body (id)
-  "Draw the body of item ID below its heading unless it is drawn already."
-  (when-let* (((not (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) id))
-                              (overlays-in (point-min) (point-max)))))
-              (heading (agent-review--find 'agent-review-heading id)))
-    (let* ((review agent-review--review)
-           (comments (agent-review--comments (plist-get review :id)))
-           (width (agent-review--number-width review agent-review--files))
-           (start (next-single-property-change heading 'agent-review-heading nil (point-max)))
-           (agent-review--shown (make-hash-table :test #'equal))
-           (agent-review--all-comments comments)
-           (inhibit-read-only t))
-      (save-excursion
-        (goto-char start)
-        (agent-review--insert-body (agent-review--item review id)
-                                   (agent-review--comments-by-line comments) width)
-        (put-text-property start (point) 'agent-review-in id)))))
+(defun agent-review--plain-p (id)
+  "Whether item ID is drawn without syntax faces."
+  (let ((overlay (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) id))
+                           (overlays-in (point-min) (point-max)))))
+    (or (null overlay) (overlay-get overlay 'agent-review-plain))))
+
+(defun agent-review--redraw-item (id)
+  "Redraw item ID in place, keeping each window on what it showed.
+For changes within one item; the whole buffer takes much longer to draw.
+Redraw it all if the item is not shown."
+  (if-let* ((start (agent-review--find 'agent-review-in id)))
+      (progn
+        (agent-review--keeping-place
+         (lambda ()
+           (let* ((review agent-review--review)
+                  (comments (agent-review--comments (plist-get review :id)))
+                  (agent-review--shown (make-hash-table :test #'equal))
+                  (agent-review--all-comments comments))
+             (agent-review--count-comments comments)
+             (delete-region start (next-single-property-change start 'agent-review-in nil
+                                                               (point-max)))
+             (goto-char start)
+             (agent-review--insert-item (agent-review--item review id)
+                                        (agent-review--comments-by-line comments)
+                                        (agent-review--number-width review agent-review--files)))))
+        (agent-review--note-reattach)
+        (agent-review--nav-refresh))
+    (agent-review--redraw)))
+
+(defun agent-review--count-comments (comments)
+  "Note how many of the review's COMMENTS there are, and how many are open."
+  (setq agent-review--counts
+        (cons (length comments)
+              (seq-count (lambda (c) (equal (plist-get c :status) "open")) comments))))
 
 (defun agent-review--number-width (review files)
   "Width of the line number columns of REVIEW, whose file data is FILES."
@@ -1353,9 +1383,7 @@ WIDTH is the width of the line number columns."
                     (setq agent-review--files (agent-review--file-data review))))
          (width (agent-review--number-width review files)))
     (unless agent-review--context (setq agent-review--context agent-review-context))
-    (setq agent-review--counts
-          (cons (length comments)
-                (seq-count (lambda (c) (equal (plist-get c :status) "open")) comments)))
+    (agent-review--count-comments comments)
     (insert (propertize (plist-get review :title) 'face 'agent-review-title) "\n"
             (propertize (format "%s %s → %s %s · %d 个文件 · +%d −%d · %d 项\n"
                                 (plist-get review :target-ref)
@@ -1459,22 +1487,26 @@ at POS and how far into it POS is, or (nil LINE COLUMN) elsewhere."
         (min (+ (prop-match-beginning match) offset)
              (max (prop-match-beginning match) (1- (prop-match-end match))))))))
 
-(defun agent-review--redraw ()
-  "Redraw this review buffer, keeping each window on what it showed.
-An answer inserted above point must not move point onto other code."
+(defun agent-review--keeping-place (redraw)
+  "Call REDRAW to redraw this buffer, keeping each window on what it showed.
+Point goes back to where it was, or to the start of the buffer."
   (let ((here (agent-review--anchor (point)))
         (windows (mapcar (lambda (window)
                            (list window (agent-review--anchor (window-point window))
                                  (agent-review--anchor (window-start window))))
                          (get-buffer-window-list nil nil t)))
         (inhibit-read-only t))
-    (erase-buffer)
-    (agent-review--render)
+    (funcall redraw)
     (goto-char (or (agent-review--anchor-pos here) (point-min)))
     (pcase-dolist (`(,window ,point ,start) windows)
       (when-let* ((pos (agent-review--anchor-pos start)))
         (set-window-start window (save-excursion (goto-char pos) (line-beginning-position)) t))
-      (set-window-point window (or (agent-review--anchor-pos point) (point)))))
+      (set-window-point window (or (agent-review--anchor-pos point) (point))))))
+
+(defun agent-review--redraw ()
+  "Redraw this review buffer, keeping each window on what it showed.
+An answer inserted above point must not move point onto other code."
+  (agent-review--keeping-place (lambda () (erase-buffer) (agent-review--render)))
   (agent-review--note-reattach)
   (agent-review--nav-refresh))
 
@@ -1500,10 +1532,11 @@ An answer inserted above point must not move point onto other code."
                 (equal (plist-get (buffer-local-value 'agent-review--review buffer) :id) id))
               (buffer-list)))
 
-(defun agent-review--refresh (id)
-  "Redraw every buffer showing the review with ID."
+(defun agent-review--refresh (id &optional item)
+  "Redraw every buffer showing the review with ID, or only its ITEM."
   (dolist (buffer (agent-review--buffers id))
-    (with-current-buffer buffer (agent-review--redraw))))
+    (with-current-buffer buffer
+      (if item (agent-review--redraw-item item) (agent-review--redraw)))))
 
 (defun agent-review-show (review)
   "Show REVIEW and its sidebar, without selecting them; return the buffer."
@@ -1533,15 +1566,8 @@ An answer inserted above point must not move point onto other code."
 
 (defun agent-review--set-folded (id fold)
   "Fold item ID, or the file ID of the form (ITEM . FILE), when FOLD.
-Unfold it otherwise; an item not drawn yet is drawn then."
+Unfold it otherwise; an item drawn without syntax faces is highlighted then."
   (let ((file (consp id)))
-    (unless (or file fold) (agent-review--draw-body id))
-    (when-let* ((overlay (seq-find (lambda (o)
-                                     (equal (overlay-get o (if file 'agent-review-file-body
-                                                             'agent-review-body))
-                                            id))
-                                   (overlays-in (point-min) (point-max)))))
-      (overlay-put overlay 'invisible fold))
     (if file
         (setq agent-review--folded-files
               (if fold (cl-adjoin id agent-review--folded-files :test #'equal)
@@ -1549,6 +1575,14 @@ Unfold it otherwise; an item not drawn yet is drawn then."
       (setq agent-review--folded
             (if fold (cl-adjoin id agent-review--folded :test #'equal)
               (remove id agent-review--folded))))
+    (if (and (not (or file fold)) (agent-review--plain-p id))
+        (agent-review--redraw-item id)
+      (when-let* ((overlay (seq-find (lambda (o)
+                                       (equal (overlay-get o (if file 'agent-review-file-body
+                                                               'agent-review-body))
+                                              id))
+                                     (overlays-in (point-min) (point-max)))))
+        (overlay-put overlay 'invisible fold)))
     (agent-review--save-state)))
 
 (defun agent-review--reveal ()
@@ -1646,7 +1680,7 @@ A reviewed item is folded; marking it not reviewed again unfolds it."
     (setq agent-review--folded (if done (cl-adjoin id agent-review--folded :test #'equal)
                                  (remove id agent-review--folded)))
     (agent-review--save-state)
-    (agent-review--redraw)
+    (agent-review--redraw-item id)
     done))
 
 (defun agent-review--next-unreviewed (id)
@@ -2074,7 +2108,7 @@ session that made the review, with the selected code, when sent."
         ;; Deliver first: if that fails, the draft is still here to send again.
         (agent-session-submit agent (agent-review--message review comment))
         (agent-review--note-close)
-        (agent-review--refresh (plist-get review :id))
+        (agent-review--refresh (plist-get review :id) (plist-get comment :item))
         (message "标注已发给 %s" (buffer-name session))))))
 
 (defun agent-review-note-cancel ()
@@ -2104,7 +2138,7 @@ session that made the review, with the selected code, when sent."
         (id (plist-get agent-review--review :id)))
     (when (yes-or-no-p "删除这条标注？")
       (agent-review--delete-comment id comment)
-      (agent-review--refresh id))))
+      (agent-review--refresh id (plist-get comment :item)))))
 
 (defun agent-review--set-agent (review agent)
   "Make the session buffer named AGENT the one answering REVIEW; return REVIEW."
@@ -2237,7 +2271,7 @@ it, or `all' to show the whole gap.  COUNT defaults to
     (when (eq direction 'down)
       (goto-char (agent-review--find 'agent-review-gap key))
       (forward-line -1))
-    (agent-review--redraw)))
+    (agent-review--redraw-item (car key))))
 
 (defun agent-review-expand-up (&optional n)
   "Show N more lines above the hunk at point, or of the gap at point.
@@ -2284,6 +2318,8 @@ N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, al
 
 (define-derived-mode agent-review-mode special-mode "Review"
   "Review the atomic items of a branch's changes and annotate their lines."
+  ;; Every redraw would record the whole buffer, which nobody edits.
+  (buffer-disable-undo)
   (setq-local truncate-lines nil
               word-wrap t
               header-line-format '(:eval (agent-review--header-line))
@@ -2398,7 +2434,7 @@ Every changed line must be covered exactly once. When review_build reports a cov
      (status string "responded (default) or resolved"))
   "Answer an annotation in its review; the review buffer shows it at once under the annotation. This is where the answer goes: do not repeat it in the conversation. A revision conflict means the user edited the annotation after you read it: read it again with review_comments and answer the new text. Use status resolved only when the issue is actually fixed or the user asks."
   (let ((answered (agent-review-reply review id revision text status)))
-    (agent-review--refresh review)
+    (agent-review--refresh review (plist-get answered :item))
     (list :id id :status (plist-get answered :status))))
 
 (provide 'agent-review)
