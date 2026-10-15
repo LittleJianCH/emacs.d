@@ -354,5 +354,44 @@
         (should-error (agent-review--mark-reviewed '("full" . "a.txt")))
         (should-error (agent-review--mark-reviewed "full"))))))
 
+(ert-deftest agent-review-test-whole-file-highlight ()
+  (agent-review-test--with-repo repo
+    ;; A change deep inside a docstring: the hunk and its context alone read
+    ;; as code, only the whole file says they are documentation.
+    (let ((doc (lambda (middle)
+                 (list "(defun f ()" "  \"Doc start." "a" "b" "c" middle "d" "e" "f" "end.\""
+                       "  nil)"))))
+      (agent-review-test--git repo "checkout" "-q" "-b" "doc" "main")
+      (agent-review-test--write (expand-file-name "c.el" repo) (funcall doc "old middle"))
+      (agent-review-test--git repo "add" ".")
+      (agent-review-test--git repo "commit" "-q" "-m" "c")
+      (agent-review-test--write (expand-file-name "c.el" repo) (funcall doc "new middle"))
+      (agent-review-test--git repo "commit" "-q" "-am" "c again"))
+    (let* ((review (agent-review-build (agent-review-snapshot repo "HEAD~1" "HEAD") "概览"
+                                       (vector (agent-review-test--item
+                                                "改文档" 0 (list :file "c.el" :hunks [0])))))
+           (id (plist-get review :id))
+           (doc-p (lambda (text)
+                    (goto-char (point-min))
+                    (search-forward text)
+                    (memq 'font-lock-doc-face
+                          (ensure-list (get-text-property (1- (point)) 'face))))))
+      (should (equal (mapcar #'car (plist-get review :old-sources)) '("c.el")))
+      (agent-review-test--with-buffer review
+        ;; The removed line comes from the base, the others from head.
+        (should (funcall doc-p "-old middle"))
+        (should (funcall doc-p "+new middle"))
+        (should (funcall doc-p "5  c")))
+      ;; A review stored before the base side was kept reads it once.
+      (agent-review--write (agent-review--path id "review.eld")
+                           (cl-loop for (key value) on review by #'cddr
+                                    unless (eq key :old-sources) append (list key value)))
+      (let ((old (agent-review--load id)))
+        (should-not (plist-member old :old-sources))
+        (agent-review-test--with-buffer old
+          (should (funcall doc-p "-old middle"))))
+      (should (equal (mapcar #'car (plist-get (agent-review--load id) :old-sources))
+                     '("c.el"))))))
+
 (provide 'agent-review-test)
 ;;; agent-review-test.el ends here

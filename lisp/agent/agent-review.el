@@ -276,6 +276,14 @@ Binary files, files that are not UTF-8 and files larger than
                                      'utf-8-unix))))
                           files)))))
 
+(defun agent-review--old-files (blocks)
+  "Base-side paths of the file BLOCKS with hunks that exist at the base."
+  (seq-keep (lambda (block)
+              (and (plist-get block :hunks)
+                   (not (string-search "\n--- /dev/null" (plist-get block :header)))
+                   (plist-get block :old-file)))
+            blocks))
+
 ;;; Diff parsing
 
 (defun agent-review--split-before (regexp text)
@@ -687,6 +695,10 @@ review, so its annotations are kept."
                                                                     (plist-get block :header)))
                                                 (plist-get block :file)))
                                          (plist-get snapshot :files)))
+                     ;; Base-side text, to highlight removed lines.
+                     :old-sources (agent-review--sources
+                                   (plist-get snapshot :root) (plist-get snapshot :base-sha)
+                                   (agent-review--old-files (plist-get snapshot :files)))
                      :stats stats)))
           (agent-review--write file review)
           (agent-review--index-add review)
@@ -837,6 +849,8 @@ code and where it is, so the agent can answer without looking it up."
 (defvar-local agent-review--reviewed nil "IDs of the items the user marked reviewed.")
 (defvar-local agent-review--counts nil "(ANNOTATIONS . PENDING) of the review shown.")
 (defvar-local agent-review--highlighted nil "Cache of highlighted hunks: text -> lines.")
+(defvar-local agent-review--file-faces nil
+  "Cache of whole files highlighted: (SIDE . PATH) -> vector of lines or nil.")
 (defvar-local agent-review--context nil "Context lines shown around each hunk.")
 (defvar-local agent-review--files nil
   "Per-file data of the review shown, see `agent-review--file-data'.")
@@ -971,6 +985,76 @@ used, so context never repeats lines shown elsewhere in the item."
                      (mapcar (lambda (line) (plist-get line :content)) lines)))
                  cache))))
 
+(defun agent-review--old-sources ()
+  "Base-side text of the changed files of this buffer's review.
+An alist (OLD-FILE . TEXT).  A review built before it was stored reads
+it from git now, once, and keeps it with the review."
+  (let ((review agent-review--review))
+    (if (plist-member review :old-sources)
+        (plist-get review :old-sources)
+      (condition-case err
+          (let* ((sources (agent-review--sources
+                           (plist-get review :root) (plist-get review :base-sha)
+                           (agent-review--old-files
+                            (mapcan (lambda (file)
+                                      (agent-review--split-files (plist-get file :diff)))
+                                    (plist-get review :full-files)))))
+                 (stored (plist-put (copy-sequence review) :old-sources sources)))
+            (agent-review--write (agent-review--path (plist-get review :id) "review.eld") stored)
+            (dolist (buffer (agent-review--buffers (plist-get review :id)))
+              (with-current-buffer buffer (setq agent-review--review stored)))
+            sources)
+        ;; Without them removed lines are highlighted as fragments; try
+        ;; again only in a new buffer.
+        (error (message "读取 base 侧源码失败：%s" (error-message-string err))
+               (setq agent-review--review (plist-put (copy-sequence review) :old-sources nil))
+               nil)))))
+
+(defun agent-review--file-lines (side path)
+  "Lines of the file PATH on SIDE, `new' or `old', highlighted as a whole.
+A vector of strings, or nil when the review does not keep that text."
+  (let ((cache (or agent-review--file-faces
+                   (setq agent-review--file-faces (make-hash-table :test #'equal))))
+        (key (cons side path)))
+    (pcase (gethash key cache 'missing)
+      ('missing
+       (puthash key
+                (when-let* ((text (alist-get path (if (eq side 'new)
+                                                      (plist-get agent-review--review :sources)
+                                                    (agent-review--old-sources))
+                                             nil nil #'equal)))
+                  (let ((lines (split-string (agent-canvas--fontify
+                                              text (agent-review--file-mode path))
+                                             "\n")))
+                    (when (equal (car (last lines)) "") (setq lines (butlast lines)))
+                    (vconcat lines)))
+                cache))
+      (lines lines))))
+
+(defun agent-review--line-codes (block lines)
+  "The contents of LINES of the file BLOCK with syntax faces, one string each.
+Each line is taken from its side of the file highlighted as a whole:
+a hunk alone is often not valid code, and parsers that fail on it
+highlight it wrongly or mark it as an error.  Lines whose file text the
+review does not keep are highlighted together as a fragment instead."
+  (let ((codes
+         (mapcar (lambda (line)
+                   (let* ((old (eq (plist-get line :kind) ?-))
+                          (n (plist-get line (if old :old :new)))
+                          (source (agent-review--file-lines
+                                   (if old 'old 'new)
+                                   (plist-get block (if old :old-file :file))))
+                          (code (and source n (<= 1 n (length source))
+                                     (aref source (1- n)))))
+                     ;; Use it only if it is the very text of the line.
+                     (and code (equal (substring-no-properties code) (plist-get line :content))
+                          code)))
+                 lines)))
+    (if (seq-every-p #'identity codes)
+        codes
+      (cl-mapcar (lambda (code fragment) (or code fragment))
+                 codes (agent-review--highlight (plist-get block :file) lines)))))
+
 (defun agent-review--insert-comment (comment)
   "Insert the annotation COMMENT and its answer below its last line."
   (let ((start (point))
@@ -997,7 +1081,7 @@ width of the line number columns; AROUND is the context to show, see
 `agent-review--around'."
   (let* ((file (plist-get block :file))
          (lines (append (car around) (agent-review--hunk-lines file hunk) (cdr around)))
-         (codes (agent-review--highlight file lines))
+         (codes (agent-review--line-codes block lines))
          (data (gethash file agent-review--files))
          (added (plist-get data :added))
          (number (format "%%%ds %%%ds " width width)))
