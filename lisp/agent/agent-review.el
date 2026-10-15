@@ -860,6 +860,8 @@ hunk N of the file, counting from 0; the last one is after its last hunk.")
 (defvar-local agent-review--files nil
   "Per-file data of the review shown, see `agent-review--file-data'.")
 (defvar-local agent-review--nav nil "The sidebar buffer of this review buffer.")
+(defvar-local agent-review--checkout 'unknown
+  "Worktree at the head of the review shown, or nil; `unknown' before looking.")
 (defvar-local agent-review--current nil "The item at point at the last command.")
 
 (defun agent-review--save-state ()
@@ -1394,7 +1396,7 @@ Redraw it all if the item is not shown."
                                 (plist-get stats :deletions) (plist-get stats :items))
                         'face 'agent-review-meta)
             (propertize "选中代码行按 a 写标注，直接发给 agent · r 已审阅 · o 目录 · C 标注列表 · \
-TAB 折叠 · { } 向上/向下展开代码 · f 切换视图 · RET 打开文件\n"
+TAB 折叠 · { } 向上/向下展开代码 · f 切换视图 · RET 跳到代码\n"
                         'face 'agent-review-meta)
             "\n" (propertize "本次变更概览\n" 'face 'agent-review-heading)
             (plist-get review :summary) "\n\n")
@@ -2176,37 +2178,125 @@ the review's project first, and the choice is stored with the review."
           (get-buffer name))))))
 
 (defun agent-review-visit ()
-  "Visit the line at point: the project file, or the base version of a removed line.
-On the line of a gap between hunks, show all its lines instead."
+  "Show the code of the line at point in another window.
+A line the branch has is shown in a worktree at the review's head, a
+removed line in the base version.  Elsewhere, the nearest code line is
+shown; on the line of a gap between hunks, all its lines are instead."
   (interactive)
   (if (get-text-property (point) 'agent-review-gap-info)
       (agent-review--expand 'all)
     (agent-review--visit-line)))
 
+(defun agent-review--nearest-target (pos)
+  "The code line at POS, or the one nearest to it in the same file or item.
+An annotation belongs to the line above it; a heading or a gap's line to
+the code below it."
+  (or (get-text-property pos 'agent-review-target)
+      (let* ((scope (if (get-text-property pos 'agent-review-file-in)
+                        'agent-review-file-in
+                      'agent-review-in))
+             (value (get-text-property pos scope))
+             (find (lambda (forward)
+                     (save-excursion
+                       (goto-char pos)
+                       (when-let* ((match (if forward
+                                              (text-property-search-forward
+                                               'agent-review-target nil (lambda (_ v) v))
+                                            (text-property-search-backward
+                                             'agent-review-target nil (lambda (_ v) v))))
+                                   ((equal (get-text-property (prop-match-beginning match) scope)
+                                           value)))
+                         (prop-match-value match))))))
+        (when value
+          (if (get-text-property pos 'agent-review-comment)
+              (or (funcall find nil) (funcall find t))
+            (or (funcall find t) (funcall find nil)))))))
+
+(defun agent-review--head-checkout ()
+  "Directory of a worktree of the review's repository at its head, or nil.
+Looked up once per buffer; reverting the buffer looks again."
+  (when (eq agent-review--checkout 'unknown)
+    (setq agent-review--checkout
+          (let* ((root (plist-get agent-review--review :root))
+                 (head (concat "HEAD " (plist-get agent-review--review :head-sha))))
+            (cl-loop for block in (split-string (condition-case nil
+                                                    (agent-review--git root "worktree" "list"
+                                                                       "--porcelain")
+                                                  (error ""))
+                                                "\n\n" t)
+                     for lines = (split-string block "\n" t)
+                     when (and (string-prefix-p "worktree " (car lines)) (member head lines))
+                     return (file-name-as-directory
+                             (agent-session-expand-file-name
+                              (substring (car lines) (length "worktree ")) root))))))
+  agent-review--checkout)
+
+(defun agent-review--version-buffer (label rev file text)
+  "Read-only buffer of FILE as of REV, named after LABEL.
+TEXT is its contents, or nil to read them from git."
+  (let ((root (plist-get agent-review--review :root))
+        (buffer (get-buffer-create (format "*review-%s: %s*" label file))))
+    (setq text (or text (agent-review--git root "show" (format "%s:%s" rev file))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert text))
+      (when-let* ((mode (agent-review--file-mode file)))
+        (let ((treesit-auto-install-grammar nil)) (ignore-errors (funcall mode))))
+      (setq buffer-read-only t
+            default-directory root))
+    buffer))
+
+(defun agent-review--show-code (buffer line)
+  "Select BUFFER in another window, on line LINE, and flash that line."
+  (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-use-some-window
+                                                       display-buffer-pop-up-window)
+                          (inhibit-same-window . t)))
+  (goto-char (point-min))
+  (forward-line (1- line))
+  (recenter)
+  (pulse-momentary-highlight-one-line (point)))
+
+(defun agent-review--visit-head (file line)
+  "Show line LINE of FILE as the review's head has it.
+That is the file itself in a worktree at the head, or in the project when
+its copy is the same; else a read-only copy of the head's version."
+  (let* ((review agent-review--review)
+         (head (plist-get review :head-sha))
+         (checkout (agent-review--head-checkout))
+         (same (seq-find (lambda (dir)
+                           (and dir (file-exists-p (expand-file-name file dir))
+                                (ignore-errors
+                                  (agent-review--git dir "diff" "--quiet" head "--" file)
+                                  t)))
+                         ;; The project's own path before git's name for it.
+                         (delete-dups (list (plist-get review :root) checkout)))))
+    (cond (same
+           (agent-review--show-code (find-file-noselect (expand-file-name file same)) line))
+          ((and checkout (file-exists-p (expand-file-name file checkout)))
+           (agent-review--show-code (find-file-noselect (expand-file-name file checkout)) line)
+           (message "这个文件改过了，和审查的版本不同，行号可能对不上"))
+          (t
+           (agent-review--show-code
+            (agent-review--version-buffer "head" head file
+                                          (alist-get file (plist-get review :sources)
+                                                     nil nil #'equal))
+            line)
+           (message "没有工作区检出了 %s，打开的是这个版本的只读副本"
+                    (substring head 0 10))))))
+
 (defun agent-review--visit-line ()
-  "Visit the code line at point, see `agent-review-visit'."
-  (let* ((target (agent-review--target))
-         (review agent-review--review)
-         (root (plist-get review :root))
-         (file (plist-get target :file)))
+  "Show the code of the line at point, see `agent-review-visit'."
+  (let ((target (or (agent-review--nearest-target (point)) (user-error "这里没有对应的代码")))
+        (review agent-review--review))
     (if (eq (plist-get target :side) 'new)
-        (let ((path (agent-session-expand-file-name file root)))
-          (unless (file-exists-p path) (user-error "工作区里没有 %s" file))
-          (pop-to-buffer (find-file-noselect path)))
-      (let* ((old-file (or (plist-get target :old-file) file))
-             (buffer (get-buffer-create (format "*review-base: %s*" old-file)))
-             (text (agent-review--git root "show" (format "%s:%s" (plist-get review :base-sha)
-                                                          old-file))))
-        (with-current-buffer buffer
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert text))
-          (when-let* ((mode (agent-review--file-mode old-file)))
-            (let ((treesit-auto-install-grammar nil)) (ignore-errors (funcall mode))))
-          (setq buffer-read-only t))
-        (pop-to-buffer buffer)))
-    (goto-char (point-min))
-    (forward-line (1- (plist-get target :line)))))
+        (agent-review--visit-head (plist-get target :file) (plist-get target :line))
+      (let ((file (or (plist-get target :old-file) (plist-get target :file))))
+        (agent-review--show-code
+         (agent-review--version-buffer "base" (plist-get review :base-sha) file
+                                       (alist-get file (agent-review--old-sources)
+                                                  nil nil #'equal))
+         (plist-get target :line))))))
 
 (defun agent-review-toggle-full ()
   "Switch between the items and the full diff."
@@ -2324,7 +2414,9 @@ N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, al
               word-wrap t
               header-line-format '(:eval (agent-review--header-line))
               imenu-create-index-function #'agent-review--imenu-index
-              revert-buffer-function (lambda (&rest _) (agent-review--redraw)))
+              revert-buffer-function (lambda (&rest _)
+                                       (setq agent-review--checkout 'unknown)
+                                       (agent-review--redraw)))
   (add-hook 'post-command-hook #'agent-review--track nil t)
   (add-hook 'imenu-after-jump-hook #'agent-review--reveal nil t)
   (add-hook 'kill-buffer-hook #'agent-review--kill-nav nil t))

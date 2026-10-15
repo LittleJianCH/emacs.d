@@ -443,6 +443,58 @@
         (goto-char (point-min))
         (should (search-forward "隐藏 3 行  [展开]" nil t))))))
 
+(ert-deftest agent-review-test-visit-code ()
+  (agent-review-test--with-repo repo
+    (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                       "概览" (agent-review-test--plan)))
+           (worktree (file-name-as-directory (make-temp-file "agent-review-worktree" t)))
+           (review-buffer nil)
+           (visit (lambda (text)
+                    "Visit from the line of TEXT in the review; return (BUFFER LINE CODE)."
+                    (with-current-buffer review-buffer
+                      (goto-char (point-min))
+                      (search-forward text)
+                      (agent-review-visit)
+                      ;; Now in the buffer shown.
+                      (list (current-buffer) (line-number-at-pos)
+                            (buffer-substring-no-properties (pos-bol) (pos-eol)))))))
+      (agent-review-annotate-lines review agent-review-test--change "为什么改")
+      (unwind-protect
+          (agent-review-test--with-buffer review
+            (setq review-buffer (current-buffer))
+            ;; The repository has the head checked out: its file is shown.
+            (pcase-let ((`(,buffer ,line ,code) (funcall visit "+line two")))
+              (should (equal (buffer-file-name buffer) (expand-file-name "a.txt" repo)))
+              (should (equal (list line code) '(2 "line two"))))
+            ;; A hunk's header goes to its first line; an annotation to its line.
+            (should (equal (cdr (funcall visit "@@ -2 +2 @@")) '(1 "line 1")))
+            (should (equal (cdr (funcall visit "为什么改")) '(2 "line two")))
+            ;; A removed line is shown in the base version.
+            (pcase-let ((`(,buffer ,line ,code) (funcall visit "-line 2")))
+              (should (equal (buffer-name buffer) "*review-base: a.txt*"))
+              (should (equal (list line code) '(2 "line 2"))))
+            ;; With no checkout of the head, a read-only copy of its version.
+            (agent-review-test--git repo "checkout" "-q" "main")
+            (setq agent-review--checkout 'unknown)
+            (pcase-let ((`(,buffer ,line ,code) (funcall visit "+line two")))
+              (should (equal (buffer-name buffer) "*review-head: a.txt*"))
+              (should (buffer-local-value 'buffer-read-only buffer))
+              (should (equal (list line code) '(2 "line two"))))
+            ;; A worktree at the head is found.
+            (agent-review-test--git repo "worktree" "add" "-q" worktree "feature")
+            (setq agent-review--checkout 'unknown)
+            (pcase-let ((`(,buffer ,line ,code) (funcall visit "+line two")))
+              (should (equal (file-truename (buffer-file-name buffer))
+                             (file-truename (expand-file-name "a.txt" worktree))))
+              (should (equal (list line code) '(2 "line two")))))
+        (dolist (buffer (buffer-list))
+          (when (or (string-prefix-p "*review-" (buffer-name buffer))
+                    (and (buffer-file-name buffer)
+                         (string-match-p "agent-review-\\(?:repo\\|worktree\\)"
+                                         (buffer-file-name buffer))))
+            (kill-buffer buffer)))
+        (delete-directory worktree t)))))
+
 (ert-deftest agent-review-test-deferred-items ()
   (agent-review-test--with-repo repo
     (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
