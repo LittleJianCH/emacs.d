@@ -35,6 +35,7 @@ lisp/agent/              agent support (see below)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/init-reload-test.el    ERT suite for reloading
+test/init-base-test.el      ERT suite for base defaults
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -98,7 +99,7 @@ Tests (ERT, ~50 tests, a few seconds):
 
 ```sh
 emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
-      -l test/init-reload-test.el \
+      -l test/init-reload-test.el -l test/init-base-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
