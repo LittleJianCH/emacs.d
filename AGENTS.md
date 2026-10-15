@@ -24,6 +24,7 @@ early-init.el            GC / frame settings before the first frame
 init.el                  package setup, then loads modules in order
 lisp/core/               base layer
   init-base.el           defaults, var/ paths, `my/use-evil' + `my/toggle-evil'
+  init-reload.el         `my/reload-config': apply edited files to the running Emacs
   init-ui.el             theme, fonts, windows
   init-evil.el           optional Vim bindings (off by default)
   init-completion.el     vertico / orderless / consult / corfu / cape
@@ -33,6 +34,7 @@ lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in in
 lisp/agent/              agent support (see below)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
+test/init-reload-test.el    ERT suite for reloading
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -65,7 +67,8 @@ var/                     runtime state (history, backups, pasted images...); git
   adds its own `config_read` / `config_edit` / `config_write` tools: the agent's file
   tools can't reach this machine. They are implemented in emx, not Emacs, so file I/O
   never blocks the editor, and are confined to this checkout outside `.git` (a guardrail
-  against editing the wrong host, not a sandbox: `eval` is unrestricted).
+  against editing the wrong host, not a sandbox: `eval` is unrestricted). Writing a
+  `.el` file tells the agent to call `reload` once its edits are done.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's
@@ -82,10 +85,11 @@ temp request/response files (`agent-ui-rpc`).
 
 Run from the repo root.
 
-Tests (ERT, ~30 tests, a few seconds):
+Tests (ERT, ~50 tests, a few seconds):
 
 ```sh
 emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
+      -l test/init-reload-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
@@ -116,21 +120,31 @@ The user develops inside a running Emacs, often from an agent session hosted by 
 After changing code, hot-reload it instead of asking for a restart:
 
 ```sh
-emacsclient -e '(load (locate-user-emacs-file "lisp/agent/agent-session.el") nil t)'
+bin/emx reload
 ```
 
-`locate-user-emacs-file` resolves against the running Emacs's config directory, so
-the command names no machine-specific path.
+(the `reload` MCP tool, or `M-x my/reload-config`). It reloads every file under the
+running Emacs's `lisp/` changed on disk since it was last loaded, in dependency order,
+and reports each file as `reloaded`, `failed` or `restart_required`. Edits in another
+checkout, such as a worktree, are not picked up: pass their absolute paths
+(`bin/emx reload --files "$PWD/lisp/agent/agent-ui.el ..."`; relative paths resolve
+against the running config) only when the user wants to try that code. Unlike a
+plain `load`, it:
 
-Load in dependency order: agent-session -> agent-claude / agent-codex ->
-agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
+- merges `defvar-keymap` (and keymap `defvar`) definitions into the live keymaps,
+  keeping bindings other files added; bindings the source dropped are removed from
+  the second reload on, once there is a previous version to compare with;
+- moves `defcustom`s nobody customized or `setq`'d to their new default and applies
+  changed `defface` specs; other `defvar`s are state and keep their values;
+- refuses to load a file whose `cl-defstruct` layout changed (it would break live
+  objects, including the `agent-session` you may be running in) and reports
+  `restart_required`; slots appended at the end load with a warning, since objects
+  made before lack them. Prefer keeping per-backend state in the `state` plist;
+- never reloads `init.el` / `early-init.el` (`restart_required`), nor files that only
+  depend on a changed file: reload those yourself when they expand a changed macro.
 
-- `defvar`, `defvar-keymap`, `defcustom` and `defface` do not re-evaluate on reload.
-  Apply new key bindings with `keymap-set` and changed defaults with `setq` afterwards,
-  then verify (`keymap-lookup`).
-- Changing the `agent-session` struct layout breaks live session objects — including the
-  session you may be running in. Append new slots at the end, or keep per-backend state
-  in the `state` plist; if a layout change is unavoidable, ask the user to restart.
+Other caveats:
+
 - Re-running a major mode in a live buffer kills its buffer-local variables (e.g.
   `agent-session-list--root`); save and restore them.
 - If `emacsclient` hangs or reports "Server not responding", Emacs is blocked; diagnose

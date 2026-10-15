@@ -15,11 +15,13 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'flymake)
 (require 'project)
 (require 'agent-session)
+(require 'init-reload)
 
 
 (defgroup agent-ui nil
@@ -360,6 +362,43 @@ in the foreground."
 Use it for operations the other methods do not cover, such as changing the window
 layout or calling a mode's commands."
   (prin1-to-string (eval (car (read-from-string (concat "(progn " code "\n)"))) t)))
+
+(defun agent-ui--reload-entry (entry)
+  "Convert ENTRY of a `my/reload-config' report to JSON-ready form."
+  (let (json)
+    (cl-loop for (key value) on entry by #'cddr
+             when value
+             do (setq json (plist-put json key
+                                      (cond ((stringp value) value)
+                                            ((symbolp value) (symbol-name value))
+                                            (t (vconcat (mapcar (lambda (item)
+                                                                  (format "%s" item))
+                                                                value)))))))
+    json))
+
+(agent-ui-defmethod "reload"
+    ((files string "Files to reload, separated by spaces, relative to the Emacs \
+configuration root or absolute. Default: every loaded configuration file changed \
+on disk since it was loaded"))
+  "Apply edited Emacs configuration files to the running Emacs, no restart.
+Call it once your edits are done.  Files load in dependency order.  Unlike a
+plain load, keymap definitions are merged into the live keymaps, options nobody
+customized move to their new default and changed faces are applied; other
+defvars keep their state.  A file whose struct layout changed, and init.el, are
+not loaded: they report restart_required."
+  (let* ((report (my/reload-config (and files (split-string files))))
+         (statuses (mapcar (lambda (entry) (plist-get entry :status)) report)))
+    (list :files (vconcat (mapcar #'agent-ui--reload-entry report))
+          :next_step
+          (agent-ui--json-value
+           (cond ((null report)
+                  "Nothing to reload: no loaded configuration file changed on disk.")
+                 ((memq 'failed statuses)
+                  "Fix the errors and call reload again; a failed file may be \
+partly loaded.")
+                 ((memq 'restart_required statuses)
+                  "Tell the user these changes take effect after restarting \
+Emacs."))))))
 
 (agent-ui-defmethod "describe" ()
   "List all methods with their parameter schemas (used by emx help and MCP tools/list)."
