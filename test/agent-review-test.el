@@ -176,7 +176,9 @@
       (agent-review-annotate-lines review agent-review-test--change "为什么改")
       (agent-review-test--with-buffer review
         (goto-char (point-min))
-        (should (search-forward "1. [局部修复] 改第二行" nil t))
+        (should (search-forward "1. 改第二行   局部修复 " nil t))
+        ;; The type tag has the background of its type.
+        (should (memq 'agent-review-type-fix (ensure-list (get-text-property (- (point) 2) 'face))))
         (should (search-forward "+line two" nil t))
         (should (equal (plist-get (get-text-property (point) 'agent-review-target) :line) 2))
         ;; The annotation is below the last selected line, with its range.
@@ -186,7 +188,7 @@
         ;; Context after the change, but nothing from the hunk at line 18.
         (should (search-forward " line 5\n" nil t))
         (should-not (search-forward " line 6\n" (save-excursion
-                                                   (search-forward "2. [新功能]")) t))
+                                                   (search-forward "2. 改第十八行并加 b")) t))
         ;; In item 2, b.el's lines 6-10 belong to item 3 and are shown faded.
         ;; They have no old-side number.
         (should (re-search-forward "^ +6  (b 6)$" nil t))
@@ -227,12 +229,12 @@
         ;; The sidebar lists every item and marks the reviewed one.
         (with-current-buffer (agent-review--nav-buffer)
           (goto-char (point-min))
-          (should (search-forward "✓ 1. [局部修复] 改第二行" nil t))
-          (should (search-forward "3. [新功能] b 的后半" nil t))
+          (should (search-forward "✓ 1. 改第二行   局部修复 " nil t))
+          (should (search-forward "3. b 的后半   新功能 " nil t))
           (agent-review-nav-filter "b.el")
           (goto-char (point-min))
-          (should-not (search-forward "1. [局部修复]" nil t))
-          (should (search-forward "2. [新功能]" nil t))))
+          (should-not (search-forward "1. 改第二行" nil t))
+          (should (search-forward "2. 改第十八行并加 b" nil t))))
       ;; The state is kept with the review.
       (should (equal (plist-get (agent-review--state (plist-get review :id)) :reviewed)
                      '("atomic-1"))))))

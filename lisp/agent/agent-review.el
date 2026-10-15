@@ -90,6 +90,45 @@ Agents read larger diffs with git themselves."
 (defface agent-review-response '((t :inherit font-lock-doc-face))
   "The agent's answer to an annotation.")
 
+(defface agent-review-type-format
+  '((((background dark)) :background "#3a3a3a" :foreground "#c8c8c8")
+    (t :background "#e6e6e6" :foreground "#505050"))
+  "Type tag of a formatting item.")
+(defface agent-review-type-refactor
+  '((((background dark)) :background "#1e3050" :foreground "#a9c6f5")
+    (t :background "#dce8fb" :foreground "#1f4f99"))
+  "Type tag of a refactoring item.")
+(defface agent-review-type-feature
+  '((((background dark)) :background "#1f3f2a" :foreground "#9fe0b2")
+    (t :background "#d6f0dc" :foreground "#1d6b33"))
+  "Type tag of a feature item.")
+(defface agent-review-type-fix
+  '((((background dark)) :background "#4a3218" :foreground "#f3c58f")
+    (t :background "#fde3c6" :foreground "#8a4b08"))
+  "Type tag of a local fix item.")
+(defface agent-review-type-test
+  '((((background dark)) :background "#33244a" :foreground "#d2b6f2")
+    (t :background "#ece0f8" :foreground "#5b2f8a"))
+  "Type tag of a test item.")
+
+(defconst agent-review-type-faces
+  '((0 . agent-review-type-format) (1 . agent-review-type-refactor)
+    (2 . agent-review-type-feature) (3 . agent-review-type-fix) (5 . agent-review-type-test))
+  "Face of the type tag of each item type.")
+
+(defun agent-review--type-tag (type &optional base)
+  "The type tag of item TYPE, its background telling the type apart.
+BASE is a face to keep under it, such as the heading's."
+  (propertize (format " %s " (alist-get type agent-review-types))
+              'face (delq nil (list (alist-get type agent-review-type-faces) base))))
+
+(defun agent-review--item-label (item &optional base)
+  "\"N. TITLE\" and the type tag of ITEM, the label shown for it.
+BASE is the face of the label."
+  (concat (propertize (format "%d. %s  " (plist-get item :order) (plist-get item :title))
+                      'face base)
+          (agent-review--type-tag (plist-get item :type) base)))
+
 ;;; Git
 
 (defun agent-review--git (root &rest args)
@@ -911,11 +950,8 @@ WIDTH is the width of the line number columns."
               (concat (if (member id agent-review--reviewed)
                           (propertize "✓ " 'face '(agent-review-done agent-review-item))
                         (propertize "○ " 'face '(agent-review-meta agent-review-item)))
-                      (propertize (format "%d. [%s] %s\n" (plist-get item :order)
-                                          (alist-get (plist-get item :type) agent-review-types)
-                                          (plist-get item :title))
-                                  'face 'agent-review-item)))
-            "")
+                      (agent-review--item-label item 'agent-review-item)
+                      (propertize "\n" 'face 'agent-review-item))))
     (put-text-property start (point) 'agent-review-heading id)
     (let ((body (point)))
       (when-let* ((intent (plist-get item :intent)))
@@ -1232,9 +1268,7 @@ TEXT is what the filter matches."
     (mapcar (lambda (item)
               (let ((files (string-join (plist-get item :files) " · ")))
                 (list (plist-get item :id)
-                      (format "%d. [%s] %s" (plist-get item :order)
-                              (alist-get (plist-get item :type) agent-review-types)
-                              (plist-get item :title))
+                      (agent-review--item-label item)
                       files
                       (concat (plist-get item :title) " " (plist-get item :intent) " " files))))
             (plist-get agent-review--review :items))))
