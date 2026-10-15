@@ -20,6 +20,13 @@
   (tramp-rpc-deploy-git-build-policy 'release)
   (tramp-rpc-deploy-local-cache-directory (my/var "tramp-rpc/")))
 
+;; Remote processes (eglot servers, compile, shell commands) get a plain non-login
+;; PATH, missing tools installed under the home directory such as
+;; ~/.cargo/bin/rust-analyzer.  Append the remote login shell's PATH; tramp-rpc
+;; fetches it once per connection.
+(with-eval-after-load 'tramp
+  (add-to-list 'tramp-remote-path 'tramp-own-remote-path t))
+
 ;;; No synchronous remote calls on the typing path
 
 ;; Every remote call waits a full network round trip (30-300ms to dev), and Emacs
