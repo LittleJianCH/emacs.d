@@ -938,6 +938,22 @@ Also mark that the context needs reloading."
            (agent-collab-handle-command nil))
        (should-not (agent-collab--handle-commands session))))))
 
+(ert-deftest agent-session-test-handle-commands-run ()
+  "Naming commands get a closed stdin, and one that hangs gives way to the next."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (agent-collab-handle-timeout 0.5))
+     (cl-flet ((wait-for (handle)
+                 (with-timeout (10 nil)
+                   (while (not (equal (agent-session-handle session) handle))
+                     (accept-process-output nil 0.05)))
+                 (agent-session-handle session)))
+       ;; Like `codex exec', read stdin to its end before answering.
+       (agent-collab--name session "hi" '(("sh" "-c" "cat >/dev/null; echo Stdin Closed")))
+       (should (equal (wait-for "stdin-closed") "stdin-closed"))
+       (agent-collab--name session "hi" '(("sleep" "30") ("sh" "-c" "echo fallback")))
+       (should (equal (wait-for "fallback") "fallback"))))))
+
 (ert-deftest agent-session-test-session-read ()
   (agent-session-test--with-session
    (let ((session agent-session--current))

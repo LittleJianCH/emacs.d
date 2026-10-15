@@ -47,6 +47,10 @@ agent's name) unless their agent has a command in
 fails, uses `agent-collab-handle-command'."
   :type '(alist :key-type symbol :value-type (repeat string)))
 
+(defcustom agent-collab-handle-timeout 60
+  "Seconds a naming command may run before the next one is tried."
+  :type 'integer)
+
 (defcustom agent-collab-confirm t
   "Non-nil means session_ask asks the user before sending a prompt."
   :type 'boolean)
@@ -102,26 +106,33 @@ gives a handle."
               (errors (generate-new-buffer " *agent-collab-handle-stderr*")))
     (let ((default-directory temporary-file-directory)
           (prompt (agent-collab--handle-prompt text)))
-      (make-process
-       :name "agent-collab-handle"
-       :buffer output
-       :command (append (car commands) (list prompt))
-       :connection-type 'pipe
-       :noquery t
-       :stderr errors
-       :sentinel
-       (lambda (process _event)
-         (unless (process-live-p process)
-           (let ((handle (and (zerop (process-exit-status process))
-                              (agent-collab--clean-handle
-                               (with-current-buffer output (buffer-string))))))
-             ;; The stderr pipe may outlive the process for a moment.
-             (let ((kill-buffer-query-functions nil))
-               (kill-buffer output)
-               (kill-buffer errors))
-             (cond ((not (buffer-live-p (agent-session-buffer session))))
-                   (handle (agent-session-set-handle session handle))
-                   ((cdr commands) (agent-collab--name session text (cdr commands)))))))))))
+      (let ((process
+             (make-process
+              :name "agent-collab-handle"
+              :buffer output
+              :command (append (car commands) (list prompt))
+              :connection-type 'pipe
+              :noquery t
+              :stderr errors
+              :sentinel
+              (lambda (process _event)
+                (unless (process-live-p process)
+                  (let ((handle (and (zerop (process-exit-status process))
+                                     (agent-collab--clean-handle
+                                      (with-current-buffer output (buffer-string))))))
+                    ;; The stderr pipe may outlive the process for a moment.
+                    (let ((kill-buffer-query-functions nil))
+                      (kill-buffer output)
+                      (kill-buffer errors))
+                    (cond ((not (buffer-live-p (agent-session-buffer session))))
+                          (handle (agent-session-set-handle session handle))
+                          ((cdr commands)
+                           (agent-collab--name session text (cdr commands))))))))))
+        ;; `codex exec' reads more prompt from a piped stdin until it ends.
+        (process-send-eof process)
+        ;; A command that hangs anyway gives way to the next one.
+        (run-at-time agent-collab-handle-timeout nil
+                     (lambda () (when (process-live-p process) (kill-process process))))))))
 
 (defun agent-collab--name-on-submit (session text)
   "Name SESSION from TEXT when it gets its first message."
