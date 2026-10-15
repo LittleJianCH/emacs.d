@@ -137,6 +137,12 @@ function writeConfigFile(file, content) {
   }
 }
 
+// What to tell the agent after writing FILE: Emacs still runs the old Lisp.
+const reloadHint = (file) =>
+  file.endsWith('.el')
+    ? '. The running Emacs still has the old version: call reload once your edits are done.'
+    : '';
+
 const PATH_PARAM = {
   type: 'string',
   description: 'File path, relative to the Emacs configuration root or absolute inside it',
@@ -196,7 +202,7 @@ changes is reverted afterwards.`,
         throw new Error(`old_string occurs ${count} times in ${real}; add context to make it unique, or set replace_all`);
       }
       writeConfigFile(real, parts.join(to));
-      return `Edited ${real} (${count} ${count === 1 ? 'replacement' : 'replacements'})`;
+      return `Edited ${real} (${count} ${count === 1 ? 'replacement' : 'replacements'})${reloadHint(real)}`;
     },
   },
   config_write: {
@@ -216,7 +222,7 @@ afterwards.`,
       if (typeof content !== 'string') throw new Error('content is required');
       const real = configPath(file);
       writeConfigFile(real, content);
-      return `Wrote ${real}`;
+      return `Wrote ${real}${reloadHint(real)}`;
     },
   },
 };
@@ -294,12 +300,14 @@ const MCP_INSTRUCTIONS = `These tools operate the Emacs instance the user is wor
 - Use show to display an existing org / markdown document or a diff.
 - Call context first to see which file, cursor position and selection the user is looking at.
 - For editor operations the other tools do not cover, run Elisp with eval.
+- After editing the Lisp files of this Emacs configuration, apply them with reload rather
+  than loading them through eval.
 - The user reads Chinese: write page content and notifications in Chinese unless asked otherwise.`;
 
 const REMOTE_INSTRUCTIONS = `
 - Your own file tools work on the project's host, not on the machine Emacs runs on. To
   work on this Emacs configuration (${CONFIG_DIR}), use config_read, config_edit and
-  config_write; read its AGENTS.md first.`;
+  config_write; read its AGENTS.md first. Edits take effect after reload.`;
 
 function mcpServer() {
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
