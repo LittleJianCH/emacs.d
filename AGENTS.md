@@ -106,8 +106,11 @@ The user develops inside a running Emacs, often from an agent session hosted by 
 After changing code, hot-reload it instead of asking for a restart:
 
 ```sh
-emacsclient -e '(load "~/Developer/emacs.d/lisp/agent/agent-session.el" nil t)'
+emacsclient -e '(load (locate-user-emacs-file "lisp/agent/agent-session.el") nil t)'
 ```
+
+`locate-user-emacs-file` resolves against the running Emacs's config directory, so
+the command names no machine-specific path.
 
 Load in dependency order: agent-session -> agent-claude / agent-codex ->
 agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
