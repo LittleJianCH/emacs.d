@@ -40,6 +40,7 @@ test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
+test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -102,6 +103,13 @@ var/                     runtime state (history, backups, pasted images...); git
   user started may ask (`agent-collab-max-depth`).
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
+  An `elisp` block runs the agent's Lisp at point on every redraw (resize, theme change,
+  `g`, state change); the public `agent-canvas-*` helpers give it page state kept across
+  redraws, buttons, timers cancelled on redraw, and a way to message the session. `v`
+  shows the source of the block at point. render / patch read and byte-compile elisp
+  blocks before running them and return what they find as `warnings`. The `canvas_guide`
+  method gives agents the how-to (kept in `agent-canvas--guide`) and the example pages in
+  `lisp/agent/canvas-examples/` (snippets, not loaded or compiled; a test renders each one).
 - `agent-review.el` — atomic reviews of a branch: `review_snapshot` pins base/head and
   lists hunks, the agent plans items, `review_build` checks every changed line is covered
   exactly once and shows a review buffer with a sidebar of items. The user selects lines
@@ -126,7 +134,7 @@ Tests (ERT, ~50 tests, a few seconds):
 ```sh
 emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
-      -l test/agent-review-test.el \
+      -l test/agent-review-test.el -l test/agent-canvas-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 

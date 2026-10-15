@@ -12,8 +12,14 @@
 ;; description for the block format.  To add a block type, write a function
 ;; that takes a block plist and add it to `agent-canvas-renderers'.
 ;;
+;; An elisp block runs Lisp from the agent at point on every redraw, for
+;; content the other blocks cannot express; the agent-canvas-* helpers give it
+;; page state that survives redraws, buttons, timers and a way to message the
+;; agent.
+;;
 ;; Keys in a page: TAB folds a section / jumps to the next button, RET clicks,
-;; c replies to the agent, g redraws, q quits.
+;; c replies to the agent, v shows the source of the block at point, g redraws,
+;; q quits.
 
 ;;; Code:
 
@@ -25,6 +31,7 @@
 (require 'svg)
 (require 'dom)
 (require 'button)
+(require 'bytecomp)
 
 ;; Bound dynamically in a let so rendering code blocks never prompts to install
 ;; a tree-sitter grammar.
@@ -75,6 +82,13 @@
 (defvar-local agent-canvas--errors nil "Blocks that failed in the last render.")
 (defvar-local agent-canvas--width nil "Window body width when rendered (pixels on GUI).")
 (defvar-local agent-canvas--time nil "Time the page was last updated.")
+(defvar-local agent-canvas--state nil
+  "Page state ((KEY . VALUE) ...) set by elisp blocks, kept on redraw.")
+(defvar-local agent-canvas--timers nil
+  "Timers started by elisp blocks; cancelled before each redraw.")
+(defvar-local agent-canvas--drawing nil "Non-nil while the page is being drawn.")
+(defvar agent-canvas--warnings nil
+  "Problems found in elisp blocks by the current render or patch call.")
 
 (defvar agent-canvas--prefix ""
   "Line prefix at the current nesting level (section indent, callout bar).")
@@ -956,6 +970,154 @@ direction}."
                         (if (plist-get e :label) (format "  (%s)" (plist-get e :label)) "")))))
     (agent-canvas--decorate start)))
 
+;;; Elisp blocks: Lisp from the agent, run on every redraw
+
+(defun agent-canvas--elisp (block)
+  "Render an elisp BLOCK: {code} or {file}, see `agent-canvas--load-sources'.
+The code runs at point with lexical binding and inserts the block's content."
+  (let ((code (or (plist-get block :code) (error "elisp block needs code or file")))
+        (start (point)))
+    (eval `(progn ,@(agent-canvas--read-forms code)) t)
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    ;; Content drawn through `agent-canvas-blocks' is still this block's.
+    (put-text-property start (point) 'agent-canvas-block block)
+    (unless (string-empty-p agent-canvas--prefix)
+      (agent-canvas--decorate start))))
+
+(defun agent-canvas--read-forms (code)
+  "Read the top-level forms of CODE.
+Signal an error naming the line when its parentheses do not balance."
+  (with-temp-buffer
+    (with-syntax-table emacs-lisp-mode-syntax-table
+      (insert code)
+      (goto-char (point-min))
+      (let (forms)
+        (while (progn (forward-comment (buffer-size)) (not (eobp)))
+          (let ((start (point)))
+            (condition-case err
+                (push (read (current-buffer)) forms)
+              (end-of-file
+               (error "Line %d: form not closed (missing parenthesis)"
+                      (line-number-at-pos start)))
+              (invalid-read-syntax
+               (error "Line %d: %s (extra closing parenthesis?)"
+                      (line-number-at-pos (point)) (error-message-string err))))))
+        (nreverse forms)))))
+
+(defun agent-canvas--check-elisp (code)
+  "Problems in CODE found without running it: read errors, compiler warnings.
+A free variable usually means a misplaced parenthesis."
+  (condition-case err
+      (let ((forms (agent-canvas--read-forms code))
+            warnings)
+        (let ((byte-compile-log-warning-function
+               (lambda (string &rest _) (push string warnings))))
+          (condition-case err
+              (byte-compile `(lambda () ,@forms))
+            (error (push (error-message-string err) warnings))))
+        (nreverse warnings))
+    (error (list (error-message-string err)))))
+
+(defun agent-canvas--load-sources (blocks)
+  "Return BLOCKS with the file of each elisp block read into its code.
+The code is kept with the page, so later redraws do not need the file.  The
+problems `agent-canvas--check-elisp' finds are added to
+`agent-canvas--warnings'."
+  (vconcat
+   (mapcar (lambda (block)
+             (cond ((equal (plist-get block :type) "elisp")
+                    (let ((block (if (or (plist-get block :code) (not (plist-get block :file)))
+                                     block
+                                   (append block
+                                           (list :code (with-temp-buffer
+                                                         (insert-file-contents
+                                                          (agent-canvas--resolve
+                                                           (plist-get block :file)))
+                                                         (buffer-string)))))))
+                      (dolist (warning (and (plist-get block :code)
+                                            (agent-canvas--check-elisp (plist-get block :code))))
+                        (push (format "elisp%s: %s"
+                                      (if (plist-get block :id) (format "#%s" (plist-get block :id)) "")
+                                      warning)
+                              agent-canvas--warnings))
+                      block))
+                   ((plist-get block :blocks)
+                    (plist-put (copy-sequence block) :blocks
+                               (agent-canvas--load-sources (plist-get block :blocks))))
+                   (t block)))
+           blocks)))
+
+(defun agent-canvas--cancel-timers ()
+  "Cancel the timers started by the page's elisp blocks."
+  (mapc #'cancel-timer agent-canvas--timers)
+  (setq agent-canvas--timers nil))
+
+(defun agent-canvas-state (key &optional default)
+  "Value of KEY in the page state, or DEFAULT when it is unset."
+  (if-let* ((cell (assoc key agent-canvas--state))) (cdr cell) default))
+
+(defun agent-canvas-set (key value &optional no-redraw)
+  "Set KEY to VALUE in the page state and redraw the page.
+With NO-REDRAW, or while the page is being drawn, only the state changes.
+Returns VALUE."
+  (unless (derived-mode-p 'agent-canvas-mode)
+    (error "agent-canvas-set: %s is not a page" (current-buffer)))
+  (setf (alist-get key agent-canvas--state nil nil #'equal) value)
+  (unless no-redraw (agent-canvas-refresh))
+  value)
+
+(defun agent-canvas-refresh ()
+  "Redraw the current page, running its elisp blocks again.
+Unlike a redraw for a resize or theme change, this updates the page's time."
+  (unless agent-canvas--drawing
+    (setq agent-canvas--time (current-time))
+    (agent-canvas--redraw)))
+
+(defun agent-canvas-send (text &optional no-submit)
+  "Send TEXT to the page's agent session as a user message.
+With NO-SUBMIT, only put it in the session's input area."
+  (agent-canvas--send text (not no-submit)))
+
+(defun agent-canvas-width ()
+  "Width available for content at point: pixels, or columns on terminals."
+  (agent-canvas--avail))
+
+(defun agent-canvas-blocks (blocks)
+  "Insert BLOCKS, block plists in the format of render, at point."
+  (agent-canvas--render-blocks blocks))
+
+(defun agent-canvas-button (label action &optional help)
+  "Insert a button LABEL styled like the page's that calls ACTION.
+ACTION takes no arguments and runs in the page buffer.  HELP shows on hover."
+  (let ((buffer (current-buffer)))
+    (insert-text-button (format " %s " label)
+                        'face 'agent-canvas-button 'follow-link t 'help-echo help
+                        'action (lambda (_)
+                                  (with-current-buffer buffer (funcall action))))))
+
+(defun agent-canvas-timer (seconds function)
+  "Call FUNCTION every SECONDS in the page buffer while the page is visible.
+The timer is cancelled when the page is redrawn or killed, so the block that
+starts it starts it again each time it runs.  An error stops the timer."
+  (let* ((buffer (current-buffer))
+         timer)
+    (setq timer
+          (run-with-timer
+           seconds seconds
+           (lambda ()
+             (when (and (buffer-live-p buffer) (get-buffer-window buffer t))
+               (with-current-buffer buffer
+                 (condition-case err
+                     (funcall function)
+                   (error
+                    (cancel-timer timer)
+                    (message "页面「%s」的定时器出错，已停止：%s"
+                             (plist-get agent-canvas--page :title)
+                             (error-message-string err)))))))))
+    (push timer agent-canvas--timers)
+    timer))
+
 ;;; Rendering entry points
 
 (defvar agent-canvas-renderers
@@ -972,6 +1134,7 @@ direction}."
     ("section" . agent-canvas--section)
     ("buttons" . agent-canvas--buttons)
     ("image" . agent-canvas--image)
+    ("elisp" . agent-canvas--elisp)
     ("divider" . agent-canvas--divider))
   "Map from block type to renderer.
 A renderer takes a block plist and inserts its content at point.")
@@ -980,19 +1143,34 @@ A renderer takes a block plist and inserts its content at point.")
   "Render a single BLOCK.
 On error, show and record a notice without affecting other blocks."
   (let* ((type (plist-get block :type))
-         (renderer (alist-get type agent-canvas-renderers nil nil #'equal)))
+         (renderer (alist-get type agent-canvas-renderers nil nil #'equal))
+         (start (point)))
     (condition-case err
         (if renderer
             (funcall renderer block)
           (error "unknown block type: %s" type))
       (error
+       ;; Drop what the block inserted before failing.  The page is drawn
+       ;; from top to bottom, so its output runs to the end of the buffer.
+       (delete-region start (point-max))
+       (goto-char (point-max))
        (let ((message (format "%s%s: %s" (or type "?")
                               (if (plist-get block :id) (format "#%s" (plist-get block :id)) "")
-                              (error-message-string err)))
-             (start (point)))
+                              (error-message-string err))))
          (push message agent-canvas--errors)
          (insert (propertize (concat "⚠ 渲染失败 " message) 'face 'error) "\n")
-         (agent-canvas--decorate start))))))
+         (agent-canvas--decorate start))))
+    (agent-canvas--tag start (point) block)))
+
+(defun agent-canvas--tag (start end block)
+  "Mark the text from START to END as drawn by BLOCK.
+Text already marked by a nested block keeps its mark."
+  (let ((pos start))
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'agent-canvas-block nil end)))
+        (unless (get-text-property pos 'agent-canvas-block)
+          (put-text-property pos next 'agent-canvas-block block))
+        (setq pos next)))))
 
 (defun agent-canvas--render-blocks (blocks)
   "Render BLOCKS in order, separated by blank lines."
@@ -1016,17 +1194,19 @@ On error, show and record a notice without affecting other blocks."
             (agent-canvas--prefix ""))
         (setq agent-canvas--width (window-body-width window t)
               agent-canvas--errors nil)
+        (agent-canvas--cancel-timers)
         (delete-all-overlays)
         (erase-buffer)
         (insert (propertize (agent-canvas--cell (plist-get agent-canvas--page :title))
                             'face 'agent-canvas-title)
                 "\n"
-                (propertize (format "%s · %s · TAB 折叠  RET 点击  c 回复 agent  g 重绘\n"
+                (propertize (format "%s · %s · TAB 折叠  RET 点击  c 回复 agent  v 源码  g 重绘\n"
                                     (or agent-canvas--agent "agent")
                                     (format-time-string "%H:%M:%S" agent-canvas--time))
                             'face 'agent-canvas-meta)
                 "\n")
-        (agent-canvas--render-blocks (plist-get agent-canvas--page :blocks))
+        (let ((agent-canvas--drawing t))
+          (agent-canvas--render-blocks (plist-get agent-canvas--page :blocks)))
         (goto-char (point-min))))
     (pcase-dolist (`(,w ,start ,point) positions)
       (set-window-start w (min start (point-max)) t)
@@ -1049,6 +1229,24 @@ On error, show and record a notice without affecting other blocks."
                                        (with-current-buffer buffer
                                          (agent-canvas--redraw))))))))))
 
+(defvar agent-canvas--theme-timer nil)
+
+(defun agent-canvas--on-theme (&rest _)
+  "Redraw visible pages after a theme change, so SVG colors follow the theme."
+  (when (timerp agent-canvas--theme-timer) (cancel-timer agent-canvas--theme-timer))
+  (setq agent-canvas--theme-timer
+        (run-with-idle-timer
+         0.2 nil
+         (lambda ()
+           (dolist (buffer (buffer-list))
+             (with-current-buffer buffer
+               (when (and (derived-mode-p 'agent-canvas-mode) agent-canvas--page
+                          (get-buffer-window buffer t))
+                 (agent-canvas--redraw))))))))
+
+(add-hook 'enable-theme-functions #'agent-canvas--on-theme)
+(add-hook 'disable-theme-functions #'agent-canvas--on-theme)
+
 ;;; Page mode and commands
 
 (defun agent-canvas-tab ()
@@ -1065,13 +1263,36 @@ On error, show and record a notice without affecting other blocks."
   (agent-canvas--send (format "[关于页面「%s」] %s" (plist-get agent-canvas--page :title) text)
                       t))
 
+(defun agent-canvas-view-source ()
+  "Show the source of the block at point: Lisp for elisp blocks, else JSON."
+  (interactive)
+  (let ((block (or (get-text-property (point) 'agent-canvas-block)
+                   (user-error "这里没有 block")))
+        (buffer (get-buffer-create "*agent-canvas-source*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (if (equal (plist-get block :type) "elisp")
+            (progn
+              (when (plist-get block :file)
+                (insert (format ";; 来自 %s\n" (plist-get block :file))))
+              (insert (plist-get block :code))
+              (emacs-lisp-mode))
+          (insert (decode-coding-string (json-serialize block :false-object nil) 'utf-8))
+          (json-pretty-print-buffer)
+          (js-json-mode))
+        (goto-char (point-min))
+        (setq buffer-read-only t)))
+    (pop-to-buffer buffer)))
+
 (defvar-keymap agent-canvas-mode-map
   :doc "Keys for agent pages."
   "TAB" #'agent-canvas-tab
   "<backtab>" #'backward-button
   "n" #'forward-button
   "p" #'backward-button
-  "c" #'agent-canvas-comment)
+  "c" #'agent-canvas-comment
+  "v" #'agent-canvas-view-source)
 
 (define-derived-mode agent-canvas-mode special-mode "Canvas"
   "Display a page generated by an agent."
@@ -1079,7 +1300,8 @@ On error, show and record a notice without affecting other blocks."
               word-wrap t
               word-wrap-by-category t
               revert-buffer-function (lambda (&rest _) (agent-canvas--redraw)))
-  (add-hook 'window-size-change-functions #'agent-canvas--on-resize nil t))
+  (add-hook 'window-size-change-functions #'agent-canvas--on-resize nil t)
+  (add-hook 'kill-buffer-hook #'agent-canvas--cancel-timers nil t))
 
 (defun agent-canvas--buffer (title)
   "The page buffer titled TITLE."
@@ -1121,8 +1343,10 @@ Return (FOUND . BLOCKS)."
     (with-current-buffer buffer
       (setq agent-canvas--time (current-time))
       (agent-canvas--redraw window)
-      (list :buffer (buffer-name buffer)
-            :errors (vconcat (reverse agent-canvas--errors))))))
+      (append (list :buffer (buffer-name buffer)
+                    :errors (vconcat (reverse agent-canvas--errors)))
+              (and agent-canvas--warnings
+                   (list :warnings (vconcat (reverse agent-canvas--warnings))))))))
 
 (agent-ui-defmethod "render"
     ((title string "Page title; rendering the same title again updates that page" required)
@@ -1132,7 +1356,7 @@ Return (FOUND . BLOCKS)."
 syntax highlighted, charts and diagrams are drawn as SVG, sections fold, and buttons can
 send instructions back to you. Good for option comparisons, plans, code review results,
 architecture diagrams, statistics and progress reports. The returned errors list blocks
-that failed to render.
+that failed to render; warnings list problems found in elisp blocks before running them.
 
 Each block is an object whose type selects the format; any block may carry an id so it
 can be updated later with patch:
@@ -1153,18 +1377,23 @@ can be updated later with patch:
   message (with submit:false it is only placed in the input area).
 - {\"type\":\"image\",\"path\":\"…\",\"width\":600}
 - {\"type\":\"divider\"}
+- {\"type\":\"elisp\",\"file\":\"/tmp/view.el\"} or {\"type\":\"elisp\",\"code\":\"…\"}  Emacs Lisp that draws the block, for interactive or richer
+  content the other blocks cannot express: page state, local actions, timers, background processes, vtable. Call canvas_guide before
+  writing one.
 File paths are relative to the project root. The user reads Chinese, so write the page
 text in Chinese."
   (let* ((buffer (agent-canvas--buffer title))
-         (agent (plist-get agent-ui-caller :agent_buffer)))
+         (agent (plist-get agent-ui-caller :agent_buffer))
+         (agent-canvas--warnings nil))
     (with-current-buffer buffer
-      (setq agent-canvas--page
-            (list :title title
-                  :blocks (if (and append agent-canvas--page)
-                              (vconcat (plist-get agent-canvas--page :blocks) blocks)
-                            blocks)))
       (when agent (setq agent-canvas--agent agent))
-      (setq agent-canvas--root (agent-canvas--caller-root agent-canvas--agent)))
+      (setq agent-canvas--root (agent-canvas--caller-root agent-canvas--agent))
+      (let ((blocks (agent-canvas--load-sources blocks)))
+        (setq agent-canvas--page
+              (list :title title
+                    :blocks (if (and append agent-canvas--page)
+                                (vconcat (plist-get agent-canvas--page :blocks) blocks)
+                              blocks)))))
     (agent-canvas--publish buffer)))
 
 (agent-ui-defmethod "patch"
@@ -1174,12 +1403,113 @@ text in Chinese."
   "Replace the block with the given id in a rendered page (nested blocks included), to
 update progress, status and other parts of the page."
   (let ((buffer (or (get-buffer (format "*agent-canvas: %s*" title))
-                    (error "No page titled %s" title))))
+                    (error "No page titled %s" title)))
+        (agent-canvas--warnings nil))
     (with-current-buffer buffer
-      (let ((result (agent-canvas--replace-block (plist-get agent-canvas--page :blocks) id block)))
+      (let ((result (agent-canvas--replace-block (plist-get agent-canvas--page :blocks) id
+                                                 (aref (agent-canvas--load-sources (vector block)) 0))))
         (unless (car result) (error "No block with id %s on the page" id))
         (setq agent-canvas--page (plist-put agent-canvas--page :blocks (cdr result)))))
     (agent-canvas--publish buffer)))
+
+;;; Guide for elisp blocks
+
+(defconst agent-canvas--examples-directory
+  (expand-file-name "canvas-examples"
+                    (file-name-directory (or load-file-name buffer-file-name default-directory)))
+  "Example pages made of elisp blocks, returned by canvas_guide.")
+
+(defconst agent-canvas--guide
+  "Elisp blocks: {\"type\":\"elisp\",\"file\":\"/abs/path.el\"} or {\"type\":\"elisp\",\"code\":\"...\"}
+
+How they run
+- The code is read as top-level forms and evaluated with lexical binding in the page
+  buffer, at the end of the page drawn so far; it inserts the block's content.
+- It runs again on every redraw: window resize, theme change, g, patch, agent-canvas-set,
+  agent-canvas-refresh.  So the body must only draw.  Start real work (processes, theme
+  changes, writing files) from buttons or timers, never directly in the body.
+- Prefer file: write the code to a .el file with your file tool, then render.  The file
+  is read when render or patch is called; after editing it, call render or patch again.
+  Relative paths resolve against your project root.
+- render and patch check the code without running it and return what they find in
+  warnings: unbalanced parentheses (with the line) and byte-compiler warnings such as
+  free variables and wrong argument counts.  Fix every warning; a free variable usually
+  means a misplaced parenthesis closed a let too early.
+- An error while drawing replaces the block with its message and is listed in errors.
+  An infinite loop or a blocking call freezes the user's Emacs: no sleep-for, no
+  synchronous shell or network calls in the body or in callbacks; use make-process.
+
+Helpers (they act on the current buffer, which must be the page)
+- (agent-canvas-state KEY &optional DEFAULT): page state.  It survives redraws, patch and
+  rendering the same title again.
+- (agent-canvas-set KEY VALUE &optional NO-REDRAW): store state and redraw.  It never
+  redraws while the body runs.  Pass NO-REDRAW to set several keys and redraw once with
+  the last call.
+- (agent-canvas-button LABEL FN &optional HELP): a button; FN takes no arguments and runs
+  in the page buffer.
+- (agent-canvas-send TEXT): send TEXT to your session as a user message, so a click can
+  start your next turn.
+- (agent-canvas-blocks BLOCKS): insert ordinary blocks given as plists, e.g.
+  (list (list :type \"table\" :columns [\"a\" \"b\"] :rows (list (list 1 2)))).
+  Strings may carry faces.
+- (agent-canvas-timer SECONDS FN): repeating timer.  Ticks are skipped while the page is
+  not shown in a window; it is cancelled on the next redraw, so the body starts it again
+  each time; an error in FN stops it.
+- (agent-canvas-width): width available in pixels.  (agent-canvas-refresh): redraw now.
+
+Patterns
+- Interactive view: read state at the top of the body, draw from it, change it with
+  agent-canvas-set in button callbacks.
+- Slow work: in a button callback, set a running key and start make-process with a
+  sentinel.  While running, draw progress and start (agent-canvas-timer 0.5
+  #'agent-canvas-refresh).  In the sentinel, store the result and clear the running key.
+- Callbacks that run outside the page (process sentinels, minibuffer, hooks): bind
+  (current-buffer) to a variable while drawing and use
+  (when (buffer-live-p page) (with-current-buffer page ...)).
+- Live data: (agent-canvas-timer 2 #'agent-canvas-refresh).
+- Input: the page is read-only, so editable widget fields do not work; ask with
+  read-string or completing-read from a button.
+
+Pitfalls
+- require the libraries you use (vtable, svg, ...).
+- make-vtable leaves point at the start of the table: (goto-char (point-max)) before
+  inserting more.  Give it :use-header-line nil, and row actions with :actions.
+- Use theme faces (shadow, success, warning, error, bold, link, ...), not literal colors;
+  pages redraw when the theme changes.
+- Tables and vtable align columns with display properties, so
+  buffer-substring-no-properties shows them misaligned; check alignment with pixel
+  positions (posn-at-point, window-text-pixel-size).
+- Page text is shown to the user: write it in Chinese.  Comments in the code are for
+  agents: write them in English."
+  "What canvas_guide returns, followed by the list of examples.")
+
+(defun agent-canvas--examples ()
+  "Example names with the summary on the first line of each, as text."
+  (mapconcat (lambda (file)
+               (format "- %s: %s" (file-name-base file)
+                       (with-temp-buffer
+                         (insert-file-contents file)
+                         (string-trim (buffer-substring (point-min) (line-end-position))
+                                      "[; ]+"))))
+             (directory-files agent-canvas--examples-directory t "\\.el\\'")
+             "\n"))
+
+(agent-ui-defmethod "canvas_guide"
+    ((example string "Name of an example page: returns its source instead of the guide"))
+  "How to write elisp blocks for render: how they run, helpers, patterns, pitfalls, and
+example pages whose source you can read.  Call it before writing an elisp block."
+  (if (not example)
+      (concat agent-canvas--guide
+              "\n\nExamples (call canvas_guide with example=NAME for the source; render it with"
+              " {\"type\":\"elisp\",\"code\":<source>} to try it):\n"
+              (agent-canvas--examples))
+    (let ((file (expand-file-name (concat (file-name-base example) ".el")
+                                  agent-canvas--examples-directory)))
+      (unless (file-exists-p file)
+        (error "No example %s; examples:\n%s" example (agent-canvas--examples)))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (buffer-string)))))
 
 (provide 'agent-canvas)
 
