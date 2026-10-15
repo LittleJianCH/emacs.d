@@ -91,24 +91,24 @@ Agents read larger diffs with git themselves."
   "The agent's answer to an annotation.")
 
 (defface agent-review-type-format
-  '((((background dark)) :background "#3a3a3a" :foreground "#c8c8c8")
-    (t :background "#e6e6e6" :foreground "#505050"))
+  '((((background dark)) :background "#3a3a3a" :foreground "#c8c8c8" :extend t)
+    (t :background "#e6e6e6" :foreground "#505050" :extend t))
   "Type tag of a formatting item.")
 (defface agent-review-type-refactor
-  '((((background dark)) :background "#1e3050" :foreground "#a9c6f5")
-    (t :background "#dce8fb" :foreground "#1f4f99"))
+  '((((background dark)) :background "#1e3050" :foreground "#a9c6f5" :extend t)
+    (t :background "#dce8fb" :foreground "#1f4f99" :extend t))
   "Type tag of a refactoring item.")
 (defface agent-review-type-feature
-  '((((background dark)) :background "#1f3f2a" :foreground "#9fe0b2")
-    (t :background "#d6f0dc" :foreground "#1d6b33"))
+  '((((background dark)) :background "#1f3f2a" :foreground "#9fe0b2" :extend t)
+    (t :background "#d6f0dc" :foreground "#1d6b33" :extend t))
   "Type tag of a feature item.")
 (defface agent-review-type-fix
-  '((((background dark)) :background "#4a3218" :foreground "#f3c58f")
-    (t :background "#fde3c6" :foreground "#8a4b08"))
+  '((((background dark)) :background "#4a3218" :foreground "#f3c58f" :extend t)
+    (t :background "#fde3c6" :foreground "#8a4b08" :extend t))
   "Type tag of a local fix item.")
 (defface agent-review-type-test
-  '((((background dark)) :background "#33244a" :foreground "#d2b6f2")
-    (t :background "#ece0f8" :foreground "#5b2f8a"))
+  '((((background dark)) :background "#33244a" :foreground "#d2b6f2" :extend t)
+    (t :background "#ece0f8" :foreground "#5b2f8a" :extend t))
   "Type tag of a test item.")
 
 (defconst agent-review-type-faces
@@ -952,6 +952,9 @@ WIDTH is the width of the line number columns."
                         (propertize "○ " 'face '(agent-review-meta agent-review-item)))
                       (agent-review--item-label item 'agent-review-item)
                       (propertize "\n" 'face 'agent-review-item))))
+    ;; The whole heading bar takes the background of the item's type.
+    (when-let* ((face (alist-get (plist-get item :type) agent-review-type-faces)))
+      (add-face-text-property start (point) face t))
     (put-text-property start (point) 'agent-review-heading id)
     (let ((body (point)))
       (when-let* ((intent (plist-get item :intent)))
@@ -1258,19 +1261,20 @@ Unfold it otherwise."
 (defvar-local agent-review-nav--overlay nil "Highlight of the entry of the current item.")
 
 (defun agent-review--nav-entries ()
-  "Sidebar entries of this review buffer: a list of (ID TITLE DETAIL TEXT).
-TEXT is what the filter matches."
+  "Sidebar entries of this review buffer: a list of (ID TITLE DETAIL TEXT TYPE).
+TEXT is what the filter matches; TYPE is the item type, nil for a file."
   (if agent-review--full
       (mapcar (lambda (file)
                 (let ((name (plist-get file :file)))
-                  (list (cons "full" name) name nil name)))
+                  (list (cons "full" name) name nil name nil)))
               (plist-get agent-review--review :full-files))
     (mapcar (lambda (item)
               (let ((files (string-join (plist-get item :files) " · ")))
                 (list (plist-get item :id)
                       (agent-review--item-label item)
                       files
-                      (concat (plist-get item :title) " " (plist-get item :intent) " " files))))
+                      (concat (plist-get item :title) " " (plist-get item :intent) " " files)
+                      (plist-get item :type))))
             (plist-get agent-review--review :items))))
 
 (defvar-keymap agent-review-nav-entry-map
@@ -1304,7 +1308,7 @@ TEXT is what the filter matches."
             (insert (propertize (format "过滤：%s（/ 修改，空串清除）\n" filter)
                                 'face 'agent-review-meta)))
           (insert "\n")
-          (pcase-dolist (`(,id ,title ,detail ,text) entries)
+          (pcase-dolist (`(,id ,title ,detail ,text ,type) entries)
             (when (or (null filter) (string-search (downcase filter) (downcase text)))
               (let ((start (point))
                     (n (gethash id counts 0)))
@@ -1316,6 +1320,9 @@ TEXT is what the filter matches."
                         "\n")
                 (when detail
                   (insert (propertize (concat "    " detail "\n") 'face 'agent-review-meta)))
+                ;; The whole entry takes the background of the item's type.
+                (when-let* ((face (alist-get type agent-review-type-faces)))
+                  (add-face-text-property start (point) face t))
                 (put-text-property start (point) 'agent-review-nav id))))
           (insert "\n" (propertize "RET 跳转 · r 已审阅 · / 过滤 · g 刷新 · q 关闭\n"
                                    'face 'agent-review-meta))
@@ -1333,7 +1340,8 @@ TEXT is what the filter matches."
         (setq agent-review-nav--overlay (make-overlay 1 1))
         (overlay-put agent-review-nav--overlay 'face 'agent-review-current))
       (move-overlay agent-review-nav--overlay (car pos) (cdr pos) (current-buffer))
-      (when-let* ((window (get-buffer-window)))
+      (when-let* ((window (get-buffer-window))
+                  ((not (pos-visible-in-window-p (car pos) window))))
         (set-window-point window (car pos))))))
 
 (defun agent-review--nav-buffer ()
@@ -1371,7 +1379,25 @@ TEXT is what the filter matches."
   "Kill the sidebar of this review buffer with it."
   (when (buffer-live-p agent-review--nav) (kill-buffer agent-review--nav)))
 
+(defvar-local agent-review--track-timer nil
+  "Pending update of the sidebar highlight.")
+
 (defun agent-review--track ()
+  "Highlight the sidebar entry of the item at point once Emacs is idle.
+Updating it on every command made moving through folded items, where each
+line is another item, redraw the sidebar on every key."
+  (unless (timerp agent-review--track-timer)
+    (let ((buffer (current-buffer)))
+      (setq agent-review--track-timer
+            (run-with-idle-timer
+             0.15 nil
+             (lambda ()
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (setq agent-review--track-timer nil)
+                   (agent-review--track-now)))))))))
+
+(defun agent-review--track-now ()
   "Highlight the sidebar entry of the item at point when it changes."
   (let ((id (if agent-review--full
                 (get-text-property (point) 'agent-review-file-in)

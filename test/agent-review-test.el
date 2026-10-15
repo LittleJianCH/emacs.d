@@ -177,8 +177,11 @@
       (agent-review-test--with-buffer review
         (goto-char (point-min))
         (should (search-forward "1. 改第二行   局部修复 " nil t))
-        ;; The type tag has the background of its type.
+        ;; The type tag, and the whole heading bar, have the background of its type.
         (should (memq 'agent-review-type-fix (ensure-list (get-text-property (- (point) 2) 'face))))
+        (should (memq 'agent-review-type-fix
+                      (ensure-list (get-text-property (line-beginning-position) 'face))))
+        (should (memq 'agent-review-type-fix (ensure-list (get-text-property (point) 'face))))
         (should (search-forward "+line two" nil t))
         (should (equal (plist-get (get-text-property (point) 'agent-review-target) :line) 2))
         ;; The annotation is below the last selected line, with its range.
@@ -230,6 +233,10 @@
         (with-current-buffer (agent-review--nav-buffer)
           (goto-char (point-min))
           (should (search-forward "✓ 1. 改第二行   局部修复 " nil t))
+          ;; The entry, its file line included, has the background of its type.
+          (forward-line 1)
+          (should (looking-at "    a.txt"))
+          (should (memq 'agent-review-type-fix (ensure-list (get-text-property (point) 'face))))
           (should (search-forward "3. b 的后半   新功能 " nil t))
           (agent-review-nav-filter "b.el")
           (goto-char (point-min))
