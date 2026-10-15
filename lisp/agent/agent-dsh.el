@@ -12,6 +12,11 @@
 ;;
 ;; The API key is dsh's own business (~/.dsh/.credentials.yaml); nothing here
 ;; passes credentials to the process.
+;;
+;; For a remote project dsh runs on the project's host, like the other
+;; backends: the plugin files are copied to the host first, and emx is reached
+;; through agent-remote.el's relay.  The host needs dsh, python3 and its own
+;; dsh credentials.
 
 ;;; Code:
 
@@ -19,6 +24,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-remote)
 
 (defgroup agent-dsh nil
   "DeepSeek Harness backend."
@@ -51,23 +57,67 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
                  mode)
                agent-dsh--presets "workspace-write")))
 
-(defun agent-dsh--command ()
-  "Command line that starts the bridge."
-  (list agent-dsh-executable "--profile" "sdk" "--patch" agent-dsh--patch))
+(defconst agent-dsh-tested-version "0.2.0-rc.2"
+  "The dsh version the bridge plugin was written against.
+The plugin uses dsh internals, so other versions may need changes.")
+
+(defun agent-dsh--plugin-files ()
+  "The local plugin files, the patch last."
+  (list (expand-file-name "emacs-bridge.mjs" (file-name-directory agent-dsh--patch))
+        agent-dsh--patch))
+
+(defun agent-dsh--remote-plugin-dir (root files)
+  "Directory on the host of remote ROOT that holds FILES.
+Named after their contents, so a changed plugin gets a fresh copy and
+an unchanged one is reused."
+  (concat (file-remote-p root) "~/.cache/emacs-agent/dsh/"
+          (substring (secure-hash 'sha256 (mapconcat (lambda (file)
+                                                       (with-temp-buffer
+                                                         (insert-file-contents-literally file)
+                                                         (buffer-string)))
+                                                     files ""))
+                     0 16)
+          "/"))
+
+(defun agent-dsh--patch-file (root)
+  "The patch file as the bridge process of project ROOT sees it.
+A remote host gets a copy of the plugin files next to each other (the
+patch names the plugin relative to itself).  The patch is copied last,
+so its presence marks a complete upload."
+  (if (not (file-remote-p root))
+      agent-dsh--patch
+    (let* ((files (agent-dsh--plugin-files))
+           (dir (agent-dsh--remote-plugin-dir root files))
+           (patch (expand-file-name (file-name-nondirectory agent-dsh--patch) dir)))
+      (unless (file-exists-p patch)
+        (make-directory dir t)
+        (dolist (file files)
+          (copy-file file (expand-file-name (file-name-nondirectory file) dir) t)))
+      (file-local-name patch))))
+
+(defun agent-dsh--command (root)
+  "Command line that starts the bridge for project ROOT."
+  (list agent-dsh-executable "--profile" "sdk" "--patch" (agent-dsh--patch-file root)))
 
 (defun agent-dsh--mcp-servers (session)
-  "MCP servers mounted for the agent of SESSION: the emx bridge back to Emacs."
-  (let ((emx (agent-session-emx-command)))
+  "MCP servers mounted for the agent of SESSION: the emx bridge back to Emacs.
+A remote agent reaches emx through the relay of agent-remote.el."
+  (let ((emx (if (file-remote-p (agent-session-root session))
+                 (agent-remote-mcp-command session)
+               (agent-session-emx-command))))
     (vector
-     (list :name "emacs" :command (car emx) :args (vconcat (cdr emx))
-           ;; session_ask waits for another agent; the default is 60 seconds.
-           :timeoutMs 1800000
-           ;; MCP servers don't inherit the whole environment; pass what emx needs.
-           :env (let ((env (make-hash-table :test #'equal)))
-                  (dolist (name '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER") env)
-                    (when-let* ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
-                                                 (agent-session-environment session))))
-                      (puthash name (substring entry (1+ (length name))) env))))))))
+     (append
+      (list :name "emacs" :command (car emx) :args (vconcat (cdr emx))
+            ;; session_ask waits for another agent; the default is 60 seconds.
+            :timeoutMs 1800000)
+      ;; dsh scrubs secrets from the environment it passes MCP servers; give
+      ;; emx its variables explicitly.  The relay needs none.
+      (unless (file-remote-p (agent-session-root session))
+        (list :env (let ((env (make-hash-table :test #'equal)))
+                     (dolist (name '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER") env)
+                       (when-let* ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
+                                                    (agent-session-environment session))))
+                         (puthash name (substring entry (1+ (length name))) env))))))))))
 
 ;;; JSON-RPC
 
@@ -98,18 +148,11 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
 
 (cl-defmethod agent-session-backend-start ((_ (eql dsh)) session)
   (agent-dsh--set session :ready nil)
-  ;; The bridge plugin lives in this checkout, out of reach of a remote host.
-  (if (file-remote-p (agent-session-root session))
-      (progn (agent-session-set-status session 'exited)
-             (agent-session-notice session "DeepSeek 暂不支持远程项目" 'agent-session-error))
-    (agent-dsh--start session)))
-
-(defun agent-dsh--start (session)
-  "Start the bridge of SESSION and initialize its agent."
-  (agent-session-start-process session (agent-dsh--command))
+  (agent-session-start-process session (agent-dsh--command (agent-session-root session)))
   (agent-dsh--request
    session "initialize"
-   (append (list :cwd (directory-file-name (expand-file-name (agent-session-root session)))
+   (append (list :cwd (directory-file-name (agent-session-process-directory
+                                            (agent-session-root session)))
                  :preset (agent-dsh--preset session)
                  :plan (if (eq (agent-session-setting session :mode) 'plan) t :false)
                  :mcpServers (agent-dsh--mcp-servers session))
@@ -135,9 +178,18 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
        (agent-session-notice session "—— 以上为历史记录 ——"))
      (seq-doseq (warning (plist-get result :warnings))
        (agent-session-notice session (format "dsh：%s" warning) 'agent-session-error))
+     (let ((version (plist-get result :version)))
+       (unless (member version (list nil agent-dsh-tested-version))
+         (agent-session-notice
+          session (format "dsh 版本为 %s，桥接插件按 %s 编写，若有异常可能需要适配"
+                          version agent-dsh-tested-version))))
      (agent-session-set-status session 'idle))))
 
 ;;; Past sessions: a short-lived bridge answers sessions/list
+
+(defun agent-dsh--host-dir (dir)
+  "Directory DIR as the bridge sees it, without a trailing slash."
+  (directory-file-name (agent-session-process-directory dir)))
 
 (defun agent-dsh--history-items (sessions dirs)
   "History items for SESSIONS (from sessions/list) run in DIRS.
@@ -149,7 +201,7 @@ Sessions of another worktree carry :root and :worktree."
                    :title (car (split-string (string-trim (plist-get item :title)) "\n"))
                    :time (plist-get item :time))
              (when-let* ((dir (seq-find (lambda (dir)
-                                          (equal (directory-file-name (car dir))
+                                          (equal (agent-dsh--host-dir (car dir))
                                                  (plist-get item :cwd)))
                                         (cdr dirs))))
                (list :root (car dir) :worktree (cdr dir)))))
@@ -163,8 +215,10 @@ Sessions of another worktree carry :root and :worktree."
          (process
           (make-process
            :name "agent-dsh-list"
-           :command (agent-dsh--command)
+           :command (agent-dsh--command root)
            :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           ;; A remote project's sessions are stored on its host.
+           :file-handler (and (file-remote-p root) t)
            :stderr (get-buffer-create " *agent-dsh-list stderr*")
            :filter
            (lambda (process output)
@@ -187,15 +241,13 @@ Sessions of another worktree carry :root and :worktree."
      process (concat (json-serialize
                       (list :jsonrpc "2.0" :id 1 :method "sessions/list"
                             :params (list :cwds (vconcat (mapcar (lambda (dir)
-                                                                   (directory-file-name (car dir)))
+                                                                   (agent-dsh--host-dir (car dir)))
                                                                  dirs)))))
                      "\n"))))
 
 (cl-defmethod agent-session-backend-history ((_ (eql dsh)) root callback)
-  (if (file-remote-p root)
-      (funcall callback nil)
-    (agent-session-worktrees
-     root (lambda (dirs) (agent-dsh--list-sessions root dirs callback)))))
+  (agent-session-worktrees
+   root (lambda (dirs) (agent-dsh--list-sessions root dirs callback))))
 
 (defun agent-dsh--apply-config (session config)
   "Follow CONFIG, the settings the bridge reports, in SESSION."
@@ -252,14 +304,18 @@ Sessions of another worktree carry :root and :worktree."
                   :hint (plist-get command :hint)))
           (agent-dsh--state session :commands)))
 
-(defun agent-dsh--message (text)
-  "Prompt parameters for user message TEXT: its text and image files."
+(defun agent-dsh--message (text root)
+  "Prompt parameters for user message TEXT: its text and image files.
+For a remote project ROOT the bridge runs on the host, so images are
+copied there first."
   (list :text (agent-session-message-text text)
-        :images (vconcat (agent-session-message-images text))))
+        :images (vconcat (mapcar (lambda (file)
+                                   (if (file-remote-p root) (agent-remote-upload root file) file))
+                                 (agent-session-message-images text)))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql dsh)) session text)
   (agent-dsh--request
-   session "prompt" (agent-dsh--message text)
+   session "prompt" (agent-dsh--message text (agent-session-root session))
    (lambda (result)
      ;; A dsh slash command runs without a turn; show its result.
      (when-let* ((command (plist-get result :command)))
@@ -272,7 +328,7 @@ Sessions of another worktree carry :root and :worktree."
 
 (cl-defmethod agent-session-backend-steer ((_ (eql dsh)) session text)
   ;; dsh takes steering at the next step boundary of the running turn.
-  (agent-dsh--request session "steer" (agent-dsh--message text))
+  (agent-dsh--request session "steer" (agent-dsh--message text (agent-session-root session)))
   t)
 
 (cl-defmethod agent-session-backend-interrupt ((_ (eql dsh)) session)
@@ -287,9 +343,9 @@ Sessions of another worktree carry :root and :worktree."
                                          :null-object nil :false-object nil))))
 
 (defun agent-dsh--relative (session path)
-  "PATH relative to the project root of SESSION."
+  "PATH, as the agent reports it, relative to the project root of SESSION."
   (if (and (stringp path) (file-name-absolute-p path))
-      (file-relative-name path (agent-session-root session))
+      (file-relative-name path (agent-session-process-directory (agent-session-root session)))
     path))
 
 (defun agent-dsh--diff (path old new)

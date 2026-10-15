@@ -1499,5 +1499,61 @@ detached
                    (:id "b" :title "试验" :time 1
                         :root "/p/.claude/worktrees/x/" :worktree "x")))))
 
+(defmacro agent-session-test--with-fake-remote (&rest body)
+  "Run BODY with /rpc:dev: paths treated as remote, on host paths after the prefix.
+File name handlers are off, so tramp never tries to reach the host."
+  `(cl-letf* ((file-name-handler-alist nil)
+              (real (symbol-function 'file-remote-p))
+              ((symbol-function 'file-remote-p)
+               (lambda (file &optional identification connected)
+                 (if (and (stringp file) (string-prefix-p "/rpc:dev:" file))
+                     (pcase identification
+                       ('localname (substring file (length "/rpc:dev:")))
+                       (_ "/rpc:dev:"))
+                   (funcall real file identification connected)))))
+     ,@body))
+
+(ert-deftest agent-session-test-dsh-remote ()
+  "A remote dsh session uses host paths, the emx relay and an uploaded plugin."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (local-root (agent-session-root session)))
+     (agent-session-test--with-fake-remote
+      (unwind-protect
+          (progn
+            (setf (agent-session-root session) "/rpc:dev:/home/u/p/")
+            ;; Tool paths the agent reports are on the host
+            (should (equal (agent-dsh--relative session "/home/u/p/src/a.rs") "src/a.rs"))
+            ;; History asks for and matches host directories
+            (should (equal (agent-dsh--host-dir "/rpc:dev:/home/u/p/") "/home/u/p"))
+            (should (equal (agent-dsh--history-items
+                            '((:id "a" :cwd "/home/u/p/.w/x" :title "t" :time 1))
+                            '(("/rpc:dev:/home/u/p/") ("/rpc:dev:/home/u/p/.w/x/" . "x")))
+                           '((:id "a" :title "t" :time 1
+                                  :root "/rpc:dev:/home/u/p/.w/x/" :worktree "x"))))
+            ;; emx is reached through the relay, which needs no environment
+            (cl-letf (((symbol-function 'agent-remote-mcp-command)
+                       (lambda (_) '("python3" "-c" "relay" "/sock" "buf"))))
+              (let ((server (aref (agent-dsh--mcp-servers session) 0)))
+                (should (equal (plist-get server :command) "python3"))
+                (should (equal (plist-get server :args) ["-c" "relay" "/sock" "buf"]))
+                (should-not (plist-member server :env))))
+            ;; The plugin is uploaded once per content, the patch last
+            (let (copied)
+              (cl-letf (((symbol-function 'file-exists-p) (lambda (_) nil))
+                        ((symbol-function 'make-directory) #'ignore)
+                        ((symbol-function 'copy-file)
+                         (lambda (from to &rest _) (push (cons (file-name-nondirectory from) to) copied))))
+                (let ((patch (agent-dsh--patch-file "/rpc:dev:/home/u/p/")))
+                  (should (string-match-p "\\`~/\\.cache/emacs-agent/dsh/[0-9a-f]\\{16\\}/emacs\\.yml\\'"
+                                          patch))
+                  (should (equal (mapcar #'car (reverse copied)) '("emacs-bridge.mjs" "emacs.yml")))
+                  (should (equal (file-name-directory (cdar copied))
+                                 (file-name-directory (cdadr copied))))))
+              (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t))
+                        ((symbol-function 'copy-file) (lambda (&rest _) (error "Copied again"))))
+                (agent-dsh--patch-file "/rpc:dev:/home/u/p/"))))
+        (setf (agent-session-root session) local-root))))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

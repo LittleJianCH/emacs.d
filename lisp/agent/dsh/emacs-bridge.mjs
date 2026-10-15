@@ -9,8 +9,8 @@
 //
 // Requests (Emacs -> dsh):
 //   initialize {cwd, resume?, model?, effort?, preset?, plan?, mcpServers?}
-//                -> {sessionId, title, config, models, presets, plan, commands,
-//                    history, warnings}
+//                -> {sessionId, version, title, config, models, presets, plan,
+//                    commands, history, warnings}
 //   configure  {model?, effort?, preset?, plan?}         -> {config}
 //   prompt     {text, images?}       -> {messageId} | {command: {kind, text?}, status}
 //   steer      {text, images?}                           -> {messageId}
@@ -53,9 +53,9 @@
 //   error      {message}
 
 import { createRequire } from 'node:module'
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath } from 'node:fs/promises'
-import { extname } from 'node:path'
+import { dirname, extname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 
@@ -64,7 +64,15 @@ export const inject = ['agents', 'sessions', 'sessionPersistence', 'llm', 'permi
 
 // Plugin files outside the dsh installation cannot import its packages by
 // name, so resolve them from the running dsh binary.
-const dshRequire = createRequire(realpathSync(process.argv[1]))
+const dshBin = realpathSync(process.argv[1])
+const dshRequire = createRequire(dshBin)
+const dshVersion = (() => {
+  try {
+    return JSON.parse(readFileSync(join(dirname(dshBin), '..', 'package.json'), 'utf8')).version
+  } catch {
+    return null
+  }
+})()
 const { createUserMessage, ReasoningEffortId } = await import(dshRequire.resolve('@deepseek-ai/dsh-llm'))
 const { installModelSelection } = await import(dshRequire.resolve('@deepseek-ai/dsh-agent'))
 const McpClient = await import(dshRequire.resolve('@deepseek-ai/dsh-mcp-client'))
@@ -423,6 +431,7 @@ export function apply(ctx) {
       const agent = handle.agent
       return {
         sessionId: agent.session.id,
+        version: dshVersion,
         title: params.resume ? await sessionTitle(agent.session.id, agent.session.snapshotEvents()) : null,
         config: currentConfig(),
         models: await listModels(),
