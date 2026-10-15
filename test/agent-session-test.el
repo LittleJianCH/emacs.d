@@ -1217,6 +1217,61 @@ detached
       (kill-buffer buffer)
       (delete-file file))))
 
+;;; Sessions asking for attention
+
+(ert-deftest agent-session-test-alert ()
+  "An agent's alert flashes its entry, which stays pink until the session is opened."
+  (agent-session-test--with-session
+   (let* ((session-buffer (current-buffer))
+          (list-buffer (generate-new-buffer " *alert-list*"))
+          (timers nil)
+          (seen nil)
+          (face (lambda ()
+                  (with-current-buffer list-buffer
+                    (goto-char (point-min))
+                    (agent-session-list-next)
+                    (let ((faces (ensure-list (get-text-property (point) 'face))))
+                      (cond ((memq 'agent-session-list-alert-flash faces) 'flash)
+                            ((memq 'agent-session-list-alert faces) 'pink)))))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'run-with-timer)
+                    (lambda (_delay _repeat fn &rest _) (setq timers (append timers (list fn)))))
+                   ((symbol-function 'agent-session-list--refresh)
+                    (lambda () (with-current-buffer list-buffer (agent-session-list--render))))
+                   ((symbol-function 'agent-session-list--seen-p) (lambda (_) seen)))
+           (with-current-buffer list-buffer
+             (agent-session-list-mode)
+             (setq agent-session-list--root temporary-file-directory))
+           ;; Only the calling session's entry: the method takes no target.
+           (should (eq (agent-session-test--call "alert" session-buffer :reason "测试跑完了") t))
+           (should (= (length timers) 4))
+           ;; Red, pink, red, pink, and it stays pink.
+           (should (equal (mapcar (lambda (timer) (funcall timer) (funcall face)) timers)
+                          '(flash pink flash pink)))
+           (with-current-buffer list-buffer
+             (should (string-prefix-p "测试跑完了" (get-text-property (point) 'help-echo))))
+           ;; Opening the session clears it.
+           (set-window-buffer (selected-window) session-buffer)
+           (with-current-buffer session-buffer
+             (run-hook-with-args 'window-buffer-change-functions (selected-window)))
+           (should-not (funcall face))
+           (should-not (buffer-local-value 'agent-session-list--alert session-buffer))
+           ;; So does typing in it.
+           (setq timers nil)
+           (agent-session-list-alert session-buffer)
+           (mapc #'funcall timers)
+           (should (eq (funcall face) 'pink))
+           (with-current-buffer session-buffer (run-hooks 'post-command-hook))
+           (should-not (funcall face))
+           ;; Someone already looking at the session only sees the flash.
+           (setq timers nil seen t)
+           (agent-session-list-alert session-buffer)
+           (mapc #'funcall timers)
+           (should-not (funcall face))
+           ;; Callers that aren't sessions can't ask.
+           (should-error (agent-session-test--call "alert" nil)))
+       (kill-buffer list-buffer)))))
+
 ;;; Sessions working with each other (agent-collab)
 
 (defun agent-session-test--call (method caller &rest params)

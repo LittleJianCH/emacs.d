@@ -13,6 +13,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
@@ -77,6 +78,77 @@ The value is ((AGENT . ITEM) ...)."
 (defface agent-session-list-title '((t :inherit bold))
   "Face for titles of active sessions.")
 
+;;; Sessions asking for attention
+;;
+;; An agent can ask for the user's attention: its entry flashes red and
+;; pink twice and stays pink until the user opens the session.
+
+(defface agent-session-list-alert '((t :background "#ffc0cb" :extend t))
+  "Entry of a session whose agent asks for your attention.")
+
+(defface agent-session-list-alert-flash '((t :background "#ff4d4f" :extend t))
+  "Entry of such a session at the bright moments of its flash.")
+
+(defvar-local agent-session-list--alert nil
+  "In a session buffer: why its agent asks for attention, or nil.
+The reason may be the empty string.")
+
+(defvar agent-session-list--flashing nil
+  "Session buffers whose entries are bright at this moment of their flash.")
+
+(defun agent-session-list--seen-p (buffer)
+  "Whether the user is looking at session BUFFER now."
+  (and (eq (window-buffer (selected-window)) buffer)
+       (eq (frame-focus-state (window-frame (selected-window))) t)))
+
+(defun agent-session-list-alert (buffer &optional reason)
+  "Flash the entry of session BUFFER and keep it pink until the session is opened.
+REASON, if given, is shown when the mouse is on the entry.  When the user
+is already looking at the session, it only flashes."
+  (with-current-buffer buffer
+    (setq agent-session-list--alert (or reason ""))
+    (add-hook 'window-buffer-change-functions #'agent-session-list--opened nil t)
+    (add-hook 'window-selection-change-functions #'agent-session-list--opened nil t)
+    (add-hook 'post-command-hook #'agent-session-list--used nil t))
+  ;; Bright, pink, bright, then pink, 0.3 s each.
+  (pcase-dolist (`(,delay ,bright ,last) '((0 t) (0.3 nil) (0.6 t) (0.9 nil t)))
+    (run-with-timer
+     delay nil
+     (lambda ()
+       (setq agent-session-list--flashing
+             (if bright
+                 (cl-adjoin buffer agent-session-list--flashing)
+               (delq buffer agent-session-list--flashing)))
+       ;; Someone looking at the session has seen it already.
+       (when (and last (buffer-live-p buffer) (agent-session-list--seen-p buffer))
+         (agent-session-list--clear buffer))
+       (agent-session-list--refresh)))))
+
+(defun agent-session-list--clear (buffer)
+  "Stop showing that session BUFFER asks for attention."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when agent-session-list--alert
+        (setq agent-session-list--alert nil)
+        (remove-hook 'window-buffer-change-functions #'agent-session-list--opened t)
+        (remove-hook 'window-selection-change-functions #'agent-session-list--opened t)
+        (remove-hook 'post-command-hook #'agent-session-list--used t)
+        (agent-session-list--refresh)))))
+
+(defun agent-session-list--opened (_window)
+  "Clear the alert of this session buffer once it is in the selected window."
+  (when (eq (window-buffer (selected-window)) (current-buffer))
+    (agent-session-list--clear (current-buffer))))
+
+(defun agent-session-list--used ()
+  "Clear the alert of this session buffer: the user ran a command in it."
+  (agent-session-list--clear (current-buffer)))
+
+(defun agent-session-list--alert-face (buffer)
+  "Face of the entry of session BUFFER for its alert, or nil."
+  (cond ((memq buffer agent-session-list--flashing) 'agent-session-list-alert-flash)
+        ((buffer-local-value 'agent-session-list--alert buffer) 'agent-session-list-alert)))
+
 (defun agent-session-list--project-name (root)
   "Return the project name of ROOT."
   (file-name-nondirectory (directory-file-name root)))
@@ -127,14 +199,17 @@ The item is highlighted on mouse hover and opens on click."
     ;; spill onto the start of the next line.
     (when (eq (char-before) ?\n)
       (remove-text-properties (1- (point)) (point) '(mouse-face nil)))
-    ;; Add the click-to-open tooltip only to non-button parts so it doesn't
-    ;; override the tooltip of × itself.
-    (let ((pos start))
-      (while (< pos (point))
-        (let ((next (next-single-property-change pos 'button nil (point))))
-          (unless (get-text-property pos 'button)
-            (put-text-property pos next 'help-echo "点击打开"))
-          (setq pos next))))))
+    (agent-session-list--set-help start (point) "点击打开")))
+
+(defun agent-session-list--set-help (start end help)
+  "Show HELP as the tooltip of the text from START to END.
+Buttons, such as ×, keep their own tooltips."
+  (let ((pos start))
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'button nil end)))
+        (unless (get-text-property pos 'button)
+          (put-text-property pos next 'help-echo help))
+        (setq pos next)))))
 
 (defun agent-session-list--kill-button (buffer)
   "Return a × button that ends the session in BUFFER, at the right edge."
@@ -176,7 +251,8 @@ Try to keep point on the same entry."
         (insert (propertize "  还没有会话，按 c 新建\n" 'face 'agent-session-dim))
       (dolist (buffer live)
         (let* ((session (buffer-local-value 'agent-session--current buffer))
-               (project (agent-session-list--project-name (agent-session-root session))))
+               (project (agent-session-list--project-name (agent-session-root session)))
+               (start (point)))
           (agent-session-list--insert-entry
            (list :buffer buffer)
            (agent-session-list--head-line
@@ -190,7 +266,12 @@ Try to keep point on the same entry."
            "\n    "
            (propertize (agent-session-list--truncate (agent-session-display-title session))
                        'face 'agent-session-list-title)
-           "\n"))))
+           "\n")
+          (when-let* ((face (agent-session-list--alert-face buffer)))
+            (add-face-text-property start (point) face t)
+            (let ((reason (buffer-local-value 'agent-session-list--alert buffer)))
+              (when (and reason (not (string-empty-p reason)))
+                (agent-session-list--set-help start (point) (concat reason "\n点击打开"))))))))
     (insert "\n" (propertize (format "历史 · %s\n" (agent-session-list--project-name root))
                              'face 'agent-session-list-heading))
     (if (null history)
