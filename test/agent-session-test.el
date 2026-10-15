@@ -679,6 +679,15 @@ Also mark that the context needs reloading."
      (push-button (match-beginning 0))
      (should (equal (current-kill 0) "echo hello")))))
 
+(ert-deftest agent-session-test-run-code-eof-error ()
+  "A run is still recorded when sending EOF fails (remote process already gone)."
+  (agent-session-test--with-session
+   (agent-session-text-done agent-session--current "r1" "```bash\necho hi\n```")
+   (cl-letf (((symbol-function 'process-send-eof)
+              (lambda (&rest _) (error "Process not found"))))
+     (agent-session-test--run-and-wait "▶ 运行"))
+   (should (string-match-p "✓ 完成 · [0-9.]+s\nhi" (agent-session-test--transcript)))))
+
 (ert-deftest agent-session-test-run-code-tail ()
   "Only the last `agent-session-run-output-lines' lines of output are shown."
   (agent-session-test--with-session

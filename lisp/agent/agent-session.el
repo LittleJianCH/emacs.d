@@ -712,8 +712,10 @@ The output is shown below the code block."
                              (setf (plist-get run :timer) nil))
                            (when (agent-session--block session id)
                              (agent-session--render session id)))))))
-      ;; No stdin, so a command waiting for input doesn't hang.
-      (process-send-eof process)
+      ;; No stdin, so a command waiting for input doesn't hang.  A remote
+      ;; process may already be gone by now (tramp-rpc then signals), which
+      ;; must not keep the run from being recorded.
+      (ignore-errors (process-send-eof process))
       (setf (plist-get run :process) process)
       (setf (alist-get index (plist-get block :runs)) run)
       (puthash id block (agent-session-blocks session))
