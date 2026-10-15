@@ -80,8 +80,9 @@ The value is ((AGENT . ITEM) ...)."
 
 ;;; Sessions asking for attention
 ;;
-;; An agent can ask for the user's attention: its entry flashes red and
-;; pink twice and stays pink until the user opens the session.
+;; An agent can ask for the user's attention: its entry rises to the top of
+;; the live sessions, flashes red and pink twice and stays pink until the
+;; user opens the session.
 
 (defface agent-session-list-alert '((t :background "#ffc0cb" :extend t))
   "Entry of a session whose agent asks for your attention.")
@@ -93,6 +94,9 @@ The value is ((AGENT . ITEM) ...)."
   "In a session buffer: why its agent asks for attention, or nil.
 The reason may be the empty string.")
 
+(defvar-local agent-session-list--alert-time nil
+  "In a session buffer: when its agent last asked for attention.")
+
 (defvar agent-session-list--flashing nil
   "Session buffers whose entries are bright at this moment of their flash.")
 
@@ -102,16 +106,22 @@ The reason may be the empty string.")
        (eq (frame-focus-state (window-frame (selected-window))) t)))
 
 (defun agent-session-list-alert (buffer &optional reason)
-  "Flash the entry of session BUFFER and keep it pink until the session is opened.
-REASON, if given, is shown when the mouse is on the entry.  When the user
-is already looking at the session, it only flashes."
+  "Raise the entry of session BUFFER to the top and flash it.
+It stays pink until the session is opened.  REASON, if given, is shown
+when the mouse is on the entry.  When the user is already looking at the
+session, it only flashes."
   (with-current-buffer buffer
-    (setq agent-session-list--alert (or reason ""))
+    (setq agent-session-list--alert (or reason "")
+          agent-session-list--alert-time (float-time))
     (add-hook 'window-buffer-change-functions #'agent-session-list--opened nil t)
     (add-hook 'window-selection-change-functions #'agent-session-list--opened nil t)
     (add-hook 'post-command-hook #'agent-session-list--used nil t))
-  ;; Bright, pink, bright, then pink, 0.3 s each.
-  (pcase-dolist (`(,delay ,bright ,last) '((0 t) (0.3 nil) (0.6 t) (0.9 nil t)))
+  ;; Rise first, where it can be seen, then flash.
+  (agent-session-list--refresh)
+  (when-let* ((window (get-buffer-window agent-session-list--buffer-name t)))
+    (set-window-start window (with-current-buffer (window-buffer window) (point-min))))
+  ;; After a pause: bright, pink, bright, then pink, 0.3 s each.
+  (pcase-dolist (`(,delay ,bright ,last) '((0.3 t) (0.6 nil) (0.9 t) (1.2 nil t)))
     (run-with-timer
      delay nil
      (lambda ()
@@ -129,7 +139,8 @@ is already looking at the session, it only flashes."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when agent-session-list--alert
-        (setq agent-session-list--alert nil)
+        (setq agent-session-list--alert nil
+              agent-session-list--alert-time nil)
         (remove-hook 'window-buffer-change-functions #'agent-session-list--opened t)
         (remove-hook 'window-selection-change-functions #'agent-session-list--opened t)
         (remove-hook 'post-command-hook #'agent-session-list--used t)
@@ -143,6 +154,14 @@ is already looking at the session, it only flashes."
 (defun agent-session-list--used ()
   "Clear the alert of this session buffer: the user ran a command in it."
   (agent-session-list--clear (current-buffer)))
+
+(defun agent-session-list--order (buffers)
+  "BUFFERS of live sessions in list order.
+Those asking for attention come first, the latest first; the others keep
+their order."
+  (let ((time (lambda (buffer) (buffer-local-value 'agent-session-list--alert-time buffer))))
+    (append (sort (seq-filter time buffers) :key time :reverse t)
+            (seq-remove time buffers))))
 
 (defun agent-session-list--alert-face (buffer)
   "Face of the entry of session BUFFER for its alert, or nil."
@@ -243,7 +262,7 @@ Try to keep point on the same entry."
   (let* ((inhibit-read-only t)
          (current (get-text-property (point) 'agent-session-entry))
          (root agent-session-list--root)
-         (live (agent-session-buffers))
+         (live (agent-session-list--order (agent-session-buffers)))
          (history (agent-session-list--history-items root)))
     (erase-buffer)
     (insert (propertize "进行中\n" 'face 'agent-session-list-heading))
