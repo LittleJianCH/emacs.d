@@ -715,7 +715,7 @@ code and where it is, so the agent can answer without looking it up."
 ```
 %s
 
-（review=%s，标注 id=%s，revision=%d。回答后用 review_reply 把同样的结论写回审查。）"
+（review=%s，标注 id=%s，revision=%d。请直接调用 review_reply 回答，回答只写在审查里，不要在对话中再写一遍。）"
             (if (> (plist-get comment :revision) 1) "·修改标注" "·标注")
             (plist-get review :title)
             (if (equal (plist-get item :id) "full")
@@ -1889,7 +1889,7 @@ Every changed line must be covered exactly once. When review_build reports a cov
      (summary string "Overview of the whole compared change, in Chinese" required)
      (items array "The atomic items, see review_snapshot for the format" required)
      (title string "Review title. Default: <head> → <base>"))
-  "Assemble your plan for a snapshot (item format: see review_snapshot), check that every changed line is covered exactly once, and show the review in Emacs. Building the same plan again reopens the existing review with its annotations; a changed plan makes a new review and leaves the old one. Afterwards give the user the base/head and a short result, and tell them to select lines in the review buffer and press a to write an annotation. Each annotation arrives in this session as a user message carrying the selected code, its file and line range, and the review and annotation ids: answer it there and write the same answer to the review with review_reply. Do not wait or poll for annotations."
+  "Assemble your plan for a snapshot (item format: see review_snapshot), check that every changed line is covered exactly once, and show the review in Emacs. Building the same plan again reopens the existing review with its annotations; a changed plan makes a new review and leaves the old one. Afterwards give the user the base/head and a short result, and tell them to select lines in the review buffer and press a to write an annotation. Each annotation arrives in this session as a user message carrying the selected code, its file and line range, and the review and annotation ids. Answer it only by calling review_reply: the answer shows under the annotation in the review, so do not also write it in the conversation (at most a one-line note that you replied). Do not wait or poll for annotations."
   (let* ((snap (agent-review--load-snapshot snapshot))
          (review (agent-review-build snap summary items title
                                      (plist-get agent-ui-caller :agent_buffer)))
@@ -1901,7 +1901,7 @@ Every changed line must be covered exactly once. When review_build reports a cov
 (agent-ui-defmethod "review_comments"
     ((review string "Review id. Default: every review made by this session")
      (all boolean "Include annotations already answered"))
-  "Read the user's annotations of atomic reviews: item, file, the line range they cover (新: lines at head, 旧: lines at the merge base), the selected code as diff lines, revision and the user's text. Each annotation was also sent to the session as a message when written; use this to re-read them. Treat them as the user's review comments: check each against the pinned commits, answer in this session, and write the same answer to the review with review_reply. Answering is not permission to change the code; change it only when the user asks."
+  "Read the user's annotations of atomic reviews: item, file, the line range they cover (新: lines at head, 旧: lines at the merge base), the selected code as diff lines, revision and the user's text. Each annotation was also sent to the session as a message when written; use this to re-read them. Treat them as the user's review comments: check each against the pinned commits and answer it with review_reply only, not in the conversation. Answering is not permission to change the code; change it only when the user asks."
   (let* ((agent (plist-get agent-ui-caller :agent_buffer))
          (root (agent-ui--caller-root))
          (ids (cond (review (list review))
@@ -1929,7 +1929,7 @@ Every changed line must be covered exactly once. When review_build reports a cov
      (revision integer "The annotation revision you read" required)
      (text string "Your answer, in Chinese" required)
      (status string "responded (default) or resolved"))
-  "Answer an annotation in its review; the review buffer shows it at once. A revision conflict means the user edited the annotation after you read it: read it again with review_comments and answer the new text. Use status resolved only when the issue is actually fixed or the user asks."
+  "Answer an annotation in its review; the review buffer shows it at once under the annotation. This is where the answer goes: do not repeat it in the conversation. A revision conflict means the user edited the annotation after you read it: read it again with review_comments and answer the new text. Use status resolved only when the issue is actually fixed or the user asks."
   (let ((answered (agent-review-reply review id revision text status)))
     (agent-review--refresh review)
     (list :id id :status (plist-get answered :status))))

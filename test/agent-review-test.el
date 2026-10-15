@@ -145,7 +145,9 @@
         (should (string-search "a.txt 新 2 · 旧 2" message))
         (should (string-search "```diff\n-line 2\n+line two\n```\n为什么改" message))
         (should (string-search (format "标注 id=%s，revision=1" (plist-get comment :id))
-                               message)))
+                               message))
+        ;; The answer belongs in the review, not in the conversation.
+        (should (string-search "请直接调用 review_reply 回答" message)))
       ;; Selecting the same lines again edits the annotation.
       (agent-review-annotate-lines review agent-review-test--change "改成别的")
       (should (string-search "·修改标注" (agent-review--message
