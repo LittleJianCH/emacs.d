@@ -60,6 +60,12 @@
   :demand t
   :after agent-ui)
 
+;; Session handles (@name) and the sessions / session_read / session_ask methods
+;; agents use to work with each other.
+(use-package agent-collab
+  :demand t
+  :after agent-ui)
+
 (defmacro agent-session--evil-enter (name command)
   "Define NAME to run evil's COMMAND in the input area.
 Elsewhere it jumps to the end of the input area and enters insert state.

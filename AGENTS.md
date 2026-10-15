@@ -70,6 +70,15 @@ var/                     runtime state (history, backups, pasted images...); git
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's
   `tools/list` is generated from these, so a new method is automatically an MCP tool.
+  A method that waits for something slow returns `agent-ui-defer` at once and emx polls
+  it (`_poll`), so Emacs never blocks while an agent waits.
+- `agent-collab.el` — agents working with each other. Every session has a handle
+  (`@cfi-meaning`) named from its topic by a cheap model of its agent
+  (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users
+  mention sessions with it. Methods `sessions`, `session_read` (latest turns, paged)
+  and `session_ask` (confirmed by the user; starts a read-only sub-session, hidden, whose
+  confirmations are repeated in the caller, and waits for its reply). Only sessions the
+  user started may ask (`agent-collab-max-depth`).
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
@@ -123,7 +132,7 @@ emacsclient -e '(load (locate-user-emacs-file "lisp/agent/agent-session.el") nil
 the command names no machine-specific path.
 
 Load in dependency order: agent-session -> agent-claude / agent-codex ->
-agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
+agent-session-list -> agent-ui -> agent-canvas -> agent-collab -> init-agent. Caveats:
 
 - `defvar`, `defvar-keymap`, `defcustom` and `defface` do not re-evaluate on reload.
   Apply new key bindings with `keymap-set` and changed defaults with `setq` afterwards,

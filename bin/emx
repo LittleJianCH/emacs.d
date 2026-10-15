@@ -38,6 +38,8 @@ const POSITIONAL = {
   notify: ['message'],
   read_buffer: ['name', 'start_line', 'end_line'],
   diagnostics: ['path'],
+  session_read: ['session', 'last'],
+  session_ask: ['prompt'],
   config_read: ['path', 'offset', 'limit'],
 };
 
@@ -324,6 +326,10 @@ const MCP_INSTRUCTIONS = `These tools operate the Emacs instance the user is wor
 - Use show to display an existing org / markdown document or a diff.
 - Call context first to see which file, cursor position and selection the user is looking at.
 - For editor operations the other tools do not cover, run Elisp with eval.
+- Other agent sessions (Claude, Codex) may run in this Emacs. Each has an @handle, and the
+  user mentions sessions with it. sessions lists them, session_read reads their latest
+  turns, and session_ask asks another agent (a second opinion, a review of your changes)
+  and waits for its reply.
 - The user reads Chinese: write page content and notifications in Chinese unless asked otherwise.`;
 
 const REMOTE_INSTRUCTIONS = `

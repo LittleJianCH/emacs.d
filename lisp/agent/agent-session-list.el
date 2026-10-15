@@ -170,6 +170,9 @@ Try to keep point on the same entry."
            (propertize (format "  %s · %s" (agent-session-title session) project)
                        'face 'agent-session-dim)
            (agent-session-list--kill-button buffer)
+           (if-let* ((handle (agent-session-handle session)))
+               (propertize (concat "  @" handle) 'face 'agent-session-dim)
+             "")
            "\n    "
            (propertize (agent-session-list--truncate (agent-session-display-title session))
                        'face 'agent-session-list-title)

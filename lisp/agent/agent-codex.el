@@ -34,7 +34,9 @@
   '((ask "untrusted" "readOnly" "read-only" "user")
     (edits "on-request" "workspaceWrite" "workspace-write" "user")
     (auto "on-request" "workspaceWrite" "workspace-write" "auto_review")
-    (full "never" "dangerFullAccess" "danger-full-access" "user"))
+    (full "never" "dangerFullAccess" "danger-full-access" "user")
+    ;; Read-only, and never asks: what can't run in the sandbox fails.
+    (plan "never" "readOnly" "read-only" "user"))
   "Mapping from unified permission modes to Codex approval policy and sandbox.")
 
 (defun agent-codex--mode (session)
@@ -61,7 +63,9 @@ For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
 (defun agent-codex--command (session)
   "Return the command line that starts SESSION."
   (append
-   (list agent-codex-executable "app-server")
+   (list agent-codex-executable "app-server"
+         ;; session_ask waits for another agent; the default is 60 seconds.
+         "-c" "mcp_servers.emacs.tool_timeout_sec=1800")
    (if (file-remote-p (agent-session-root session))
        ;; On the host the MCP server is the relay to this Emacs's emx, which
        ;; needs no environment.

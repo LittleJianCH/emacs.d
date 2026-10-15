@@ -126,6 +126,49 @@ That is the Claude session id or the Codex thread id."
   (or (agent-session--get (agent-session-agent session) :title)
       (symbol-name (agent-session-agent session))))
 
+;;; Handles: short names to mention sessions with, e.g. @cfi-meaning
+
+(defun agent-session-handle (session)
+  "Handle of SESSION, a short unique name without the @."
+  (plist-get (agent-session-info session) :handle))
+
+(defun agent-session--unique-handle (base &optional except)
+  "BASE, or BASE-N if another live session than EXCEPT already uses it."
+  (let ((taken (delq nil (mapcar (lambda (buffer)
+                                   (let ((session (buffer-local-value 'agent-session--current
+                                                                      buffer)))
+                                     (unless (eq session except)
+                                       (agent-session-handle session))))
+                                 (agent-session-buffers))))
+        (handle base)
+        (n 1))
+    (while (member handle taken)
+      (setq handle (format "%s-%d" base (cl-incf n))))
+    handle))
+
+(defun agent-session-set-handle (session base)
+  "Name SESSION after BASE (made unique) and return the handle."
+  (let ((handle (agent-session--unique-handle base session)))
+    (setf (agent-session-info session) (plist-put (agent-session-info session) :handle handle))
+    (agent-session--refresh session)
+    handle))
+
+(defun agent-session-find (name)
+  "The live session called NAME: a handle (with or without @) or a buffer name."
+  (let ((handle (string-remove-prefix "@" name)))
+    (seq-some (lambda (buffer)
+                (let ((session (buffer-local-value 'agent-session--current buffer)))
+                  (and (or (equal handle (agent-session-handle session))
+                           (equal name (buffer-name buffer)))
+                       session)))
+              (agent-session-buffers))))
+
+(defun agent-session-parent (session)
+  "The live session that started SESSION through another agent, or nil."
+  (when-let* ((buffer (plist-get (agent-session-info session) :parent))
+              ((agent-session-buffer-p buffer)))
+    (buffer-local-value 'agent-session--current buffer)))
+
 ;;; Backend interface
 
 (cl-defgeneric agent-session-backend-start (backend session)
@@ -1040,35 +1083,60 @@ the request.  DIFF is already shown by the tool block, so it isn't repeated."
   (let ((id (symbol-name (gensym "ask-"))))
     (setf (agent-session-asks session)
           (append (agent-session-asks session)
-                  ;; :answer is a placeholder modified in place when answered,
-                  ;; so this list entry updates with it.
+                  ;; :answer and :copies are placeholders modified in place,
+                  ;; so this list entry updates with them.
                   (list (list :id id :title title :detail detail :choices choices
-                              :callback callback :tool tool :answer nil))))
+                              :callback callback :tool tool :answer nil :copies nil))))
     (when (and tool (agent-session--block session tool))
       (agent-session--update session tool :note "等待确认"))
     (agent-session--refresh session)
     (message "%s 需要确认：%s（C-c C-y 允许，C-c C-n 拒绝）"
              (agent-session-title session) title)
+    (agent-session--copy-ask session id)
     id))
+
+(defun agent-session--copy-ask (session id)
+  "Repeat confirmation request ID of SESSION in the session that started it.
+A session started by another agent runs out of sight, so the user answers
+its requests where that agent runs; answering either one answers both."
+  (when-let* ((parent (agent-session-parent session)))
+    (let* ((ask (agent-session--ask session id))
+           (tool (agent-session--block session (plist-get ask :tool)))
+           (copy (agent-session-ask
+                  parent
+                  :title (format "@%s：%s" (agent-session-handle session) (plist-get ask :title))
+                  :detail (or (plist-get ask :detail) (plist-get tool :title))
+                  :choices (plist-get ask :choices))))
+      (plist-put (agent-session--ask parent copy) :origin (cons session id))
+      (plist-put ask :copies (cons (cons parent copy) (plist-get ask :copies))))))
 
 (defun agent-session--ask (session id)
   "The confirmation request ID in SESSION."
   (seq-find (lambda (ask) (equal (plist-get ask :id) id)) (agent-session-asks session)))
 
 (defun agent-session--close-ask (session ask label)
-  "Mark confirmation request ASK as handled; note result LABEL on its tool."
+  "Mark confirmation request ASK as handled; note result LABEL on its tool.
+Its copies in other sessions close with it."
   (plist-put ask :answer label)
   (when-let* ((tool (plist-get ask :tool))
               ((agent-session--block session tool)))
-    (agent-session--update session tool :note label)))
+    (agent-session--update session tool :note label))
+  (pcase-dolist (`(,other . ,id) (plist-get ask :copies))
+    (when-let* ((copy (agent-session--ask other id))
+                ((not (plist-get copy :answer))))
+      (agent-session--close-ask other copy label)
+      (agent-session--refresh other))))
 
 (defun agent-session--answer (session id key)
-  "Answer confirmation request ID with KEY."
+  "Answer confirmation request ID with KEY.
+A copy answers the request it was made from."
   (let ((ask (agent-session--ask session id)))
     (unless (or (null ask) (plist-get ask :answer))
-      (agent-session--close-ask session ask (cadr (assq key (plist-get ask :choices))))
-      (funcall (plist-get ask :callback) key)
-      (agent-session--refresh session))))
+      (if-let* ((origin (plist-get ask :origin)))
+          (agent-session--answer (car origin) (cdr origin) key)
+        (agent-session--close-ask session ask (cadr (assq key (plist-get ask :choices))))
+        (funcall (plist-get ask :callback) key)
+        (agent-session--refresh session)))))
 
 (defun agent-session-notice (session text &optional face)
   "Insert a notice line TEXT with FACE into the transcript."
@@ -1206,7 +1274,10 @@ HELP is the help echo."
        (propertize (format "  排队 %d" queued) 'face 'agent-session-dim))
      (propertize (format "  %s" (file-name-nondirectory
                                  (directory-file-name (agent-session-root session))))
-                 'face 'agent-session-dim))))
+                 'face 'agent-session-dim)
+     (when-let* ((handle (agent-session-handle session)))
+       (propertize (concat " @" handle) 'face 'agent-session-dim
+                   'help-echo "在其他会话里用这个名字提及本会话")))))
 
 (defvar agent-session--list-refresh-function nil
   "Refresh function of the session list (set by it), called on status changes.")
@@ -1463,16 +1534,32 @@ URI and ACTION are as for `dnd-open-file'."
   "Return non-nil if point is in the input area."
   (and agent-session--current (>= (point) (agent-session-input agent-session--current))))
 
+(defvar agent-session-send-filters nil
+  "Functions rewriting a user message on its way to the agent.
+Each is called with the session and the text and returns the text to
+send; the transcript keeps showing what the user wrote.")
+
+(defvar agent-session-submit-functions nil
+  "Functions called with the session and the text of each submitted message.")
+
+(defun agent-session--outgoing (session text)
+  "TEXT as sent to the agent of SESSION, after `agent-session-send-filters'."
+  (dolist (filter agent-session-send-filters text)
+    (setq text (funcall filter session text))))
+
 (defun agent-session--deliver (session text)
   "Hand TEXT to the backend of SESSION for sending."
   (agent-session-set-status session 'running)
-  (agent-session-backend-send (agent-session-backend session) session text))
+  (agent-session-backend-send (agent-session-backend session) session
+                              (agent-session--outgoing session text)))
 
 (defun agent-session-submit (session text)
-  "Send TEXT as the user: show it in the transcript; queue it if busy."
+  "Send TEXT as the user: show it in the transcript; queue it if busy.
+Return the id of its block in the transcript."
   (unless (plist-get (agent-session-info session) :title)
     (setf (agent-session-info session)
           (plist-put (agent-session-info session) :title (agent-session--title-seed text))))
+  (run-hook-with-args 'agent-session-submit-functions session text)
   (let ((id (format "user-%s" (random)))
         (busy (memq (agent-session-status session) '(running starting))))
     (agent-session--new-block session id (list :type 'user :text text :queued busy))
@@ -1481,7 +1568,8 @@ URI and ACTION are as for `dnd-open-file'."
           (setf (agent-session-queue session)
                 (append (agent-session-queue session) (list (cons id text))))
           (agent-session--refresh session))
-      (agent-session--deliver session text))))
+      (agent-session--deliver session text))
+    id))
 
 (defun agent-session-send (session text)
   "Handle user input TEXT.
@@ -1514,7 +1602,8 @@ doesn't support steering, interrupt the current turn and send TEXT first."
    ;; Local commands like /model run in Emacs as usual.
    ((agent-session--run-local-command session text))
    (t
-    (if (agent-session-backend-steer (agent-session-backend session) session text)
+    (if (agent-session-backend-steer (agent-session-backend session) session
+                                     (agent-session--outgoing session text))
         (agent-session--new-block session (format "user-%s" (random))
                                   (list :type 'user :text text :steer t))
       (let ((id (format "user-%s" (random))))
@@ -1821,7 +1910,7 @@ session carrying over the input draft."
         (setf (agent-session-agent session) agent
               (agent-session-backend session) (agent-session--get agent :backend)
               (agent-session-state session) nil
-              (agent-session-info session) nil
+              (agent-session-info session) (list :handle (agent-session-handle session))
               (agent-session-settings session)
               (copy-sequence (alist-get agent agent-session-last-settings))
               (agent-session-status session) 'starting)
@@ -1973,14 +2062,30 @@ shares a line with the input."
                   (when-let* ((c (assoc name candidates)))
                     (agent-session--command-annotation c width)))
                 :exit-function exit)))
-       ;; @file
+       ;; @file, or @handle of another session
        ((string-match "\\(?:\\`\\|[ \t]\\)@\\([^ \t\n]*\\)\\'" text)
-        (list (+ start (match-beginning 1)) (point)
-              (completion-table-with-cache
-               (lambda (_) (agent-session--project-files session)))
-              :exclusive 'no
-              :category 'file
-              :exit-function exit))))))
+        (let ((sessions (agent-session--mention-candidates session)))
+          (list (+ start (match-beginning 1)) (point)
+                (completion-table-with-cache
+                 (lambda (_) (append (mapcar #'car sessions)
+                                     (agent-session--project-files session))))
+                :exclusive 'no
+                :category 'file
+                :annotation-function
+                (lambda (name)
+                  (when-let* ((note (cdr (assoc name sessions))))
+                    (concat "  " (propertize note 'face 'completions-annotations))))
+                :exit-function exit)))))))
+
+(defun agent-session--mention-candidates (session)
+  "Handles of the sessions other than SESSION: ((HANDLE . NOTE) ...)."
+  (seq-keep (lambda (buffer)
+              (let ((other (buffer-local-value 'agent-session--current buffer)))
+                (when-let* (((not (eq other session)))
+                            (handle (agent-session-handle other)))
+                  (cons handle (format "%s 会话 · %s" (agent-session-title other)
+                                       (agent-session-display-title other))))))
+            (agent-session-buffers)))
 
 ;;; Settings menu (C-c C-o)
 
@@ -2167,30 +2272,42 @@ of a past session to resume; ROOT defaults to the current project root."
                                       (agent-session-buffers))
                           (and (not new) (car (agent-session-buffers root agent))))))
         (select-window (agent-session-display existing))
-      (let* ((buffer (generate-new-buffer
-                      (format "*%s@%s*" agent (file-name-nondirectory (directory-file-name root)))))
-             (session (agent-session--make
-                       :agent agent
-                       :backend (or (agent-session--get agent :backend)
-                                    (user-error "未注册 agent：%s" agent))
-                       :root root :buffer buffer
-                       :state (and resume (list :resume resume))
-                       :settings (copy-sequence
-                                  (alist-get agent agent-session-last-settings)))))
-        (agent-session--setup-buffer session)
-        (with-current-buffer buffer
-          (setq default-directory root)
-          (add-hook 'kill-buffer-hook
-                    (lambda ()
-                      (agent-session-backend-stop (agent-session-backend session) session)
-                      ;; The buffer isn't deleted yet; refresh the session list later.
-                      (when agent-session--list-refresh-function
-                        (run-at-time 0 nil agent-session--list-refresh-function)))
-                    nil t))
+      (let ((buffer (agent-session-open agent root resume)))
         (select-window (agent-session-display buffer))
         (goto-char (point-max))
-        (agent-session-backend-start (agent-session-backend session) session)
         buffer))))
+
+(defun agent-session-open (agent root &optional resume settings info)
+  "Start an AGENT session in ROOT without showing it; return its buffer.
+RESUME is the id of a past session to resume.  SETTINGS defaults to the
+agent's latest settings; INFO is the initial info plist."
+  (let* ((buffer (generate-new-buffer
+                  (format "*%s@%s*" agent (file-name-nondirectory (directory-file-name root)))))
+         (session (agent-session--make
+                   :agent agent
+                   :backend (or (agent-session--get agent :backend)
+                                (user-error "未注册 agent：%s" agent))
+                   :root root :buffer buffer
+                   :info info
+                   :state (and resume (list :resume resume))
+                   :settings (or settings
+                                 (copy-sequence
+                                  (alist-get agent agent-session-last-settings))))))
+    ;; A placeholder name until one is made from the topic (see agent-collab.el).
+    (agent-session-set-handle session (symbol-name agent))
+    (agent-session--setup-buffer session)
+    (with-current-buffer buffer
+      (setq default-directory root)
+      (add-hook 'kill-buffer-hook
+                (lambda ()
+                  (agent-session-backend-stop (agent-session-backend session) session)
+                  ;; The buffer isn't deleted yet; refresh the session list later.
+                  (when agent-session--list-refresh-function
+                    (run-at-time 0 nil agent-session--list-refresh-function)))
+                nil t)
+      (goto-char (point-max)))
+    (agent-session-backend-start (agent-session-backend session) session)
+    buffer))
 
 ;;;###autoload
 (defun agent-session-create (&optional choose)
