@@ -109,18 +109,18 @@
 (ert-deftest agent-review-test-around-hunk ()
   (let ((source (vconcat (mapcar (lambda (i) (format "l%d" i)) (number-sequence 1 20)))))
     ;; A one-line change at line 2: line 1 before, lines 3-5 after.
-    (let ((around (agent-review--around "@@ -2 +2 @@\n-x\n+y\n" source 3 1 most-positive-fixnum)))
+    (let ((around (agent-review--around "@@ -2 +2 @@\n-x\n+y\n" source 3 3 1 most-positive-fixnum)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (car around)) '(1)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (cdr around)) '(3 4 5)))
       (should (equal (mapcar (lambda (l) (plist-get l :old)) (cdr around)) '(3 4 5))))
     ;; Old lines 5-6 deleted after new line 4: old numbers shift by two after it.
-    (let ((around (agent-review--around "@@ -5,2 +4,0 @@\n-a\n-b\n" source 3 1 most-positive-fixnum)))
+    (let ((around (agent-review--around "@@ -5,2 +4,0 @@\n-a\n-b\n" source 3 3 1 most-positive-fixnum)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (car around)) '(2 3 4)))
       (should (equal (mapcar (lambda (l) (plist-get l :old)) (car around)) '(2 3 4)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (cdr around)) '(5 6 7)))
       (should (equal (mapcar (lambda (l) (plist-get l :old)) (cdr around)) '(7 8 9))))
     ;; Context stops at FROM and before LIMIT.
-    (let ((around (agent-review--around "@@ -10 +10 @@\n-x\n+y\n" source 3 9 12)))
+    (let ((around (agent-review--around "@@ -10 +10 @@\n-x\n+y\n" source 3 3 9 12)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (car around)) '(9)))
       (should (equal (mapcar (lambda (l) (plist-get l :new)) (cdr around)) '(11))))))
 
@@ -382,6 +382,60 @@
         ;; Only atomic items can be marked reviewed.
         (should-error (agent-review--mark-reviewed '("full" . "a.txt")))
         (should-error (agent-review--mark-reviewed "full"))))))
+
+;; a.txt has 20 lines; item 1 changes line 2 and item 2 line 18.
+(ert-deftest agent-review-test-expand-gaps ()
+  (agent-review-test--with-repo repo
+    (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                      "概览" (agent-review-test--plan)))
+          (agent-review-expand-lines 5)
+          (shown (lambda (n)
+                   (save-excursion
+                     (goto-char (point-min))
+                     (re-search-forward (format "^ +[0-9]+ +%d  line %d$" n n) nil t)))))
+      (agent-review-test--with-buffer review
+        ;; Item 1 shows lines 1-5; lines 6-20 are hidden below the hunk.
+        (goto-char (point-min))
+        (search-forward "+line two")
+        (should (funcall shown 5))
+        (should-not (funcall shown 6))
+        (should (save-excursion (search-forward "隐藏 15 行" nil t)))
+        ;; Opening downward from the hunk keeps point above the new lines.
+        (agent-review-expand-down)
+        (should (equal (plist-get (get-text-property (point) 'agent-review-target) :line) 5))
+        (should (funcall shown 10))
+        (should-not (funcall shown 11))
+        ;; RET on the gap's line shows all of it, and the gap is gone.
+        (goto-char (point-min))
+        (search-forward "隐藏 10 行")
+        (agent-review-visit)
+        (should (funcall shown 20))
+        (should-not (save-excursion
+                      (goto-char (point-min))
+                      (text-property-search-forward 'agent-review-gap-info nil (lambda (_ v) v))))
+        ;; Item 2's hunk at line 18 opens upward; point stays on its header.
+        (agent-review-goto "atomic-2")
+        (search-forward "隐藏 14 行")
+        (agent-review-expand-up)
+        (should (equal (get-text-property (point) 'agent-review-gap) '("atomic-2" "a.txt" 0)))
+        (should (looking-back "隐藏 9 行.*" (line-beginning-position)))
+        ;; What was opened survives a redraw with more context.
+        (agent-review-more-context 1)
+        (goto-char (point-min))
+        (should (search-forward "隐藏 8 行" nil t)))
+      ;; In the full diff, the gap between a.txt's hunks opens from both ends.
+      (agent-review-test--with-buffer review
+        (agent-review-toggle-full)
+        (search-forward "隐藏 9 行")
+        (agent-review-expand-down 3)
+        (should (search-forward "隐藏 6 行" nil t))
+        (agent-review-expand-up 3)
+        (should (funcall shown 8))
+        (should (funcall shown 12))
+        (should-not (funcall shown 9))
+        (should-not (funcall shown 11))
+        (goto-char (point-min))
+        (should (search-forward "隐藏 3 行  [展开]" nil t))))))
 
 (ert-deftest agent-review-test-deferred-items ()
   (agent-review-test--with-repo repo

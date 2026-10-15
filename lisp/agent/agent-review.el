@@ -852,6 +852,11 @@ code and where it is, so the agent can answer without looking it up."
 (defvar-local agent-review--file-faces nil
   "Cache of whole files highlighted: (SIDE . PATH) -> vector of lines or nil.")
 (defvar-local agent-review--context nil "Context lines shown around each hunk.")
+(defvar-local agent-review--expanded nil
+  "Lines shown in the gaps between hunks beyond the context.
+A table from (ITEM FILE GAP) to (DOWN . UP): the lines shown below the
+hunk above gap GAP and above the hunk below it.  Gap N is the one before
+hunk N of the file, counting from 0; the last one is after its last hunk.")
 (defvar-local agent-review--files nil
   "Per-file data of the review shown, see `agent-review--file-data'.")
 (defvar-local agent-review--nav nil "The sidebar buffer of this review buffer.")
@@ -880,6 +885,10 @@ A review opened for the first time shows only its first item unfolded."
 
 (defcustom agent-review-context 3
   "Lines of the file shown before and after each hunk of an item."
+  :type 'natnum)
+
+(defcustom agent-review-expand-lines 20
+  "Lines one step of expanding a gap between hunks shows."
   :type 'natnum)
 
 (defcustom agent-review-nav-width 40
@@ -936,11 +945,12 @@ Lines the diff adds have none."
         (t (let ((end (seq-find (lambda (end) (<= (car end) new)) (plist-get data :ends))))
              (if end (+ new (- (cdr end) (car end))) new)))))
 
-(defun agent-review--around (hunk source context from limit)
-  "Lines of SOURCE to show around the zero-context HUNK, as (BEFORE . AFTER).
-SOURCE is the vector of the file's head-side lines; CONTEXT is how many
-lines on each side.  Only new-side lines from FROM and before LIMIT are
-used, so context never repeats lines shown elsewhere in the item."
+(defun agent-review--around (hunk source before after from limit)
+  "Lines of SOURCE to show around HUNK, as (BEFORE-LINES . AFTER-LINES).
+SOURCE is the vector of the file's head-side lines; BEFORE and AFTER are
+how many lines above and below.  Only new-side lines from FROM and
+before LIMIT are used, so context never repeats lines shown elsewhere in
+the item."
   (pcase-let* ((`(,old ,old-count ,new ,new-count) (agent-review--hunk-range hunk))
                ;; The lines just before and after the hunk on each side.
                (old-prev (if (> old-count 0) (1- old) old))
@@ -950,13 +960,13 @@ used, so context never repeats lines shown elsewhere in the item."
                (line (lambda (n offset)
                        (list :kind ?\s :content (aref source (1- n)) :old (+ n offset)
                              :new n :newline t :context t))))
-    (if (or (null source) (zerop context))
+    (if (null source)
         (cons nil nil)
-      (cons (cl-loop for n from (max 1 from (- new-prev context -1))
+      (cons (cl-loop for n from (max 1 from (- new-prev before -1))
                      to (min new-prev (length source))
                      collect (funcall line n (- old-prev new-prev)))
             (cl-loop for n from (max from new-next)
-                     to (min (length source) (+ new-next context -1) (1- limit))
+                     to (min (length source) (+ new-next after -1) (1- limit))
                      collect (funcall line n (- old-next new-next)))))))
 
 (defun agent-review--file-mode (file)
@@ -1074,12 +1084,52 @@ review does not keep are highlighted together as a fragment instead."
     (when agent-review--shown (puthash (plist-get comment :id) t agent-review--shown))
     (put-text-property start (point) 'agent-review-comment (plist-get comment :id))))
 
-(defun agent-review--insert-hunk (item block hunk comments width around)
+(defun agent-review--gap-button (label direction)
+  "Button LABEL that shows hidden lines of the gap it is on in DIRECTION."
+  (propertize label 'face 'agent-review-button 'mouse-face 'highlight
+              'help-echo "展开隐藏的行"
+              'keymap (let ((map (make-sparse-keymap)))
+                        (keymap-set map "<mouse-1>" (lambda (event)
+                                                      (interactive "e")
+                                                      (mouse-set-point event)
+                                                      (agent-review--expand direction)))
+                        (keymap-set map "RET" (lambda ()
+                                                (interactive)
+                                                (agent-review--expand direction)))
+                        map)))
+
+(defun agent-review--insert-gap (text gap)
+  "Insert the line TEXT standing for GAP, with buttons to show its lines.
+GAP is (KEY HIDDEN DIRECTIONS): KEY as in `agent-review--expanded', the
+number of lines it hides and the directions, `up' and `down', it opens in."
+  (pcase-let ((`(,key ,hidden ,directions) gap)
+              (start (point)))
+    (insert (propertize text 'face 'agent-review-hunk))
+    (when (> hidden 0)
+      (insert (propertize (format "  ⋯ 隐藏 %d 行 " hidden) 'face 'agent-review-hunk))
+      (pcase-dolist (`(,label . ,direction)
+                     (if (<= hidden agent-review-expand-lines)
+                         (list (cons "展开" 'all))
+                       (append (when (memq 'down directions)
+                                 (list (cons (format "↓ %d" agent-review-expand-lines) 'down)))
+                               (when (memq 'up directions)
+                                 (list (cons (format "↑ %d" agent-review-expand-lines) 'up)))
+                               (list (cons "全部" 'all)))))
+        (insert (propertize " " 'face 'agent-review-hunk)
+                (agent-review--gap-button (format "[%s]" label) direction))))
+    (insert (propertize "\n" 'face 'agent-review-hunk))
+    (add-text-properties start (point)
+                         (list 'agent-review-gap key
+                               'agent-review-gap-info (and (> hidden 0) (cons hidden directions))))))
+
+(defun agent-review--insert-hunk (item block hunk comments width around gap)
   "Insert HUNK of the file BLOCK in ITEM, with COMMENTS under their last lines.
 COMMENTS maps a line key to the annotations ending there.  WIDTH is the
 width of the line number columns; AROUND is the context to show, see
-`agent-review--around'."
-  (let* ((file (plist-get block :file))
+`agent-review--around'.  The hunk's header stands for GAP, the one above
+it, see `agent-review--insert-gap'."
+  (let* ((start (point))
+         (file (plist-get block :file))
          (lines (append (car around) (agent-review--hunk-lines file hunk) (cdr around)))
          (codes (agent-review--line-codes block lines))
          (data (gethash file agent-review--files))
@@ -1091,7 +1141,7 @@ width of the line number columns; AROUND is the context to show, see
       (dolist (line lines)
         (when (plist-get line :context)
           (plist-put line :old (agent-review--old-line data (plist-get line :new))))))
-    (insert (propertize (concat (car (split-string hunk "\n")) "\n") 'face 'agent-review-hunk))
+    (agent-review--insert-gap (car (split-string hunk "\n")) gap)
     (cl-loop
      for line in lines
      for code in codes
@@ -1120,7 +1170,8 @@ width of the line number columns; AROUND is the context to show, see
             (when face (add-face-text-property code-start (point) face t)))
           (put-text-property start (point) 'agent-review-target target)
           (dolist (comment (gethash (agent-review--line-key target) comments))
-            (agent-review--insert-comment comment))))))
+            (agent-review--insert-comment comment))))
+    (put-text-property start (point) 'agent-review-hunk (car gap))))
 
 (defun agent-review--fold-overlay (start property id folded)
   "Make the region from START to point foldable as ID under PROPERTY.
@@ -1173,6 +1224,12 @@ Items with annotations are drawn, so moving between annotations finds them."
        (not (seq-find (lambda (c) (equal (plist-get c :item) id))
                       agent-review--all-comments))))
 
+(defun agent-review--gap-shown (item file gap)
+  "Lines of gap GAP of FILE in ITEM shown beyond the context, as (DOWN . UP)."
+  (or (and agent-review--expanded
+           (gethash (list item file gap) agent-review--expanded))
+      '(0 . 0)))
+
 (defun agent-review--insert-body (item comments width)
   "Insert the intent and diff of ITEM, foldable, with COMMENTS under their lines.
 WIDTH is the width of the line number columns."
@@ -1202,19 +1259,34 @@ WIDTH is the width of the line number columns."
                                   'face 'agent-review-meta)))
             (cl-loop
              for (hunk next) on (plist-get block :hunks)
-             do (let ((around (agent-review--around
-                               hunk source context from
-                               (if next
-                                   (pcase-let ((`(,_ ,_ ,new ,count)
-                                                (agent-review--hunk-range next)))
-                                     (if (> count 0) new (1+ new)))
-                                 most-positive-fixnum))))
-                  (agent-review--insert-hunk item block hunk comments width around)
+             for index from 0
+             do (pcase-let* ((`(,_ ,_ ,new ,count) (agent-review--hunk-range hunk))
+                             (around (agent-review--around
+                                      hunk source
+                                      (+ context (cdr (agent-review--gap-shown id file index)))
+                                      (+ context (car (agent-review--gap-shown id file (1+ index))))
+                                      from
+                                      (if next
+                                          (pcase-let ((`(,_ ,_ ,new ,count)
+                                                       (agent-review--hunk-range next)))
+                                            (if (> count 0) new (1+ new)))
+                                        most-positive-fixnum)))
+                             ;; The lines from FROM to the hunk the context
+                             ;; above it leaves out.
+                             (hidden (if source
+                                         (max 0 (- (min (if (> count 0) (1- new) new) (length source))
+                                                   from -1 (length (car around))))
+                                       0)))
+                  (agent-review--insert-hunk item block hunk comments width around
+                                             (list (list id file index) hidden
+                                                   (if (zerop index) '(up) '(down up))))
                   (setq from (1+ (if (cdr around)
                                      (plist-get (car (last (cdr around))) :new)
-                                   (pcase-let ((`(,_ ,_ ,new ,count)
-                                                (agent-review--hunk-range hunk)))
-                                     (if (> count 0) (+ new count -1) new))))))))
+                                   (if (> count 0) (+ new count -1) new))))))
+            (when (and source (< from (1+ (length source))))
+              (agent-review--insert-gap
+               "" (list (list id file (length (plist-get block :hunks)))
+                          (- (length source) from -1) '(down)))))
           (agent-review--fold-overlay file-body 'agent-review-file-body key
                                       (and (member key agent-review--folded-files) t)))
         (put-text-property file-start (point) 'agent-review-file-in key)))
@@ -1294,7 +1366,7 @@ WIDTH is the width of the line number columns."
                                 (plist-get stats :deletions) (plist-get stats :items))
                         'face 'agent-review-meta)
             (propertize "选中代码行按 a 写标注，直接发给 agent · r 已审阅 · o 目录 · C 标注列表 · \
-TAB 折叠 · f 切换视图 · RET 打开文件\n"
+TAB 折叠 · { } 向上/向下展开代码 · f 切换视图 · RET 打开文件\n"
                         'face 'agent-review-meta)
             "\n" (propertize "本次变更概览\n" 'face 'agent-review-heading)
             (plist-get review :summary) "\n\n")
@@ -1345,7 +1417,8 @@ TAB 折叠 · f 切换视图 · RET 打开文件\n"
                           'face 'agent-review-meta)))))
 
 (defconst agent-review--anchor-properties
-  '(agent-review-comment agent-review-target agent-review-file-heading agent-review-heading)
+  '(agent-review-comment agent-review-target agent-review-gap agent-review-file-heading
+    agent-review-heading)
   "Text properties that identify what a position shows, most specific first.")
 
 (defun agent-review--anchor (pos)
@@ -2069,8 +2142,15 @@ the review's project first, and the choice is stored with the review."
           (get-buffer name))))))
 
 (defun agent-review-visit ()
-  "Visit the line at point: the project file, or the base version of a removed line."
+  "Visit the line at point: the project file, or the base version of a removed line.
+On the line of a gap between hunks, show all its lines instead."
   (interactive)
+  (if (get-text-property (point) 'agent-review-gap-info)
+      (agent-review--expand 'all)
+    (agent-review--visit-line)))
+
+(defun agent-review--visit-line ()
+  "Visit the code line at point, see `agent-review-visit'."
   (let* ((target (agent-review--target))
          (review agent-review--review)
          (root (plist-get review :root))
@@ -2120,6 +2200,57 @@ A negative N shows fewer."
   (interactive)
   (agent-review-more-context -5))
 
+(defun agent-review--gap-at (pos direction)
+  "The gap to open from POS in DIRECTION, as (KEY HIDDEN . DIRECTIONS), or nil.
+On the line of a gap, that gap; in a hunk, the gap above or below it."
+  (if-let* ((key (get-text-property pos 'agent-review-gap)))
+      (when-let* ((info (get-text-property pos 'agent-review-gap-info)))
+        (cons key info))
+    (when-let* ((hunk (get-text-property pos 'agent-review-hunk))
+                (key (list (nth 0 hunk) (nth 1 hunk)
+                           (if (eq direction 'up) (nth 2 hunk) (1+ (nth 2 hunk)))))
+                (line (agent-review--find 'agent-review-gap key))
+                (info (get-text-property line 'agent-review-gap-info)))
+      (cons key info))))
+
+(defun agent-review--expand (direction &optional count)
+  "Show COUNT more hidden lines of the gap at point in DIRECTION.
+DIRECTION is `down' to extend the hunk above the gap, `up' the hunk below
+it, or `all' to show the whole gap.  COUNT defaults to
+`agent-review-expand-lines'; `all' shows the whole gap too."
+  (pcase-let* ((`(,key ,hidden . ,directions)
+                (or (agent-review--gap-at (point) direction) (user-error "这里没有隐藏的行")))
+               (count (if (or (eq direction 'all) (eq count 'all))
+                          hidden
+                        (min hidden (or count agent-review-expand-lines))))
+               (direction (cond ((eq direction 'all)
+                                 (if (memq 'down directions) 'down 'up))
+                                ((memq direction directions) direction)
+                                (t (car directions))))
+               (table (or agent-review--expanded
+                          (setq agent-review--expanded (make-hash-table :test #'equal))))
+               (`(,down . ,up) (apply #'agent-review--gap-shown key)))
+    (puthash key (if (eq direction 'down) (cons (+ down count) up) (cons down (+ up count)))
+             table)
+    ;; Lines shown below the hunk above the gap go below point when it is
+    ;; there, and the gap's line may be gone after.
+    (when (eq direction 'down)
+      (goto-char (agent-review--find 'agent-review-gap key))
+      (forward-line -1))
+    (agent-review--redraw)))
+
+(defun agent-review-expand-up (&optional n)
+  "Show N more lines above the hunk at point, or of the gap at point.
+N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, all of them."
+  (interactive "P")
+  (agent-review--expand 'up (if (consp n) 'all (and n (prefix-numeric-value n)))))
+
+(defun agent-review-expand-down (&optional n)
+  "Show N more lines below the hunk at point, or of the gap at point.
+N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, all of them."
+  (interactive "P")
+  (agent-review--expand 'down (if (consp n) 'all (and n (prefix-numeric-value n)))))
+
 (defun agent-review-open (id)
   "Show the stored review with ID."
   (interactive
@@ -2147,7 +2278,9 @@ A negative N shows fewer."
   "RET" #'agent-review-visit
   "f" #'agent-review-toggle-full
   "+" #'agent-review-more-context
-  "-" #'agent-review-less-context)
+  "-" #'agent-review-less-context
+  "{" #'agent-review-expand-up
+  "}" #'agent-review-expand-down)
 
 (define-derived-mode agent-review-mode special-mode "Review"
   "Review the atomic items of a branch's changes and annotate their lines."

@@ -191,6 +191,8 @@ In visual state a is the text object prefix, so this rebinds it there."
     "f" #'agent-review-toggle-full
     "+" #'agent-review-more-context
     "-" #'agent-review-less-context
+    "{" #'agent-review-expand-up
+    "}" #'agent-review-expand-down
     "gr" #'revert-buffer
     "q" #'quit-window)
   (evil-define-key* 'visual agent-review-mode-map
