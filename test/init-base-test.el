@@ -17,6 +17,10 @@ e.g. after a plain M-x evil-mode autoloaded it without init-evil."
   (should (default-value 'evil-want-integration))
   (should-not (default-value 'evil-want-keybinding)))
 
+(ert-deftest init-base-no-scroll-margin ()
+  "No scroll margin, which makes touchpad scrolling jump back."
+  (should (= (default-value 'scroll-margin) 0)))
+
 (ert-deftest init-base-truncates-code-lines ()
   "Code and config buffers truncate long lines; prose wraps."
   (with-temp-buffer

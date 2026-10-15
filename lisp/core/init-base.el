@@ -12,7 +12,10 @@
       delete-old-versions t
       create-lockfiles nil
       scroll-conservatively 101
-      scroll-margin 3
+      ;; No margin: with pixel-precise touchpad scrolling, a margin makes
+      ;; redisplay pull the window back to a line start to keep point
+      ;; clear of the edge, so the window jumps up while scrolling down.
+      scroll-margin 0
       read-process-output-max (* 1024 1024)
       sentence-end-double-space nil
       require-final-newline t)
