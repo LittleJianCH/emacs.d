@@ -27,10 +27,7 @@
   ;; (Emacs 31 global minor modes no longer define MODE-buffers); fixed on MELPA.
   :pin melpa
   :demand t
-  :init
-  ;; evil-collection requires these to be set before evil loads.
-  (setq evil-want-integration t
-        evil-want-keybinding nil)
+  ;; `evil-want-keybinding' is set to nil in init-base.el, before evil can load.
   :custom
   (evil-want-C-u-scroll t)
   (evil-want-C-i-jump nil)

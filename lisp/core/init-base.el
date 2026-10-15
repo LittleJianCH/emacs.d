@@ -119,6 +119,11 @@ session with `my/toggle-evil'."
   :type 'boolean
   :group 'convenience)
 
+;; evil-collection needs these set before evil loads, which can happen without
+;; init-evil too (a plain M-x evil-mode autoloads evil), so set them up front.
+(setq-default evil-want-integration t
+              evil-want-keybinding nil)
+
 (defun my/toggle-evil (&optional save)
   "Turn evil on or off in the current Emacs.
 With SAVE (prefix argument), also save the new state as the default

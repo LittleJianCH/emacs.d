@@ -10,6 +10,13 @@
 
 (require 'ert)
 
+(ert-deftest init-base-evil-keybinding-preset ()
+  "evil's integration settings are set before evil can load by any path.
+evil-collection warns when evil loaded with `evil-want-keybinding' on,
+e.g. after a plain M-x evil-mode autoloaded it without init-evil."
+  (should (default-value 'evil-want-integration))
+  (should-not (default-value 'evil-want-keybinding)))
+
 (ert-deftest init-base-truncates-code-lines ()
   "Code and config buffers truncate long lines; prose wraps."
   (with-temp-buffer
