@@ -330,9 +330,8 @@ const MCP_INSTRUCTIONS = `These tools operate the Emacs instance the user is wor
   session when the user clicks them. Use patch to update parts of a page afterwards.
 - To point the user at code, use open to show and highlight it instead of only citing a path.
 - Use show to display an existing org / markdown document or a diff.
-- For an atomic review of a branch (原子审查 / atomic review), call review_snapshot and
-  follow its description; read the user's annotations with review_comments and answer
-  them with review_reply.
+- For an atomic review of a branch (原子审查 / atomic review), use the emacs-atomic-review
+  skill: it starts with review_snapshot, and annotations are answered with review_reply.
 - Call context first to see which file, cursor position and selection the user is looking at.
 - For editor operations the other tools do not cover, run Elisp with eval.
 - Other agent sessions (Claude, Codex) may run in this Emacs. Each has an @handle, and the

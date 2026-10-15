@@ -883,6 +883,11 @@ A review opened for the first time shows only its first item unfolded."
             (mapcar (lambda (item) (plist-get item :id))
                     (cdr (plist-get agent-review--review :items)))))))
 
+;; The workflow for agents is a skill, which replaces the atomic-review
+;; skill that makes web page reviews.
+(agent-session-add-skill "emacs-atomic-review" (locate-user-emacs-file "skills/emacs-atomic-review/")
+                         "atomic-review")
+
 ;;; Review buffer
 
 (defcustom agent-review-context 3
@@ -2441,17 +2446,9 @@ N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, al
 (agent-ui-defmethod "review_snapshot"
     ((base string "Branch, tag or commit to compare against, e.g. main or origin/main" required)
      (head string "Branch or commit under review. Default: HEAD"))
-  "Start an atomic review (原子审查) of a branch: pin the committed changes of head against its merge base with base, and list their hunks. Use it when the user asks for an atomic review of a branch or MR; the review is shown in Emacs, where the user annotates lines. Only committed changes are compared, never uncommitted files. For \"against main\", check whether local main or origin/main is meant; fetch first when origin is needed.
+  "Start an atomic review (原子审查) of a branch: pin the committed changes of head against its merge base with base, and list their hunks. The emacs-atomic-review skill describes the whole workflow: how to split the changes, write the plan and answer annotations; follow it. Only committed changes are compared, never uncommitted files.
 
-Then:
-1. Read the hunks (fragments, or the output of diff_command when the diff is too large to return) and the sources at head_sha (git show <head_sha>:path when the worktree may differ). Understand the code yourself; no other model is involved.
-2. Split the changes by independent intent into items. Order: foundations and core logic first, then call sites, then tests. Related tests may form an item of their own; upstream test corpora are grouped by case or package. Never group by an arbitrary number of lines, and never pack unrelated abilities into one big item.
-3. Call review_build with the snapshot id, a summary and the items:
-   - summary: the overview at the top of the review, for the whole compared change (not one commit or item): the problem it solves, behavior before and after, user-visible effects, main risks if any. A few sentences.
-   - each item: {\"title\", \"intent\", \"type\", \"parts\"}. intent explains, from the source, why the change is made and the inputs, outputs and edge cases of the functions it touches. type: 0 formatting, 1 refactoring, 2 feature, 3 local fix, 5 tests.
-   - each part names a file of this snapshot and selects exactly one of: \"hunks\": [0, 2] (zero-based hunk indexes within that file, as listed here); \"whole\": true (all its hunks, or a binary/metadata-only file); \"added_lines\": [10, 45] (inclusive line range of a newly added text file only: split it along declarations, functions or test cases, assigning headers, imports and blank lines too).
-   Example: {\"title\": \"保留调用实参中的命名类型\", \"intent\": \"…\", \"type\": 3, \"parts\": [{\"file\": \"compiler/typeck/src/call.rs\", \"hunks\": [0, 3]}]}
-Every changed line must be covered exactly once. When review_build reports a coverage error, fix the plan; never drop changes that are hard to place. Write titles, intents and the summary in Chinese. The split is a static reading of the diff: never describe it as tested."
+The plan you then give review_build: a summary of the whole compared change, and items {\"title\", \"intent\", \"type\", \"parts\"}. type: 0 formatting, 1 refactoring, 2 feature, 3 local fix, 5 tests. Each part names a file of this snapshot and selects exactly one of: \"hunks\": [0, 2] (zero-based hunk indexes within that file, as listed here); \"whole\": true (all its hunks, or a binary/metadata-only file); \"added_lines\": [10, 45] (inclusive line range of a newly added text file only). Every changed line must be covered exactly once. Write titles, intents and the summary in Chinese. Small diffs come with the hunks' text (fragments); otherwise run diff_command."
   (let* ((root (or (agent-ui--caller-root) (error "No project root for this caller")))
          (snapshot (agent-review-snapshot root base (or head "HEAD")))
          (fragments (plist-get snapshot :fragments)))
