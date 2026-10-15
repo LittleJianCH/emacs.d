@@ -6,6 +6,7 @@
 ;;   lisp/core/   base layer: defaults, UI, completion, general dev tools
 ;;   lisp/lang/   language modules, one file per language: lang-NAME.el
 ;;   lisp/agent/  agent support: terminal sessions, the agent -> Emacs bridge
+;;   lisp/app/    standalone applications, such as the Telegram client
 ;;
 ;; To add a language: create lisp/lang/lang-NAME.el (ending with `provide'),
 ;; then add NAME to `my/languages'.
@@ -15,7 +16,7 @@
 (when (version< emacs-version "30.1")
   (error "这份配置需要 Emacs 30.1 或更新版本"))
 
-(dolist (dir '("core" "lang" "agent"))
+(dolist (dir '("core" "lang" "agent" "app"))
   (add-to-list 'load-path (expand-file-name (concat "lisp/" dir) user-emacs-directory)))
 
 ;;; Package archives: GNU / NonGNU ELPA first, MELPA only for a few extras
@@ -35,6 +36,7 @@
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
 
 (require 'init-base)        ; defaults, paths, macOS environment
+(require 'init-reload)      ; M-x my/reload-config: apply edited files, no restart
 (require 'init-ui)          ; theme, fonts, windows
 (when my/use-evil
   (require 'init-evil))     ; Vim keys (evil), off by default; M-x my/toggle-evil
@@ -46,6 +48,7 @@
   (require (intern (format "lang-%s" lang))))
 
 (require 'init-agent)       ; agent terminal sessions, agent -> Emacs bridge
+(require 'init-telega)      ; Telegram client, C-c t
 
 ;; Restore normal GC settings once startup finishes.
 (add-hook 'emacs-startup-hook

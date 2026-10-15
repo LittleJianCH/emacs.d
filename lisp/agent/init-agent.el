@@ -66,6 +66,17 @@
   :demand t
   :after agent-ui)
 
+;; Atomic reviews of a branch: the review_* methods and the review buffer.
+(use-package agent-review
+  :demand t
+  :after agent-canvas)
+
+;; Session handles (@name) and the sessions / session_read / session_ask methods
+;; agents use to work with each other.
+(use-package agent-collab
+  :demand t
+  :after agent-ui)
+
 (defmacro agent-session--evil-enter (name command)
   "Define NAME to run evil's COMMAND in the input area.
 Elsewhere it jumps to the end of the input area and enters insert state.
@@ -89,6 +100,7 @@ In the transcript, jump to the end of the input area and enter insert state." co
 (declare-function evil-open-below "evil-commands")
 (declare-function evil-open-above "evil-commands")
 (declare-function evil-insert-state "evil-states")
+(declare-function evil-exit-visual-state "evil-states")
 (declare-function evil-set-initial-state "evil-core")
 (declare-function evil-define-key* "evil-core")
 
@@ -99,6 +111,13 @@ In the transcript, jump to the end of the input area and enter insert state." co
 (agent-session--evil-enter agent-session-evil-append-line evil-append-line)
 (agent-session--evil-enter agent-session-evil-open-below evil-open-below)
 (agent-session--evil-enter agent-session-evil-open-above evil-open-above)
+
+(defun agent-review-evil-annotate (start end)
+  "Annotate the lines of the visual selection from START to END.
+In visual state a is the text object prefix, so this rebinds it there."
+  (interactive "r")
+  (evil-exit-visual-state)
+  (agent-review-annotate start end))
 
 ;; Vim keys (when evil is loaded).  Session buffers start in normal state: i / a / o
 ;; etc. keep their meaning in the input area, and in the transcript jump to the end
@@ -160,7 +179,46 @@ In the transcript, jump to the end of the input area and enter insert state." co
     (kbd "<backtab>") #'backward-button
     "c" #'agent-canvas-comment
     "gr" #'revert-buffer
-    "q" #'quit-window))
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-mode 'normal)
+  (evil-define-key* '(normal motion) agent-review-mode-map
+    (kbd "RET") #'agent-review-visit
+    (kbd "TAB") #'agent-review-toggle
+    "]]" #'agent-review-next-item
+    "[[" #'agent-review-previous-item
+    "]c" #'agent-review-next-annotation
+    "[c" #'agent-review-previous-annotation
+    "a" #'agent-review-annotate
+    "dd" #'agent-review-delete-annotation
+    "r" #'agent-review-toggle-reviewed
+    "o" #'agent-review-toggle-nav
+    "C" #'agent-review-list-annotations
+    "f" #'agent-review-toggle-full
+    "+" #'agent-review-more-context
+    "-" #'agent-review-less-context
+    "{" #'agent-review-expand-up
+    "}" #'agent-review-expand-down
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+  (evil-define-key* 'visual agent-review-mode-map
+    "a" #'agent-review-evil-annotate)
+
+  (evil-set-initial-state 'agent-review-nav-mode 'normal)
+  (evil-define-key* '(normal motion) agent-review-nav-mode-map
+    (kbd "RET") #'agent-review-nav-visit
+    "r" #'agent-review-nav-toggle-reviewed
+    "/" #'agent-review-nav-filter
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-notes-mode 'normal)
+  (evil-define-key* '(normal motion) agent-review-notes-mode-map
+    (kbd "RET") #'agent-review-notes-visit
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-note-mode 'insert))
 
 ;; Agents call back into this instance through emacsclient / emx.
 (use-package server

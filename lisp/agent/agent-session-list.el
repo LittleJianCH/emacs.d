@@ -137,17 +137,30 @@ The item is highlighted on mouse hover and opens on click."
           (setq pos next))))))
 
 (defun agent-session-list--kill-button (buffer)
-  "Return a × button that ends the session in BUFFER."
-  (make-text-button " ×" nil 'face 'agent-session-dim 'follow-link t
-                    'help-echo "结束这个会话"
-                    'action (lambda (_)
-                              (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
-                                (kill-buffer buffer)
-                                (agent-session-list--refresh)))))
+  "Return a × button that ends the session in BUFFER, at the right edge."
+  (concat
+   ;; At least one space, then align × one column short of the edge (a
+   ;; terminal reserves the last column for the wrap glyph).
+   " " (propertize " " 'display `(space :align-to (- right ,(1+ (string-width "×")))))
+   (make-text-button "×" nil 'face 'agent-session-dim 'follow-link t
+                     'help-echo "结束这个会话"
+                     'action (lambda (_)
+                               (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
+                                 (kill-buffer buffer)
+                                 (agent-session-list--refresh))))))
 
 (defun agent-session-list--truncate (string)
   "Truncate STRING to fit the window width."
   (truncate-string-to-width string (max 10 (- (window-body-width) 4)) nil nil "…"))
+
+(defun agent-session-list--head-line (head handle)
+  "HEAD then HANDLE, cut to leave room for the × at the window's right edge.
+HEAD is cut first, so the handle stays readable."
+  (let ((width (- (window-body-width) 3)))
+    (truncate-string-to-width
+     (concat (truncate-string-to-width head (max 10 (- width (string-width handle))) nil nil "…")
+             handle)
+     width nil nil "…")))
 
 (defun agent-session-list--render ()
   "Redraw the session list in the current buffer.
@@ -166,9 +179,13 @@ Try to keep point on the same entry."
                (project (agent-session-list--project-name (agent-session-root session))))
           (agent-session-list--insert-entry
            (list :buffer buffer)
-           "  " (agent-session-status-label session)
-           (propertize (format "  %s · %s" (agent-session-title session) project)
-                       'face 'agent-session-dim)
+           (agent-session-list--head-line
+            (concat "  " (agent-session-status-label session)
+                    (propertize (format "  %s · %s" (agent-session-title session) project)
+                                'face 'agent-session-dim))
+            (if-let* ((handle (agent-session-handle session)))
+                (propertize (concat "  @" handle) 'face 'agent-session-dim)
+              ""))
            (agent-session-list--kill-button buffer)
            "\n    "
            (propertize (agent-session-list--truncate (agent-session-display-title session))
@@ -180,12 +197,18 @@ Try to keep point on the same entry."
         (insert (propertize "  （没有历史会话）\n" 'face 'agent-session-dim))
       (pcase-dolist (`(,agent . ,item) history)
         (agent-session-list--insert-entry
-         (list :agent agent :id (plist-get item :id) :root root :title (plist-get item :title))
+         (list :agent agent :id (plist-get item :id) :root (or (plist-get item :root) root)
+               :title (plist-get item :title))
          "  "
          (propertize (format "%-7s %-5s " (agent-session-list--ago (plist-get item :time))
                              (or (agent-session--get agent :title) agent))
                      'face 'agent-session-dim)
-         (agent-session-list--truncate (plist-get item :title))
+         (agent-session-list--truncate
+          (concat (if-let* ((worktree (plist-get item :worktree)))
+                      (propertize (format "[%s] " (truncate-string-to-width worktree 16 nil nil "…"))
+                                  'face 'agent-session-dim)
+                    "")
+                  (plist-get item :title)))
          "\n")))
     ;; Return to the original entry
     (goto-char (point-min))
@@ -231,13 +254,8 @@ Status changes often while output streams, so coalesce them into one redraw."
   (let ((entry (agent-session-list--entry)))
     (if-let* ((buffer (plist-get entry :buffer)))
         (select-window (agent-session-display buffer))
-      (let ((buffer (agent-session-start (plist-get entry :agent) nil (plist-get entry :id)
-                                         (plist-get entry :root))))
-        (when (bufferp buffer)
-          (let ((session (buffer-local-value 'agent-session--current buffer)))
-            (setf (agent-session-info session)
-                  (plist-put (agent-session-info session) :title (plist-get entry :title)))
-            (agent-session--refresh session)))))))
+      (agent-session-start (plist-get entry :agent) nil (plist-get entry :id)
+                           (plist-get entry :root) (plist-get entry :title)))))
 
 (defun agent-session-list-create (&optional choose)
   "Create a session in the list's project.
@@ -301,7 +319,7 @@ With CHOOSE (prefix argument), choose the agent first."
 Clicking it runs COMMAND in the session list window."
   (propertize label
               'face 'agent-session-assistant
-              'mouse-face 'header-line-highlight
+              'mouse-face 'highlight
               'help-echo help
               'local-map (let ((map (make-sparse-keymap)))
                            (define-key map [header-line mouse-1]

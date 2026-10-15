@@ -15,6 +15,12 @@
 (require 'agent-claude)
 (require 'agent-codex)
 (require 'agent-dsh)
+(require 'agent-ui)
+(require 'agent-collab)
+
+;; Never name sessions with a real model in tests.
+(setq agent-collab-handle-command nil
+      agent-collab-agent-handle-commands nil)
 
 (cl-defmethod agent-session-backend-start ((_ (eql test-echo)) session)
   (agent-session-set-status session 'idle))
@@ -229,6 +235,8 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
      (agent-session-select-agent 'test-echo2)
      (should (eq (agent-session-agent agent-session--current) 'test-echo2))
      (should (eq (current-buffer) buffer))
+     ;; The placeholder handle follows the new agent.
+     (should (equal (agent-session-handle agent-session--current) "test-echo2"))
      (agent-session-test--type "hi")
      (goto-char (point-max))
      (insert "草稿")
@@ -243,6 +251,35 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
                         (agent-session--input-text agent-session--current))
                       "草稿"))
        (kill-buffer new)))))
+
+(ert-deftest agent-session-test-select-agent-no-annotation ()
+  "Agent candidates are plain names: a title would only repeat them."
+  (agent-session-test--with-session
+   (let (annotate candidates)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (setq candidates collection
+                        annotate (plist-get completion-extra-properties
+                                            :annotation-function))
+                  "test-echo2")))
+       (agent-session-select-agent))
+     (should (member "test-echo2" candidates))
+     (should-not annotate)
+     (should (eq (agent-session-agent agent-session--current) 'test-echo2)))))
+
+(ert-deftest agent-session-test-resume-keeps-title ()
+  "A resumed session keeps its title instead of taking the next message."
+  (agent-session-test--with-session
+   (cl-letf (((symbol-function 'agent-session-backend-history)
+              (lambda (_backend _root callback)
+                (funcall callback '((:id "old" :title "旧标题" :time 0)))))
+             ((symbol-function 'completing-read)
+              (lambda (_prompt candidates &rest _) (caar candidates))))
+     (agent-session-resume)
+     (let ((session agent-session--current))
+       (should (equal (agent-session-resume-id session) "old"))
+       (agent-session-test--type "新消息")
+       (should (equal (agent-session-display-title session) "旧标题"))))))
 
 (ert-deftest agent-session-test-mode-line ()
   "The mode line shows agent, model, effort, permission mode and status."
@@ -506,13 +543,29 @@ The summary can be expanded."
                (let* ((start (text-property-search-forward
                               'agent-session-entry (list :buffer session-buffer) #'equal))
                       (kill (progn (goto-char (prop-match-beginning start))
-                                   (search-forward " ×" (prop-match-end start))
+                                   (search-forward "×" (prop-match-end start))
                                    (match-beginning 0))))
                  (should (equal (get-text-property kill 'help-echo) "结束这个会话"))
+                 ;; × comes last on its line, after the handle, aligned to the right.
+                 (should (string-blank-p (buffer-substring (point) (line-end-position))))
+                 (should (search-backward
+                          (concat "@" (agent-session-handle
+                                       (buffer-local-value 'agent-session--current session-buffer)))
+                          (prop-match-beginning start) t))
+                 (should (eq (car-safe (get-text-property (1- kill) 'display)) 'space))
                  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
                    (click kill))))
              (should-not (buffer-live-p session-buffer))))
        (kill-buffer list-buffer)))))
+
+(ert-deftest agent-session-test-list-head-line ()
+  "Session list: a session's first line leaves room for × and keeps the handle."
+  (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 30)))
+    (let ((line (agent-session-list--head-line "  ● 工作中 1m  Claude · emacs.d"
+                                               "  @greeting-check")))
+      (should (<= (string-width line) 27))
+      (should (string-suffix-p "…  @greeting-check" line)))
+    (should (equal (agent-session-list--head-line "  ● 空闲" "  @a") "  ● 空闲  @a"))))
 
 ;; Regression: when all entries shared one mouse-face, hovering highlighted adjacent
 ;; entries as one block.
@@ -884,6 +937,445 @@ an approved plan review switches the session back."
                       '(:jsonrpc "2.0" :id "dsh-2"
                         :result (:answers [(:id "review" :selected ["Keep planning"]
                                                 :custom "再细一点")]))))))))
+;;; Remote projects
+
+(ert-deftest agent-session-test-remote-paths ()
+  "Agents of a remote project see and name paths on its host."
+  (should (equal (agent-session-process-directory "/ssh:dev:/srv/proj/") "/srv/proj/"))
+  (should (equal (agent-session-process-directory "/tmp/proj/") "/tmp/proj/"))
+  (should (equal (agent-session-expand-file-name "/srv/proj/a.rs" "/ssh:dev:/srv/proj/")
+                 "/ssh:dev:/srv/proj/a.rs"))
+  (should (equal (agent-session-expand-file-name "src/a.rs" "/ssh:dev:/srv/proj/")
+                 "/ssh:dev:/srv/proj/src/a.rs"))
+  (should (equal (agent-session-expand-file-name "src/a.rs" "/tmp/proj/") "/tmp/proj/src/a.rs"))
+  (should (equal (agent-session-expand-file-name "/etc/hosts" "/tmp/proj/") "/etc/hosts")))
+
+(ert-deftest agent-session-test-claude-project-dir ()
+  "Claude history is read where the CLI files it: locally or on the host."
+  (should (equal (agent-claude--project-dir "/tmp/my.proj/")
+                 (expand-file-name "~/.claude/projects/-tmp-my-proj")))
+  (should (equal (agent-claude--project-dir "/ssh:dev:/srv/my.proj/")
+                 "/ssh:dev:~/.claude/projects/-srv-my-proj")))
+
+(ert-deftest agent-session-test-worktree-dirs ()
+  "Sessions of a project may run in the other git worktrees of its repository."
+  (let ((worktrees (agent-session--parse-worktrees "\
+worktree /src/emacs.d
+HEAD 1111
+branch refs/heads/main
+
+worktree /src/emacs.d/.claude/worktrees/telega-ed2ff9
+HEAD 2222
+branch refs/heads/claude/telega-ed2ff9
+
+worktree /src/emacs.d-feature
+HEAD 3333
+detached
+")))
+    (should (equal worktrees '("/src/emacs.d" "/src/emacs.d/.claude/worktrees/telega-ed2ff9"
+                               "/src/emacs.d-feature")))
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d/" worktrees)
+                   '(("/src/emacs.d/")
+                     ("/src/emacs.d/.claude/worktrees/telega-ed2ff9/" . "telega-ed2ff9")
+                     ("/src/emacs.d-feature/" . "emacs.d-feature"))))
+    ;; From a worktree, the main checkout is a worktree too.
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d-feature/" worktrees)
+                   '(("/src/emacs.d-feature/")
+                     ("/src/emacs.d/" . "emacs.d")
+                     ("/src/emacs.d/.claude/worktrees/telega-ed2ff9/" . "telega-ed2ff9"))))
+    ;; A subdirectory of a repository is not one of its worktrees.
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d/lisp/" worktrees)
+                   '(("/src/emacs.d/lisp/"))))
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d/" nil) '(("/src/emacs.d/"))))))
+
+;; Claude Desktop runs sessions in worktrees under .claude/worktrees.
+(ert-deftest agent-session-test-claude-worktree-dirs ()
+  "Claude history covers the project's worktrees, removed Desktop ones too."
+  (should (equal (agent-claude--history-dirs
+                  '(("/src/emacs.d/")
+                    ("/src/emacs.d/.claude/worktrees/telega-ed2ff9/" . "telega-ed2ff9")
+                    ("/src/emacs.d-feature/" . "emacs.d-feature"))
+                  '("-src-emacs-d" "-src-emacs-d--claude-worktrees-telega-ed2ff9"
+                    "-src-emacs-d--claude-worktrees-gone-1a2b3c" "-src-other"))
+                 '(("-src-emacs-d" "/src/emacs.d/" nil)
+                   ("-src-emacs-d--claude-worktrees-telega-ed2ff9"
+                    "/src/emacs.d/.claude/worktrees/telega-ed2ff9/" "telega-ed2ff9")
+                   ("-src-emacs-d-feature" "/src/emacs.d-feature/" "emacs.d-feature")
+                   ;; Removed: no longer listed by git, still filed by the CLI
+                   ("-src-emacs-d--claude-worktrees-gone-1a2b3c"
+                    "/src/emacs.d/.claude/worktrees/gone-1a2b3c/" "gone-1a2b3c")))))
+
+(ert-deftest agent-session-test-codex-worktree-history ()
+  "Codex threads of another worktree carry it; the project's own don't."
+  (let ((items (agent-codex--history-items
+                (vector (list :id "t1" :name "主仓库" :updatedAt 3000 :cwd "/src/p")
+                        (list :id "t2" :preview "工作树里的\n第二行" :updatedAt 2000
+                              :cwd "/Users/me/.codex/worktrees/ab12/p"))
+                '(("/src/p/") ("/Users/me/.codex/worktrees/ab12/p/" . "p")))))
+    (should (equal items '((:id "t1" :title "主仓库" :time 3000)
+                           (:id "t2" :title "工作树里的" :time 2000
+                                :root "/Users/me/.codex/worktrees/ab12/p/" :worktree "p")))))
+  ;; A remote project lists only its root, by its path on the host.
+  (should (equal (agent-codex--cwd "/ssh:dev:/srv/p/") "/srv/p")))
+
+(ert-deftest agent-session-test-claude-worktree-history ()
+  "Sessions of all worktrees merge newest first; worktree ones carry their root."
+  (let* ((main (make-temp-file "agent-claude-main-" t))
+         (tree (make-temp-file "agent-claude-tree-" t))
+         (write (lambda (dir id text time)
+                  (let ((file (expand-file-name (concat id ".jsonl") dir))
+                        (coding-system-for-write 'no-conversion))
+                    (with-temp-file file
+                      (insert (json-serialize
+                               (list :type "user" :message (list :role "user" :content text)))
+                              "\n"))
+                    (set-file-times file (seconds-to-time time))))))
+    (unwind-protect
+        (progn
+          (funcall write main "a" "旧的" 1000)
+          (funcall write tree "b" "工作树里的" 2000)
+          (funcall write main "c" "新的" 3000)
+          (let ((items (agent-claude--history-items
+                        (list (list main "/src/p/" nil)
+                              (list tree "/src/p/.claude/worktrees/t/" "t")
+                              (list (expand-file-name "missing" main) "/x/" "x")))))
+            (should (equal (mapcar (lambda (item) (plist-get item :id)) items) '("c" "b" "a")))
+            (should (equal (nth 1 items) '(:id "b" :title "工作树里的" :time 2000.0
+                                           :root "/src/p/.claude/worktrees/t/" :worktree "t")))
+            (should-not (plist-member (car items) :root)))
+          (should (equal (length (agent-claude--history-items (list (list main "/src/p/" nil)) 1))
+                         1)))
+      (delete-directory main t)
+      (delete-directory tree t))))
+
+(ert-deftest agent-session-test-list-worktree-history ()
+  "A worktree session is labeled in the list and resumes in its worktree."
+  (let ((root (file-name-as-directory (make-temp-file "agent-list-root-" t)))
+        (agent-session-list--history (make-hash-table :test #'equal)))
+    (unwind-protect
+        (with-temp-buffer
+          (puthash (cons root 'claude)
+                   (list (list :id "wt-1" :title "维护状态" :time (float-time)
+                               :root (expand-file-name ".claude/worktrees/gone/" root)
+                               :worktree "gone"))
+                   agent-session-list--history)
+          (agent-session-list-mode)
+          (setq agent-session-list--root root)
+          (agent-session-list--render)
+          (should (string-match-p "\\[gone\\] 维护状态" (buffer-string)))
+          (goto-char (point-min))
+          (search-forward "维护状态")
+          (should (equal (plist-get (get-text-property (point) 'agent-session-entry) :root)
+                         (expand-file-name ".claude/worktrees/gone/" root)))
+          ;; The worktree was removed: say so instead of starting the CLI there.
+          (let ((err (should-error (agent-session-list-open) :type 'user-error)))
+            (should (string-match-p "已不存在" (cadr err))))
+          (should-not (seq-find (lambda (b) (equal (agent-session-resume-id
+                                                    (buffer-local-value 'agent-session--current b))
+                                                   "wt-1"))
+                                (agent-session-buffers))))
+      (delete-directory root t))))
+
+(ert-deftest agent-session-test-remote-mcp-commands ()
+  "Remote agents reach emx through the relay; local ones run emx directly."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (setf (agent-session-root session) "/ssh:dev:/srv/proj/")
+     (cl-letf (((symbol-function 'agent-remote-bridge) (lambda (_root) "/run/emx.sock")))
+       (let* ((command (agent-claude--command session))
+              (config (json-parse-string (cadr (member "--mcp-config" command))
+                                         :object-type 'plist))
+              (emacs (plist-get (plist-get config :mcpServers) :emacs))
+              (args (plist-get emacs :args)))
+         (should (equal (plist-get emacs :command) "python3"))
+         (should (equal (aref args 2) "/run/emx.sock"))
+         (should (equal (aref args 3) (buffer-name))))
+       (let ((command (string-join (agent-codex--command session) " ")))
+         (should (string-search "mcp_servers.emacs.command=\"python3\"" command))
+         (should (string-search "\"/run/emx.sock\"" command))
+         (should-not (string-search "mcp_servers.emacs.env" command)))))))
+
+(ert-deftest agent-session-test-remote-codex-images ()
+  "Images for a remote codex are uploaded to the host and named by that path."
+  (cl-letf (((symbol-function 'agent-session-message-images) (lambda (_) '("/tmp/a.png")))
+            ((symbol-function 'agent-session-message-text) (lambda (_) "看"))
+            ((symbol-function 'agent-remote-upload)
+             (lambda (root file) (concat (file-remote-p root 'localname) "up/" (file-name-nondirectory file)))))
+    (should (equal (agent-codex--input "msg" "/ssh:dev:/srv/proj/")
+                   (vector '(:type "text" :text "看")
+                           '(:type "localImage" :path "/srv/proj/up/a.png"))))
+    (should (equal (aref (agent-codex--input "msg" "/tmp/proj/") 1)
+                   '(:type "localImage" :path "/tmp/a.png")))))
+
+(ert-deftest agent-session-test-codex-toml-string ()
+  "TOML strings escape quotes, backslashes and control characters."
+  (should (equal (agent-codex--toml-string "a\"b\\c\nd\te") "\"a\\\"b\\\\c\\nd\\te\"")))
+
+(ert-deftest agent-session-test-remote-bridge-local-end ()
+  "A relay connection is piped to an emx started for the session it names."
+  (agent-session-test--with-session
+   (let* ((dir (make-temp-file "agent-remote-test-" t))
+          (socket (expand-file-name "emx.sock" dir))
+          (server (agent-remote--listen socket))
+          (status nil))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-session-emx-command) (lambda () '("cat"))))
+           (cl-flet ((relay (name input)
+                       ;; The relay's stderr is part of the output: it must
+                       ;; stay quiet.
+                       (let* ((output "")
+                              (process (make-process
+                                        :name "agent-remote-test-relay"
+                                        :command (list "python3" "-c" agent-remote--relay socket name)
+                                        :connection-type 'pipe :noquery t
+                                        :filter (lambda (_p s) (setq output (concat output s))))))
+                         ;; Like an agent: send a request and wait for the
+                         ;; reply (or the connection to drop) before quitting.
+                         (process-send-string process input)
+                         (let ((deadline (+ (float-time) 5)))
+                           (while (and (process-live-p process) (string-empty-p output)
+                                       (< (float-time) deadline))
+                             (accept-process-output nil 0.05)))
+                         (setq status (and (not (process-live-p process))
+                                           (process-exit-status process)))
+                         (delete-process process)
+                         output)))
+             (should (equal (relay (buffer-name) "{\"ping\":1}\n") "{\"ping\":1}\n"))
+             ;; A connection naming no session is dropped, possibly while the
+             ;; relay still writes; it exits quietly.
+             (should (equal (relay "*no such session*" "x\n") ""))
+             (should (eql status 0))
+             ;; The emx of a remote agent offers the config_* methods.
+             (cl-letf (((symbol-function 'agent-session-emx-command)
+                        (lambda () '("sh" "-c" "read _; echo \"$EMX_REMOTE_AGENT\""))))
+               (should (equal (relay (buffer-name) "{}\n") "1\n")))))
+       (delete-process server)
+       (delete-directory dir t)))))
+
+(ert-deftest agent-session-test-file-written-by-emx ()
+  "emx writes a file only without unsaved edits, then its buffer is reverted."
+  (let* ((file (make-temp-file "agent-ui-test-" nil ".txt" "old\n"))
+         (buffer (find-file-noselect file)))
+    (unwind-protect
+        (progn
+          (should-not (agent-ui-file-modified-p file))
+          (should-not (agent-ui-file-modified-p (concat file ".missing")))
+          (with-temp-file file (insert "new\n"))
+          (agent-ui-file-written file)
+          (should (equal (with-current-buffer buffer (buffer-string)) "new\n"))
+          (with-current-buffer buffer (insert "edit"))
+          (should (agent-ui-file-modified-p file))
+          ;; A buffer with unsaved edits is left alone.
+          (agent-ui-file-written file)
+          (should (equal (with-current-buffer buffer (buffer-string)) "editnew\n")))
+      (with-current-buffer buffer (set-buffer-modified-p nil))
+      (kill-buffer buffer)
+      (delete-file file))))
+
+;;; Sessions working with each other (agent-collab)
+
+(defun agent-session-test--call (method caller &rest params)
+  "Call agent-ui METHOD with PARAMS as the agent of session buffer CALLER."
+  (let ((agent-ui-caller (and caller (list :agent_buffer (buffer-name caller)))))
+    (funcall (plist-get (alist-get method agent-ui--methods nil nil #'equal) :function)
+             params)))
+
+(defun agent-session-test--poll (pending)
+  "Poll the deferred result PENDING once."
+  (agent-ui--poll (cadr pending) nil))
+
+(ert-deftest agent-session-test-handles ()
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (other (buffer-local-value 'agent-session--current (agent-session-test-echo t))))
+     ;; Placeholder names are the agent's, made unique.
+     (should (equal (agent-session-handle session) "test-echo"))
+     (should (equal (agent-session-handle other) "test-echo-2"))
+     (should (equal (agent-session-set-handle other "test-echo") "test-echo-2"))
+     (should (equal (agent-session-set-handle other "cfi-meaning") "cfi-meaning"))
+     (should (eq (agent-session-find "@cfi-meaning") other))
+     (should (eq (agent-session-find "cfi-meaning") other))
+     (should (eq (agent-session-find (buffer-name buffer)) session))
+     (should-not (agent-session-find "@nothing"))
+     (with-current-buffer buffer
+       (should (string-match-p "@test-echo\\'" (agent-session-test--mode-line))))
+     ;; @ completion offers the other sessions, not this one.
+     (should (equal (mapcar #'car (agent-session--mention-candidates session))
+                    '("cfi-meaning")))
+     ;; Mentions get a note for the agent; the transcript keeps the user's text.
+     (should (string-match-p "(@cfi-meaning is the Echo session"
+                             (agent-collab--mention-note session "看下 @cfi-meaning 的结论")))
+     (should (equal (agent-collab--mention-note session "mail me@cfi-meaning or @test-echo")
+                    "mail me@cfi-meaning or @test-echo")))))
+
+(ert-deftest agent-session-test-handle-names ()
+  (should (equal (agent-collab--clean-handle "  CFI-Meaning\n") "cfi-meaning"))
+  (should (equal (agent-collab--clean-handle "Sure!\n**Perf Tuning**") "perf-tuning"))
+  (should-not (agent-collab--clean-handle "42"))
+  (should-not (agent-collab--clean-handle ""))
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     ;; The agent's own command first, then the global one; missing ones are skipped.
+     (let ((agent-collab-agent-handle-commands '((test-echo "sh" "-c" "own")))
+           (agent-collab-handle-command '("sh" "-c" "global")))
+       (should (equal (agent-collab--handle-commands session)
+                      '(("sh" "-c" "own") ("sh" "-c" "global")))))
+     (let ((agent-collab-agent-handle-commands '((codex "sh" "-c" "codex")))
+           (agent-collab-handle-command '("sh" "-c" "global")))
+       (should (equal (agent-collab--handle-commands session) '(("sh" "-c" "global")))))
+     (let ((agent-collab-agent-handle-commands '((test-echo "no-such-program-x")))
+           (agent-collab-handle-command nil))
+       (should-not (agent-collab--handle-commands session))))))
+
+(ert-deftest agent-session-test-handle-commands-run ()
+  "Naming commands get a closed stdin, and one that hangs gives way to the next."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (agent-collab-handle-timeout 0.5))
+     (cl-flet ((wait-for (handle)
+                 (with-timeout (10 nil)
+                   (while (not (equal (agent-session-handle session) handle))
+                     (accept-process-output nil 0.05)))
+                 (agent-session-handle session)))
+       ;; Like `codex exec', read stdin to its end before answering.
+       (agent-collab--name session "hi" '(("sh" "-c" "cat >/dev/null; echo Stdin Closed")))
+       (should (equal (wait-for "stdin-closed") "stdin-closed"))
+       (agent-collab--name session "hi" '(("sleep" "30") ("sh" "-c" "echo fallback")))
+       (should (equal (wait-for "fallback") "fallback"))))))
+
+(ert-deftest agent-session-test-session-read ()
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-set-handle session "reader")
+     (agent-session-test--type "第一个问题")
+     (agent-session-test--type "第二个问题")
+     (agent-session-test--type "hold 第三个")
+     (agent-session-tool session "t1" :kind 'command :title "make test" :status 'error
+                         :output "boom")
+     (agent-session-text session "thinking-1" "想一想" 'thinking)
+     (let ((out (agent-session-test--call "session_read" nil :session "@reader")))
+       (should (string-match-p "Turns 2-3 of 3\\. Earlier turns: call again with before=2\\." out))
+       (should (string-match-p "## Turn 3 (in progress)" out))
+       (should (string-match-p "- \\$ make test (failed)" out))
+       (should (string-match-p "收到：第二个问题" out))
+       (should-not (string-match-p "User:\n第一个问题" out))
+       (should-not (string-match-p "想一想" out)))
+     (let ((out (agent-session-test--call "session_read" nil :session "@reader"
+                                          :before 2 :last 5 :tools "none")))
+       (should (string-match-p "Turns 1-1 of 3\\.\n" out))
+       (should (string-match-p "User:\n第一个问题" out)))
+     (let ((out (agent-session-test--call "session_read" nil :session "@reader"
+                                          :last 1 :tools "full")))
+       (should (string-match-p "Tool \\$ make test (failed)\nboom" out)))
+     (should-error (agent-session-test--call "session_read" nil :session "@reader"
+                                             :tools "all"))
+     (should-error (agent-session-test--call "session_read" nil :session "@nobody")))))
+
+(ert-deftest agent-session-test-session-ask ()
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (pending (agent-session-test--call "session_ask" buffer
+                                             :prompt "帮我看看这个 diff" :agent "test-echo2")))
+     (should (eq (car pending) :agent-ui-pending))
+     ;; Nothing starts before the user confirms in the caller's footer.
+     (should (= (length (agent-session-buffers)) 1))
+     (should (eq (car (agent-session-test--poll pending)) :agent-ui-pending))
+     (should (string-match-p "向 Echo2 提问（只读子会话）" (agent-session-test--footer)))
+     (agent-session-approve)
+     (let* ((sub (seq-find (lambda (b) (not (eq b buffer))) (agent-session-buffers)))
+            (child (buffer-local-value 'agent-session--current sub))
+            (reply (agent-session-test--poll pending)))
+       ;; The sub-session runs out of sight, read-only, and knows who started it.
+       (should-not (get-buffer-window sub))
+       (should (eq (agent-session-setting child :mode) 'plan))
+       (should (eq (agent-session-parent child) session))
+       (should (string-match-p "\\`Reply from @test-echo2 (Echo2):\n\n收到：帮我看看这个 diff" reply))
+       (should (string-match-p "Sent by the Echo agent of session \"@test-echo\" through session_ask"
+                               reply))
+       (should-not (string-match-p "is the Echo session" reply))
+       (let ((listed (agent-session-test--call "sessions" buffer)))
+         (should (equal (seq-subseq (plist-get listed :agents) -2) ["test-echo" "test-echo2"]))
+         (should (equal (sort (seq-map (lambda (s) (list (plist-get s :id) (plist-get s :started_by)
+                                                         (plist-get s :yours)))
+                                       (plist-get listed :sessions))
+                              :key #'car)
+                        '(("@test-echo" :null t) ("@test-echo2" "@test-echo" :false)))))
+       ;; A sub-session can't ask others, and nobody asks a session that waits for them.
+       (should-error (agent-session-test--call "session_ask" sub :prompt "x"
+                                               :agent "test-echo"))
+       (should-error (agent-session-test--call "session_ask" buffer :prompt "x"
+                                               :session "@test-echo"))
+       ;; Follow-ups go to the existing session.
+       (let ((agent-collab-confirm nil))
+         (should (string-match-p
+                  "收到：再看看"
+                  (agent-session-test--poll
+                   (agent-session-test--call "session_ask" buffer :prompt "再看看"
+                                             :session "@test-echo2")))))
+       ;; Declined: the agent gets an error.
+       (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第三次"
+                                                :session "@test-echo2")))
+         (agent-session-deny)
+         (should-error (agent-session-test--poll pending) :type 'error))
+       ;; Timed out before the user answered: the request closes.
+       (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第四次"
+                                                :session "@test-echo2" :wait 1)))
+         (plist-put (gethash (cadr pending) agent-ui--deferred) :deadline 0)
+         (should-error (agent-session-test--poll pending))
+         (should-not (agent-session--pending-asks session)))))))
+
+(ert-deftest agent-session-test-sub-session-asks ()
+  (agent-session-test--with-session
+   (let* ((parent agent-session--current)
+          (child (buffer-local-value
+                  'agent-session--current
+                  (agent-session-open 'test-echo2 default-directory nil nil
+                                      (list :parent buffer :depth 1))))
+          (answers nil)
+          (ask (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
+                                  :callback (lambda (key) (push key answers)))))
+     ;; The request shows in the parent too; answering there answers the child.
+     (should (string-match-p "@test-echo2：运行 make" (agent-session-test--footer)))
+     (agent-session-approve)
+     (should (equal answers '(allow)))
+     (should (equal (plist-get (agent-session--ask child ask) :answer) "允许"))
+     (should-not (agent-session--pending-asks parent))
+     ;; When the child's turn ends, its copy expires; the parent's turn ending
+     ;; leaves the child's request alone.
+     (setq ask (agent-session-ask child :title "再运行" :choices '((allow "允许"))
+                                  :callback (lambda (key) (push key answers))))
+     (agent-session--settle parent)
+     (should (agent-session--pending-asks child))
+     (agent-session--settle child)
+     (should-not (agent-session--pending-asks child))
+     (should-not (agent-session--pending-asks parent))
+     (should (equal answers '(allow))))))
+
+(ert-deftest agent-session-test-rpc-deferred ()
+  (let* ((polls 0)
+         (agent-ui--methods
+          (cons (list "test_wait" :function
+                      (lambda (_params)
+                        (agent-ui-defer (lambda () (and (> (cl-incf polls) 1) (list "done"))))))
+                agent-ui--methods))
+         (dir (make-temp-file "agent-ui-rpc-" t))
+         (req (expand-file-name "req.json" dir))
+         (res (expand-file-name "res.json" dir)))
+    (unwind-protect
+        (cl-flet ((rpc (method &optional params)
+                    (with-temp-file req
+                      (insert (json-serialize (list :method method
+                                                    :params (or params (make-hash-table))))))
+                    (agent-ui-rpc req res)
+                    (with-temp-buffer
+                      (insert-file-contents res)
+                      (json-parse-buffer :object-type 'plist))))
+          (let ((id (plist-get (rpc "test_wait") :pending)))
+            (should (stringp id))
+            (should (equal (plist-get (rpc "_poll" (list :id id)) :pending) id))
+            (should (equal (rpc "_poll" (list :id id)) '(:ok t :result "done")))
+            (should (eq (plist-get (rpc "_poll" (list :id id)) :ok) :false))))
+      (delete-directory dir t))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

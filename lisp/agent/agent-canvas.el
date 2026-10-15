@@ -154,8 +154,11 @@ EXTRA is additional indentation for wrapped lines."
                              'wrap-prefix (concat agent-canvas--prefix (or extra "")))))
 
 (defun agent-canvas--resolve (path)
-  "Resolve PATH relative to the page root directory."
-  (expand-file-name path agent-canvas--root))
+  "Resolve PATH relative to the page root directory.
+For a remote root, absolute paths name files on its host."
+  (if agent-canvas--root
+      (agent-session-expand-file-name path agent-canvas--root)
+    (expand-file-name path)))
 
 (defun agent-canvas--open (target)
   "Open TARGET: URLs in eww, otherwise as path[:line[-end]] in another window."

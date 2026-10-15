@@ -73,6 +73,17 @@
 (add-hook 'prog-mode-hook #'hl-line-mode)
 (add-hook 'text-mode-hook #'visual-line-mode)
 
+(defun my/truncate-lines ()
+  "Show long lines truncated instead of wrapped in this buffer.
+Config modes such as `toml-ts-mode' derive from `text-mode', so undo the
+`visual-line-mode' it turned on."
+  (visual-line-mode -1)
+  (setq-local truncate-lines t))
+
+;; Code is not wrapped; scroll horizontally to read long lines.
+(dolist (hook '(prog-mode-hook conf-mode-hook toml-ts-mode-hook yaml-ts-mode-hook))
+  (add-hook hook #'my/truncate-lines))
+
 ;;; macOS
 
 ;; When the GUI is launched from the Dock, inherit PATH from a login shell
@@ -107,6 +118,11 @@ nil means use the native Emacs keybindings.  Toggle it in a running
 session with `my/toggle-evil'."
   :type 'boolean
   :group 'convenience)
+
+;; evil-collection needs these set before evil loads, which can happen without
+;; init-evil too (a plain M-x evil-mode autoloads evil), so set them up front.
+(setq-default evil-want-integration t
+              evil-want-keybinding nil)
 
 (defun my/toggle-evil (&optional save)
   "Turn evil on or off in the current Emacs.

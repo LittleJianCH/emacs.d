@@ -8,6 +8,7 @@
 ;;   SPC s  search buffer   SPC /  search project   SPC p  project commands
 ;;   SPC g  magit           SPC a  agent commands (same as C-c a)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
+;; Insert state uses Emacs editing keys; Escape returns to normal state.
 ;; evil is not enabled in the minibuffer, which keeps normal editing.
 ;;
 ;; Whether it loads is controlled by `my/use-evil' in init-base.el (off by
@@ -27,10 +28,7 @@
   ;; (Emacs 31 global minor modes no longer define MODE-buffers); fixed on MELPA.
   :pin melpa
   :demand t
-  :init
-  ;; evil-collection requires these to be set before evil loads.
-  (setq evil-want-integration t
-        evil-want-keybinding nil)
+  ;; `evil-want-keybinding' is set to nil in init-base.el, before evil can load.
   :custom
   (evil-want-C-u-scroll t)
   (evil-want-C-i-jump nil)
@@ -40,6 +38,8 @@
   (evil-vsplit-window-right t)
   (evil-symbol-word-search t)
   :config
+  ;; Apply after Evil initializes its keymaps, including during hot reload.
+  (customize-set-variable 'evil-disable-insert-state-bindings t)
   (evil-mode 1)
   (evil-set-leader '(normal motion visual) (kbd "SPC"))
   (evil-define-key '(normal motion visual) 'global

@@ -24,6 +24,7 @@ early-init.el            GC / frame settings before the first frame
 init.el                  package setup, then loads modules in order
 lisp/core/               base layer
   init-base.el           defaults, var/ paths, `my/use-evil' + `my/toggle-evil'
+  init-reload.el         `my/reload-config': apply edited files to the running Emacs
   init-ui.el             theme, fonts, windows
   init-evil.el           optional Vim bindings (off by default)
   init-completion.el     vertico / orderless / consult / corfu / cape
@@ -31,8 +32,13 @@ lisp/core/               base layer
   init-remote.el         remote editing (tramp-rpc)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              agent support (see below)
+lisp/app/                standalone applications
+  init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
+test/init-reload-test.el    ERT suite for reloading
+test/init-base-test.el      ERT suite for base defaults
+test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -68,12 +74,40 @@ var/                     runtime state (history, backups, pasted images...); git
   Elisp. emx is mounted per agent with dsh's MCP client. It depends on dsh internals,
   so expect to adjust it when dsh is upgraded. The API key lives in dsh's
   `~/.dsh/.credentials.yaml`; never pass it through the environment.
+- `agent-remote.el` — remote projects (`/rpc:` roots). The agent CLI runs on the
+  project's host through tramp-rpc, so it uses the host's toolchain and history, like
+  Claude Desktop's SSH mode. emx stays local: a per-host bridge forwards a Unix socket
+  over the tramp-rpc ControlMaster (`ssh -O forward -R`, owner-only on the host), the
+  agent's MCP command there is a python3 relay into it, and Emacs runs a local `emx mcp`
+  per connection. Paths an agent reports are on the host
+  (`agent-session-expand-file-name`). That emx runs with `EMX_REMOTE_AGENT=1`, which
+  adds its own `config_read` / `config_edit` / `config_write` tools: the agent's file
+  tools can't reach this machine. They are implemented in emx, not Emacs, so file I/O
+  never blocks the editor, and are confined to this checkout outside `.git` (a guardrail
+  against editing the wrong host, not a sandbox: `eval` is unrestricted). Writing a
+  `.el` file tells the agent to call `reload` once its edits are done.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's
   `tools/list` is generated from these, so a new method is automatically an MCP tool.
+  A method that waits for something slow returns `agent-ui-defer` at once and emx polls
+  it (`_poll`), so Emacs never blocks while an agent waits.
+- `agent-collab.el` — agents working with each other. Every session has a handle
+  (`@cfi-meaning`) named from its topic by a cheap model of its agent
+  (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users
+  mention sessions with it. Methods `sessions`, `session_read` (latest turns, paged)
+  and `session_ask` (confirmed by the user; starts a read-only sub-session, hidden, whose
+  confirmations are repeated in the caller, and waits for its reply). Only sessions the
+  user started may ask (`agent-collab-max-depth`).
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
+- `agent-review.el` — atomic reviews of a branch: `review_snapshot` pins base/head and
+  lists hunks, the agent plans items, `review_build` checks every changed line is covered
+  exactly once and shows a review buffer with a sidebar of items. The user selects lines
+  and writes an annotation, which is sent straight to the originating session with the
+  selected code; the agent answers with `review_reply`. Git runs in the
+  caller's root through its file handler, so remote projects need nothing on the host.
+  Data lives under `var/reviews/` as Lisp data.
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
 
 The emx MCP server is only configured for agent processes started from Emacs (via
@@ -84,10 +118,12 @@ temp request/response files (`agent-ui-rpc`).
 
 Run from the repo root.
 
-Tests (ERT, ~30 tests, a few seconds):
+Tests (ERT, ~50 tests, a few seconds):
 
 ```sh
 emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
+      -l test/init-reload-test.el -l test/init-base-test.el \
+      -l test/agent-review-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
@@ -99,7 +135,7 @@ emacs --batch --init-directory=. -l init.el --eval '
 (let ((out (make-temp-file "elc-" t)))
   (setq byte-compile-dest-file-function
         (lambda (f) (expand-file-name (concat (file-name-nondirectory f) "c") out)))
-  (dolist (dir (list "lisp/core" "lisp/agent" "lisp/lang"))
+  (dolist (dir (list "lisp/core" "lisp/agent" "lisp/lang" "lisp/app"))
     (dolist (f (directory-files dir t "\\.el$"))
       (byte-compile-file f))))' 2>&1 | grep -A3 -E '^[a-z-]+\.el:[0-9]+|Error'
 ```
@@ -119,21 +155,31 @@ The user develops inside a running Emacs, often from an agent session hosted by 
 After changing code, hot-reload it instead of asking for a restart:
 
 ```sh
-emacsclient -e '(load (locate-user-emacs-file "lisp/agent/agent-session.el") nil t)'
+bin/emx reload
 ```
 
-`locate-user-emacs-file` resolves against the running Emacs's config directory, so
-the command names no machine-specific path.
+(the `reload` MCP tool, or `M-x my/reload-config`). It reloads every file under the
+running Emacs's `lisp/` changed on disk since it was last loaded, in dependency order,
+and reports each file as `reloaded`, `failed` or `restart_required`. Edits in another
+checkout, such as a worktree, are not picked up: pass their absolute paths
+(`bin/emx reload --files "$PWD/lisp/agent/agent-ui.el ..."`; relative paths resolve
+against the running config) only when the user wants to try that code. Unlike a
+plain `load`, it:
 
-Load in dependency order: agent-session -> agent-claude / agent-codex / agent-dsh ->
-agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
+- merges `defvar-keymap` (and keymap `defvar`) definitions into the live keymaps,
+  keeping bindings other files added; bindings the source dropped are removed from
+  the second reload on, once there is a previous version to compare with;
+- moves `defcustom`s nobody customized or `setq`'d to their new default and applies
+  changed `defface` specs; other `defvar`s are state and keep their values;
+- refuses to load a file whose `cl-defstruct` layout changed (it would break live
+  objects, including the `agent-session` you may be running in) and reports
+  `restart_required`; slots appended at the end load with a warning, since objects
+  made before lack them. Prefer keeping per-backend state in the `state` plist;
+- never reloads `init.el` / `early-init.el` (`restart_required`), nor files that only
+  depend on a changed file: reload those yourself when they expand a changed macro.
 
-- `defvar`, `defvar-keymap`, `defcustom` and `defface` do not re-evaluate on reload.
-  Apply new key bindings with `keymap-set` and changed defaults with `setq` afterwards,
-  then verify (`keymap-lookup`).
-- Changing the `agent-session` struct layout breaks live session objects — including the
-  session you may be running in. Append new slots at the end, or keep per-backend state
-  in the `state` plist; if a layout change is unavoidable, ask the user to restart.
+Other caveats:
+
 - Re-running a major mode in a live buffer kills its buffer-local variables (e.g.
   `agent-session-list--root`); save and restore them.
 - If `emacsclient` hangs or reports "Server not responding", Emacs is blocked; diagnose
@@ -174,7 +220,8 @@ agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
 - **Modularity.** New languages go in `lisp/lang/lang-NAME.el` and are enabled in
   `my/languages`. A new agent is a backend implementing the generics plus one
   `agent-session-define-agent` line in `init-agent.el`. New agent -> Emacs abilities are
-  `agent-ui-defmethod`s.
+  `agent-ui-defmethod`s; only work that needs no Emacs state (like the `config_*` file
+  tools) belongs in emx itself.
 - **Packages.** use-package with GNU ELPA first, then NonGNU, then MELPA; pin to MELPA
   only when needed (evil: NonGNU 1.15 breaks on Emacs 31).
 - **State.** Runtime files go under `var/` (`my/var`), never into tracked paths.
