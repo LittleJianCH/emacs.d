@@ -32,6 +32,8 @@ lisp/core/               base layer
   init-remote.el         remote editing (tramp-rpc)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              agent support (see below)
+lisp/app/                standalone applications
+  init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/init-reload-test.el    ERT suite for reloading
@@ -111,7 +113,7 @@ emacs --batch --init-directory=. -l init.el --eval '
 (let ((out (make-temp-file "elc-" t)))
   (setq byte-compile-dest-file-function
         (lambda (f) (expand-file-name (concat (file-name-nondirectory f) "c") out)))
-  (dolist (dir (list "lisp/core" "lisp/agent" "lisp/lang"))
+  (dolist (dir (list "lisp/core" "lisp/agent" "lisp/lang" "lisp/app"))
     (dolist (f (directory-files dir t "\\.el$"))
       (byte-compile-file f))))' 2>&1 | grep -A3 -E '^[a-z-]+\.el:[0-9]+|Error'
 ```
