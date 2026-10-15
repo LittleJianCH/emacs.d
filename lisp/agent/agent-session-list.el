@@ -137,17 +137,30 @@ The item is highlighted on mouse hover and opens on click."
           (setq pos next))))))
 
 (defun agent-session-list--kill-button (buffer)
-  "Return a × button that ends the session in BUFFER."
-  (make-text-button " ×" nil 'face 'agent-session-dim 'follow-link t
-                    'help-echo "结束这个会话"
-                    'action (lambda (_)
-                              (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
-                                (kill-buffer buffer)
-                                (agent-session-list--refresh)))))
+  "Return a × button that ends the session in BUFFER, at the right edge."
+  (concat
+   ;; At least one space, then align × one column short of the edge (a
+   ;; terminal reserves the last column for the wrap glyph).
+   " " (propertize " " 'display `(space :align-to (- right ,(1+ (string-width "×")))))
+   (make-text-button "×" nil 'face 'agent-session-dim 'follow-link t
+                     'help-echo "结束这个会话"
+                     'action (lambda (_)
+                               (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
+                                 (kill-buffer buffer)
+                                 (agent-session-list--refresh))))))
 
 (defun agent-session-list--truncate (string)
   "Truncate STRING to fit the window width."
   (truncate-string-to-width string (max 10 (- (window-body-width) 4)) nil nil "…"))
+
+(defun agent-session-list--head-line (head handle)
+  "HEAD then HANDLE, cut to leave room for the × at the window's right edge.
+HEAD is cut first, so the handle stays readable."
+  (let ((width (- (window-body-width) 3)))
+    (truncate-string-to-width
+     (concat (truncate-string-to-width head (max 10 (- width (string-width handle))) nil nil "…")
+             handle)
+     width nil nil "…")))
 
 (defun agent-session-list--render ()
   "Redraw the session list in the current buffer.
@@ -166,13 +179,14 @@ Try to keep point on the same entry."
                (project (agent-session-list--project-name (agent-session-root session))))
           (agent-session-list--insert-entry
            (list :buffer buffer)
-           "  " (agent-session-status-label session)
-           (propertize (format "  %s · %s" (agent-session-title session) project)
-                       'face 'agent-session-dim)
+           (agent-session-list--head-line
+            (concat "  " (agent-session-status-label session)
+                    (propertize (format "  %s · %s" (agent-session-title session) project)
+                                'face 'agent-session-dim))
+            (if-let* ((handle (agent-session-handle session)))
+                (propertize (concat "  @" handle) 'face 'agent-session-dim)
+              ""))
            (agent-session-list--kill-button buffer)
-           (if-let* ((handle (agent-session-handle session)))
-               (propertize (concat "  @" handle) 'face 'agent-session-dim)
-             "")
            "\n    "
            (propertize (agent-session-list--truncate (agent-session-display-title session))
                        'face 'agent-session-list-title)

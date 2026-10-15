@@ -542,13 +542,29 @@ The summary can be expanded."
                (let* ((start (text-property-search-forward
                               'agent-session-entry (list :buffer session-buffer) #'equal))
                       (kill (progn (goto-char (prop-match-beginning start))
-                                   (search-forward " ×" (prop-match-end start))
+                                   (search-forward "×" (prop-match-end start))
                                    (match-beginning 0))))
                  (should (equal (get-text-property kill 'help-echo) "结束这个会话"))
+                 ;; × comes last on its line, after the handle, aligned to the right.
+                 (should (string-blank-p (buffer-substring (point) (line-end-position))))
+                 (should (search-backward
+                          (concat "@" (agent-session-handle
+                                       (buffer-local-value 'agent-session--current session-buffer)))
+                          (prop-match-beginning start) t))
+                 (should (eq (car-safe (get-text-property (1- kill) 'display)) 'space))
                  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
                    (click kill))))
              (should-not (buffer-live-p session-buffer))))
        (kill-buffer list-buffer)))))
+
+(ert-deftest agent-session-test-list-head-line ()
+  "Session list: a session's first line leaves room for × and keeps the handle."
+  (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 30)))
+    (let ((line (agent-session-list--head-line "  ● 工作中 1m  Claude · emacs.d"
+                                               "  @greeting-check")))
+      (should (<= (string-width line) 27))
+      (should (string-suffix-p "…  @greeting-check" line)))
+    (should (equal (agent-session-list--head-line "  ● 空闲" "  @a") "  ● 空闲  @a"))))
 
 ;; Regression: when all entries shared one mouse-face, hovering highlighted adjacent
 ;; entries as one block.
