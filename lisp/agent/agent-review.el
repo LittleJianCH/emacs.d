@@ -131,6 +131,13 @@ BASE is the face of the label."
 
 ;;; Git
 
+(defconst agent-review--git-config
+  ;; With diff.suppressBlankEmpty, git prints empty context lines without
+  ;; their leading space, which the hunk counts would not match.
+  '("-c" "core.quotepath=false" "-c" "diff.suppressBlankEmpty=false")
+  "Configuration every git command of a review runs with.
+It overrides user settings that change the diff format parsed here.")
+
 (defun agent-review--git (root &rest args)
   "Run git with ARGS in ROOT and return its standard output.
 Signal an error with git's message when it fails."
@@ -140,7 +147,7 @@ Signal an error with git's message when it fails."
         (with-temp-buffer
           (let* ((coding-system-for-read 'utf-8-unix)
                  (status (apply #'process-file "git" nil (list t stderr) nil
-                                "-c" "core.quotepath=false" args)))
+                                (append agent-review--git-config args))))
             (unless (eql status 0)
               (error "git %s failed: %s" (car args)
                      (string-trim (with-temp-buffer
@@ -167,7 +174,7 @@ Signal an error with git's message when it fails."
 
 (defun agent-review--diff-command (base head)
   "Shell command that prints the hunks of BASE..HEAD as a snapshot numbers them."
-  (string-join (append '("git" "-c" "core.quotepath=false" "diff")
+  (string-join (append '("git") agent-review--git-config '("diff")
                        agent-review--diff-flags
                        (list "--unified=0" base head "--"))
                " "))
@@ -176,57 +183,85 @@ Signal an error with git's message when it fails."
   "Largest file, in bytes, whose text a review keeps for context.")
 
 (defun agent-review--source-text (bytes)
-  "BYTES of a file decoded as UTF-8, or nil for binary and non-UTF-8 files."
+  "BYTES of a file decoded as UTF-8, or nil for binary and non-UTF-8 files.
+Text with U+FFFD is left out too: a file handler that decodes lossily
+puts it in place of invalid bytes, and context must not show wrong text."
   (when (and (<= (length bytes) agent-review--source-limit)
              (not (string-search "\0" bytes)))
     (let ((text (decode-coding-string bytes 'utf-8-unix t)))
       ;; Invalid UTF-8 decodes to raw-byte characters.
-      (unless (string-match-p (format "[%c-%c]" #x3fff80 #x3fffff) text)
+      (unless (or (string-match-p (format "[%c-%c]" #x3fff80 #x3fffff) text)
+                  (string-search (string #xfffd) text))
         text))))
+
+(defun agent-review--cat-file (root input &rest args)
+  "Output of git cat-file ARGS in ROOT, reading object names from INPUT."
+  (let ((default-directory root)
+        (coding-system-for-read 'utf-8-emacs-unix))
+    (with-temp-buffer
+      (unless (eql 0 (apply #'process-file "git" input (list t nil) nil "cat-file" args))
+        (error "git cat-file failed"))
+      ;; Some file handlers (tramp-rpc) decode the output whatever coding is
+      ;; asked for, so turn it back into bytes before using the byte sizes
+      ;; git reports.
+      (if enable-multibyte-characters
+          (encode-coding-string (buffer-string) 'utf-8-emacs-unix)
+        (buffer-string)))))
+
+(defun agent-review--small-files (root head files)
+  "Those of FILES at commit HEAD in ROOT that exist and fit the source limit.
+Asking git for the sizes first keeps large files from being read at all."
+  (let ((input (make-temp-file "agent-review-batch")))
+    (unwind-protect
+        (let ((coding-system-for-write 'utf-8-unix))
+          (write-region (mapconcat (lambda (file) (format "%s:%s\n" head file)) files "")
+                        nil input nil 'silent)
+          (let ((lines (split-string (agent-review--cat-file root input "--batch-check") "\n")))
+            (cl-loop for file in files
+                     for line in lines
+                     when (and (string-match "\\`[0-9a-f]+ blob \\([0-9]+\\)\\'" line)
+                               (<= (string-to-number (match-string 1 line))
+                                   agent-review--source-limit))
+                     collect file)))
+      (delete-file input))))
 
 (defun agent-review--cat-files (root head files)
   "The bytes of FILES at commit HEAD in ROOT read by one git cat-file.
 Return a list of (FILE . BYTES), BYTES nil for a missing file, or nil
-when the output cannot be split, which happens when a file handler
-decodes it lossily."
+when the output cannot be split exactly, which happens when a file
+handler decodes it lossily."
   (let ((default-directory root)
         (input (make-temp-file "agent-review-batch")))
     (unwind-protect
-        (let ((coding-system-for-write 'utf-8-unix)
-              (coding-system-for-read 'utf-8-emacs-unix))
+        (let ((coding-system-for-write 'utf-8-unix))
           (write-region (mapconcat (lambda (file) (format "%s:%s\n" head file)) files "")
                         nil input nil 'silent)
-          (with-temp-buffer
-            (unless (eql 0 (process-file "git" input (list t nil) nil "cat-file" "--batch"))
-              (error "git cat-file failed"))
-            ;; Some file handlers (tramp-rpc) decode the output whatever
-            ;; coding is asked for, so turn it back into bytes before using
-            ;; the byte sizes git reports.
-            (let ((out (if enable-multibyte-characters
-                           (encode-coding-string (buffer-string) 'utf-8-emacs-unix)
-                         (buffer-string)))
-                  (pos 0) result)
-              (catch 'lossy
-                (dolist (file files (nreverse result))
-                  (cond
-                   ((eq (string-match "[0-9a-f]+ blob \\([0-9]+\\)\n" out pos) pos)
-                    (let* ((start (match-end 0))
-                           (end (+ start (string-to-number (match-string 1 out)))))
-                      (unless (and (< end (length out)) (eq (aref out end) ?\n))
-                        (throw 'lossy nil))
-                      (push (cons file (substring out start end)) result)
-                      (setq pos (1+ end))))
-                   ((eq (string-match "[^\n]* missing\n" out pos) pos)
-                    (push (cons file nil) result)
-                    (setq pos (match-end 0)))
-                   (t (throw 'lossy nil))))))))
+          (let ((out (agent-review--cat-file root input "--batch"))
+                (pos 0) result)
+            (catch 'lossy
+              (dolist (file files)
+                (cond
+                 ((eq (string-match "[0-9a-f]+ blob \\([0-9]+\\)\n" out pos) pos)
+                  (let* ((start (match-end 0))
+                         (end (+ start (string-to-number (match-string 1 out)))))
+                    (unless (and (< end (length out)) (eq (aref out end) ?\n))
+                      (throw 'lossy nil))
+                    (push (cons file (substring out start end)) result)
+                    (setq pos (1+ end))))
+                 ((eq (string-match "[^\n]* missing\n" out pos) pos)
+                  (push (cons file nil) result)
+                  (setq pos (match-end 0)))
+                 (t (throw 'lossy nil))))
+              ;; Every byte must belong to an object, or the sizes lied.
+              (unless (= pos (length out)) (throw 'lossy nil))
+              (nreverse result))))
       (delete-file input))))
 
 (defun agent-review--sources (root head files)
   "The text of FILES at commit HEAD in ROOT, as an alist (FILE . TEXT).
 Binary files, files that are not UTF-8 and files larger than
 `agent-review--source-limit' are left out."
-  (when files
+  (when-let* ((files (and files (agent-review--small-files root head files))))
     (seq-keep (lambda (entry)
                 (when-let* ((bytes (cdr entry))
                             (text (agent-review--source-text bytes)))
@@ -252,31 +287,57 @@ Binary files, files that are not UTF-8 and files larger than
     (cl-loop for (start end) on (nreverse starts)
              collect (substring text start end))))
 
-(defun agent-review--file-path (header)
-  "The path of the file whose diff starts with HEADER."
-  (let ((pos 0) path)
-    (while (string-match "^\\(?:\\+\\+\\+\\|---\\) \\(.+\\)$" header pos)
-      (let ((name (string-remove-suffix "\t" (match-string 1 header))))
-        (unless (equal name "/dev/null") (setq path name)))
-      (setq pos (match-end 0)))
-    (cond
-     ((null path)
-      (if (string-match "\\`diff --git a/\\(.+\\) b/\\(.+\\)\n" header)
-          (match-string 2 header)
-        (error "Unsupported file header: %s" (car (split-string header "\n")))))
-     ((or (string-prefix-p "\"" path)
-          (not (member (substring path 0 (min 2 (length path))) '("a/" "b/"))))
-      (error "Quoted or control-character paths are not supported: %s" path))
-     (t (substring path 2)))))
+(defun agent-review--header-value (header regexp)
+  "The rest of the line of HEADER that starts with REGEXP and a space, or nil.
+Quoted paths, which git uses for control characters, are not supported."
+  (when (string-match (concat "^" regexp " \\(.+\\)$") header)
+    (let ((value (string-remove-suffix "\t" (match-string 1 header))))
+      (when (string-prefix-p "\"" value)
+        (error "Quoted or control-character paths are not supported: %s" value))
+      value)))
+
+(defun agent-review--prefixed-path (header marker)
+  "The path on the MARKER line (--- or +++) of HEADER without its a/ or b/.
+nil when the line is missing or names /dev/null."
+  (when-let* ((path (agent-review--header-value header marker))
+              ((not (equal path "/dev/null"))))
+    (unless (member (substring path 0 (min 2 (length path))) '("a/" "b/"))
+      (error "Unexpected path in the diff header: %s" path))
+    (substring path 2)))
+
+(defun agent-review--file-paths (header)
+  "The (NEW . OLD) paths of the file whose diff starts with HEADER.
+OLD differs from NEW for renames and copies; for an added or deleted
+file both are the path that exists."
+  (let ((new (agent-review--prefixed-path header "\\+\\+\\+"))
+        (old (agent-review--prefixed-path header "---")))
+    (if (or new old)
+        (cons (or new old) (or old new))
+      ;; No ---/+++ lines: a rename or mode change without edits, or a
+      ;; binary file.  Renames and copies name both paths unambiguously.
+      (if-let* ((to (agent-review--header-value header "\\(?:rename\\|copy\\) to")))
+          (cons to (or (agent-review--header-value header "\\(?:rename\\|copy\\) from") to))
+        ;; Otherwise "diff --git a/P b/P" names one path twice; split it in
+        ;; the middle, since P itself may contain " b/".
+        (let* ((line (substring header 0 (string-search "\n" header)))
+               (rest (and (string-prefix-p "diff --git a/" line) (substring line 13)))
+               (half (and rest (/ (- (length rest) 3) 2))))
+          (if (and rest (>= half 0) (= (length rest) (+ (* 2 half) 3))
+                   (equal (substring rest half (+ half 3)) " b/")
+                   (equal (substring rest 0 half) (substring rest (+ half 3))))
+              (let ((path (substring rest 0 half))) (cons path path))
+            (error "Unsupported file header: %s" line)))))))
 
 (defun agent-review--split-files (text)
-  "Split the Git diff TEXT into a list of (:file :header :hunks) per file."
+  "Split the Git diff TEXT into a list of (:file :old-file :header :hunks).
+FILE is the path at head, OLD-FILE the path at the base."
   (unless (string-empty-p text)
     (unless (string-prefix-p "diff --git " text)
       (error "Expected a Git unified diff"))
     (mapcar (lambda (block)
-              (let ((sections (agent-review--split-before "@@ " block)))
-                (list :file (agent-review--file-path (car sections))
+              (let* ((sections (agent-review--split-before "@@ " block))
+                     (paths (agent-review--file-paths (car sections))))
+                (list :file (car paths) :old-file (cdr paths)
                       :header (car sections)
                       :hunks (cdr sections))))
             (agent-review--split-before "diff --git " text))))
@@ -488,13 +549,18 @@ files not covered: %s, metadata-only files not selected exactly once: %s"
 (defun agent-review--write (file data)
   "Write the Lisp DATA to FILE, replacing it atomically."
   (make-directory (file-name-directory file) t)
-  (let ((temp (concat file ".tmp"))
+  ;; A temporary file of its own beside FILE, so the rename is atomic and
+  ;; two writers never share one.
+  (let ((temp (make-temp-file (concat file ".")))
         (print-length nil) (print-level nil) (print-circle nil)
         (coding-system-for-write 'utf-8-emacs-unix))
-    (with-temp-buffer
-      (prin1 data (current-buffer))
-      (write-region nil nil temp nil 'silent))
-    (rename-file temp file t)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (prin1 data (current-buffer))
+            (write-region nil nil temp nil 'silent))
+          (rename-file temp file t))
+      (when (file-exists-p temp) (delete-file temp)))))
 
 (defun agent-review--read (file)
   "The Lisp data in FILE, or nil if FILE does not exist."
@@ -517,10 +583,25 @@ files not covered: %s, metadata-only files not selected exactly once: %s"
   "The annotations of the review with ID."
   (plist-get (agent-review--read (agent-review--path id "comments.eld")) :comments))
 
-(defun agent-review--save-comments (id comments)
-  "Store COMMENTS as the annotations of the review with ID."
+(defun agent-review--retired (id)
+  "Last revisions of the deleted annotations of the review with ID: (ID . REV)."
+  (plist-get (agent-review--read (agent-review--path id "comments.eld")) :retired))
+
+(defun agent-review--save-comments (id comments &optional retired)
+  "Store COMMENTS as the annotations of the review with ID.
+RETIRED replaces the revisions kept for deleted annotations; nil keeps them."
   (agent-review--write (agent-review--path id "comments.eld")
-                       (list :review id :comments comments)))
+                       (list :review id :comments comments
+                             :retired (or retired (agent-review--retired id)))))
+
+(defun agent-review--delete-comment (id comment)
+  "Delete COMMENT from the review with ID, remembering its revision.
+An annotation written again on the same lines gets the same ID; its
+revision continues from here, so an answer to the deleted one is refused."
+  (agent-review--save-comments
+   id (remove comment (agent-review--comments id))
+   (cons (cons (plist-get comment :id) (plist-get comment :revision))
+         (assoc-delete-all (plist-get comment :id) (agent-review--retired id)))))
 
 (defun agent-review--now ()
   "The current time as an ISO 8601 string."
@@ -539,7 +620,9 @@ The diff runs from the merge base of the two.  Return the snapshot."
       (error "No committed changes between the merge base and %s" head))
     (agent-review--changes full)        ; fail early on a diff we cannot parse
     (let* ((zero (agent-review--diff root base-sha head-sha 0))
-           (snapshot (list :id (agent-review--hash full) :root root
+           ;; The same diff can come from other commits (after a rebase) or
+           ;; another repository, so the pinned commits are part of its ID.
+           (snapshot (list :id (agent-review--hash (list root base-sha head-sha full)) :root root
                            :target-ref base :target-sha target :base-sha base-sha
                            :head-ref head :head-sha head-sha
                            :full full :fragments zero
@@ -572,7 +655,11 @@ review, so its annotations are kept."
          (stats (agent-review--validate full assembled))
          (id (agent-review--hash (list (plist-get snapshot :id) summary assembled)))
          (file (agent-review--path id "review.eld")))
-    (or (agent-review--read file)
+    (or (when-let* ((review (agent-review--read file)))
+          ;; Repair the index if writing it failed after the review.
+          (unless (seq-find (lambda (e) (equal (plist-get e :id) id)) (agent-review--index))
+            (agent-review--index-add review))
+          review)
         (let ((review
                (list :id id
                      :title (or title (format "%s → %s" (plist-get snapshot :head-ref)
@@ -602,12 +689,17 @@ review, so its annotations are kept."
                                          (plist-get snapshot :files)))
                      :stats stats)))
           (agent-review--write file review)
-          (agent-review--write (agent-review--path "index.eld")
-                               (cons (list :id id :title (plist-get review :title) :agent agent
-                                           :root (plist-get review :root)
-                                           :created (plist-get review :created))
-                                     (agent-review--index)))
+          (agent-review--index-add review)
           review))))
+
+(defun agent-review--index-add (review)
+  "Put REVIEW first in the index of reviews."
+  (agent-review--write (agent-review--path "index.eld")
+                       (cons (list :id (plist-get review :id) :title (plist-get review :title)
+                                   :agent (plist-get review :agent)
+                                   :root (plist-get review :root)
+                                   :created (plist-get review :created))
+                             (agent-review--index))))
 
 (defun agent-review--item (review id)
   "The item with ID of REVIEW; \"full\" is the whole diff."
@@ -658,7 +750,12 @@ LINES are line targets of one file of one item, in order."
          (item (plist-get (car lines) :item))
          (comments (agent-review--comments (plist-get review :id)))
          (previous (seq-find (lambda (c) (equal (plist-get c :id) id)) comments))
-         (comment (list :id id :revision (1+ (or (plist-get previous :revision) 0))
+         ;; Continue from a deleted annotation on the same lines, so an
+         ;; answer written for it does not land on this one.
+         (revision (max (or (plist-get previous :revision) 0)
+                        (alist-get id (agent-review--retired (plist-get review :id))
+                                   0 nil #'equal)))
+         (comment (list :id id :revision (1+ revision)
                         :item item
                         :item-title (plist-get (agent-review--item review item) :title)
                         :file (plist-get (car lines) :file)
@@ -781,7 +878,7 @@ A review opened for the first time shows only its first item unfolded."
   "Lines an annotation is being written for.")
 (defface agent-review-done '((t :inherit success))
   "Mark of an item the user reviewed.")
-(defface agent-review-button '((t :inherit (header-line-highlight bold)))
+(defface agent-review-button '((t :inherit (agent-review-meta bold)))
   "Clickable part of the header line.")
 (defface agent-review-current '((t :inherit highlight :extend t))
   "The sidebar entry of the item at point.")
@@ -890,14 +987,16 @@ used, so context never repeats lines shown elsewhere in the item."
       (insert bar (propertize "agent 回应" 'face '(bold agent-review-response)) "\n")
       (dolist (line (split-string response "\n"))
         (insert bar (propertize line 'face 'agent-review-response) "\n")))
+    (when agent-review--shown (puthash (plist-get comment :id) t agent-review--shown))
     (put-text-property start (point) 'agent-review-comment (plist-get comment :id))))
 
-(defun agent-review--insert-hunk (item file hunk comments width around)
-  "Insert HUNK of FILE in ITEM, with COMMENTS under their last lines.
+(defun agent-review--insert-hunk (item block hunk comments width around)
+  "Insert HUNK of the file BLOCK in ITEM, with COMMENTS under their last lines.
 COMMENTS maps a line key to the annotations ending there.  WIDTH is the
 width of the line number columns; AROUND is the context to show, see
 `agent-review--around'."
-  (let* ((lines (append (car around) (agent-review--hunk-lines file hunk) (cdr around)))
+  (let* ((file (plist-get block :file))
+         (lines (append (car around) (agent-review--hunk-lines file hunk) (cdr around)))
          (codes (agent-review--highlight file lines))
          (data (gethash file agent-review--files))
          (added (plist-get data :added))
@@ -916,7 +1015,10 @@ width of the line number columns; AROUND is the context to show, see
                (side (if (eq kind ?-) 'old 'new))
                (target (list :item (plist-get item :id) :file file :side side
                              :line (plist-get line (if (eq side 'old) :old :new))
-                             :kind kind :code (plist-get line :content)))
+                             :kind kind :code (plist-get line :content)
+                             ;; Where an old-side line lives at the base,
+                             ;; which differs for a renamed file.
+                             :old-file (plist-get block :old-file)))
                (face (cond ((and (plist-get line :context) added
                                  (gethash (plist-get line :new) added))
                             'agent-review-other)
@@ -943,6 +1045,20 @@ FOLDED says whether it starts folded."
     (overlay-put overlay property id)
     (overlay-put overlay 'evaporate t)
     (overlay-put overlay 'invisible folded)))
+
+(defvar agent-review--shown nil
+  "While drawing a review, the IDs of the annotations inserted so far.")
+
+(defvar agent-review--all-comments nil
+  "While drawing a review, all of its annotations.")
+
+(defun agent-review--extended-header (header)
+  "Lines of the file HEADER worth showing: modes, renames, similarity.
+The diff --git, index and ---/+++ lines are left out."
+  (seq-remove (lambda (line)
+                (or (string-empty-p line)
+                    (string-match-p "\\`\\(?:diff --git \\|index \\|--- \\|\\+\\+\\+ \\)" line)))
+              (split-string header "\n")))
 
 (defun agent-review--insert-item (item comments width)
   "Insert ITEM: its heading, intent and diff, with COMMENTS under their lines.
@@ -974,29 +1090,44 @@ WIDTH is the width of the line number columns."
           (insert "\n" (propertize (concat file "\n") 'face 'agent-review-file
                                    'agent-review-file-heading key))
           (let ((file-body (point)))
-            (if (plist-get block :hunks)
-                (cl-loop
-                 for (hunk next) on (plist-get block :hunks)
-                 do (let ((around (agent-review--around
-                                   hunk source context from
-                                   (if next
-                                       (pcase-let ((`(,_ ,_ ,new ,count)
-                                                    (agent-review--hunk-range next)))
-                                         (if (> count 0) new (1+ new)))
-                                     most-positive-fixnum))))
-                      (agent-review--insert-hunk item file hunk comments width around)
-                      (setq from (1+ (if (cdr around)
-                                         (plist-get (car (last (cdr around))) :new)
-                                       (pcase-let ((`(,_ ,_ ,new ,count)
-                                                    (agent-review--hunk-range hunk)))
-                                         (if (> count 0) (+ new count -1) new)))))))
-              ;; Binary or metadata-only: show what git says about the file.
-              (insert (propertize (string-join (cdr (split-string (plist-get block :header) "\n"))
-                                               "\n")
-                                  'face 'agent-review-meta)))
+            (if (not (plist-get block :hunks))
+                ;; Binary or metadata-only: show what git says about the file.
+                (insert (propertize (string-join (cdr (split-string (plist-get block :header) "\n"))
+                                                 "\n")
+                                    'face 'agent-review-meta))
+              ;; A rename or mode change that comes with edits.
+              (when-let* ((lines (agent-review--extended-header (plist-get block :header))))
+                (insert (propertize (concat (string-join lines "\n") "\n")
+                                    'face 'agent-review-meta)))
+              (cl-loop
+               for (hunk next) on (plist-get block :hunks)
+               do (let ((around (agent-review--around
+                                 hunk source context from
+                                 (if next
+                                     (pcase-let ((`(,_ ,_ ,new ,count)
+                                                  (agent-review--hunk-range next)))
+                                       (if (> count 0) new (1+ new)))
+                                   most-positive-fixnum))))
+                    (agent-review--insert-hunk item block hunk comments width around)
+                    (setq from (1+ (if (cdr around)
+                                       (plist-get (car (last (cdr around))) :new)
+                                     (pcase-let ((`(,_ ,_ ,new ,count)
+                                                  (agent-review--hunk-range hunk)))
+                                       (if (> count 0) (+ new count -1) new))))))))
             (agent-review--fold-overlay file-body 'agent-review-file-body key
                                         (and (member key agent-review--folded-files) t)))
           (put-text-property file-start (point) 'agent-review-file-in key)))
+      ;; Annotations on context lines the current context no longer shows
+      ;; would otherwise be stored but nowhere to be seen.
+      (when-let* ((hidden (seq-filter (lambda (c)
+                                        (and (equal (plist-get c :item) id)
+                                             (not (gethash (plist-get c :id) agent-review--shown))))
+                                      agent-review--all-comments)))
+        (insert "\n" (propertize "这些标注所在的行不在当前上下文里，按 + 显示更多上下文：\n"
+                                 'face 'agent-review-meta))
+        (dolist (comment hidden)
+          (insert (propertize (format "  %s\n" (plist-get comment :file)) 'face 'agent-review-meta))
+          (agent-review--insert-comment comment)))
       (insert "\n")
       (agent-review--fold-overlay body 'agent-review-body id
                                   (and (member id agent-review--folded) t)))
@@ -1045,8 +1176,10 @@ TAB 折叠 · f 切换视图 · RET 打开文件\n"
                         'face 'agent-review-meta)
             "\n" (propertize "本次变更概览\n" 'face 'agent-review-heading)
             (plist-get review :summary) "\n\n")
-    (dolist (item items)
-      (agent-review--insert-item item by-line width))))
+    (let ((agent-review--shown (make-hash-table :test #'equal))
+          (agent-review--all-comments comments))
+      (dolist (item items)
+        (agent-review--insert-item item by-line width)))))
 
 (defun agent-review--item-at (pos)
   "The item ID at POS, or nil."
@@ -1089,22 +1222,82 @@ TAB 折叠 · f 切换视图 · RET 打开文件\n"
               (propertize (format "  ·  %d. %s" (plist-get item :order) (plist-get item :title))
                           'face 'agent-review-meta)))))
 
+(defconst agent-review--anchor-properties
+  '(agent-review-comment agent-review-target agent-review-file-heading agent-review-heading)
+  "Text properties that identify what a position shows, most specific first.")
+
+(defun agent-review--anchor (pos)
+  "What the text at POS shows, to find the same place after a redraw.
+Return (PROPERTY VALUE OFFSET): the annotation, code line, file or item
+at POS and how far into it POS is, or (nil LINE COLUMN) elsewhere."
+  (or (seq-some (lambda (property)
+                  (when-let* ((value (get-text-property pos property)))
+                    (let ((start (previous-single-property-change
+                                  (min (1+ pos) (point-max)) property nil (point-min))))
+                      (list property
+                            (if (eq property 'agent-review-target)
+                                (agent-review--line-key value)
+                              value)
+                            (- pos start)))))
+                agent-review--anchor-properties)
+      (save-excursion
+        (goto-char pos)
+        (list nil (line-number-at-pos) (current-column)))))
+
+(defun agent-review--anchor-pos (anchor)
+  "Where ANCHOR from `agent-review--anchor' is now, or nil if it is gone."
+  (pcase-let ((`(,property ,value ,offset) anchor))
+    (if (null property)
+        (save-excursion
+          (goto-char (point-min))
+          (forward-line (1- value))
+          (move-to-column offset)
+          (point))
+      (when-let* ((match (save-excursion
+                           (goto-char (point-min))
+                           (text-property-search-forward
+                            property value
+                            (if (eq property 'agent-review-target)
+                                (lambda (key target)
+                                  (and target (equal key (agent-review--line-key target))))
+                              t)))))
+        (min (+ (prop-match-beginning match) offset)
+             (max (prop-match-beginning match) (1- (prop-match-end match))))))))
+
 (defun agent-review--redraw ()
-  "Redraw this review buffer, keeping point on the same line."
-  (let ((line (line-number-at-pos))
-        (column (current-column))
-        (windows (mapcar (lambda (w) (cons w (window-start w)))
+  "Redraw this review buffer, keeping each window on what it showed.
+An answer inserted above point must not move point onto other code."
+  (let ((here (agent-review--anchor (point)))
+        (windows (mapcar (lambda (window)
+                           (list window (agent-review--anchor (window-point window))
+                                 (agent-review--anchor (window-start window))))
                          (get-buffer-window-list nil nil t)))
         (inhibit-read-only t))
     (erase-buffer)
     (agent-review--render)
-    (goto-char (point-min))
-    (forward-line (1- line))
-    (move-to-column column)
-    (pcase-dolist (`(,window . ,start) windows)
-      (set-window-start window (min start (point-max)) t)
-      (set-window-point window (point))))
+    (goto-char (or (agent-review--anchor-pos here) (point-min)))
+    (pcase-dolist (`(,window ,point ,start) windows)
+      (when-let* ((pos (agent-review--anchor-pos start)))
+        (set-window-start window (save-excursion (goto-char pos) (line-beginning-position)) t))
+      (set-window-point window (or (agent-review--anchor-pos point) (point)))))
+  (agent-review--note-reattach)
   (agent-review--nav-refresh))
+
+(defun agent-review--note-reattach ()
+  "Highlight again the lines a note being written covers, after a redraw."
+  (when-let* ((draft (get-buffer "*review-note*"))
+              (note (buffer-local-value 'agent-review--note draft))
+              ((eq (plist-get note :buffer) (current-buffer)))
+              (overlay (plist-get note :overlay))
+              (lines (plist-get note :lines))
+              (first (agent-review--anchor-pos
+                      (list 'agent-review-target (agent-review--line-key (car lines)) 0)))
+              (last (agent-review--anchor-pos
+                     (list 'agent-review-target (agent-review--line-key (car (last lines))) 0))))
+    (move-overlay overlay
+                  (save-excursion (goto-char first) (line-beginning-position))
+                  (save-excursion (goto-char last) (line-beginning-position 2))
+                  (current-buffer))))
 
 (defun agent-review--buffers (id)
   "Live buffers showing the review with ID."
@@ -1245,7 +1438,10 @@ Unfold it otherwise."
 (defun agent-review--mark-reviewed (id)
   "Toggle whether item ID is marked reviewed; return the new state.
 A reviewed item is folded; marking it not reviewed again unfolds it."
-  (when (equal id "full") (user-error "完整 diff 不能标记已审阅"))
+  ;; Only atomic items: not the full diff, nor its files in the sidebar.
+  (unless (and (stringp id) (not (equal id "full"))
+               (agent-review--item agent-review--review id))
+    (user-error "只有审查项能标记已审阅"))
   (let ((done (not (member id agent-review--reviewed))))
     (setq agent-review--reviewed (if done (cons id agent-review--reviewed)
                                    (remove id agent-review--reviewed)))
@@ -1620,6 +1816,13 @@ session that made the review, with the selected code, when sent."
                                 (equal (plist-get line :file) (plist-get first :file))))
                          lines)
       (user-error "一条标注只能选同一审查项里同一个文件的行"))
+    ;; There is one note buffer; don't throw away a note not sent yet.
+    (when-let* ((draft (get-buffer "*review-note*"))
+                ((buffer-local-value 'agent-review--note draft))
+                ((not (string-blank-p (with-current-buffer draft (buffer-string))))))
+      (unless (yes-or-no-p "还有一条标注没发送，放弃它？")
+        (pop-to-buffer draft)
+        (user-error "先发送（C-c C-c）或取消（C-c C-k）那条标注")))
     (let* ((id (agent-review--comment-id lines))
            (previous (or existing
                          (seq-find (lambda (c) (equal (plist-get c :id) id))
@@ -1670,9 +1873,10 @@ session that made the review, with the selected code, when sent."
       (when (eq (agent-session-status agent) 'exited) (user-error "agent 进程已退出"))
       (let* ((review (buffer-local-value 'agent-review--review source))
              (comment (agent-review-annotate-lines review (plist-get note :lines) text)))
+        ;; Deliver first: if that fails, the draft is still here to send again.
+        (agent-session-submit agent (agent-review--message review comment))
         (agent-review--note-close)
         (agent-review--refresh (plist-get review :id))
-        (agent-session-submit agent (agent-review--message review comment))
         (message "标注已发给 %s" (buffer-name session))))))
 
 (defun agent-review-note-cancel ()
@@ -1701,7 +1905,7 @@ session that made the review, with the selected code, when sent."
   (let ((comment (or (agent-review--comment-at (point)) (user-error "光标不在标注上")))
         (id (plist-get agent-review--review :id)))
     (when (yes-or-no-p "删除这条标注？")
-      (agent-review--save-comments id (remove comment (agent-review--comments id)))
+      (agent-review--delete-comment id comment)
       (agent-review--refresh id))))
 
 (defun agent-review--set-agent (review agent)
@@ -1750,13 +1954,15 @@ the review's project first, and the choice is stored with the review."
         (let ((path (agent-session-expand-file-name file root)))
           (unless (file-exists-p path) (user-error "工作区里没有 %s" file))
           (pop-to-buffer (find-file-noselect path)))
-      (let ((buffer (get-buffer-create (format "*review-base: %s*" file)))
-            (text (agent-review--git root "show" (format "%s:%s" (plist-get review :base-sha) file))))
+      (let* ((old-file (or (plist-get target :old-file) file))
+             (buffer (get-buffer-create (format "*review-base: %s*" old-file)))
+             (text (agent-review--git root "show" (format "%s:%s" (plist-get review :base-sha)
+                                                          old-file))))
         (with-current-buffer buffer
           (let ((inhibit-read-only t))
             (erase-buffer)
             (insert text))
-          (when-let* ((mode (agent-review--file-mode file)))
+          (when-let* ((mode (agent-review--file-mode old-file)))
             (let ((treesit-auto-install-grammar nil)) (ignore-errors (funcall mode))))
           (setq buffer-read-only t))
         (pop-to-buffer buffer)))

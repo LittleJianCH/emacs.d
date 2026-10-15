@@ -273,5 +273,86 @@
       (should (equal (plist-get (agent-review--state (plist-get review :id)) :reviewed)
                      '("atomic-1"))))))
 
+(ert-deftest agent-review-test-file-paths ()
+  ;; A rename with edits: the new path at head, the old one at the base.
+  (should (equal (agent-review--file-paths
+                  "diff --git a/old.el b/new.el\nsimilarity index 90%\nrename from old.el\nrename to new.el\nindex 1..2 100644\n--- a/old.el\n+++ b/new.el\n")
+                 '("new.el" . "old.el")))
+  ;; Added and deleted files name the path that exists on both sides.
+  (should (equal (agent-review--file-paths "diff --git a/x b/x\nnew file mode 100644\n--- /dev/null\n+++ b/x\n")
+                 '("x" . "x")))
+  (should (equal (agent-review--file-paths "diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n")
+                 '("x" . "x")))
+  ;; A pure rename, and a mode change of a path that contains " b/".
+  (should (equal (agent-review--file-paths "diff --git a/p b/q\nsimilarity index 100%\nrename from p\nrename to q\n")
+                 '("q" . "p")))
+  (should (equal (agent-review--file-paths "diff --git a/dir b/name b/dir b/name\nold mode 100644\nnew mode 100755\n")
+                 '("dir b/name" . "dir b/name")))
+  ;; Edits that come with a mode change keep the mode lines visible.
+  (should (equal (agent-review--extended-header
+                  "diff --git a/x b/x\nold mode 100644\nnew mode 100755\nindex 1..2\n--- a/x\n+++ b/x\n")
+                 '("old mode 100644" "new mode 100755"))))
+
+(ert-deftest agent-review-test-snapshot-robustness ()
+  (agent-review-test--with-repo repo
+    ;; A user setting that drops the space of empty context lines.
+    (agent-review-test--write (expand-file-name "c.txt" repo) '("one" "" "two" "three"))
+    (agent-review-test--git repo "add" ".")
+    (agent-review-test--git repo "commit" "-q" "-m" "c")
+    (agent-review-test--write (expand-file-name "c.txt" repo) '("one" "" "2" "three"))
+    (agent-review-test--git repo "commit" "-q" "-am" "c again")
+    (agent-review-test--git repo "config" "diff.suppressBlankEmpty" "true")
+    (should (agent-review-snapshot repo "HEAD~1" "HEAD"))
+    ;; The same diff on other commits, as after a rebase, is another snapshot.
+    (agent-review-test--git repo "checkout" "-q" "-b" "base2" "main")
+    (agent-review-test--write (expand-file-name "d.txt" repo) '("d"))
+    (agent-review-test--git repo "add" ".")
+    (agent-review-test--git repo "commit" "-q" "-m" "d")
+    (agent-review-test--git repo "checkout" "-q" "-b" "feature2")
+    (agent-review-test--git repo "cherry-pick" "feature~2")
+    (let ((one (agent-review-snapshot repo "main" "feature~2"))
+          (two (agent-review-snapshot repo "base2" "feature2")))
+      (should (equal (plist-get one :full) (plist-get two :full)))
+      (should-not (equal (plist-get one :id) (plist-get two :id))))))
+
+(ert-deftest agent-review-test-deleted-annotation-revision ()
+  (agent-review-test--with-repo repo
+    (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                       "概览" (agent-review-test--plan)))
+           (id (plist-get review :id))
+           (first (agent-review-annotate-lines review agent-review-test--change "一")))
+      (agent-review--delete-comment id first)
+      ;; Written again on the same lines, it continues the revisions, so a
+      ;; late answer to the deleted one is refused.
+      (let ((again (agent-review-annotate-lines review agent-review-test--change "二")))
+        (should (equal (plist-get again :id) (plist-get first :id)))
+        (should (= (plist-get again :revision) 2))
+        (should-error (agent-review-reply id (plist-get first :id) 1 "迟到的回答"))))))
+
+(ert-deftest agent-review-test-hidden-context-and-redraw ()
+  (agent-review-test--with-repo repo
+    (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                      "概览" (agent-review-test--plan))))
+      ;; An annotation on a context line the current context doesn't show.
+      (agent-review-annotate-lines
+       review (list (list :item "atomic-1" :file "a.txt" :side 'new :line 9 :kind ?\s
+                          :code "line 9"))
+       "远处的一行")
+      (agent-review-test--with-buffer review
+        (goto-char (point-min))
+        (should (search-forward "不在当前上下文里" nil t))
+        (should (search-forward "远处的一行" nil t))
+        ;; Point stays on its code line when an annotation appears above it.
+        (agent-review-goto "atomic-2")
+        (search-forward "+line eighteen")
+        (let ((key (agent-review--line-key (get-text-property (point) 'agent-review-target))))
+          (agent-review-annotate-lines review agent-review-test--change "上面多了一条")
+          (agent-review--redraw)
+          (should (equal (agent-review--line-key (get-text-property (point) 'agent-review-target))
+                         key)))
+        ;; Only atomic items can be marked reviewed.
+        (should-error (agent-review--mark-reviewed '("full" . "a.txt")))
+        (should-error (agent-review--mark-reviewed "full"))))))
+
 (provide 'agent-review-test)
 ;;; agent-review-test.el ends here
