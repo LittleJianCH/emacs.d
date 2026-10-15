@@ -20,6 +20,28 @@
       sentence-end-double-space nil
       require-final-newline t)
 
+(defun my/scroll-down-with-point (&optional n)
+  "Scroll the text up N screen lines, moving point with it.
+Point keeps its place on the screen.  At the end of the buffer, where the
+text can't scroll, only point moves."
+  (interactive "p")
+  (my/scroll-with-point (or n 1)))
+
+(defun my/scroll-up-with-point (&optional n)
+  "Scroll the text down N screen lines, moving point with it.
+Point keeps its place on the screen.  At the start of the buffer, where the
+text can't scroll, only point moves."
+  (interactive "p")
+  (my/scroll-with-point (- (or n 1))))
+
+(defun my/scroll-with-point (n)
+  "Scroll N screen lines, down if N is positive, keeping point on the screen."
+  (let ((scroll-preserve-screen-position 'always))
+    (condition-case nil
+        (if (> n 0) (scroll-up-line n) (scroll-down-line (- n)))
+      ((beginning-of-buffer end-of-buffer)
+       (ignore-errors (line-move n))))))
+
 (setq-default indent-tabs-mode nil
               tab-width 4
               fill-column 88)

@@ -8,6 +8,8 @@
 ;;   SPC s  search buffer   SPC /  search project   SPC p  project commands
 ;;   SPC g  magit           SPC a  agent commands (same as C-c a)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
+;; C-j / C-k move point and the text together, a line at a time, so point
+;; stays where it is on the screen.
 ;; Insert state uses Emacs editing keys; Escape returns to normal state.
 ;; evil is not enabled in the minibuffer, which keeps normal editing.
 ;;
@@ -53,7 +55,9 @@
     (kbd "<leader>w") evil-window-map
     (kbd "<leader>u") #'universal-argument
     (kbd "<leader>h") help-map
-    (kbd "<leader>i") #'my/open-init-file))
+    (kbd "<leader>i") #'my/open-init-file
+    (kbd "C-j") #'my/scroll-down-with-point
+    (kbd "C-k") #'my/scroll-up-with-point))
 
 (use-package evil-collection
   :ensure t

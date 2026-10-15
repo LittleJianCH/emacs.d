@@ -17,6 +17,36 @@ e.g. after a plain M-x evil-mode autoloaded it without init-evil."
   (should (default-value 'evil-want-integration))
   (should-not (default-value 'evil-want-keybinding)))
 
+(ert-deftest init-base-scroll-with-point ()
+  "C-j / C-k scroll a line and move point with it, keeping its screen row.
+Scrolling needs a real display: run it in the running Emacs."
+  (skip-unless (not noninteractive))
+  (save-window-excursion
+    (with-temp-buffer
+      (dotimes (i 100) (insert (format "line %d\n" i)))
+      (switch-to-buffer (current-buffer))
+      (let ((row (lambda () (count-screen-lines (window-start) (point))))
+            (line (lambda () (line-number-at-pos))))
+        (goto-char (point-min))
+        (forward-line 20)
+        (move-to-column 3)
+        (set-window-start nil (save-excursion (forward-line -5) (point)))
+        (let ((row0 (funcall row)))
+          (my/scroll-down-with-point)
+          (should (= (funcall line) 22))
+          (should (= (funcall row) row0))
+          (should (= (current-column) 3))
+          (my/scroll-up-with-point 2)
+          (should (= (funcall line) 20))
+          (should (= (funcall row) row0)))
+        ;; At the start the text can't scroll: only point moves.
+        (goto-char (point-min))
+        (forward-line 3)
+        (set-window-start nil (point-min))
+        (my/scroll-up-with-point)
+        (should (= (funcall line) 3))
+        (should (= (window-start) (point-min)))))))
+
 (ert-deftest init-base-no-scroll-margin ()
   "No scroll margin, which makes touchpad scrolling jump back."
   (should (= (default-value 'scroll-margin) 0)))
