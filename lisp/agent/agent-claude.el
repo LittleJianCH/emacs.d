@@ -19,6 +19,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-remote)
 
 (defgroup agent-claude nil
   "Claude Code backend."
@@ -45,26 +46,29 @@
 (defun agent-claude--command (session)
   "Return the command line that starts SESSION.
 Model, reasoning effort and permission mode come from the session settings."
-  (append
-   (list agent-claude-executable "-p"
-         "--input-format" "stream-json" "--output-format" "stream-json"
-         "--verbose" "--include-partial-messages"
-         "--permission-prompt-tool" "stdio"
-         "--mcp-config" (json-serialize
-                         (list :mcpServers
-                               (list :emacs (list :command (car (agent-session-emx-command))
-                                                  :args (vconcat (cdr (agent-session-emx-command))))))))
-   ;; Allow switching to full access later in the session; --permission-mode
-   ;; decides whether it is enabled.
-   (list "--allow-dangerously-skip-permissions"
-         "--permission-mode" (agent-claude--mode session))
-   (when-let* ((model (agent-session-setting session :model)))
-     (unless (equal model "default") (list "--model" model)))
-   (when-let* ((effort (agent-session-setting session :effort)))
-     (list "--effort" effort))
-   (when-let* ((resume (plist-get (agent-session-state session) :resume)))
-     (list "--resume" resume))
-   agent-claude-extra-args))
+  (let ((emx (if (file-remote-p (agent-session-root session))
+                 (agent-remote-mcp-command session)
+               (agent-session-emx-command))))
+    (append
+     (list agent-claude-executable "-p"
+           "--input-format" "stream-json" "--output-format" "stream-json"
+           "--verbose" "--include-partial-messages"
+           "--permission-prompt-tool" "stdio"
+           "--mcp-config" (json-serialize
+                           (list :mcpServers
+                                 (list :emacs (list :command (car emx)
+                                                    :args (vconcat (cdr emx)))))))
+     ;; Allow switching to full access later in the session; --permission-mode
+     ;; decides whether it is enabled.
+     (list "--allow-dangerously-skip-permissions"
+           "--permission-mode" (agent-claude--mode session))
+     (when-let* ((model (agent-session-setting session :model)))
+       (unless (equal model "default") (list "--model" model)))
+     (when-let* ((effort (agent-session-setting session :effort)))
+       (list "--effort" effort))
+     (when-let* ((resume (plist-get (agent-session-state session) :resume)))
+       (list "--resume" resume))
+     agent-claude-extra-args)))
 
 (defun agent-claude--state (session key)
   "Return backend state KEY of SESSION."
@@ -87,10 +91,14 @@ On a successful response, call CALLBACK with the response contents."
 
 (defun agent-claude--project-dir (root)
   "Return the session directory of project ROOT.
-Every non-alphanumeric character in the path is replaced with -."
-  (expand-file-name (replace-regexp-in-string "[^[:alnum:]]" "-" (directory-file-name
-                                                                   (expand-file-name root)))
-                    "~/.claude/projects/"))
+Every non-alphanumeric character in the path is replaced with -.  The CLI
+of a remote project runs on its host, so its sessions are filed there."
+  (let ((name (replace-regexp-in-string
+               "[^[:alnum:]]" "-" (directory-file-name (agent-session-process-directory root)))))
+    (if-let* ((remote (file-remote-p root)))
+        ;; Left unexpanded: expanding ~ would need a round trip to the host.
+        (concat remote "~/.claude/projects/" name)
+      (expand-file-name name "~/.claude/projects/"))))
 
 (defun agent-claude--json-lines (file &optional beg end)
   "Return the JSON lines of FILE between bytes BEG and END that parse fully."
@@ -384,7 +392,7 @@ first and the text last."
 (defun agent-claude--relative (session path)
   "Return PATH relative to the project root of SESSION."
   (if (and (stringp path) (file-name-absolute-p path))
-      (file-relative-name path (agent-session-root session))
+      (file-relative-name path (agent-session-process-directory (agent-session-root session)))
     path))
 
 (defun agent-claude--diff (path old new)

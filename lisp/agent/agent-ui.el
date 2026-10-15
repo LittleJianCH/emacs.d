@@ -172,9 +172,20 @@ If there is none, split a new one to the left of the agent column."
         (erase-buffer)))
     buffer))
 
+(defun agent-ui--caller-root ()
+  "Project root of the calling agent session, or nil."
+  (when-let* ((name (plist-get agent-ui-caller :agent_buffer))
+              (buffer (get-buffer name))
+              (session (buffer-local-value 'agent-session--current buffer)))
+    (agent-session-root session)))
+
 (defun agent-ui--abs (path)
-  "Return the absolute path of PATH; signal an error if the file does not exist."
-  (let ((file (expand-file-name path)))
+  "Return the absolute path of PATH; signal an error if the file does not exist.
+PATH is as the calling agent sees it: an agent of a remote project names
+files on its host."
+  (let ((file (if-let* ((root (agent-ui--caller-root)))
+                  (agent-session-expand-file-name path root)
+                (expand-file-name path))))
     (unless (file-exists-p file) (error "No such file: %s" file))
     file))
 

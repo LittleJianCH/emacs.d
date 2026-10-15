@@ -55,6 +55,13 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
+- `agent-remote.el` — remote projects (`/rpc:` roots). The agent CLI runs on the
+  project's host through tramp-rpc, so it uses the host's toolchain and history, like
+  Claude Desktop's SSH mode. emx stays local: a per-host bridge forwards a Unix socket
+  over the tramp-rpc ControlMaster (`ssh -O forward -R`, owner-only on the host), the
+  agent's MCP command there is a python3 relay into it, and Emacs runs a local `emx mcp`
+  per connection. Paths an agent reports are on the host
+  (`agent-session-expand-file-name`).
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's

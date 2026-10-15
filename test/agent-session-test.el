@@ -759,5 +759,90 @@ Also mark that the context needs reloading."
        (should (string-search "■ 已停止" (agent-session-test--transcript)))
        (should (string-search "↻ 重新运行" (agent-session-test--transcript)))))))
 
+;;; Remote projects
+
+(ert-deftest agent-session-test-remote-paths ()
+  "Agents of a remote project see and name paths on its host."
+  (should (equal (agent-session-process-directory "/ssh:dev:/data01/proj/") "/data01/proj/"))
+  (should (equal (agent-session-process-directory "/tmp/proj/") "/tmp/proj/"))
+  (should (equal (agent-session-expand-file-name "/data01/proj/a.rs" "/ssh:dev:/data01/proj/")
+                 "/ssh:dev:/data01/proj/a.rs"))
+  (should (equal (agent-session-expand-file-name "src/a.rs" "/ssh:dev:/data01/proj/")
+                 "/ssh:dev:/data01/proj/src/a.rs"))
+  (should (equal (agent-session-expand-file-name "src/a.rs" "/tmp/proj/") "/tmp/proj/src/a.rs"))
+  (should (equal (agent-session-expand-file-name "/etc/hosts" "/tmp/proj/") "/etc/hosts")))
+
+(ert-deftest agent-session-test-claude-project-dir ()
+  "Claude history is read where the CLI files it: locally or on the host."
+  (should (equal (agent-claude--project-dir "/tmp/my.proj/")
+                 (expand-file-name "~/.claude/projects/-tmp-my-proj")))
+  (should (equal (agent-claude--project-dir "/ssh:dev:/data01/my.proj/")
+                 "/ssh:dev:~/.claude/projects/-data01-my-proj")))
+
+(ert-deftest agent-session-test-remote-mcp-commands ()
+  "Remote agents reach emx through the relay; local ones run emx directly."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (setf (agent-session-root session) "/ssh:dev:/data01/proj/")
+     (cl-letf (((symbol-function 'agent-remote-bridge) (lambda (_root) "/run/emx.sock")))
+       (let* ((command (agent-claude--command session))
+              (config (json-parse-string (cadr (member "--mcp-config" command))
+                                         :object-type 'plist))
+              (emacs (plist-get (plist-get config :mcpServers) :emacs))
+              (args (plist-get emacs :args)))
+         (should (equal (plist-get emacs :command) "python3"))
+         (should (equal (aref args 2) "/run/emx.sock"))
+         (should (equal (aref args 3) (buffer-name))))
+       (let ((command (string-join (agent-codex--command session) " ")))
+         (should (string-search "mcp_servers.emacs.command=\"python3\"" command))
+         (should (string-search "\"/run/emx.sock\"" command))
+         (should-not (string-search "mcp_servers.emacs.env" command)))))))
+
+(ert-deftest agent-session-test-remote-codex-images ()
+  "Images for a remote codex are uploaded to the host and named by that path."
+  (cl-letf (((symbol-function 'agent-session-message-images) (lambda (_) '("/tmp/a.png")))
+            ((symbol-function 'agent-session-message-text) (lambda (_) "看"))
+            ((symbol-function 'agent-remote-upload)
+             (lambda (root file) (concat (file-remote-p root 'localname) "up/" (file-name-nondirectory file)))))
+    (should (equal (agent-codex--input "msg" "/ssh:dev:/data01/proj/")
+                   (vector '(:type "text" :text "看")
+                           '(:type "localImage" :path "/data01/proj/up/a.png"))))
+    (should (equal (aref (agent-codex--input "msg" "/tmp/proj/") 1)
+                   '(:type "localImage" :path "/tmp/a.png")))))
+
+(ert-deftest agent-session-test-codex-toml-string ()
+  "TOML strings escape quotes, backslashes and control characters."
+  (should (equal (agent-codex--toml-string "a\"b\\c\nd\te") "\"a\\\"b\\\\c\\nd\\te\"")))
+
+(ert-deftest agent-session-test-remote-bridge-local-end ()
+  "A relay connection is piped to an emx started for the session it names."
+  (agent-session-test--with-session
+   (let* ((dir (make-temp-file "agent-remote-test-" t))
+          (socket (expand-file-name "emx.sock" dir))
+          (server (agent-remote--listen socket)))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-session-emx-command) (lambda () '("cat"))))
+           (cl-flet ((relay (name input)
+                       (let* ((output "")
+                              (process (make-process
+                                        :name "agent-remote-test-relay"
+                                        :command (list "python3" "-c" agent-remote--relay socket name)
+                                        :connection-type 'pipe :noquery t
+                                        :filter (lambda (_p s) (setq output (concat output s))))))
+                         ;; Like an agent: send a request and wait for the
+                         ;; reply (or the connection to drop) before quitting.
+                         (process-send-string process input)
+                         (let ((deadline (+ (float-time) 5)))
+                           (while (and (process-live-p process) (string-empty-p output)
+                                       (< (float-time) deadline))
+                             (accept-process-output nil 0.05)))
+                         (delete-process process)
+                         output)))
+             (should (equal (relay (buffer-name) "{\"ping\":1}\n") "{\"ping\":1}\n"))
+             ;; A connection naming no session is dropped.
+             (should (equal (relay "*no such session*" "x\n") ""))))
+       (delete-process server)
+       (delete-directory dir t)))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

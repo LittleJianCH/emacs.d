@@ -259,12 +259,33 @@ E.g. to switch settings that can only be given at startup."
   "Command line that starts the emx MCP server."
   (list (expand-file-name "emx" agent-session-bin-directory) "mcp"))
 
+(defun agent-session-process-directory (root)
+  "Project ROOT as the agent process sees it.
+Agents of a remote project run on its host, so that is the host's path."
+  (or (file-remote-p root 'localname) (expand-file-name root)))
+
+(defun agent-session-expand-file-name (path root)
+  "PATH reported by the agent of project ROOT, as an Emacs file name.
+Relative paths are relative to ROOT; absolute paths from an agent of a
+remote project live on its host."
+  (if (and (file-remote-p root) (file-name-absolute-p path) (not (file-remote-p path)))
+      (concat (file-remote-p root) path)
+    (expand-file-name path root)))
+
 (defun agent-session-start-process (session command)
   "Start the background process of SESSION with COMMAND.
-Each JSON line is handed to the backend."
+Each JSON line is handed to the backend.  For a remote project the
+process runs on its host through the file handler (tramp-rpc), where
+the project, its toolchain and the agent's own history live."
   (let* ((buffer (agent-session-buffer session))
          (default-directory (agent-session-root session))
-         (process-environment (agent-session-environment session))
+         (remote (file-remote-p default-directory))
+         ;; The local PATH and emx variables mean nothing on the host (tramp
+         ;; forwards changed variables); a remote agent reaches emx through
+         ;; the bridge of agent-remote.el instead.
+         (process-environment (if remote
+                                  process-environment
+                                (agent-session-environment session)))
          (pending "")
          (process
           (make-process
@@ -273,6 +294,7 @@ Each JSON line is handed to the backend."
            :connection-type 'pipe
            :coding 'utf-8-unix
            :noquery t
+           :file-handler (and remote t)
            :stderr (get-buffer-create (format " *%s stderr*" (buffer-name buffer)))
            :filter
            (lambda (_process output)

@@ -17,6 +17,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-remote)
 
 (defgroup agent-codex nil
   "Codex backend."
@@ -49,28 +50,41 @@ For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
 
 (defun agent-codex--toml-string (string)
   "Return STRING as a TOML string literal."
-  (concat "\"" (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" string) "\""))
+  (concat "\""
+          (replace-regexp-in-string
+           "\n" "\\\\n"
+           (replace-regexp-in-string
+            "\t" "\\\\t"
+            (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" string)))
+          "\""))
 
 (defun agent-codex--command (session)
   "Return the command line that starts SESSION."
-  (let* ((emx (agent-session-emx-command))
-         ;; codex doesn't pass the whole environment to MCP servers, so give
-         ;; the variables emx needs explicitly.  A variable may appear several
-         ;; times in the environment list (the first one wins), but a TOML
-         ;; table may contain it only once.
-         (env (mapcar (lambda (name)
-                        (let ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
-                                               (agent-session-environment session))))
-                          (format "%s=%s" name (agent-codex--toml-string
-                                                (substring entry (1+ (length name)))))))
-                      '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER"))))
-    (append
-     (list agent-codex-executable "app-server"
-           "-c" (concat "mcp_servers.emacs.command=" (agent-codex--toml-string (car emx)))
-           "-c" (format "mcp_servers.emacs.args=[%s]"
-                        (mapconcat #'agent-codex--toml-string (cdr emx) ","))
-           "-c" (format "mcp_servers.emacs.env={%s}" (string-join env ",")))
-     agent-codex-extra-args)))
+  (append
+   (list agent-codex-executable "app-server")
+   (if (file-remote-p (agent-session-root session))
+       ;; On the host the MCP server is the relay to this Emacs's emx, which
+       ;; needs no environment.
+       (let ((relay (agent-remote-mcp-command session)))
+         (list "-c" (concat "mcp_servers.emacs.command=" (agent-codex--toml-string (car relay)))
+               "-c" (format "mcp_servers.emacs.args=[%s]"
+                            (mapconcat #'agent-codex--toml-string (cdr relay) ","))))
+     (let* ((emx (agent-session-emx-command))
+            ;; codex doesn't pass the whole environment to MCP servers, so
+            ;; give the variables emx needs explicitly.  A variable may
+            ;; appear several times in the environment list (the first one
+            ;; wins), but a TOML table may contain it only once.
+            (env (mapcar (lambda (name)
+                           (let ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
+                                                  (agent-session-environment session))))
+                             (format "%s=%s" name (agent-codex--toml-string
+                                                   (substring entry (1+ (length name)))))))
+                         '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER"))))
+       (list "-c" (concat "mcp_servers.emacs.command=" (agent-codex--toml-string (car emx)))
+             "-c" (format "mcp_servers.emacs.args=[%s]"
+                          (mapconcat #'agent-codex--toml-string (cdr emx) ","))
+             "-c" (format "mcp_servers.emacs.env={%s}" (string-join env ",")))))
+   agent-codex-extra-args))
 
 ;;; JSON-RPC
 
@@ -119,7 +133,7 @@ When the result arrives, call CALLBACK with it."
                   (resume (agent-codex--state session :resume)))
        (agent-codex--request
         session (if resume "thread/resume" "thread/start")
-        (append (list :cwd (expand-file-name (agent-session-root session))
+        (append (list :cwd (agent-session-process-directory (agent-session-root session))
                       :approvalPolicy approval
                       :sandbox sandbox)
                 (when resume (list :threadId resume :excludeTurns t))
@@ -158,11 +172,14 @@ When the result arrives, call CALLBACK with it."
 (cl-defmethod agent-session-backend-history ((_ (eql codex)) root callback)
   (let* ((pending "")
          (done nil)
+         ;; Threads of a remote project are stored on its host.
+         (default-directory root)
          (process
           (make-process
            :name "agent-codex-list"
            :command (list agent-codex-executable "app-server")
            :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           :file-handler (and (file-remote-p root) t)
            :stderr (get-buffer-create " *agent-codex-list stderr*")
            :filter
            (lambda (process output)
@@ -179,7 +196,8 @@ When the result arrives, call CALLBACK with it."
                          (concat (json-serialize '(:jsonrpc "2.0" :method "initialized")) "\n"
                                  (json-serialize
                                   (list :jsonrpc "2.0" :id 2 :method "thread/list"
-                                        :params (list :cwd (directory-file-name (expand-file-name root))
+                                        :params (list :cwd (directory-file-name
+                                                                    (agent-session-process-directory root))
                                                       :limit 50 :sortKey "updated_at"
                                                       :sortDirection "desc")))
                                  "\n")))
@@ -221,11 +239,17 @@ When the result arrives, call CALLBACK with it."
   (when (memq :model changed)
     (agent-session-set-info session :model (agent-session-setting session :model))))
 
-(defun agent-codex--input (text)
-  "Return the input items of user message TEXT: text and images (local files)."
+(defun agent-codex--input (text &optional root)
+  "Return the input items of user message TEXT: text and images (local files).
+For a remote project ROOT codex runs on the host, so images are copied
+there first."
   (let ((plain (agent-session-message-text text)))
     (vconcat (unless (string-empty-p plain) (list (list :type "text" :text plain)))
-             (mapcar (lambda (file) (list :type "localImage" :path file))
+             (mapcar (lambda (file)
+                       (list :type "localImage"
+                             :path (if (and root (file-remote-p root))
+                                       (agent-remote-upload root file)
+                                     file)))
                      (agent-session-message-images text)))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql codex)) session text)
@@ -234,7 +258,7 @@ When the result arrives, call CALLBACK with it."
    (pcase-let ((`(,approval ,sandbox ,_ ,reviewer) (agent-codex--mode session)))
      (append
       (list :threadId (agent-codex--state session :thread)
-            :input (agent-codex--input text)
+            :input (agent-codex--input text (agent-session-root session))
             ;; Request reasoning summaries to get item/reasoning/summaryTextDelta.
             :summary "detailed"
             ;; Send approval settings explicitly every turn so a resumed
@@ -262,7 +286,7 @@ If the turn id isn't known yet, interrupt once turn/started arrives."
     (agent-codex--request session "turn/steer"
                           (list :threadId (agent-codex--state session :thread)
                                 :expectedTurnId turn
-                                :input (agent-codex--input text)))
+                                :input (agent-codex--input text (agent-session-root session))))
     t))
 
 (cl-defmethod agent-session-backend-interrupt ((_ (eql codex)) session)
@@ -273,7 +297,7 @@ If the turn id isn't known yet, interrupt once turn/started arrives."
 (defun agent-codex--relative (session path)
   "Return PATH relative to the project root of SESSION."
   (if (and (stringp path) (file-name-absolute-p path))
-      (file-relative-name path (agent-session-root session))
+      (file-relative-name path (agent-session-process-directory (agent-session-root session)))
     path))
 
 (defun agent-codex--changes-diff (session changes)
