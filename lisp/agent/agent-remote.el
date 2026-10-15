@@ -28,21 +28,29 @@ s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])
 s.sendall((sys.argv[2] + '\\n').encode())
 def up():
-    while True:
-        d = os.read(0, 65536)
-        if not d:
-            s.shutdown(socket.SHUT_WR)
-            break
-        s.sendall(d)
+    try:
+        while True:
+            d = os.read(0, 65536)
+            if not d:
+                s.shutdown(socket.SHUT_WR)
+                break
+            s.sendall(d)
+    except OSError:
+        pass
 threading.Thread(target=up, daemon=True).start()
-while True:
-    d = s.recv(65536)
-    if not d:
-        break
-    os.write(1, d)
+try:
+    while True:
+        d = s.recv(65536)
+        if not d:
+            break
+        os.write(1, d)
+except OSError:
+    pass
 "
   "Python program on the host relaying stdio to the bridge socket.
-Arguments: the socket path and the session buffer name.")
+Arguments: the socket path and the session buffer name.  Emacs may close the
+connection while the agent still writes (an unknown session, emx exiting):
+the relay then exits quietly instead of printing a broken pipe traceback.")
 
 (defvar agent-remote--bridges (make-hash-table :test 'equal)
   "Bridges by remote prefix (\"/rpc:dev:\").

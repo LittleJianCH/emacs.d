@@ -769,12 +769,12 @@ Also mark that the context needs reloading."
 
 (ert-deftest agent-session-test-remote-paths ()
   "Agents of a remote project see and name paths on its host."
-  (should (equal (agent-session-process-directory "/ssh:dev:/data01/proj/") "/data01/proj/"))
+  (should (equal (agent-session-process-directory "/ssh:dev:/srv/proj/") "/srv/proj/"))
   (should (equal (agent-session-process-directory "/tmp/proj/") "/tmp/proj/"))
-  (should (equal (agent-session-expand-file-name "/data01/proj/a.rs" "/ssh:dev:/data01/proj/")
-                 "/ssh:dev:/data01/proj/a.rs"))
-  (should (equal (agent-session-expand-file-name "src/a.rs" "/ssh:dev:/data01/proj/")
-                 "/ssh:dev:/data01/proj/src/a.rs"))
+  (should (equal (agent-session-expand-file-name "/srv/proj/a.rs" "/ssh:dev:/srv/proj/")
+                 "/ssh:dev:/srv/proj/a.rs"))
+  (should (equal (agent-session-expand-file-name "src/a.rs" "/ssh:dev:/srv/proj/")
+                 "/ssh:dev:/srv/proj/src/a.rs"))
   (should (equal (agent-session-expand-file-name "src/a.rs" "/tmp/proj/") "/tmp/proj/src/a.rs"))
   (should (equal (agent-session-expand-file-name "/etc/hosts" "/tmp/proj/") "/etc/hosts")))
 
@@ -782,14 +782,14 @@ Also mark that the context needs reloading."
   "Claude history is read where the CLI files it: locally or on the host."
   (should (equal (agent-claude--project-dir "/tmp/my.proj/")
                  (expand-file-name "~/.claude/projects/-tmp-my-proj")))
-  (should (equal (agent-claude--project-dir "/ssh:dev:/data01/my.proj/")
-                 "/ssh:dev:~/.claude/projects/-data01-my-proj")))
+  (should (equal (agent-claude--project-dir "/ssh:dev:/srv/my.proj/")
+                 "/ssh:dev:~/.claude/projects/-srv-my-proj")))
 
 (ert-deftest agent-session-test-remote-mcp-commands ()
   "Remote agents reach emx through the relay; local ones run emx directly."
   (agent-session-test--with-session
    (let ((session agent-session--current))
-     (setf (agent-session-root session) "/ssh:dev:/data01/proj/")
+     (setf (agent-session-root session) "/ssh:dev:/srv/proj/")
      (cl-letf (((symbol-function 'agent-remote-bridge) (lambda (_root) "/run/emx.sock")))
        (let* ((command (agent-claude--command session))
               (config (json-parse-string (cadr (member "--mcp-config" command))
@@ -810,9 +810,9 @@ Also mark that the context needs reloading."
             ((symbol-function 'agent-session-message-text) (lambda (_) "看"))
             ((symbol-function 'agent-remote-upload)
              (lambda (root file) (concat (file-remote-p root 'localname) "up/" (file-name-nondirectory file)))))
-    (should (equal (agent-codex--input "msg" "/ssh:dev:/data01/proj/")
+    (should (equal (agent-codex--input "msg" "/ssh:dev:/srv/proj/")
                    (vector '(:type "text" :text "看")
-                           '(:type "localImage" :path "/data01/proj/up/a.png"))))
+                           '(:type "localImage" :path "/srv/proj/up/a.png"))))
     (should (equal (aref (agent-codex--input "msg" "/tmp/proj/") 1)
                    '(:type "localImage" :path "/tmp/a.png")))))
 
@@ -825,10 +825,13 @@ Also mark that the context needs reloading."
   (agent-session-test--with-session
    (let* ((dir (make-temp-file "agent-remote-test-" t))
           (socket (expand-file-name "emx.sock" dir))
-          (server (agent-remote--listen socket)))
+          (server (agent-remote--listen socket))
+          (status nil))
      (unwind-protect
          (cl-letf (((symbol-function 'agent-session-emx-command) (lambda () '("cat"))))
            (cl-flet ((relay (name input)
+                       ;; The relay's stderr is part of the output: it must
+                       ;; stay quiet.
                        (let* ((output "")
                               (process (make-process
                                         :name "agent-remote-test-relay"
@@ -842,11 +845,15 @@ Also mark that the context needs reloading."
                            (while (and (process-live-p process) (string-empty-p output)
                                        (< (float-time) deadline))
                              (accept-process-output nil 0.05)))
+                         (setq status (and (not (process-live-p process))
+                                           (process-exit-status process)))
                          (delete-process process)
                          output)))
              (should (equal (relay (buffer-name) "{\"ping\":1}\n") "{\"ping\":1}\n"))
-             ;; A connection naming no session is dropped.
+             ;; A connection naming no session is dropped, possibly while the
+             ;; relay still writes; it exits quietly.
              (should (equal (relay "*no such session*" "x\n") ""))
+             (should (eql status 0))
              ;; The emx of a remote agent offers the config_* methods.
              (cl-letf (((symbol-function 'agent-session-emx-command)
                         (lambda () '("sh" "-c" "read _; echo \"$EMX_REMOTE_AGENT\""))))
