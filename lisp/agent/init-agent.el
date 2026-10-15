@@ -94,6 +94,7 @@ In the transcript, jump to the end of the input area and enter insert state." co
 (declare-function evil-open-below "evil-commands")
 (declare-function evil-open-above "evil-commands")
 (declare-function evil-insert-state "evil-states")
+(declare-function evil-exit-visual-state "evil-states")
 (declare-function evil-set-initial-state "evil-core")
 (declare-function evil-define-key* "evil-core")
 
@@ -104,6 +105,13 @@ In the transcript, jump to the end of the input area and enter insert state." co
 (agent-session--evil-enter agent-session-evil-append-line evil-append-line)
 (agent-session--evil-enter agent-session-evil-open-below evil-open-below)
 (agent-session--evil-enter agent-session-evil-open-above evil-open-above)
+
+(defun agent-review-evil-annotate (start end)
+  "Annotate the lines of the visual selection from START to END.
+In visual state a is the text object prefix, so this rebinds it there."
+  (interactive "r")
+  (evil-exit-visual-state)
+  (agent-review-annotate start end))
 
 ;; Vim keys (when evil is loaded).  Session buffers start in normal state: i / a / o
 ;; etc. keep their meaning in the input area, and in the transcript jump to the end
@@ -185,6 +193,8 @@ In the transcript, jump to the end of the input area and enter insert state." co
     "-" #'agent-review-less-context
     "gr" #'revert-buffer
     "q" #'quit-window)
+  (evil-define-key* 'visual agent-review-mode-map
+    "a" #'agent-review-evil-annotate)
 
   (evil-set-initial-state 'agent-review-nav-mode 'normal)
   (evil-define-key* '(normal motion) agent-review-nav-mode-map

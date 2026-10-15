@@ -217,6 +217,34 @@
                                  (agent-review--lines-between start (point)))
                          '(?- ?+))))))))
 
+(ert-deftest agent-review-test-evil-visual-annotate ()
+  "With evil, a annotates the lines of a visual selection."
+  (skip-unless (locate-library "evil"))
+  (require 'evil)
+  (agent-review-test--with-repo repo
+    (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                      "概览" (agent-review-test--plan))))
+      (agent-review-test--with-buffer review
+        (switch-to-buffer (current-buffer))
+        (evil-local-mode 1)
+        (evil-normal-state)
+        (goto-char (point-min))
+        (search-forward "-line 2")
+        (unwind-protect
+            (progn
+              ;; In visual state a is evil's text object prefix unless rebound.
+              (execute-kbd-macro "Vja")
+              (let ((note (buffer-local-value 'agent-review--note
+                                              (get-buffer "*review-note*"))))
+                (should (equal (mapcar (lambda (l) (plist-get l :kind))
+                                       (plist-get note :lines))
+                               '(?- ?+))))
+              (should (eq (buffer-local-value 'evil-state (window-buffer (next-window)))
+                          'normal)))
+          (when-let* ((note (get-buffer "*review-note*")))
+            (kill-buffer note))
+          (delete-other-windows))))))
+
 (ert-deftest agent-review-test-view-state ()
   (agent-review-test--with-repo repo
     (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
