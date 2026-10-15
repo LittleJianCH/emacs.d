@@ -60,6 +60,8 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
   (let ((emx (agent-session-emx-command)))
     (vector
      (list :name "emacs" :command (car emx) :args (vconcat (cdr emx))
+           ;; session_ask waits for another agent; the default is 60 seconds.
+           :timeoutMs 1800000
            ;; MCP servers don't inherit the whole environment; pass what emx needs.
            :env (let ((env (make-hash-table :test #'equal)))
                   (dolist (name '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER") env)
@@ -96,6 +98,14 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
 
 (cl-defmethod agent-session-backend-start ((_ (eql dsh)) session)
   (agent-dsh--set session :ready nil)
+  ;; The bridge plugin lives in this checkout, out of reach of a remote host.
+  (if (file-remote-p (agent-session-root session))
+      (progn (agent-session-set-status session 'exited)
+             (agent-session-notice session "DeepSeek 暂不支持远程项目" 'agent-session-error))
+    (agent-dsh--start session)))
+
+(defun agent-dsh--start (session)
+  "Start the bridge of SESSION and initialize its agent."
   (agent-session-start-process session (agent-dsh--command))
   (agent-dsh--request
    session "initialize"
@@ -129,7 +139,24 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
 
 ;;; Past sessions: a short-lived bridge answers sessions/list
 
-(cl-defmethod agent-session-backend-history ((_ (eql dsh)) root callback)
+(defun agent-dsh--history-items (sessions dirs)
+  "History items for SESSIONS (from sessions/list) run in DIRS.
+DIRS is from `agent-session-worktree-dirs', its project root first.
+Sessions of another worktree carry :root and :worktree."
+  (mapcar (lambda (item)
+            (append
+             (list :id (plist-get item :id)
+                   :title (car (split-string (string-trim (plist-get item :title)) "\n"))
+                   :time (plist-get item :time))
+             (when-let* ((dir (seq-find (lambda (dir)
+                                          (equal (directory-file-name (car dir))
+                                                 (plist-get item :cwd)))
+                                        (cdr dirs))))
+               (list :root (car dir) :worktree (cdr dir)))))
+          sessions))
+
+(defun agent-dsh--list-sessions (root dirs callback)
+  "Call CALLBACK with the history items of the sessions run in DIRS of ROOT."
   (let* ((pending "")
          (done nil)
          (default-directory root)
@@ -152,19 +179,23 @@ Plan mode is separate in dsh; it keeps the preset of the mode before it."
                    (setq done t)
                    (delete-process process)
                    (funcall callback
-                            (mapcar (lambda (item)
-                                      (list :id (plist-get item :id)
-                                            :title (car (split-string (string-trim (plist-get item :title))
-                                                                      "\n"))
-                                            :time (plist-get item :time)))
-                                    (plist-get (plist-get message :result) :sessions)))))))
+                            (agent-dsh--history-items
+                             (plist-get (plist-get message :result) :sessions) dirs))))))
            :sentinel (lambda (_process _event)
                        (unless done (setq done t) (funcall callback nil))))))
     (process-send-string
      process (concat (json-serialize
                       (list :jsonrpc "2.0" :id 1 :method "sessions/list"
-                            :params (list :cwd (directory-file-name (expand-file-name root)))))
+                            :params (list :cwds (vconcat (mapcar (lambda (dir)
+                                                                   (directory-file-name (car dir)))
+                                                                 dirs)))))
                      "\n"))))
+
+(cl-defmethod agent-session-backend-history ((_ (eql dsh)) root callback)
+  (if (file-remote-p root)
+      (funcall callback nil)
+    (agent-session-worktrees
+     root (lambda (dirs) (agent-dsh--list-sessions root dirs callback)))))
 
 (defun agent-dsh--apply-config (session config)
   "Follow CONFIG, the settings the bridge reports, in SESSION."

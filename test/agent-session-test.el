@@ -1377,5 +1377,15 @@ detached
             (should (eq (plist-get (rpc "_poll" (list :id id)) :ok) :false))))
       (delete-directory dir t))))
 
+(ert-deftest agent-session-test-dsh-history-worktrees ()
+  "dsh sessions of another worktree resume there and carry its label."
+  (should (equal (agent-dsh--history-items
+                  '((:id "a" :cwd "/p" :title "修复\n细节" :time 2)
+                    (:id "b" :cwd "/p/.claude/worktrees/x" :title "试验" :time 1))
+                  '(("/p/") ("/p/.claude/worktrees/x/" . "x")))
+                 '((:id "a" :title "修复" :time 2)
+                   (:id "b" :title "试验" :time 1
+                        :root "/p/.claude/worktrees/x/" :worktree "x")))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

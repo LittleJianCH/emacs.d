@@ -15,11 +15,11 @@
 //   prompt     {text, images?}       -> {messageId} | {command: {kind, text?}, status}
 //   steer      {text, images?}                           -> {messageId}
 //   cancel     {}                                        -> {}
-//   sessions/list {cwd}             -> {sessions: [{id, title, time}]}  (no initialize needed)
+//   sessions/list {cwds}            -> {sessions: [{id, cwd, title, time}]}  (no initialize needed)
 //
 // images are absolute file paths. A prompt naming a dsh slash command runs
 // the command instead of starting a turn. mcpServers are stdio servers
-// [{name, command, args, env}] mounted for this agent only. commands is
+// [{name, command, args, env, timeoutMs?}] mounted for this agent only. commands is
 // [{name, description, hint?}]. history (resumed sessions only) replays the
 // transcript as a list of {method, params} in the notification vocabulary
 // below, plus `user` {id, text, images}.
@@ -366,6 +366,7 @@ export function apply(ctx) {
               env: server.env ?? {},
               cwd: params.cwd,
               failOnStartupError: false,
+              ...server.timeoutMs ? { toolCallTimeoutMs: server.timeoutMs } : {},
             }))
           } catch (error) {
             warnings.push(`MCP ${server.name}: ${errorMessage(error)}`)
@@ -483,11 +484,14 @@ export function apply(ctx) {
     async 'sessions/list'(params) {
       const query = ctx.get('sessionQuery')
       if (query === undefined) return { sessions: [] }
-      const cwd = await realpath(params.cwd).catch(() => params.cwd)
+      // Compare physical directories; report each session under the given name.
+      const wanted = new Map()
+      for (const cwd of params.cwds ?? []) wanted.set(await realpath(cwd).catch(() => cwd), cwd)
       const roots = []
       for (const { header } of await query.listSessions()) {
         if (header.origin === 'subagent' || header.parentSession !== undefined || !header.cwd) continue
-        if ((await realpath(header.cwd).catch(() => header.cwd)) === cwd) roots.push(header)
+        const cwd = wanted.get(await realpath(header.cwd).catch(() => header.cwd))
+        if (cwd !== undefined) roots.push({ ...header, cwd })
       }
       roots.sort((a, b) => b.createdAt - a.createdAt)
       const recent = roots.slice(0, 50)
@@ -495,6 +499,7 @@ export function apply(ctx) {
         const events = (await query.readSession(header.id).catch(() => undefined))?.events ?? []
         return {
           id: header.id,
+          cwd: header.cwd,
           title: await sessionTitle(header.id, events),
           time: (events.at(-1)?.time ?? header.createdAt) / 1000,
         }
