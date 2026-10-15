@@ -1160,62 +1160,102 @@ WIDTH is the width of the line number columns."
     (when-let* ((face (alist-get (plist-get item :type) agent-review-type-faces)))
       (add-face-text-property start (point) face t))
     (put-text-property start (point) 'agent-review-heading id)
-    (let ((body (point)))
-      (when-let* ((intent (plist-get item :intent)))
-        (insert intent "\n"))
-      (dolist (block (agent-review--split-files (plist-get item :diff)))
-        (let* ((file (plist-get block :file))
-               (key (cons id file))
-               (file-start (point))
-               (source (plist-get (gethash file agent-review--files) :source))
-               ;; The full diff has its own context.
-               (context (if (equal id "full") 0 agent-review--context))
-               (from 1))
-          (insert "\n" (propertize (concat file "\n") 'face 'agent-review-file
-                                   'agent-review-file-heading key))
-          (let ((file-body (point)))
-            (if (not (plist-get block :hunks))
-                ;; Binary or metadata-only: show what git says about the file.
-                (insert (propertize (string-join (cdr (split-string (plist-get block :header) "\n"))
-                                                 "\n")
-                                    'face 'agent-review-meta))
-              ;; A rename or mode change that comes with edits.
-              (when-let* ((lines (agent-review--extended-header (plist-get block :header))))
-                (insert (propertize (concat (string-join lines "\n") "\n")
-                                    'face 'agent-review-meta)))
-              (cl-loop
-               for (hunk next) on (plist-get block :hunks)
-               do (let ((around (agent-review--around
-                                 hunk source context from
-                                 (if next
-                                     (pcase-let ((`(,_ ,_ ,new ,count)
-                                                  (agent-review--hunk-range next)))
-                                       (if (> count 0) new (1+ new)))
-                                   most-positive-fixnum))))
-                    (agent-review--insert-hunk item block hunk comments width around)
-                    (setq from (1+ (if (cdr around)
-                                       (plist-get (car (last (cdr around))) :new)
-                                     (pcase-let ((`(,_ ,_ ,new ,count)
-                                                  (agent-review--hunk-range hunk)))
-                                       (if (> count 0) (+ new count -1) new))))))))
-            (agent-review--fold-overlay file-body 'agent-review-file-body key
-                                        (and (member key agent-review--folded-files) t)))
-          (put-text-property file-start (point) 'agent-review-file-in key)))
-      ;; Annotations on context lines the current context no longer shows
-      ;; would otherwise be stored but nowhere to be seen.
-      (when-let* ((hidden (seq-filter (lambda (c)
-                                        (and (equal (plist-get c :item) id)
-                                             (not (gethash (plist-get c :id) agent-review--shown))))
-                                      agent-review--all-comments)))
-        (insert "\n" (propertize "这些标注所在的行不在当前上下文里，按 + 显示更多上下文：\n"
-                                 'face 'agent-review-meta))
-        (dolist (comment hidden)
-          (insert (propertize (format "  %s\n" (plist-get comment :file)) 'face 'agent-review-meta))
-          (agent-review--insert-comment comment)))
-      (insert "\n")
-      (agent-review--fold-overlay body 'agent-review-body id
-                                  (and (member id agent-review--folded) t)))
+    ;; Highlighting whole files is slow for large reviews, so a folded item
+    ;; is drawn when it is first unfolded.
+    (unless (agent-review--deferred-p id)
+      (agent-review--insert-body item comments width))
     (put-text-property start (point) 'agent-review-in id)))
+
+(defun agent-review--deferred-p (id)
+  "Whether item ID is folded and can wait to be drawn until it is unfolded.
+Items with annotations are drawn, so moving between annotations finds them."
+  (and (member id agent-review--folded)
+       (not (seq-find (lambda (c) (equal (plist-get c :item) id))
+                      agent-review--all-comments))))
+
+(defun agent-review--insert-body (item comments width)
+  "Insert the intent and diff of ITEM, foldable, with COMMENTS under their lines.
+WIDTH is the width of the line number columns."
+  (let ((id (plist-get item :id))
+        (body (point)))
+    (when-let* ((intent (plist-get item :intent)))
+      (insert intent "\n"))
+    (dolist (block (agent-review--split-files (plist-get item :diff)))
+      (let* ((file (plist-get block :file))
+             (key (cons id file))
+             (file-start (point))
+             (source (plist-get (gethash file agent-review--files) :source))
+             ;; The full diff has its own context.
+             (context (if (equal id "full") 0 agent-review--context))
+             (from 1))
+        (insert "\n" (propertize (concat file "\n") 'face 'agent-review-file
+                                 'agent-review-file-heading key))
+        (let ((file-body (point)))
+          (if (not (plist-get block :hunks))
+              ;; Binary or metadata-only: show what git says about the file.
+              (insert (propertize (string-join (cdr (split-string (plist-get block :header) "\n"))
+                                               "\n")
+                                  'face 'agent-review-meta))
+            ;; A rename or mode change that comes with edits.
+            (when-let* ((lines (agent-review--extended-header (plist-get block :header))))
+              (insert (propertize (concat (string-join lines "\n") "\n")
+                                  'face 'agent-review-meta)))
+            (cl-loop
+             for (hunk next) on (plist-get block :hunks)
+             do (let ((around (agent-review--around
+                               hunk source context from
+                               (if next
+                                   (pcase-let ((`(,_ ,_ ,new ,count)
+                                                (agent-review--hunk-range next)))
+                                     (if (> count 0) new (1+ new)))
+                                 most-positive-fixnum))))
+                  (agent-review--insert-hunk item block hunk comments width around)
+                  (setq from (1+ (if (cdr around)
+                                     (plist-get (car (last (cdr around))) :new)
+                                   (pcase-let ((`(,_ ,_ ,new ,count)
+                                                (agent-review--hunk-range hunk)))
+                                     (if (> count 0) (+ new count -1) new))))))))
+          (agent-review--fold-overlay file-body 'agent-review-file-body key
+                                      (and (member key agent-review--folded-files) t)))
+        (put-text-property file-start (point) 'agent-review-file-in key)))
+    ;; Annotations on context lines the current context no longer shows
+    ;; would otherwise be stored but nowhere to be seen.
+    (when-let* ((hidden (seq-filter (lambda (c)
+                                      (and (equal (plist-get c :item) id)
+                                           (not (gethash (plist-get c :id) agent-review--shown))))
+                                    agent-review--all-comments)))
+      (insert "\n" (propertize "这些标注所在的行不在当前上下文里，按 + 显示更多上下文：\n"
+                               'face 'agent-review-meta))
+      (dolist (comment hidden)
+        (insert (propertize (format "  %s\n" (plist-get comment :file)) 'face 'agent-review-meta))
+        (agent-review--insert-comment comment)))
+    (insert "\n")
+    (agent-review--fold-overlay body 'agent-review-body id
+                                (and (member id agent-review--folded) t))))
+
+(defun agent-review--comments-by-line (comments)
+  "COMMENTS in a table from the key of the line they end on, in order."
+  (let ((by-line (make-hash-table :test #'equal)))
+    (dolist (comment (reverse comments) by-line)
+      (push comment (gethash (plist-get comment :anchor) by-line)))))
+
+(defun agent-review--draw-body (id)
+  "Draw the body of item ID below its heading unless it is drawn already."
+  (when-let* (((not (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) id))
+                              (overlays-in (point-min) (point-max)))))
+              (heading (agent-review--find 'agent-review-heading id)))
+    (let* ((review agent-review--review)
+           (comments (agent-review--comments (plist-get review :id)))
+           (width (agent-review--number-width review agent-review--files))
+           (start (next-single-property-change heading 'agent-review-heading nil (point-max)))
+           (agent-review--shown (make-hash-table :test #'equal))
+           (agent-review--all-comments comments)
+           (inhibit-read-only t))
+      (save-excursion
+        (goto-char start)
+        (agent-review--insert-body (agent-review--item review id)
+                                   (agent-review--comments-by-line comments) width)
+        (put-text-property start (point) 'agent-review-in id)))))
 
 (defun agent-review--number-width (review files)
   "Width of the line number columns of REVIEW, whose file data is FILES."
@@ -1233,7 +1273,7 @@ WIDTH is the width of the line number columns."
   (let* ((review agent-review--review)
          (stats (plist-get review :stats))
          (comments (agent-review--comments (plist-get review :id)))
-         (by-line (make-hash-table :test #'equal))
+         (by-line (agent-review--comments-by-line comments))
          (items (if agent-review--full
                     (list (agent-review--item review "full"))
                   (plist-get review :items)))
@@ -1241,8 +1281,6 @@ WIDTH is the width of the line number columns."
                     (setq agent-review--files (agent-review--file-data review))))
          (width (agent-review--number-width review files)))
     (unless agent-review--context (setq agent-review--context agent-review-context))
-    (dolist (comment (reverse comments))
-      (push comment (gethash (plist-get comment :anchor) by-line)))
     (setq agent-review--counts
           (cons (length comments)
                 (seq-count (lambda (c) (equal (plist-get c :status) "open")) comments)))
@@ -1422,8 +1460,9 @@ An answer inserted above point must not move point onto other code."
 
 (defun agent-review--set-folded (id fold)
   "Fold item ID, or the file ID of the form (ITEM . FILE), when FOLD.
-Unfold it otherwise."
+Unfold it otherwise; an item not drawn yet is drawn then."
   (let ((file (consp id)))
+    (unless (or file fold) (agent-review--draw-body id))
     (when-let* ((overlay (seq-find (lambda (o)
                                      (equal (overlay-get o (if file 'agent-review-file-body
                                                              'agent-review-body))
@@ -1448,11 +1487,13 @@ Unfold it otherwise."
 
 (defun agent-review-goto (id)
   "Unfold and move to item ID, or to the file ID of the form (ITEM . FILE)."
+  ;; A file shows only once its item is unfolded and so drawn.
+  (when (and (consp id) (agent-review--find 'agent-review-heading (car id)))
+    (agent-review--set-folded (car id) nil))
   (let ((pos (or (agent-review--find (if (consp id) 'agent-review-file-heading
                                        'agent-review-heading)
                                      id)
                  (user-error "当前视图里没有它"))))
-    (when (consp id) (agent-review--set-folded (car id) nil))
     (agent-review--set-folded id nil)
     (goto-char pos)
     (when-let* ((window (get-buffer-window)))

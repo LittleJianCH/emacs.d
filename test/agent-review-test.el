@@ -196,6 +196,7 @@
                                                    (search-forward "2. 改第十八行并加 b")) t))
         ;; In item 2, b.el's lines 6-10 belong to item 3 and are shown faded.
         ;; They have no old-side number.
+        (agent-review-goto "atomic-2")
         (should (re-search-forward "^ +6  (b 6)$" nil t))
         (should (memq 'agent-review-other (ensure-list (get-text-property (1- (point)) 'face))))))))
 
@@ -353,6 +354,49 @@
         ;; Only atomic items can be marked reviewed.
         (should-error (agent-review--mark-reviewed '("full" . "a.txt")))
         (should-error (agent-review--mark-reviewed "full"))))))
+
+(ert-deftest agent-review-test-deferred-items ()
+  (agent-review-test--with-repo repo
+    (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                       "概览" (agent-review-test--plan)))
+           (body (lambda (id)
+                   (seq-find (lambda (o) (equal (overlay-get o 'agent-review-body) id))
+                             (overlays-in (point-min) (point-max))))))
+      (agent-review-test--with-buffer review
+        ;; Folded items are drawn when first unfolded, then kept: folding
+        ;; again only hides them.
+        (goto-char (point-min))
+        (should-not (search-forward "+line eighteen" nil t))
+        (goto-char (agent-review--find 'agent-review-heading "atomic-2"))
+        (agent-review-toggle)
+        (should (search-forward "+line eighteen" nil t))
+        (should (equal (agent-review--item-at (point)) "atomic-2"))
+        (let ((overlay (funcall body "atomic-2"))
+              (text (buffer-string)))
+          (goto-char (agent-review--find 'agent-review-heading "atomic-2"))
+          (agent-review-toggle)
+          (should (overlay-get overlay 'invisible))
+          (agent-review-toggle)
+          (should (eq (funcall body "atomic-2") overlay))
+          (should-not (overlay-get overlay 'invisible))
+          (should (equal (buffer-string) text)))
+        ;; A file of an item not drawn yet can be gone to directly.
+        (should-not (funcall body "atomic-3"))
+        (agent-review-goto '("atomic-3" . "b.el"))
+        (should (looking-at "b\\.el$"))
+        (should (funcall body "atomic-3")))
+      ;; A folded item with annotations is drawn, so moving between
+      ;; annotations finds them.
+      (agent-review-annotate-lines review agent-review-test--change "为什么改")
+      (agent-review--write (agent-review--path (plist-get review :id) "state.eld")
+                           (list :folded '("atomic-1" "atomic-2" "atomic-3")))
+      (agent-review-test--with-buffer review
+        (should (funcall body "atomic-1"))
+        (should-not (funcall body "atomic-2"))
+        (goto-char (point-min))
+        (agent-review-next-annotation)
+        (should (equal (agent-review--item-at (point)) "atomic-1"))
+        (should-not (member "atomic-1" agent-review--folded))))))
 
 (ert-deftest agent-review-test-whole-file-highlight ()
   (agent-review-test--with-repo repo
