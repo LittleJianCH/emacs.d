@@ -317,6 +317,59 @@ remote project live on its host."
       (concat (file-remote-p root) path)
     (expand-file-name path root)))
 
+;;; Skills given to the agents Emacs starts
+;;
+;; Some abilities of this Emacs come with a skill telling agents how to use
+;; them, which may replace a skill installed for the agent CLIs.  The agents
+;; Emacs starts get these skills, copied to their host, and not the skills
+;; they replace.
+
+(defvar agent-session-skills nil
+  "Skills given to the agents Emacs starts.
+An alist (NAME DIRECTORY . SUPERSEDED): the directory holding the skill's
+SKILL.md, and the names of installed skills it replaces, which those
+agents don't get.  Add entries with `agent-session-add-skill'.")
+
+(defun agent-session-add-skill (name directory &rest superseded)
+  "Give the agents Emacs starts the skill NAME, whose files are in DIRECTORY.
+They no longer get the installed skills named SUPERSEDED."
+  (setf (alist-get name agent-session-skills nil nil #'equal)
+        (cons (file-name-as-directory directory) superseded)))
+
+(defun agent-session-superseded-skills ()
+  "Names of the installed skills replaced by those Emacs gives its agents."
+  (delete-dups (mapcan (lambda (skill) (copy-sequence (cddr skill))) agent-session-skills)))
+
+(defun agent-session-skills-dir (session)
+  "Copy the skills Emacs gives to SESSION's host; return where they are, or nil.
+They are under .claude/skills/ of the returned directory, which is named
+as on that host.  Files already up to date are not written again.  If
+they can't be copied, the agent starts without them."
+  (when agent-session-skills
+    (condition-case err
+        (agent-session--copy-skills
+         (expand-file-name (concat (or (file-remote-p (agent-session-root session)) "")
+                                   "~/.cache/emacs-agent/skills/")))
+      (error (message "没能把 skill 复制给 agent：%s" (error-message-string err))
+             nil))))
+
+(defun agent-session--copy-skills (base)
+  "Copy the skills of `agent-session-skills' under BASE; return its local name."
+  (pcase-dolist (`(,name ,directory . ,_) agent-session-skills)
+    (dolist (file (directory-files-recursively directory ""))
+      (let ((target (expand-file-name (file-relative-name file directory)
+                                      (expand-file-name (concat ".claude/skills/" name) base))))
+        (unless (and (file-exists-p target)
+                     (equal (with-temp-buffer
+                              (insert-file-contents-literally file)
+                              (buffer-string))
+                            (with-temp-buffer
+                              (insert-file-contents-literally target)
+                              (buffer-string))))
+          (make-directory (file-name-directory target) t)
+          (copy-file file target t)))))
+  (file-local-name base))
+
 ;;; Git worktrees: a project's sessions may run in its other worktrees
 ;;
 ;; Claude Desktop and the Codex app run a session in a git worktree of the

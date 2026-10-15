@@ -956,7 +956,8 @@ detached
   (agent-session-test--with-session
    (let ((session agent-session--current))
      (setf (agent-session-root session) "/ssh:dev:/srv/proj/")
-     (cl-letf (((symbol-function 'agent-remote-bridge) (lambda (_root) "/run/emx.sock")))
+     (cl-letf (((symbol-function 'agent-remote-bridge) (lambda (_root) "/run/emx.sock"))
+               ((symbol-function 'agent-session-skills-dir) #'ignore))
        (let* ((command (agent-claude--command session))
               (config (json-parse-string (cadr (member "--mcp-config" command))
                                          :object-type 'plist))
@@ -985,6 +986,50 @@ detached
 (ert-deftest agent-session-test-codex-toml-string ()
   "TOML strings escape quotes, backslashes and control characters."
   (should (equal (agent-codex--toml-string "a\"b\\c\nd\te") "\"a\\\"b\\\\c\\nd\\te\"")))
+
+(ert-deftest agent-session-test-skills ()
+  "Skills Emacs gives are copied for the agent and replace the ones they supersede."
+  (agent-session-test--with-session
+   (let* ((home (make-temp-file "agent-skill-home-" t))
+          (source (make-temp-file "agent-skill-src-" t))
+          (process-environment (cons (concat "HOME=" home) process-environment))
+          (agent-session-skills nil)
+          (session agent-session--current))
+     (unwind-protect
+         (let ((skill (expand-file-name "SKILL.md" source))
+               (target (expand-file-name
+                        ".cache/emacs-agent/skills/.claude/skills/new-skill/SKILL.md" home)))
+           (with-temp-file skill (insert "v1"))
+           (agent-session-add-skill "new-skill" source "old-skill")
+           (should (equal (agent-session-superseded-skills) '("old-skill")))
+           ;; Copied under .claude/skills/ of the directory returned.
+           (should (equal (file-truename (agent-session-skills-dir session))
+                          (file-truename (expand-file-name ".cache/emacs-agent/skills/" home))))
+           (should (equal (with-temp-buffer (insert-file-contents target) (buffer-string)) "v1"))
+           ;; An up-to-date copy is not written again; a changed one is.
+           (set-file-times target '(0 0))
+           (agent-session-skills-dir session)
+           (should (time-equal-p (file-attribute-modification-time (file-attributes target))
+                                 '(0 0)))
+           (with-temp-file skill (insert "v2"))
+           (agent-session-skills-dir session)
+           (should (equal (with-temp-buffer (insert-file-contents target) (buffer-string)) "v2"))
+           ;; Claude adds the directory and turns the superseded skill off.
+           (let ((command (agent-claude--command session)))
+             (should (equal (file-truename (cadr (member "--add-dir" command)))
+                            (file-truename (expand-file-name ".cache/emacs-agent/skills/" home))))
+             (should (equal (json-parse-string (cadr (member "--settings" command))
+                                               :object-type 'alist)
+                            '((skillOverrides (old-skill . "off"))))))
+           ;; Codex turns it off by name.
+           (should (member "skills.config=[{name=\"old-skill\",enabled=false}]"
+                           (agent-codex--command session)))
+           ;; Without access to the host the agent starts without them.
+           (cl-letf (((symbol-function 'agent-session--copy-skills)
+                      (lambda (_) (error "No route to host"))))
+             (should-not (agent-session-skills-dir session))))
+       (delete-directory home t)
+       (delete-directory source t)))))
 
 (ert-deftest agent-session-test-remote-bridge-local-end ()
   "A relay connection is piped to an emx started for the session it names."

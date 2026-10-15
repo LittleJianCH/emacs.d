@@ -68,6 +68,13 @@ Model, reasoning effort and permission mode come from the session settings."
        (list "--effort" effort))
      (when-let* ((resume (plist-get (agent-session-state session) :resume)))
        (list "--resume" resume))
+     ;; Claude loads the skills under .claude/skills/ of an added directory.
+     (when-let* ((skills (agent-session-skills-dir session)))
+       (list "--add-dir" skills))
+     (when-let* ((superseded (agent-session-superseded-skills)))
+       (let ((overrides (make-hash-table :test #'equal)))
+         (dolist (name superseded) (puthash name "off" overrides))
+         (list "--settings" (json-serialize (list :skillOverrides overrides)))))
      agent-claude-extra-args)))
 
 (defun agent-claude--state (session key)

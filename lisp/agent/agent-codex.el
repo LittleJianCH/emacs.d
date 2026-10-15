@@ -88,6 +88,13 @@ For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
              "-c" (format "mcp_servers.emacs.args=[%s]"
                           (mapconcat #'agent-codex--toml-string (cdr emx) ","))
              "-c" (format "mcp_servers.emacs.env={%s}" (string-join env ",")))))
+   ;; This replaces any [[skills.config]] of config.toml.
+   (when-let* ((superseded (agent-session-superseded-skills)))
+     (list "-c" (format "skills.config=[%s]"
+                        (mapconcat (lambda (name)
+                                     (format "{name=%s,enabled=false}"
+                                             (agent-codex--toml-string name)))
+                                   superseded ","))))
    agent-codex-extra-args))
 
 ;;; JSON-RPC
@@ -124,33 +131,45 @@ When the result arrives, call CALLBACK with it."
 ;;; Backend interface
 
 (cl-defmethod agent-session-backend-start ((_ (eql codex)) session)
-  (agent-session-start-process session (agent-codex--command session))
-  (agent-codex--request
-   session "initialize"
-   (list :clientInfo (list :name "emacs" :title "Emacs" :version emacs-version))
-   (lambda (_result)
-     (agent-codex--notify session "initialized")
-     (agent-codex--request
-      session "model/list" (list :limit 50)
-      (lambda (result) (agent-codex--set session :models (plist-get result :data))))
-     (pcase-let* ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session))
-                  (resume (agent-codex--state session :resume)))
+  (let ((skills (agent-session-skills-dir session)))
+    (agent-session-start-process session (agent-codex--command session))
+    (agent-codex--request
+     session "initialize"
+     (list :clientInfo (list :name "emacs" :title "Emacs" :version emacs-version))
+     (lambda (_result)
+       (agent-codex--notify session "initialized")
        (agent-codex--request
-        session (if resume "thread/resume" "thread/start")
-        (append (list :cwd (agent-session-process-directory (agent-session-root session))
-                      :approvalPolicy approval
-                      :sandbox sandbox)
-                (when resume (list :threadId resume :excludeTurns t))
-                (when-let* ((model (agent-session-setting session :model)))
-                  (list :model model)))
-        (lambda (result)
-          (let ((thread (plist-get (plist-get result :thread) :id)))
-            (agent-codex--set session :thread thread)
-            (agent-codex--set session :resume thread))
-          (agent-session-set-info session :model (plist-get result :model))
-          (if (and resume (zerop (hash-table-count (agent-session-blocks session))))
-              (agent-codex--replay session)
-            (agent-session-set-status session 'idle))))))))
+        session "model/list" (list :limit 50)
+        (lambda (result) (agent-codex--set session :models (plist-get result :data))))
+       ;; Codex loads the skills in the directories under an extra root;
+       ;; the thread starts once they are known.
+       (if skills
+           (agent-codex--request
+            session "skills/extraRoots/set"
+            (list :extraRoots (vector (concat skills ".claude/skills")))
+            (lambda (_result) (agent-codex--start-thread session)))
+         (agent-codex--start-thread session))))))
+
+(defun agent-codex--start-thread (session)
+  "Start or resume the thread of SESSION, then go idle."
+  (pcase-let* ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session))
+               (resume (agent-codex--state session :resume)))
+    (agent-codex--request
+     session (if resume "thread/resume" "thread/start")
+     (append (list :cwd (agent-session-process-directory (agent-session-root session))
+                   :approvalPolicy approval
+                   :sandbox sandbox)
+             (when resume (list :threadId resume :excludeTurns t))
+             (when-let* ((model (agent-session-setting session :model)))
+               (list :model model)))
+     (lambda (result)
+       (let ((thread (plist-get (plist-get result :thread) :id)))
+         (agent-codex--set session :thread thread)
+         (agent-codex--set session :resume thread))
+       (agent-session-set-info session :model (plist-get result :model))
+       (if (and resume (zerop (hash-table-count (agent-session-blocks session))))
+           (agent-codex--replay session)
+         (agent-session-set-status session 'idle))))))
 
 (defun agent-codex--replay (session)
   "Fetch and render the past turns of a resumed session, then go idle."

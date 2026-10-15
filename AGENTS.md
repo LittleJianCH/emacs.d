@@ -35,6 +35,7 @@ lisp/agent/              agent support (see below)
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
+skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
@@ -94,7 +95,9 @@ var/                     runtime state (history, backups, pasted images...); git
   and writes an annotation, which is sent straight to the originating session with the
   selected code; the agent answers with `review_reply`. Git runs in the
   caller's root through its file handler, so remote projects need nothing on the host.
-  Data lives under `var/reviews/` as Lisp data.
+  Data lives under `var/reviews/` as Lisp data.  The workflow for agents is the
+  `emacs-atomic-review` skill (`skills/`), which replaces the CLIs' web page
+  `atomic-review` skill in the sessions Emacs starts.
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
 
 The emx MCP server is only configured for agent processes started from Emacs (via
