@@ -148,6 +148,15 @@
                            (agent-ui--method-canvas_guide '(:example "theme-picker"))))
   (should-error (agent-ui--method-canvas_guide '(:example "nope"))))
 
+(ert-deftest agent-canvas-buttons-are-flat ()
+  "Agent buttons are flat pills, independent of the mode-line faces.
+They used to inherit `mode-line-inactive' and look like raised 3D keys."
+  (dolist (face '(agent-session-button agent-canvas-button))
+    (should (eq (plist-get (face-attribute face :box) :style) 'flat-button))
+    (should (stringp (face-attribute face :background)))
+    (should-not (memq 'mode-line-inactive
+                      (ensure-list (face-attribute face :inherit))))))
+
 (provide 'agent-canvas-test)
 
 ;;; agent-canvas-test.el ends here
