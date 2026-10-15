@@ -698,6 +698,21 @@ Also mark that the context needs reloading."
    (should (invisible-p (match-beginning 0)))
    (should-not (invisible-p (- (point) 5)))))
 
+(ert-deftest agent-session-test-run-command-remote-login-shell ()
+  "Remote commands run through the user's login shell; local ones don't."
+  (let ((default-directory "/ssh:host:/tmp/"))
+    (should (equal (agent-session--run-command "rustup show")
+                   '("/bin/sh" "-c" "exec \"${SHELL:-/bin/sh}\" -lc \"$1\"" "sh" "rustup show"))))
+  (let ((default-directory temporary-file-directory))
+    (should (equal (agent-session--run-command "ls")
+                   (list shell-file-name shell-command-switch "ls"))))
+  ;; The command reaches the login shell intact, quotes included.
+  (let ((argv (let ((default-directory "/ssh:host:/tmp/"))
+                (agent-session--run-command "printf '%s' \"a b\""))))
+    (with-temp-buffer
+      (apply #'call-process (car argv) nil t nil (cdr argv))
+      (should (equal (buffer-string) "a b")))))
+
 (ert-deftest agent-session-test-run-code-eof-error ()
   "A run is still recorded when sending EOF fails (remote process already gone)."
   (agent-session-test--with-session

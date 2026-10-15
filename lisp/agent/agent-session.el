@@ -708,6 +708,15 @@ last carriage return (progress bars)."
                                  (when (agent-session--block session id)
                                    (agent-session--render session id)))))))
 
+(defun agent-session--run-command (command)
+  "Process command line running shell COMMAND in `default-directory'.
+Remote hosts start processes without a login environment, so tools
+installed under the home directory (rustup, cargo) are not on PATH;
+run COMMAND through the remote user's login shell instead."
+  (if (file-remote-p default-directory)
+      (list "/bin/sh" "-c" "exec \"${SHELL:-/bin/sh}\" -lc \"$1\"" "sh" command)
+    (list shell-file-name shell-command-switch command)))
+
 (defun agent-session-run-code (session id index)
   "Run code block INDEX of message block ID in the project root of SESSION.
 The output is shown below the code block."
@@ -728,8 +737,7 @@ The output is shown below the code block."
              :name "agent-run"
              ;; Tied to the session buffer, so closing the session ends it.
              :buffer (agent-session-buffer session)
-             :command (list (if (file-remote-p default-directory) "/bin/sh" shell-file-name)
-                            shell-command-switch command)
+             :command (agent-session--run-command command)
              :connection-type 'pipe
              ;; Run on the remote host for remote projects.
              :file-handler t
