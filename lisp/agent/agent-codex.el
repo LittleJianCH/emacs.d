@@ -173,10 +173,39 @@ When the result arrives, call CALLBACK with it."
 
 ;;; Past session list: start a temporary app-server and call thread/list
 
+(defun agent-codex--history-items (threads dirs)
+  "Return history items for THREADS (from thread/list) run in DIRS.
+DIRS is from `agent-session-worktree-dirs', its project root first.
+Threads of another worktree carry :root and :worktree."
+  (mapcar (lambda (thread)
+            (append
+             (list :id (plist-get thread :id)
+                   :title (or (plist-get thread :name)
+                              (car (split-string (string-trim (or (plist-get thread :preview) ""))
+                                                 "\n"))
+                              "（无标题）")
+                   :time (plist-get thread :updatedAt))
+             (when-let* ((dir (seq-find (lambda (dir)
+                                          (equal (agent-codex--cwd (car dir))
+                                                 (plist-get thread :cwd)))
+                                        (cdr dirs))))
+               (list :root (car dir) :worktree (cdr dir)))))
+          threads))
+
+(defun agent-codex--cwd (dir)
+  "Return DIR the way Codex records a thread's cwd."
+  (directory-file-name (agent-session-process-directory dir)))
+
 (cl-defmethod agent-session-backend-history ((_ (eql codex)) root callback)
+  (agent-session-worktrees
+   root (lambda (dirs) (agent-codex--list-threads root dirs callback))))
+
+(defun agent-codex--list-threads (root dirs callback)
+  "Call CALLBACK with the threads of project ROOT run in DIRS.
+The app-server runs where ROOT's threads are stored: on a remote
+project's host."
   (let* ((pending "")
          (done nil)
-         ;; Threads of a remote project are stored on its host.
          (default-directory root)
          (process
           (make-process
@@ -199,24 +228,20 @@ When the result arrives, call CALLBACK with it."
                          process
                          (concat (json-serialize '(:jsonrpc "2.0" :method "initialized")) "\n"
                                  (json-serialize
+                                  ;; The cwd filter takes several paths: one
+                                  ;; request sorts and limits them together.
                                   (list :jsonrpc "2.0" :id 2 :method "thread/list"
-                                        :params (list :cwd (directory-file-name
-                                                                    (agent-session-process-directory root))
+                                        :params (list :cwd (vconcat (mapcar (lambda (dir)
+                                                                              (agent-codex--cwd (car dir)))
+                                                                            dirs))
                                                       :limit 50 :sortKey "updated_at"
                                                       :sortDirection "desc")))
                                  "\n")))
                      (2 (setq done t)
                         (delete-process process)
                         (funcall callback
-                                 (mapcar (lambda (thread)
-                                           (list :id (plist-get thread :id)
-                                                 :title (or (plist-get thread :name)
-                                                            (car (split-string
-                                                                  (string-trim (or (plist-get thread :preview) ""))
-                                                                  "\n"))
-                                                            "（无标题）")
-                                                 :time (plist-get thread :updatedAt)))
-                                         (plist-get (plist-get message :result) :data)))))))))
+                                 (agent-codex--history-items
+                                  (plist-get (plist-get message :result) :data) dirs))))))))
            :sentinel (lambda (_process _event)
                        (unless done (setq done t) (funcall callback nil))))))
     (process-send-string

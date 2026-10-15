@@ -317,6 +317,57 @@ remote project live on its host."
       (concat (file-remote-p root) path)
     (expand-file-name path root)))
 
+;;; Git worktrees: a project's sessions may run in its other worktrees
+;;
+;; Claude Desktop and the Codex app run a session in a git worktree of the
+;; project, and the agent CLIs file it under the worktree's path.  Such a
+;; session belongs to the project's history but resumes in its worktree.
+
+(defun agent-session--parse-worktrees (output)
+  "Return the worktree paths in OUTPUT of `git worktree list --porcelain'."
+  (let (result)
+    (dolist (line (split-string output "\n" t) (nreverse result))
+      (when (string-prefix-p "worktree " line)
+        (push (substring line (length "worktree ")) result)))))
+
+(defun agent-session-worktree-dirs (root worktrees)
+  "Return the directories where sessions of project ROOT may run.
+WORKTREES are the paths of the git worktrees of ROOT's repository; they
+count only when ROOT is one of them, not a subdirectory.  Each element
+is (DIRECTORY . LABEL), ROOT first with a nil LABEL."
+  (let* ((root (file-name-as-directory (expand-file-name root)))
+         (worktrees (mapcar (lambda (path) (file-name-as-directory (expand-file-name path)))
+                            worktrees)))
+    (cons (list root)
+          (and (member root worktrees)
+               (seq-keep (lambda (path)
+                           (unless (equal path root)
+                             (cons path (file-name-nondirectory (directory-file-name path)))))
+                         worktrees)))))
+
+(defun agent-session-worktrees (root callback)
+  "Call CALLBACK with `agent-session-worktree-dirs' of project ROOT.
+Git runs asynchronously.  A remote project only gets ROOT itself:
+listing its worktrees would take more round trips to the host."
+  (if (file-remote-p root)
+      (funcall callback (list (list root)))
+    (let ((default-directory root)
+          (output ""))
+      (condition-case nil
+          (make-process
+           :name "agent-session-worktrees"
+           :command (list "git" "worktree" "list" "--porcelain")
+           :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           :stderr (get-buffer-create " *agent-session-worktrees stderr*")
+           :filter (lambda (_ string) (setq output (concat output string)))
+           :sentinel (lambda (process _)
+                       (unless (process-live-p process)
+                         (funcall callback
+                                  (agent-session-worktree-dirs
+                                   root (and (zerop (process-exit-status process))
+                                             (agent-session--parse-worktrees output)))))))
+        (error (funcall callback (list (list root))))))))
+
 (defun agent-session-start-process (session command)
   "Start the background process of SESSION with COMMAND.
 Each JSON line is handed to the backend.  For a remote project the

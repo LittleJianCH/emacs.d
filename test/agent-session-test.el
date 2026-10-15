@@ -832,10 +832,9 @@ Also mark that the context needs reloading."
   (should (equal (agent-claude--project-dir "/ssh:dev:/srv/my.proj/")
                  "/ssh:dev:~/.claude/projects/-srv-my-proj")))
 
-;; Claude Desktop runs sessions in worktrees under .claude/worktrees.
-(ert-deftest agent-session-test-claude-worktree-dirs ()
-  "Claude history covers the project's git worktrees, removed ones too."
-  (let ((worktrees (agent-claude--parse-worktrees "\
+(ert-deftest agent-session-test-worktree-dirs ()
+  "Sessions of a project may run in the other git worktrees of its repository."
+  (let ((worktrees (agent-session--parse-worktrees "\
 worktree /src/emacs.d
 HEAD 1111
 branch refs/heads/main
@@ -847,27 +846,52 @@ branch refs/heads/claude/telega-ed2ff9
 worktree /src/emacs.d-feature
 HEAD 3333
 detached
-"))
-        (names '("-src-emacs-d" "-src-emacs-d--claude-worktrees-telega-ed2ff9"
-                 "-src-emacs-d--claude-worktrees-gone-1a2b3c" "-src-other")))
+")))
     (should (equal worktrees '("/src/emacs.d" "/src/emacs.d/.claude/worktrees/telega-ed2ff9"
                                "/src/emacs.d-feature")))
-    (should (equal (agent-claude--history-dirs "/src/emacs.d/" worktrees names)
-                   '(("-src-emacs-d" "/src/emacs.d/" nil)
-                     ("-src-emacs-d--claude-worktrees-telega-ed2ff9"
-                      "/src/emacs.d/.claude/worktrees/telega-ed2ff9/" "telega-ed2ff9")
-                     ("-src-emacs-d-feature" "/src/emacs.d-feature/" "emacs.d-feature")
-                     ;; Removed: no longer listed by git, still filed by the CLI
-                     ("-src-emacs-d--claude-worktrees-gone-1a2b3c"
-                      "/src/emacs.d/.claude/worktrees/gone-1a2b3c/" "gone-1a2b3c"))))
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d/" worktrees)
+                   '(("/src/emacs.d/")
+                     ("/src/emacs.d/.claude/worktrees/telega-ed2ff9/" . "telega-ed2ff9")
+                     ("/src/emacs.d-feature/" . "emacs.d-feature"))))
     ;; From a worktree, the main checkout is a worktree too.
-    (should (equal (mapcar #'car (agent-claude--history-dirs
-                                  "/src/emacs.d/.claude/worktrees/telega-ed2ff9/" worktrees nil))
-                   '("-src-emacs-d--claude-worktrees-telega-ed2ff9" "-src-emacs-d"
-                     "-src-emacs-d-feature")))
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d-feature/" worktrees)
+                   '(("/src/emacs.d-feature/")
+                     ("/src/emacs.d/" . "emacs.d")
+                     ("/src/emacs.d/.claude/worktrees/telega-ed2ff9/" . "telega-ed2ff9"))))
     ;; A subdirectory of a repository is not one of its worktrees.
-    (should (equal (agent-claude--history-dirs "/src/emacs.d/lisp/" worktrees names)
-                   '(("-src-emacs-d-lisp" "/src/emacs.d/lisp/" nil))))))
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d/lisp/" worktrees)
+                   '(("/src/emacs.d/lisp/"))))
+    (should (equal (agent-session-worktree-dirs "/src/emacs.d/" nil) '(("/src/emacs.d/"))))))
+
+;; Claude Desktop runs sessions in worktrees under .claude/worktrees.
+(ert-deftest agent-session-test-claude-worktree-dirs ()
+  "Claude history covers the project's worktrees, removed Desktop ones too."
+  (should (equal (agent-claude--history-dirs
+                  '(("/src/emacs.d/")
+                    ("/src/emacs.d/.claude/worktrees/telega-ed2ff9/" . "telega-ed2ff9")
+                    ("/src/emacs.d-feature/" . "emacs.d-feature"))
+                  '("-src-emacs-d" "-src-emacs-d--claude-worktrees-telega-ed2ff9"
+                    "-src-emacs-d--claude-worktrees-gone-1a2b3c" "-src-other"))
+                 '(("-src-emacs-d" "/src/emacs.d/" nil)
+                   ("-src-emacs-d--claude-worktrees-telega-ed2ff9"
+                    "/src/emacs.d/.claude/worktrees/telega-ed2ff9/" "telega-ed2ff9")
+                   ("-src-emacs-d-feature" "/src/emacs.d-feature/" "emacs.d-feature")
+                   ;; Removed: no longer listed by git, still filed by the CLI
+                   ("-src-emacs-d--claude-worktrees-gone-1a2b3c"
+                    "/src/emacs.d/.claude/worktrees/gone-1a2b3c/" "gone-1a2b3c")))))
+
+(ert-deftest agent-session-test-codex-worktree-history ()
+  "Codex threads of another worktree carry it; the project's own don't."
+  (let ((items (agent-codex--history-items
+                (vector (list :id "t1" :name "主仓库" :updatedAt 3000 :cwd "/src/p")
+                        (list :id "t2" :preview "工作树里的\n第二行" :updatedAt 2000
+                              :cwd "/Users/me/.codex/worktrees/ab12/p"))
+                '(("/src/p/") ("/Users/me/.codex/worktrees/ab12/p/" . "p")))))
+    (should (equal items '((:id "t1" :title "主仓库" :time 3000)
+                           (:id "t2" :title "工作树里的" :time 2000
+                                :root "/Users/me/.codex/worktrees/ab12/p/" :worktree "p")))))
+  ;; A remote project lists only its root, by its path on the host.
+  (should (equal (agent-codex--cwd "/ssh:dev:/srv/p/") "/srv/p")))
 
 (ert-deftest agent-session-test-claude-worktree-history ()
   "Sessions of all worktrees merge newest first; worktree ones carry their root."
