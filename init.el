@@ -39,6 +39,7 @@
   (require 'init-evil))     ; Vim 键位（evil），默认关闭；M-x my/toggle-evil 切换
 (require 'init-completion)  ; vertico / consult / corfu
 (require 'init-dev)         ; 项目、git、eglot、tree-sitter
+(require 'init-remote)      ; remote editing: tramp-rpc
 
 (dolist (lang my/languages)
   (require (intern (format "lang-%s" lang))))
