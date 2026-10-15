@@ -869,5 +869,33 @@ Also mark that the context needs reloading."
       (kill-buffer buffer)
       (delete-file file))))
 
+;;; Deferred results
+
+(ert-deftest agent-session-test-rpc-deferred ()
+  (let* ((polls 0)
+         (agent-ui--methods
+          (cons (list "test_wait" :function
+                      (lambda (_params)
+                        (agent-ui-defer (lambda () (and (> (cl-incf polls) 1) (list "done"))))))
+                agent-ui--methods))
+         (dir (make-temp-file "agent-ui-rpc-" t))
+         (req (expand-file-name "req.json" dir))
+         (res (expand-file-name "res.json" dir)))
+    (unwind-protect
+        (cl-flet ((rpc (method &optional params)
+                    (with-temp-file req
+                      (insert (json-serialize (list :method method
+                                                    :params (or params (make-hash-table))))))
+                    (agent-ui-rpc req res)
+                    (with-temp-buffer
+                      (insert-file-contents res)
+                      (json-parse-buffer :object-type 'plist))))
+          (let ((id (plist-get (rpc "test_wait") :pending)))
+            (should (stringp id))
+            (should (equal (plist-get (rpc "_poll" (list :id id)) :pending) id))
+            (should (equal (rpc "_poll" (list :id id)) '(:ok t :result "done")))
+            (should (eq (plist-get (rpc "_poll" (list :id id)) :ok) :false))))
+      (delete-directory dir t))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

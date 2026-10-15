@@ -102,6 +102,56 @@ NAME is the method name used in the error message."
   "Return VALUE, converting nil to JSON null."
   (if (null value) :null value))
 
+;;; Deferred results
+;;
+;; A method that waits for something slow (another agent's reply) must not block
+;; Emacs.  It returns `agent-ui-defer' at once; emx then calls the internal
+;; method _poll about once a second until the result is ready.
+
+(defvar agent-ui--deferred (make-hash-table :test #'equal)
+  "Pending results: ID -> (:poll FN :deadline TIME :timeout FN :cancel FN).")
+
+(defun agent-ui-defer (poll &rest props)
+  "Return a deferred result, to be produced by POLL.
+POLL is called on every poll with no arguments and returns nil while the
+result is pending, else a list whose car is the result; an error it
+signals is the method's error.  PROPS: :wait seconds until :timeout, a
+function returning the result then; :cancel, called when the caller gives
+up."
+  (let ((id (format "%s-%s" (float-time) (random 100000)))
+        (now (float-time)))
+    ;; Drop results whose caller went away without polling to the end.
+    (maphash (lambda (key entry)
+               (when (> now (+ (plist-get entry :deadline) 300))
+                 (remhash key agent-ui--deferred)))
+             agent-ui--deferred)
+    (puthash id (list :poll poll
+                      :deadline (+ now (or (plist-get props :wait) 3600))
+                      :timeout (plist-get props :timeout)
+                      :cancel (plist-get props :cancel))
+             agent-ui--deferred)
+    (list :agent-ui-pending id)))
+
+(defun agent-ui--poll (id cancel)
+  "Poll deferred result ID; with CANCEL, give it up instead."
+  (let ((entry (or (gethash id agent-ui--deferred)
+                   (error "No pending result %s" id))))
+    (cond
+     (cancel
+      (remhash id agent-ui--deferred)
+      (when-let* ((fn (plist-get entry :cancel))) (funcall fn))
+      nil)
+     ((condition-case err
+          (when-let* ((done (funcall (plist-get entry :poll))))
+            (remhash id agent-ui--deferred)
+            (car done))
+        (error (remhash id agent-ui--deferred)
+               (signal (car err) (cdr err)))))
+     ((> (float-time) (plist-get entry :deadline))
+      (remhash id agent-ui--deferred)
+      (if-let* ((fn (plist-get entry :timeout))) (funcall fn) (error "Timed out")))
+     (t (list :agent-ui-pending id)))))
+
 ;;;###autoload
 (defun agent-ui-rpc (request-file response-file)
   "Run the call in REQUEST-FILE and write the result to RESPONSE-FILE.
@@ -115,15 +165,20 @@ Used by emx."
                                                   :null-object nil
                                                   :false-object nil)))
                     (method (plist-get request :method))
-                    (entry (or (alist-get method agent-ui--methods nil nil #'equal)
-                               (error "Unknown method: %s" method)))
-                    (spec (plist-get entry :params))
-                    (params (agent-ui--coerce (plist-get request :params) spec))
-                    (agent-ui-caller (plist-get request :context)))
-               (agent-ui--check-required method params spec)
-               (list :ok t
-                     :result (agent-ui--json-value
-                              (funcall (plist-get entry :function) params))))
+                    (agent-ui-caller (plist-get request :context))
+                    (result
+                     (if (equal method "_poll")
+                         (let ((params (plist-get request :params)))
+                           (agent-ui--poll (plist-get params :id) (plist-get params :cancel)))
+                       (let* ((entry (or (alist-get method agent-ui--methods nil nil #'equal)
+                                         (error "Unknown method: %s" method)))
+                              (spec (plist-get entry :params))
+                              (params (agent-ui--coerce (plist-get request :params) spec)))
+                         (agent-ui--check-required method params spec)
+                         (funcall (plist-get entry :function) params)))))
+               (if (eq (car-safe result) :agent-ui-pending)
+                   (list :ok t :pending (cadr result))
+                 (list :ok t :result (agent-ui--json-value result))))
            (error (list :ok :false :error (error-message-string err))))))
     (with-temp-buffer
       (condition-case err
@@ -172,11 +227,16 @@ If there is none, split a new one to the left of the agent column."
         (erase-buffer)))
     buffer))
 
-(defun agent-ui--caller-root ()
-  "Project root of the calling agent session, or nil."
+(defun agent-ui-caller-session ()
+  "The calling agent session, or nil."
   (when-let* ((name (plist-get agent-ui-caller :agent_buffer))
               (buffer (get-buffer name))
-              (session (buffer-local-value 'agent-session--current buffer)))
+              ((agent-session-buffer-p buffer)))
+    (buffer-local-value 'agent-session--current buffer)))
+
+(defun agent-ui--caller-root ()
+  "Project root of the calling agent session, or nil."
+  (when-let* ((session (agent-ui-caller-session)))
     (agent-session-root session)))
 
 (defun agent-ui--abs (path)

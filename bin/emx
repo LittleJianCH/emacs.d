@@ -47,8 +47,9 @@ const JSON_INPUT = new Set(['render', 'patch']);
 
 const lispString = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 
-// Call an agent-ui method in Emacs; return the result or throw an error.
-function call(method, params = {}) {
+// Call an agent-ui method in Emacs; return its response {ok, result | pending} or throw
+// an error.
+function request(method, params = {}) {
   params = { ...params };
   if (typeof params.path === 'string') params.path = path.resolve(params.path);
 
@@ -70,10 +71,39 @@ function call(method, params = {}) {
     }
     const out = JSON.parse(fs.readFileSync(response, 'utf8'));
     if (!out.ok) throw new Error(out.error);
-    return out.result;
+    return out;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// Call an agent-ui method that answers at once; return the result or throw an error.
+function call(method, params = {}) {
+  const out = request(method, params);
+  if (out.pending) {
+    request('_poll', { id: out.pending, cancel: true });
+    throw new Error(`${method} waits for its result; call it through the MCP server or the command line`);
+  }
+  return out.result;
+}
+
+const POLL_INTERVAL = 1000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Call an agent-ui method and wait for its result. A method that would block Emacs
+// while it waits (e.g. for another agent) answers {pending: id} at once;
+// poll it until it is done. Setting signal.cancelled gives it up.
+async function callAsync(method, params = {}, signal = {}) {
+  let out = request(method, params);
+  while (out.pending) {
+    await sleep(POLL_INTERVAL);
+    if (signal.cancelled) {
+      request('_poll', { id: out.pending, cancel: true });
+      throw new Error('Cancelled');
+    }
+    out = request('_poll', { id: out.pending });
+  }
+  return out.result;
 }
 
 const render = (result) =>
@@ -225,9 +255,9 @@ afterwards.`,
 // local ones have their own file tools.
 const configMethods = () => (REMOTE_AGENT ? CONFIG_METHODS : {});
 
-function invoke(method, params) {
+async function invoke(method, params, signal) {
   const local = configMethods();
-  return Object.hasOwn(local, method) ? local[method].run(params) : call(method, params);
+  return Object.hasOwn(local, method) ? local[method].run(params) : callAsync(method, params, signal);
 }
 
 const configTools = () =>
@@ -322,14 +352,20 @@ function mcpServer() {
         return { tools: configTools() };
       }
     },
-    'tools/call': ({ name, arguments: args }) => {
+    'tools/call': async ({ name, arguments: args }, id) => {
+      const signal = {};
+      running.set(id, signal);
       try {
-        return { content: [{ type: 'text', text: render(invoke(name, args || {})) }] };
+        return { content: [{ type: 'text', text: render(await invoke(name, args || {}, signal)) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: err.message }], isError: true };
+      } finally {
+        running.delete(id);
       }
     },
   };
+  // Calls still waiting for their result, by request id, so they can be cancelled.
+  const running = new Map();
 
   const rl = readline.createInterface({ input: process.stdin });
   rl.on('line', (line) => {
@@ -340,32 +376,36 @@ function mcpServer() {
     } catch {
       return fail(null, -32700, 'Parse error');
     }
-    if (msg.id === undefined) return; // notifications need no reply
+    if (msg.id === undefined) {
+      // Notifications need no reply; a cancelled call stops waiting.
+      if (msg.method === 'notifications/cancelled') {
+        const signal = running.get(msg.params && msg.params.requestId);
+        if (signal) signal.cancelled = true;
+      }
+      return;
+    }
     const handler = handlers[msg.method];
     if (!handler) return fail(msg.id, -32601, `Method not found: ${msg.method}`);
-    try {
-      reply(msg.id, handler(msg.params || {}));
-    } catch (err) {
-      fail(msg.id, -32603, err.message);
-    }
+    // Handlers may be async: replies can go out in another order than the requests.
+    Promise.resolve()
+      .then(() => handler(msg.params || {}, msg.id))
+      .then((result) => reply(msg.id, result), (err) => fail(msg.id, -32603, err.message));
   });
 }
 
 // ---------------------------------------------------------------- Entry point
 
-function main() {
+async function main() {
   const [method, ...rest] = process.argv.slice(2);
   if (method === 'mcp') return mcpServer();
   if (!method || method === 'help' || method === '-h' || method === '--help') {
     console.log(help(rest[0]));
     return;
   }
-  console.log(render(invoke(method, parseArgs(method, rest))));
+  console.log(render(await invoke(method, parseArgs(method, rest))));
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   console.error(`emx: ${err.message}`);
   process.exit(1);
-}
+});
