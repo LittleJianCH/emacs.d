@@ -1243,11 +1243,14 @@ Unfold it otherwise."
 ;;; Reviewed items
 
 (defun agent-review--mark-reviewed (id)
-  "Toggle whether item ID is marked reviewed; return the new state."
+  "Toggle whether item ID is marked reviewed; return the new state.
+A reviewed item is folded; marking it not reviewed again unfolds it."
   (when (equal id "full") (user-error "完整 diff 不能标记已审阅"))
   (let ((done (not (member id agent-review--reviewed))))
     (setq agent-review--reviewed (if done (cons id agent-review--reviewed)
                                    (remove id agent-review--reviewed)))
+    (setq agent-review--folded (if done (cl-adjoin id agent-review--folded :test #'equal)
+                                 (remove id agent-review--folded)))
     (agent-review--save-state)
     (agent-review--redraw)
     done))
@@ -1274,11 +1277,11 @@ On an item already marked, mark it not reviewed again and stay."
     (if (not (agent-review--mark-reviewed id))
         (message "已取消已审阅")
       (let ((next (agent-review--next-unreviewed id)))
-        (when next
-          (goto-char (agent-review--find 'agent-review-heading next))
-          (when-let* ((window (get-buffer-window))
-                      ((not (pos-visible-in-window-p (point) window))))
-            (with-selected-window window (recenter 3))))
+        ;; With nothing left, stay on the heading of the item just folded.
+        (goto-char (agent-review--find 'agent-review-heading (or next id)))
+        (when-let* ((window (get-buffer-window))
+                    ((not (pos-visible-in-window-p (point) window))))
+          (with-selected-window window (recenter 3)))
         (agent-review--reviewed-message next)))))
 
 ;;; Sidebar

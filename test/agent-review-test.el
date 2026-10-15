@@ -226,8 +226,10 @@
         (should (string-search "已审阅 0/3" (agent-review--header-line)))
         (goto-char (agent-review--find 'agent-review-heading "atomic-1"))
         (agent-review-toggle-reviewed)
-        ;; Marking an item reviewed moves on to the next one not reviewed.
+        ;; Marking an item reviewed folds it and moves on to the next one
+        ;; not reviewed.
         (should (looking-at "○ 2\\. "))
+        (should (member "atomic-1" agent-review--folded))
         (save-excursion
           (goto-char (agent-review--find 'agent-review-heading "atomic-1"))
           (should (looking-at "✓ 1\\. ")))
@@ -236,13 +238,14 @@
         (goto-char (agent-review--find 'agent-review-heading "atomic-3"))
         (agent-review-toggle-reviewed)
         (should (looking-at "○ 2\\. "))
-        ;; Unmarking stays on the item.
+        ;; Unmarking stays on the item and unfolds it.
         (goto-char (agent-review--find 'agent-review-heading "atomic-3"))
         (agent-review-toggle-reviewed)
         (should (looking-at "○ 3\\. "))
+        (should-not (member "atomic-3" agent-review--folded))
         ;; Jumping to an item unfolds it.
-        (agent-review-goto "atomic-3")
-        (should (equal agent-review--folded '("atomic-2")))
+        (agent-review-goto "atomic-2")
+        (should (equal agent-review--folded '("atomic-1")))
         ;; The sidebar lists every item and marks the reviewed one.
         (with-current-buffer (agent-review--nav-buffer)
           (goto-char (point-min))
