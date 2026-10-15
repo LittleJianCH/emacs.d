@@ -60,6 +60,11 @@
   :demand t
   :after agent-ui)
 
+;; Atomic reviews of a branch: the review_* methods and the review buffer.
+(use-package agent-review
+  :demand t
+  :after agent-canvas)
+
 ;; Session handles (@name) and the sessions / session_read / session_ask methods
 ;; agents use to work with each other.
 (use-package agent-collab
@@ -159,6 +164,23 @@ In the transcript, jump to the end of the input area and enter insert state." co
     (kbd "TAB") #'agent-canvas-tab
     (kbd "<backtab>") #'backward-button
     "c" #'agent-canvas-comment
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-review-mode 'normal)
+  (evil-define-key* '(normal motion) agent-review-mode-map
+    (kbd "RET") #'agent-review-visit
+    (kbd "TAB") #'agent-review-toggle
+    "]]" #'agent-review-next-item
+    "[[" #'agent-review-previous-item
+    "]c" #'agent-review-next-annotation
+    "[c" #'agent-review-previous-annotation
+    "a" #'agent-review-annotate
+    "dd" #'agent-review-delete-annotation
+    "s" #'agent-review-ask
+    "f" #'agent-review-toggle-full
+    "+" #'agent-review-more-context
+    "-" #'agent-review-less-context
     "gr" #'revert-buffer
     "q" #'quit-window))
 

@@ -38,6 +38,7 @@ bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
+test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -87,6 +88,12 @@ var/                     runtime state (history, backups, pasted images...); git
   user started may ask (`agent-collab-max-depth`).
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
+- `agent-review.el` — atomic reviews of a branch: `review_snapshot` pins base/head and
+  lists hunks, the agent plans items, `review_build` checks every changed line is covered
+  exactly once and shows a review buffer where the user annotates lines; `s` there asks
+  the originating session to answer (`review_comments` / `review_reply`). Git runs in the
+  caller's root through its file handler, so remote projects need nothing on the host.
+  Data lives under `var/reviews/` as Lisp data.
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
 
 The emx MCP server is only configured for agent processes started from Emacs (via
@@ -102,6 +109,7 @@ Tests (ERT, ~50 tests, a few seconds):
 ```sh
 emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
+      -l test/agent-review-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
