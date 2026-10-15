@@ -785,6 +785,10 @@ A review opened for the first time shows only its first item unfolded."
   "Clickable part of the header line.")
 (defface agent-review-current '((t :inherit highlight :extend t))
   "The sidebar entry of the item at point.")
+(defface agent-review-brand '((t :weight bold :height 1.1))
+  "Name at the top of the sidebar.
+It does not inherit a heading face, which themes such as Leuven give a
+background.")
 
 (defun agent-review--file-data (review)
   "Index the head-side lines of each changed file of REVIEW.
@@ -1323,7 +1327,7 @@ TEXT is what the filter matches; TYPE is the item type, nil for a file."
       (cl-incf (gethash (plist-get comment :item) counts 0))
       (cl-incf (gethash (cons (plist-get comment :item) (plist-get comment :file)) counts 0)))
     (erase-buffer)
-    (insert (propertize "原子审查" 'face 'agent-review-heading)
+    (insert (propertize "Atomic Review" 'face 'agent-review-brand)
             (propertize (format "  %d 项 · 已审阅 %d\n" (length items)
                                 (seq-count (lambda (item) (member (plist-get item :id) reviewed))
                                            items))
