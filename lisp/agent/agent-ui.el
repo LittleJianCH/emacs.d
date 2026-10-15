@@ -371,6 +371,23 @@ layout or calling a mode's commands."
                        :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
 
+;;; Buffers of files written by emx
+
+;; emx's config_* methods write files themselves; they ask these first and after.
+
+(defun agent-ui-file-modified-p (file)
+  "Non-nil if a buffer visiting FILE has unsaved changes."
+  (when-let* ((buffer (find-buffer-visiting file)))
+    (and (buffer-modified-p buffer) t)))
+
+(defun agent-ui-file-written (file)
+  "Revert the buffer visiting FILE after an agent wrote it, unless it is modified."
+  (when-let* ((buffer (find-buffer-visiting file)))
+    (with-current-buffer buffer
+      (unless (buffer-modified-p)
+        (revert-buffer t t t))))
+  nil)
+
 ;;; Interactive commands
 
 (defun agent-ui-last-view ()

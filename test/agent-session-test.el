@@ -14,6 +14,7 @@
 (require 'agent-session-list)
 (require 'agent-claude)
 (require 'agent-codex)
+(require 'agent-ui)
 
 (cl-defmethod agent-session-backend-start ((_ (eql test-echo)) session)
   (agent-session-set-status session 'idle))
@@ -840,9 +841,33 @@ Also mark that the context needs reloading."
                          output)))
              (should (equal (relay (buffer-name) "{\"ping\":1}\n") "{\"ping\":1}\n"))
              ;; A connection naming no session is dropped.
-             (should (equal (relay "*no such session*" "x\n") ""))))
+             (should (equal (relay "*no such session*" "x\n") ""))
+             ;; The emx of a remote agent offers the config_* methods.
+             (cl-letf (((symbol-function 'agent-session-emx-command)
+                        (lambda () '("sh" "-c" "read _; echo \"$EMX_REMOTE_AGENT\""))))
+               (should (equal (relay (buffer-name) "{}\n") "1\n")))))
        (delete-process server)
        (delete-directory dir t)))))
+
+(ert-deftest agent-session-test-file-written-by-emx ()
+  "emx writes a file only without unsaved edits, then its buffer is reverted."
+  (let* ((file (make-temp-file "agent-ui-test-" nil ".txt" "old\n"))
+         (buffer (find-file-noselect file)))
+    (unwind-protect
+        (progn
+          (should-not (agent-ui-file-modified-p file))
+          (should-not (agent-ui-file-modified-p (concat file ".missing")))
+          (with-temp-file file (insert "new\n"))
+          (agent-ui-file-written file)
+          (should (equal (with-current-buffer buffer (buffer-string)) "new\n"))
+          (with-current-buffer buffer (insert "edit"))
+          (should (agent-ui-file-modified-p file))
+          ;; A buffer with unsaved edits is left alone.
+          (agent-ui-file-written file)
+          (should (equal (with-current-buffer buffer (buffer-string)) "editnew\n")))
+      (with-current-buffer buffer (set-buffer-modified-p nil))
+      (kill-buffer buffer)
+      (delete-file file))))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

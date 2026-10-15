@@ -141,7 +141,10 @@ For inputs the agent opens itself, such as pasted images."
   (if-let* ((buffer (get-buffer name))
             (session (buffer-local-value 'agent-session--current buffer)))
       (let* ((default-directory temporary-file-directory)
-             (process-environment (agent-session-environment session))
+             ;; The agent's file tools can't reach this machine: give it emx's
+             ;; config_* methods for the Emacs configuration.
+             (process-environment (cons "EMX_REMOTE_AGENT=1"
+                                        (agent-session-environment session)))
              (emx (make-process
                    :name "agent-remote-emx" :command (agent-session-emx-command)
                    :connection-type 'pipe :coding 'binary :noquery t

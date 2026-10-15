@@ -12,8 +12,10 @@
 //   emx mcp                          run as a stdio MCP server
 //
 // Methods are defined in lisp/agent/agent-ui.el; extend them with agent-ui-defmethod.
+// The config_* methods are emx's own (see "Config files" below).
 // Environment: EMACS_SOCKET_NAME selects the server (set automatically inside agent
-//              sessions), EMX_EMACSCLIENT sets the emacsclient path.
+//              sessions), EMX_EMACSCLIENT sets the emacsclient path, EMX_REMOTE_AGENT=1
+//              (set for agents of remote projects) enables the config_* methods.
 
 'use strict';
 const { execFileSync } = require('node:child_process');
@@ -24,6 +26,9 @@ const readline = require('node:readline');
 
 const EMACSCLIENT = process.env.EMX_EMACSCLIENT || 'emacsclient';
 const VERSION = '0.1.0';
+// The Emacs configuration checkout this emx belongs to.
+const CONFIG_DIR = path.resolve(__dirname, '..');
+const REMOTE_AGENT = process.env.EMX_REMOTE_AGENT === '1';
 
 // Maps positional arguments to parameter names; other parameters use --key value.
 const POSITIONAL = {
@@ -33,6 +38,7 @@ const POSITIONAL = {
   notify: ['message'],
   read_buffer: ['name', 'start_line', 'end_line'],
   diagnostics: ['path'],
+  config_read: ['path', 'offset', 'limit'],
 };
 
 // These methods take structured data: the positional argument is a JSON file (or - for
@@ -73,6 +79,161 @@ function call(method, params = {}) {
 const render = (result) =>
   typeof result === 'string' ? result : JSON.stringify(result, null, 2);
 
+// ---------------------------------------------------------------- Config files
+//
+// The file tools of a remote project's agent work on the project's host and can't
+// reach this machine. These methods let it read and edit the Emacs configuration here.
+// They run in emx rather than Emacs, so file I/O never blocks the editor; Emacs is only
+// asked about buffers visiting a file before and after it is written. Paths are
+// confined to the configuration checkout, outside .git, against slips such as editing
+// the wrong host's files. That is a guardrail, not a sandbox: eval stays unrestricted.
+
+function exists(file) {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Resolve FILE (relative to the configuration, absolute, or ~/...) to a real path in it.
+function configPath(file) {
+  if (typeof file !== 'string' || !file) throw new Error('path is required');
+  if (file === '~' || file.startsWith('~/')) file = path.join(os.homedir(), file.slice(1));
+  const root = fs.realpathSync(CONFIG_DIR);
+  // Resolve symlinks through the deepest existing ancestor, so none leads outside.
+  let real = path.resolve(root, file);
+  const rest = [];
+  while (!exists(real)) {
+    rest.unshift(path.basename(real));
+    real = path.dirname(real);
+  }
+  real = path.join(fs.realpathSync(real), ...rest);
+  const rel = path.relative(root, real);
+  if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel) ||
+      rel.split(path.sep)[0] === '.git') {
+    throw new Error(`${file} is not a file in the Emacs configuration (${root})`);
+  }
+  return real;
+}
+
+// Refuse to overwrite unsaved edits in a buffer visiting FILE.
+function checkBuffer(file) {
+  if (call('eval', { code: `(agent-ui-file-modified-p ${lispString(file)})` }) !== 'nil') {
+    throw new Error(`${file} has unsaved changes in Emacs; ask the user to save or revert it first`);
+  }
+}
+
+// Write CONTENT to FILE, then let Emacs refresh a buffer visiting it.
+function writeConfigFile(file, content) {
+  checkBuffer(file);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
+  try {
+    call('eval', { code: `(agent-ui-file-written ${lispString(file)})` });
+  } catch {
+    // The file is written; a stale buffer is all that is left.
+  }
+}
+
+const PATH_PARAM = {
+  type: 'string',
+  description: 'File path, relative to the Emacs configuration root or absolute inside it',
+};
+
+const CONFIG_METHODS = {
+  config_read: {
+    description: `Read a file of the Emacs configuration on the machine Emacs runs on, with
+line numbers. Use it instead of your own file tools, which work on the project's host.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: PATH_PARAM,
+        offset: { type: 'integer', description: 'First line to read, default 1' },
+        limit: { type: 'integer', description: 'Number of lines to read, default 2000' },
+      },
+      required: ['path'],
+    },
+    run({ path: file, offset, limit }) {
+      const lines = fs.readFileSync(configPath(file), 'utf8').split('\n');
+      if (lines[lines.length - 1] === '') lines.pop();
+      if (!lines.length) return '(empty file)';
+      const start = Math.max(1, Number(offset) || 1);
+      const count = Math.max(1, Number(limit) || 2000);
+      const out = lines.slice(start - 1, start - 1 + count)
+        .map((line, i) => `${String(start + i).padStart(6)}\t${line}`);
+      if (start - 1 + count < lines.length) {
+        out.push(`... ${lines.length} lines in total; continue with offset ${start + count}`);
+      }
+      return out.join('\n');
+    },
+  },
+  config_edit: {
+    description: `Replace an exact string in a file of the Emacs configuration on the
+machine Emacs runs on. old_string must occur exactly once unless replace_all is set.
+Fails if a buffer visiting the file has unsaved changes; a visiting buffer without
+changes is reverted afterwards.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: PATH_PARAM,
+        old_string: { type: 'string', description: 'Text to replace, including whitespace' },
+        new_string: { type: 'string', description: 'Replacement text' },
+        replace_all: { type: 'boolean', description: 'Replace every occurrence' },
+      },
+      required: ['path', 'old_string', 'new_string'],
+    },
+    run({ path: file, old_string: from, new_string: to, replace_all: all }) {
+      if (typeof from !== 'string' || !from) throw new Error('old_string is required');
+      if (typeof to !== 'string') throw new Error('new_string is required');
+      if (from === to) throw new Error('old_string and new_string are the same');
+      const real = configPath(file);
+      const parts = fs.readFileSync(real, 'utf8').split(from);
+      const count = parts.length - 1;
+      if (!count) throw new Error(`old_string not found in ${real}`);
+      if (count > 1 && all !== true && all !== 'true') {
+        throw new Error(`old_string occurs ${count} times in ${real}; add context to make it unique, or set replace_all`);
+      }
+      writeConfigFile(real, parts.join(to));
+      return `Edited ${real} (${count} ${count === 1 ? 'replacement' : 'replacements'})`;
+    },
+  },
+  config_write: {
+    description: `Create or overwrite a file of the Emacs configuration on the machine
+Emacs runs on. Prefer config_edit for changes to existing files. Fails if a buffer
+visiting the file has unsaved changes; a visiting buffer without changes is reverted
+afterwards.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: PATH_PARAM,
+        content: { type: 'string', description: 'The complete file content' },
+      },
+      required: ['path', 'content'],
+    },
+    run({ path: file, content }) {
+      if (typeof content !== 'string') throw new Error('content is required');
+      const real = configPath(file);
+      writeConfigFile(real, content);
+      return `Wrote ${real}`;
+    },
+  },
+};
+
+// Methods for this emx: the configuration methods only serve agents of remote projects,
+// local ones have their own file tools.
+const configMethods = () => (REMOTE_AGENT ? CONFIG_METHODS : {});
+
+function invoke(method, params) {
+  const local = configMethods();
+  return Object.hasOwn(local, method) ? local[method].run(params) : call(method, params);
+}
+
+const configTools = () =>
+  Object.entries(configMethods()).map(([name, m]) =>
+    ({ name, description: m.description, inputSchema: m.inputSchema }));
+
 // ---------------------------------------------------------------- Command line
 
 function parseArgs(method, argv) {
@@ -103,7 +264,7 @@ function parseArgs(method, argv) {
 }
 
 function help(name) {
-  const methods = call('describe');
+  const methods = [...call('describe'), ...configTools()];
   if (name) {
     const m = methods.find((m) => m.name === name);
     if (!m) throw new Error(`Unknown method: ${name}`);
@@ -135,6 +296,11 @@ const MCP_INSTRUCTIONS = `These tools operate the Emacs instance the user is wor
 - For editor operations the other tools do not cover, run Elisp with eval.
 - The user reads Chinese: write page content and notifications in Chinese unless asked otherwise.`;
 
+const REMOTE_INSTRUCTIONS = `
+- Your own file tools work on the project's host, not on the machine Emacs runs on. To
+  work on this Emacs configuration (${CONFIG_DIR}), use config_read, config_edit and
+  config_write; read its AGENTS.md first.`;
+
 function mcpServer() {
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
   const reply = (id, result) => send({ jsonrpc: '2.0', id, result });
@@ -145,20 +311,20 @@ function mcpServer() {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: 'emacs', version: VERSION },
-      instructions: MCP_INSTRUCTIONS,
+      instructions: MCP_INSTRUCTIONS + (REMOTE_AGENT ? REMOTE_INSTRUCTIONS : ''),
     }),
     ping: () => ({}),
     'tools/list': () => {
       try {
-        return { tools: call('describe') };
+        return { tools: [...call('describe'), ...configTools()] };
       } catch (err) {
         process.stderr.write(`emx: ${err.message}\n`);
-        return { tools: [] };
+        return { tools: configTools() };
       }
     },
     'tools/call': ({ name, arguments: args }) => {
       try {
-        return { content: [{ type: 'text', text: render(call(name, args || {})) }] };
+        return { content: [{ type: 'text', text: render(invoke(name, args || {})) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: err.message }], isError: true };
       }
@@ -194,7 +360,7 @@ function main() {
     console.log(help(rest[0]));
     return;
   }
-  console.log(render(call(method, parseArgs(method, rest))));
+  console.log(render(invoke(method, parseArgs(method, rest))));
 }
 
 try {

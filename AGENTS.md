@@ -61,7 +61,11 @@ var/                     runtime state (history, backups, pasted images...); git
   over the tramp-rpc ControlMaster (`ssh -O forward -R`, owner-only on the host), the
   agent's MCP command there is a python3 relay into it, and Emacs runs a local `emx mcp`
   per connection. Paths an agent reports are on the host
-  (`agent-session-expand-file-name`).
+  (`agent-session-expand-file-name`). That emx runs with `EMX_REMOTE_AGENT=1`, which
+  adds its own `config_read` / `config_edit` / `config_write` tools: the agent's file
+  tools can't reach this machine. They are implemented in emx, not Emacs, so file I/O
+  never blocks the editor, and are confined to this checkout outside `.git` (a guardrail
+  against editing the wrong host, not a sandbox: `eval` is unrestricted).
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's
@@ -167,7 +171,8 @@ agent-session-list -> agent-ui -> agent-canvas -> init-agent. Caveats:
 - **Modularity.** New languages go in `lisp/lang/lang-NAME.el` and are enabled in
   `my/languages`. A new agent is a backend implementing the generics plus one
   `agent-session-define-agent` line in `init-agent.el`. New agent -> Emacs abilities are
-  `agent-ui-defmethod`s.
+  `agent-ui-defmethod`s; only work that needs no Emacs state (like the `config_*` file
+  tools) belongs in emx itself.
 - **Packages.** use-package with GNU ELPA first, then NonGNU, then MELPA; pin to MELPA
   only when needed (evil: NonGNU 1.15 breaks on Emacs 31).
 - **State.** Runtime files go under `var/` (`my/var`), never into tracked paths.
