@@ -69,10 +69,19 @@ Prefer the project root; fall back to the nearest Cargo.toml."
 
 ;;; Mode
 
+(defun my/rust-ts-drop-error-face ()
+  "Don't paint tree-sitter parse errors with `font-lock-warning-face'.
+The rule overrides every other face inside an ERROR node, and syntax the
+grammar doesn't know yet (nightly `impl [const] Trait' in core, for one)
+wraps the whole file in one, leaving it a single color.  rust-analyzer
+reports real syntax errors through eglot anyway."
+  (treesit-font-lock-recompute-features nil '(error)))
+
 (use-package rust-ts-mode
   :mode "\\.rs\\'"
   :hook ((rust-ts-mode . eglot-ensure)
-         (rust-ts-mode . my/eglot-format-on-save))
+         (rust-ts-mode . my/eglot-format-on-save)
+         (rust-ts-mode . my/rust-ts-drop-error-face))
   :bind (:map rust-ts-mode-map
          ("C-c C-c" . my/cargo)
          ("C-c C-t" . my/cargo-test-at-point)
