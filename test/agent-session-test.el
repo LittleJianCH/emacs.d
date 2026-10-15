@@ -820,10 +820,13 @@ Also mark that the context needs reloading."
   (agent-session-test--with-session
    (let* ((dir (make-temp-file "agent-remote-test-" t))
           (socket (expand-file-name "emx.sock" dir))
-          (server (agent-remote--listen socket)))
+          (server (agent-remote--listen socket))
+          (status nil))
      (unwind-protect
          (cl-letf (((symbol-function 'agent-session-emx-command) (lambda () '("cat"))))
            (cl-flet ((relay (name input)
+                       ;; The relay's stderr is part of the output: it must
+                       ;; stay quiet.
                        (let* ((output "")
                               (process (make-process
                                         :name "agent-remote-test-relay"
@@ -837,11 +840,15 @@ Also mark that the context needs reloading."
                            (while (and (process-live-p process) (string-empty-p output)
                                        (< (float-time) deadline))
                              (accept-process-output nil 0.05)))
+                         (setq status (and (not (process-live-p process))
+                                           (process-exit-status process)))
                          (delete-process process)
                          output)))
              (should (equal (relay (buffer-name) "{\"ping\":1}\n") "{\"ping\":1}\n"))
-             ;; A connection naming no session is dropped.
+             ;; A connection naming no session is dropped, possibly while the
+             ;; relay still writes; it exits quietly.
              (should (equal (relay "*no such session*" "x\n") ""))
+             (should (eql status 0))
              ;; The emx of a remote agent offers the config_* methods.
              (cl-letf (((symbol-function 'agent-session-emx-command)
                         (lambda () '("sh" "-c" "read _; echo \"$EMX_REMOTE_AGENT\""))))
