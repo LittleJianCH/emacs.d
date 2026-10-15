@@ -722,6 +722,16 @@ Also mark that the context needs reloading."
      (agent-session-test--run-and-wait "▶ 运行"))
    (should (string-match-p "✓ 完成 · [0-9.]+s\nhi" (agent-session-test--transcript)))))
 
+(ert-deftest agent-session-test-run-buttons-face ()
+  "Code block buttons use a face without underline."
+  (agent-session-test--with-session
+   (agent-session-text-done agent-session--current "r1" "```bash\necho hi\n```")
+   (goto-char (point-min))
+   (dolist (label '("▶ 运行" "⧉ 复制"))
+     (search-forward label)
+     (should (eq (get-text-property (match-beginning 0) 'face) 'agent-session-run-button)))
+   (should-not (face-attribute 'agent-session-run-button :underline nil t))))
+
 (ert-deftest agent-session-test-run-code-tail ()
   "Only the last `agent-session-run-output-lines' lines of output are shown."
   (agent-session-test--with-session

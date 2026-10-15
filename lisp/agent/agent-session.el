@@ -573,6 +573,9 @@ done; thinking is folded into one line by default, click to expand."
 (defface agent-session-run-output '((t :inherit default))
   "Command output shown below a code block.")
 
+(defface agent-session-run-button '((t :inherit link :underline nil))
+  "Run, stop and copy buttons of a code block.")
+
 (defun agent-session--code-blocks (text)
   "Runnable fenced code blocks in TEXT: ((INDEX HEADER-END CLOSE-END CODE) ...).
 HEADER-END is the end of the opening fence line and CLOSE-END the end of the
@@ -638,7 +641,7 @@ run don't highlight it again."
     (apply #'concat (nreverse parts))))
 
 (define-button-type 'agent-session-run
-  'follow-link t 'action #'agent-session--run-button)
+  'face 'agent-session-run-button 'follow-link t 'action #'agent-session--run-button)
 
 (defun agent-session--run-button (button)
   "Run, stop or copy the code block command of BUTTON."
