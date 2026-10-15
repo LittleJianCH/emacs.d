@@ -224,8 +224,20 @@
         (should (string-search "已审阅 0/3" (agent-review--header-line)))
         (goto-char (agent-review--find 'agent-review-heading "atomic-1"))
         (agent-review-toggle-reviewed)
-        (should (looking-at "✓ 1\\. "))
+        ;; Marking an item reviewed moves on to the next one not reviewed.
+        (should (looking-at "○ 2\\. "))
+        (save-excursion
+          (goto-char (agent-review--find 'agent-review-heading "atomic-1"))
+          (should (looking-at "✓ 1\\. ")))
         (should (string-search "已审阅 1/3" (agent-review--header-line)))
+        ;; Past the last item it wraps around to the first one left.
+        (goto-char (agent-review--find 'agent-review-heading "atomic-3"))
+        (agent-review-toggle-reviewed)
+        (should (looking-at "○ 2\\. "))
+        ;; Unmarking stays on the item.
+        (goto-char (agent-review--find 'agent-review-heading "atomic-3"))
+        (agent-review-toggle-reviewed)
+        (should (looking-at "○ 3\\. "))
         ;; Jumping to an item unfolds it.
         (agent-review-goto "atomic-3")
         (should (equal agent-review--folded '("atomic-2")))
@@ -237,6 +249,16 @@
           (forward-line 1)
           (should (looking-at "    a.txt"))
           (should (memq 'agent-review-type-fix (ensure-list (get-text-property (point) 'face))))
+          ;; In the sidebar r also moves on to the next item not reviewed,
+          ;; and redrawing keeps point on its entry instead of the end.
+          (goto-char (agent-review--find 'agent-review-nav "atomic-2"))
+          (agent-review-nav-toggle-reviewed)
+          (should (equal (get-text-property (point) 'agent-review-nav) "atomic-3"))
+          (agent-review--nav-render)
+          (should (equal (get-text-property (point) 'agent-review-nav) "atomic-3"))
+          (with-current-buffer agent-review-nav--review-buffer
+            (agent-review--mark-reviewed "atomic-2"))
+          (goto-char (point-min))
           (should (search-forward "3. b 的后半   新功能 " nil t))
           (agent-review-nav-filter "b.el")
           (goto-char (point-min))

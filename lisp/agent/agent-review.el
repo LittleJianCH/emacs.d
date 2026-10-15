@@ -1248,11 +1248,34 @@ Unfold it otherwise."
     (agent-review--redraw)
     done))
 
+(defun agent-review--next-unreviewed (id)
+  "The first item after ID not marked reviewed, wrapping around, or nil."
+  (let* ((ids (mapcar (lambda (item) (plist-get item :id)) (plist-get agent-review--review :items)))
+         (after (cdr (member id ids))))
+    (seq-find (lambda (other) (not (member other agent-review--reviewed)))
+              (append after (seq-take ids (- (length ids) (length after)))))))
+
+(defun agent-review--reviewed-message (next)
+  "Tell the user an item was marked reviewed and NEXT is the next one to read."
+  (message (if next
+               (format "已审阅；下一个未审阅：%s"
+                       (plist-get (agent-review--item agent-review--review next) :title))
+             "已审阅；全部审完了")))
+
 (defun agent-review-toggle-reviewed ()
-  "Mark the item at point reviewed, or not reviewed again."
+  "Mark the item at point reviewed and move to the next item not reviewed.
+On an item already marked, mark it not reviewed again and stay."
   (interactive)
   (let ((id (or (agent-review--item-at (point)) (user-error "这里不在审查项里"))))
-    (message (if (agent-review--mark-reviewed id) "已标记为已审阅" "已取消已审阅"))))
+    (if (not (agent-review--mark-reviewed id))
+        (message "已取消已审阅")
+      (let ((next (agent-review--next-unreviewed id)))
+        (when next
+          (goto-char (agent-review--find 'agent-review-heading next))
+          (when-let* ((window (get-buffer-window))
+                      ((not (pos-visible-in-window-p (point) window))))
+            (with-selected-window window (recenter 3))))
+        (agent-review--reviewed-message next)))))
 
 ;;; Sidebar
 
@@ -1285,48 +1308,53 @@ TEXT is what the filter matches; TYPE is the item type, nil for a file."
   "Draw this sidebar from its review buffer."
   (let* ((source agent-review-nav--review-buffer)
          (filter agent-review-nav--filter)
+         (review (buffer-local-value 'agent-review--review source))
+         (reviewed (buffer-local-value 'agent-review--reviewed source))
+         (current (buffer-local-value 'agent-review--current source))
+         (entries (with-current-buffer source (agent-review--nav-entries)))
+         (items (plist-get review :items))
+         (counts (make-hash-table :test #'equal))
+         ;; Keep point on its entry: erasing the buffer would leave it at
+         ;; the end, and the user may be moving through the sidebar.
+         (keep (get-text-property (point) 'agent-review-nav))
+         (line (line-number-at-pos))
          (inhibit-read-only t))
-    (with-current-buffer source
-      (let* ((review agent-review--review)
-             (reviewed agent-review--reviewed)
-             (current agent-review--current)
-             (counts (make-hash-table :test #'equal))
-             (entries (agent-review--nav-entries))
-             (items (plist-get review :items)))
-        (dolist (comment (agent-review--comments (plist-get review :id)))
-          (cl-incf (gethash (plist-get comment :item) counts 0))
-          (cl-incf (gethash (cons (plist-get comment :item) (plist-get comment :file)) counts 0)))
-        (with-current-buffer (buffer-local-value 'agent-review--nav source)
-          (erase-buffer)
-          (insert (propertize "原子审查" 'face 'agent-review-heading)
-                  (propertize (format "  %d 项 · 已审阅 %d\n" (length items)
-                                      (seq-count (lambda (item)
-                                                   (member (plist-get item :id) reviewed))
-                                                 items))
-                              'face 'agent-review-meta))
-          (when filter
-            (insert (propertize (format "过滤：%s（/ 修改，空串清除）\n" filter)
-                                'face 'agent-review-meta)))
-          (insert "\n")
-          (pcase-dolist (`(,id ,title ,detail ,text ,type) entries)
-            (when (or (null filter) (string-search (downcase filter) (downcase text)))
-              (let ((start (point))
-                    (n (gethash id counts 0)))
-                (insert (if (member id reviewed) (propertize "✓ " 'face 'agent-review-done) "  ")
-                        (propertize title 'mouse-face 'highlight
-                                    'keymap agent-review-nav-entry-map
-                                    'help-echo "跳到这一项")
-                        (if (> n 0) (propertize (format "  ✎%d" n) 'face 'agent-review-comment) "")
-                        "\n")
-                (when detail
-                  (insert (propertize (concat "    " detail "\n") 'face 'agent-review-meta)))
-                ;; The whole entry takes the background of the item's type.
-                (when-let* ((face (alist-get type agent-review-type-faces)))
-                  (add-face-text-property start (point) face t))
-                (put-text-property start (point) 'agent-review-nav id))))
-          (insert "\n" (propertize "RET 跳转 · r 已审阅 · / 过滤 · g 刷新 · q 关闭\n"
-                                   'face 'agent-review-meta))
-          (agent-review--nav-highlight current))))))
+    (dolist (comment (agent-review--comments (plist-get review :id)))
+      (cl-incf (gethash (plist-get comment :item) counts 0))
+      (cl-incf (gethash (cons (plist-get comment :item) (plist-get comment :file)) counts 0)))
+    (erase-buffer)
+    (insert (propertize "原子审查" 'face 'agent-review-heading)
+            (propertize (format "  %d 项 · 已审阅 %d\n" (length items)
+                                (seq-count (lambda (item) (member (plist-get item :id) reviewed))
+                                           items))
+                        'face 'agent-review-meta))
+    (when filter
+      (insert (propertize (format "过滤：%s（/ 修改，空串清除）\n" filter)
+                          'face 'agent-review-meta)))
+    (insert "\n")
+    (pcase-dolist (`(,id ,title ,detail ,text ,type) entries)
+      (when (or (null filter) (string-search (downcase filter) (downcase text)))
+        (let ((start (point))
+              (n (gethash id counts 0)))
+          (insert (if (member id reviewed) (propertize "✓ " 'face 'agent-review-done) "  ")
+                  (propertize title 'mouse-face 'highlight
+                              'keymap agent-review-nav-entry-map
+                              'help-echo "跳到这一项")
+                  (if (> n 0) (propertize (format "  ✎%d" n) 'face 'agent-review-comment) "")
+                  "\n")
+          (when detail
+            (insert (propertize (concat "    " detail "\n") 'face 'agent-review-meta)))
+          ;; The whole entry takes the background of the item's type.
+          (when-let* ((face (alist-get type agent-review-type-faces)))
+            (add-face-text-property start (point) face t))
+          (put-text-property start (point) 'agent-review-nav id))))
+    (insert "\n" (propertize "RET 跳转 · r 已审阅 · / 过滤 · g 刷新 · q 关闭\n"
+                             'face 'agent-review-meta))
+    (goto-char (or (and keep (agent-review--find 'agent-review-nav keep))
+                   (progn (goto-char (point-min)) (forward-line (1- line)) (point))))
+    (dolist (window (get-buffer-window-list nil nil t))
+      (set-window-point window (point)))
+    (agent-review--nav-highlight current)))
 
 (defun agent-review--nav-highlight (id)
   "Highlight the sidebar entry of ID and keep it in view."
@@ -1340,7 +1368,9 @@ TEXT is what the filter matches; TYPE is the item type, nil for a file."
         (setq agent-review-nav--overlay (make-overlay 1 1))
         (overlay-put agent-review-nav--overlay 'face 'agent-review-current))
       (move-overlay agent-review-nav--overlay (car pos) (cdr pos) (current-buffer))
+      ;; Leave the sidebar's point alone while the user works in it.
       (when-let* ((window (get-buffer-window))
+                  ((not (eq window (selected-window))))
                   ((not (pos-visible-in-window-p (car pos) window))))
         (set-window-point window (car pos))))))
 
@@ -1428,11 +1458,20 @@ line is another item, redraw the sidebar on every key."
   (agent-review-nav-visit))
 
 (defun agent-review-nav-toggle-reviewed ()
-  "Mark the item at point reviewed, or not reviewed again."
+  "Mark the item at point reviewed and move to the next one not reviewed.
+On an item already marked, mark it not reviewed again and stay."
   (interactive)
-  (let ((id (or (get-text-property (point) 'agent-review-nav) (user-error "这里没有条目"))))
-    (with-current-buffer (agent-review--nav-source)
-      (agent-review--mark-reviewed id))))
+  (let* ((id (or (get-text-property (point) 'agent-review-nav) (user-error "这里没有条目")))
+         (next (with-current-buffer (agent-review--nav-source)
+                 (if (agent-review--mark-reviewed id)
+                     (let ((next (agent-review--next-unreviewed id)))
+                       (agent-review--reviewed-message next)
+                       (or next 'done))
+                   (message "已取消已审阅")
+                   nil))))
+    (when-let* (((stringp next))
+                (pos (agent-review--find 'agent-review-nav next)))
+      (goto-char pos))))
 
 (defun agent-review-nav-filter (text)
   "List only the entries whose title, intent or files contain TEXT.
