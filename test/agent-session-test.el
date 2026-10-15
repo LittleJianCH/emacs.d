@@ -679,6 +679,25 @@ Also mark that the context needs reloading."
      (push-button (match-beginning 0))
      (should (equal (current-kill 0) "echo hello")))))
 
+(ert-deftest agent-session-test-markdown-hides-markup ()
+  "Finished replies hide markdown markup; opening fences show their language."
+  (agent-session-test--with-session
+   (agent-session-text-done agent-session--current "r1"
+                            "**粗体** 和 `code`\n```bash\necho hi\n```\n```\nplain\n```\n完")
+   (goto-char (point-min))
+   (search-forward "**粗体**")
+   (should (invisible-p (match-beginning 0)))
+   (should-not (invisible-p (+ 2 (match-beginning 0))))
+   (search-forward "```bash")
+   (should (equal (get-char-property (match-beginning 0) 'display) "bash"))
+   ;; The run buttons after the label and the line break stay visible.
+   (should-not (invisible-p (match-end 0)))
+   (search-forward "echo hi\n")
+   (should (invisible-p (point)))
+   (search-forward "```\nplain")
+   (should (invisible-p (match-beginning 0)))
+   (should-not (invisible-p (- (point) 5)))))
+
 (ert-deftest agent-session-test-run-code-eof-error ()
   "A run is still recorded when sending EOF fails (remote process already gone)."
   (agent-session-test--with-session

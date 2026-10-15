@@ -426,8 +426,10 @@ preserved."
 
 ;;; Markdown and code highlighting
 
-(defun agent-session-fontify (text mode)
-  "Highlight TEXT with major MODE and return a string with faces."
+(defun agent-session-fontify (text mode &optional keep-markup)
+  "Highlight TEXT with major MODE and return a string with faces.
+With KEEP-MARKUP, keep markdown-mode's markup hiding: `invisible' text
+of the `markdown-markup' kind and string `display' replacements."
   (if (not (fboundp mode))
       text
     (with-temp-buffer
@@ -445,16 +447,48 @@ preserved."
             (when face (put-text-property pos next 'face face))
             (setq pos next))))
       (remove-list-of-text-properties (point-min) (point-max)
-                                      '(invisible display keymap local-map mouse-face help-echo))
+                                      '(keymap local-map mouse-face help-echo))
+      (let ((pos (point-min)))
+        (while (< pos (point-max))
+          (let ((next (next-property-change pos nil (point-max))))
+            (unless (and keep-markup (eq (get-text-property pos 'invisible) 'markdown-markup))
+              (remove-text-properties pos next '(invisible nil)))
+            (unless (and keep-markup (stringp (get-text-property pos 'display)))
+              (remove-text-properties pos next '(display nil)))
+            (setq pos next))))
       (buffer-string))))
 
 (defvar markdown-fontify-code-blocks-natively)
+(defvar markdown-hide-markup)
 
 (defun agent-session--markdown (text)
-  "Highlight markdown TEXT (code blocks by their language)."
+  "Highlight markdown TEXT (code blocks by their language) and hide its markup.
+The markup stays in the text, hidden through the `markdown-markup'
+invisibility spec of the session buffer."
   (if (require 'markdown-mode nil t)
-      (let ((markdown-fontify-code-blocks-natively t))
-        (agent-session-fontify text 'gfm-mode))
+      (let ((markdown-fontify-code-blocks-natively t)
+            (markdown-hide-markup t))
+        (agent-session--fence-labels (agent-session-fontify text 'gfm-mode t)))
+    text))
+
+(defun agent-session--fence-labels (text)
+  "Show each opening code fence in TEXT as just its language, in place.
+markdown-mode hides fence lines whole; keeping the opening line visible
+gives the run buttons placed at its end a line of their own."
+  (let ((start 0))
+    (while (string-match "^[ \t]*\\(\\(?:`\\{3,\\}\\|~\\{3,\\}\\)[ \t]*\\([^ \t\n`{]+\\)\\)[^\n]*$"
+                         text start)
+      (let ((fence (match-beginning 1))
+            (fence-end (match-end 1))
+            (lang (match-string 2 text))
+            (eol (match-end 0)))
+        (remove-text-properties fence (min (1+ eol) (length text)) '(invisible nil) text)
+        (put-text-property fence fence-end 'display (propertize lang 'face 'agent-session-dim) text)
+        (put-text-property fence-end eol 'invisible 'markdown-markup text)
+        ;; Skip the block body and its closing fence.
+        (setq start (if (string-match "^[ \t]*\\(?:`\\{3,\\}\\|~\\{3,\\}\\)[ \t]*$" text eol)
+                        (match-end 0)
+                      (length text)))))
     text))
 
 ;;; Formats of each block type
@@ -1985,6 +2019,8 @@ The transcript is on top, the input area follows the footer.
               header-line-format nil
               mode-line-format '((:eval (agent-session--mode-line agent-session--current))))
   (cursor-intangible-mode 1)
+  ;; Hide the markdown markup of finished replies (see `agent-session--markdown').
+  (add-to-invisibility-spec 'markdown-markup)
   (setq-local dnd-protocol-alist (cons '("^file:" . agent-session--dnd-file) dnd-protocol-alist))
   (add-hook 'post-command-hook #'agent-session--keep-point-out-of-prompt nil t)
   (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
