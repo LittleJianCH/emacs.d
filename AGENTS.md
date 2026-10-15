@@ -1,8 +1,7 @@
 # AGENTS.md
 
-Guide for coding agents working on this Emacs configuration. The repository lives at
-`~/Developer/emacs.d` and is symlinked as `~/.config/emacs`, so the files you edit are the
-ones the user's Emacs loads.
+Guide for coding agents working on this Emacs configuration. This checkout is the
+configuration the user's Emacs loads, so the files you edit are the ones it runs.
 
 ## What this is
 
