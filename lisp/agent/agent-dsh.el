@@ -415,59 +415,70 @@ copied there first."
      :callback (lambda (choice)
                  (agent-dsh--respond session id (list :decision (symbol-name choice)))))))
 
-;;; Questions (e.g. the plan review when the agent leaves plan mode)
+;;; Questions, and the plan review when the agent leaves plan mode
 
-(defun agent-dsh--question-choices (question)
-  "Choices for QUESTION: one per option, plus free text.
-A plan review has no free-text choice: declining it asks for feedback, and
-the last choice is what `agent-session-deny' picks."
-  (append (seq-map-indexed (lambda (option index)
-                             (list (intern (format "option-%d" index)) (plist-get option :label)))
-                           (plist-get question :options))
-          (unless (equal (plist-get (plist-get question :intent) :kind) "plan-review")
-            '((custom "其他…")))))
+(defun agent-dsh--plan-review-p (question)
+  "Whether QUESTION is dsh's review of a plan."
+  (equal (plist-get (plist-get question :intent) :kind) "plan-review"))
 
-(defun agent-dsh--answer-question (question choice)
-  "The answer to QUESTION for CHOICE, a key of `agent-dsh--question-choices'."
-  (let* ((options (plist-get question :options))
-         (intent (plist-get question :intent))
-         (label (and (not (eq choice 'custom))
-                     (plist-get (seq-elt options (string-to-number
-                                                  (substring (symbol-name choice) 7)))
-                                :label))))
-    (append
-     (list :id (plist-get question :id) :selected (if label (vector label) []))
-     (cond
-      ((eq choice 'custom)
-       (list :custom (read-string (format "%s " (plist-get question :question)))))
-      ;; Declining a plan can carry feedback for the next revision.
-      ((and (equal (plist-get intent :kind) "plan-review")
-            (not (equal label (plist-get intent :approve))))
-       (let ((feedback (string-trim (read-string "修改意见（可留空）："))))
-         (unless (string-empty-p feedback) (list :custom feedback))))))))
+(defun agent-dsh--plan-review (session id question tool)
+  "Ask the user to approve the plan of QUESTION in request ID.
+TOOL is the id of the related tool block.
+Declining it can carry feedback for the next revision; the last option is
+what `agent-session-deny' picks."
+  (let* ((options (append (plist-get question :options) nil))
+         (approve (plist-get (plist-get question :intent) :approve)))
+    (agent-session-ask
+     session
+     :title "批准这个计划并开始执行？"
+     :tool tool
+     :choices (seq-map-indexed (lambda (option index) (list index (plist-get option :label)))
+                               options)
+     :callback
+     (lambda (index)
+       (let ((label (plist-get (nth index options) :label)))
+         (agent-dsh--respond
+          session id
+          (list :answers
+                (vector
+                 (append
+                  (list :id (plist-get question :id) :selected (vector label))
+                  (unless (equal label approve)
+                    (let ((feedback (string-trim (read-string "修改意见（可留空）："))))
+                      (unless (string-empty-p feedback) (list :custom feedback)))))))))))))
 
 (defun agent-dsh--question (session id params)
-  "Ask the user the bridge's questions in request ID with PARAMS, one by one."
-  (let ((questions (append (plist-get params :questions) nil))
-        (answers nil))
-    (cl-labels
-        ((next ()
-           (if (null questions)
-               (agent-dsh--respond session id (list :answers (vconcat (nreverse answers))))
-             (let ((question (pop questions)))
-               (agent-session-ask
-                session
-                :title (if (equal (plist-get (plist-get question :intent) :kind) "plan-review")
-                           "批准这个计划并开始执行？"
-                         (plist-get question :question))
-                :detail (unless (plist-get (plist-get question :intent) :kind)
-                          (plist-get question :detail))
-                :choices (agent-dsh--question-choices question)
-                :tool (plist-get params :callId)
-                :callback (lambda (choice)
-                            (push (agent-dsh--answer-question question choice) answers)
-                            (next)))))))
-      (next))))
+  "Ask the user the bridge's questions in request ID with PARAMS."
+  (let ((questions (append (plist-get params :questions) nil)))
+    (if-let* ((review (seq-find #'agent-dsh--plan-review-p questions)))
+        (agent-dsh--plan-review session id review (plist-get params :callId))
+      (agent-session-ask-questions
+       session
+       :questions (mapcar (lambda (question)
+                            (list :question (plist-get question :question)
+                                  :header (plist-get question :header)
+                                  :detail (plist-get question :detail)
+                                  :options (mapcar (lambda (option)
+                                                     (cons (plist-get option :label)
+                                                           (plist-get option :description)))
+                                                   (plist-get question :options))
+                                  :multi (plist-get question :multiSelect)
+                                  :other t))
+                          questions)
+       :tool (plist-get params :callId)
+       :callback
+       (lambda (answers)
+         (agent-dsh--respond
+          session id
+          (list :answers
+                (vconcat
+                 (cl-mapcar (lambda (question answer)
+                              (append (list :id (plist-get question :id)
+                                            :selected (vconcat (plist-get answer :selected)))
+                                      (when-let* ((custom (plist-get answer :custom)))
+                                        (list :custom custom))))
+                            questions
+                            (if (eq answers 'cancel) (make-list (length questions) nil) answers))))))))))
 
 ;;; Message handling
 

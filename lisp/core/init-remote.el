@@ -22,10 +22,13 @@
 
 ;; Remote processes (eglot servers, compile, shell commands) get a plain non-login
 ;; PATH, missing tools installed under the home directory such as
-;; ~/.cargo/bin/rust-analyzer.  Append the remote login shell's PATH; tramp-rpc
-;; fetches it once per connection.
+;; ~/.cargo/bin/rust-analyzer.  Put the remote login shell's PATH first, so a
+;; toolchain installed there (e.g. a gvm Go) wins over an older one in /usr/bin;
+;; tramp-rpc fetches it once per connection.
 (with-eval-after-load 'tramp
-  (add-to-list 'tramp-remote-path 'tramp-own-remote-path t))
+  (setq tramp-remote-path
+        (cons 'tramp-own-remote-path
+              (delq 'tramp-own-remote-path tramp-remote-path))))
 
 ;;; No synchronous remote calls on the typing path
 

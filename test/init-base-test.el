@@ -10,6 +10,8 @@
 
 (require 'ert)
 
+(defvar treesit-auto-install-grammar)
+
 (ert-deftest init-base-evil-keybinding-preset ()
   "evil's integration settings are set before evil can load by any path.
 evil-collection warns when evil loaded with `evil-want-keybinding' on,
@@ -61,8 +63,10 @@ Scrolling needs a real display: run it in the running Emacs."
     (should truncate-lines))
   (when (fboundp 'toml-ts-mode)
     (with-temp-buffer
-      ;; Hooks run even when the grammar is missing.
-      (ignore-errors (toml-ts-mode))
+      ;; Hooks run even when the grammar is missing, as long as nothing asks
+      ;; to install it (a checkout without tree-sitter/, such as a worktree).
+      (let ((treesit-auto-install-grammar nil))
+        (ignore-errors (toml-ts-mode)))
       (should truncate-lines)
       (should-not visual-line-mode)))
   (with-temp-buffer

@@ -32,7 +32,7 @@
 
 ;;; Modules
 
-(defvar my/languages '(elisp rust)
+(defvar my/languages '(elisp rust go)
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
 
 (require 'init-base)        ; defaults, paths, macOS environment

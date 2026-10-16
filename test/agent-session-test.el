@@ -471,19 +471,33 @@ The summary can be expanded."
      (should (eq (agent-session-status session) 'running)))))
 
 (ert-deftest agent-session-test-steer-input ()
-  "M-RET sends as a steer while running; when idle it is a normal send."
+  "C-u C-c C-c sends as a steer while running; when idle it is a normal send."
   (agent-session-test--with-session
    (let ((session agent-session--current)
          (agent-session-test--steered nil))
      (goto-char (point-max)) (insert "先别发")
-     (agent-session-steer-input)                    ; idle: normal send
+     (agent-session-send-input t)                   ; idle: normal send
      (should (string-match-p "收到：先别发" (agent-session-test--transcript)))
      (should-not agent-session-test--steered)
      (agent-session-test--type "hold")
      (goto-char (point-max)) (insert "顺便加个测试")
-     (agent-session-steer-input)
+     (agent-session-send-input t)
      (should (equal agent-session-test--steered '("顺便加个测试")))
      (should-not (agent-session-queue session)))))
+
+(ert-deftest agent-session-test-ret-newline ()
+  "RET adds a newline in the input area; C-c C-c sends, M-RET is free."
+  (agent-session-test--with-session
+   (should (eq (keymap-lookup agent-session-mode-map "C-c C-c") #'agent-session-send-input))
+   (should-not (keymap-lookup agent-session-mode-map "M-RET"))
+   (goto-char (point-max))
+   (insert "第一行")
+   (agent-session-ret)
+   (insert "第二行")
+   (should (equal (agent-session--input-text agent-session--current) "第一行\n第二行"))
+   (should-not (string-search "收到" (agent-session-test--transcript)))
+   (agent-session-send-input)
+   (should (string-search "收到：第一行\n第二行" (agent-session-test--transcript)))))
 
 (ert-deftest agent-session-test-steer-fallback ()
   "Without backend steer support, interrupt the turn and queue the message first."
@@ -919,7 +933,7 @@ an approved plan review switches the session back."
      (should (eq (agent-session-setting session :mode) 'full)))))
 
 (ert-deftest agent-session-test-dsh-question ()
-  "dsh questions become footer choices; a declined plan carries feedback."
+  "dsh questions use the question form; a declined plan carries feedback."
   (agent-session-test--with-session
    (let ((session agent-session--current)
          (written nil))
@@ -936,7 +950,184 @@ an approved plan review switches the session back."
        (should (equal (car written)
                       '(:jsonrpc "2.0" :id "dsh-2"
                         :result (:answers [(:id "review" :selected ["Keep planning"]
-                                                :custom "再细一点")]))))))))
+                                                :custom "再细一点")]))))
+       ;; Other questions: multiple choice and typed answers
+       (agent-session-backend-handle
+        'dsh session
+        '(:id "dsh-3" :method "question"
+          :params (:questions [(:id "q1" :question "Which?" :multiSelect t
+                                :options [(:label "a") (:label "b")])
+                               (:id "q2" :question "Why?" :options [(:label "x")])])))
+       (should (string-search "? 1. Which?（可多选）\n ? 2. Why?\n" (agent-session-test--footer)))
+       (agent-session-test--answering '(("b" "再细一点") "")
+         (agent-session-approve))
+       (should (equal (car written)
+                      '(:jsonrpc "2.0" :id "dsh-3"
+                        :result (:answers [(:id "q1" :selected ["b"] :custom "再细一点")
+                                           (:id "q2" :selected [])]))))
+       ;; Declining answers nothing
+       (agent-session-backend-handle
+        'dsh session '(:id "dsh-4" :method "question"
+                       :params (:questions [(:id "q1" :question "Which?"
+                                             :options [(:label "a")])])))
+       (agent-session-deny)
+       (should (equal (car written)
+                      '(:jsonrpc "2.0" :id "dsh-4"
+                        :result (:answers [(:id "q1" :selected [])]))))))))
+;;; Questions
+
+(defmacro agent-session-test--answering (replies &rest body)
+  "Run BODY with the minibuffer answering REPLIES in order.
+A list reply answers a `completing-read-multiple'; once REPLIES run out,
+the user quits."
+  (declare (indent 1))
+  `(let ((replies ,replies)
+         (prompts nil))
+     (cl-letf* ((reply (lambda (prompt &rest _)
+                        (push prompt prompts)
+                        (if replies (pop replies) (signal 'quit nil))))
+                ((symbol-function 'completing-read) reply)
+                ((symbol-function 'completing-read-multiple) reply)
+                ((symbol-function 'read-string) reply)
+                ((symbol-function 'read-number) reply)
+                ((symbol-function 'read-passwd) reply))
+       ,@body)
+     (should-not replies)
+     (nreverse prompts)))
+
+(ert-deftest agent-session-test-questions ()
+  "Questions wait in one footer line and are answered in the minibuffer.
+Typed text besides the options is a custom answer, empty input leaves a
+question unanswered, and quitting halfway keeps the answers so far."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (answers :none))
+     (agent-session-tool session "t1" :kind 'question :title "选方案" :status 'running)
+     (agent-session-ask-questions
+      session :tool "t1"
+      :questions '((:question "用哪种认证？" :header "认证" :detail "影响登录页"
+                    :options (("OAuth" . "第三方登录") ("JWT")) :other t)
+                   (:question "要哪些功能？" :options (("A") ("B") ("C")) :multi t :other t)
+                   (:question "名字？")
+                   (:question "几页？" :range (1 10 "页"))
+                   (:question "备注？"))
+      :callback (lambda (value) (setq answers value)))
+     ;; Every question shows, the keys on a line of their own
+     (should (string-search (concat " ? 1. [认证] 用哪种认证？\n"
+                                    " ? 2. 要哪些功能？（可多选）\n"
+                                    " ? 3. 名字？\n ? 4. 几页？\n ? 5. 备注？\n"
+                                    "   C-c C-y 回答 · C-c C-n 不回答\n")
+                            (agent-session-test--footer)))
+     (should-not (string-search "OAuth" (agent-session-test--footer)))
+     (should (string-match-p "选方案.*等待回答" (agent-session-test--transcript)))
+     (should (string-match-p "等待回答" (agent-session-test--mode-line)))
+     ;; Options keep their order and show their descriptions
+     (let ((table (agent-session--option-table '(("OAuth" . "第三方登录") ("JWT")))))
+       (should (equal (all-completions "" table) '("OAuth" "JWT")))
+       (let ((metadata (cdr (funcall table "" nil 'metadata))))
+         (should (equal (funcall (alist-get 'annotation-function metadata) "OAuth")
+                        "  第三方登录"))
+         (should-not (funcall (alist-get 'annotation-function metadata) "JWT"))))
+     ;; Quit after the first two questions
+     (let ((prompts (agent-session-test--answering '("OAuth" ("B" "A" "D"))
+                      (should (eq (condition-case nil (agent-session-approve) (quit 'quit))
+                                  'quit)))))
+       (should (string-search "影响登录页\n[认证] 用哪种认证？（1/5）" (car prompts)))
+       (should (string-search "要哪些功能？（可多选，逗号分隔）（2/5）" (cadr prompts))))
+     (should (eq answers :none))
+     (should (string-search (concat " ? 1. [认证] 用哪种认证？  → OAuth\n"
+                                    " ? 2. 要哪些功能？（可多选）  → A、B、D\n"
+                                    " ? 3. 名字？\n")
+                            (agent-session-test--footer)))
+     (should (string-search "C-c C-y 继续回答" (agent-session-test--footer)))
+     ;; Sending the empty input area goes on from there; a number must lie in
+     ;; its range
+     (goto-char (point-max))
+     (agent-session-test--answering '("  小明 " 0 12 3 "")
+       (agent-session-send-input))
+     (should (equal answers '((:selected ("OAuth")) (:selected ("A" "B") :custom "D")
+                              (:selected nil :custom "小明") (:selected nil :custom "3")
+                              nil)))
+     (should-not (agent-session--pending-asks session))
+     (should (string-match-p "选方案.*已回答" (agent-session-test--transcript)))
+     ;; A single question notes its answer; declining gives `cancel'
+     (agent-session-ask-questions session :tool "t1" :questions '((:question "Q" :options (("x"))))
+                                  :callback (lambda (value) (setq answers value)))
+     (agent-session-test--answering '("x") (agent-session-answer-questions))
+     (should (string-match-p "选方案.*x" (agent-session-test--transcript)))
+     (agent-session-ask-questions session :questions '((:question "Q1") (:question "Q2"))
+                                  :callback (lambda (value) (setq answers value)))
+     (agent-session-deny)
+     (should (eq answers 'cancel))
+     (should-not (agent-session--pending-asks session)))))
+
+(ert-deftest agent-session-test-claude-ask-user-question ()
+  "Claude's AskUserQuestion is answered in the footer.
+The answers go back keyed by question text, beside the original input."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (written nil)
+          (line (json-serialize
+                 '(:type "control_request" :request_id "r1"
+                   :request (:subtype "can_use_tool" :tool_name "AskUserQuestion"
+                             :tool_use_id "tu1"
+                             :input (:questions
+                                     [(:question "Which?" :header "Lib" :multiSelect :false
+                                       :options [(:label "a" :description "first")
+                                                 (:label "b" :description "second")])
+                                      (:question "Features?" :header "Feat" :multiSelect t
+                                       :options [(:label "x" :description "") (:label "y" :description "")])
+                                      (:question "Why?" :header "Why" :multiSelect :false
+                                       :options [(:label "p" :description "") (:label "q" :description "")])])))
+                 :false-object :false)))
+     (cl-letf (((symbol-function 'agent-session-write) (lambda (_ object) (push object written))))
+       (let ((agent-session-raw-message line))
+         (agent-session-backend-handle
+          'claude session (json-parse-string line :object-type 'plist :null-object nil
+                                             :false-object nil)))
+       (should (string-search "? 1. [Lib] Which?\n ? 2. [Feat] Features?（可多选）\n"
+                              (agent-session-test--footer)))
+       (agent-session-test--answering '("b" ("y" "z") "")
+         (agent-session-approve))
+       (let* ((response (plist-get (plist-get (car written) :response) :response))
+              (input (plist-get response :updatedInput))
+              (answers (gethash "answers" input)))
+         (should (equal (plist-get response :behavior) "allow"))
+         ;; The questions shown are sent back untouched
+         (should (equal (json-serialize (gethash "questions" input) :false-object :false)
+                        (let ((agent-session-raw-message line))
+                          (json-serialize (agent-session-raw-json "request" "input" "questions")
+                                          :false-object :false))))
+         (should (equal (gethash "Which?" answers) "b"))
+         (should (equal (gethash "Features?" answers) ["y" "z"]))
+         (should (eq (gethash "Why?" answers 'none) 'none))))
+     (should (equal (plist-get (agent-claude--tool-view session "AskUserQuestion"
+                                                        '(:questions [(:question "Which?")]))
+                               :title)
+                    "Which?")))))
+
+(ert-deftest agent-session-test-codex-user-input ()
+  "Codex's request_user_input is answered keyed by question id."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (written nil))
+     (cl-letf (((symbol-function 'agent-session-write) (lambda (_ object) (push object written))))
+       (agent-session-backend-handle
+        'codex session
+        '(:id 7 :method "item/tool/requestUserInput"
+          :params (:itemId "i1" :questions [(:id "q1" :header "H" :question "Pick?" :isOther t
+                                             :options [(:label "a" :description "da")])
+                                            (:id "q2" :header "T" :question "Token?" :isSecret t)])))
+       (should (string-search "? 1. [H] Pick?\n ? 2. [T] Token?\n" (agent-session-test--footer)))
+       (agent-session-test--answering '("a" "s3cret")
+         (agent-session-approve))
+       (let ((result (plist-get (car written) :result)))
+         (should (equal (plist-get (car written) :id) 7))
+         (should (equal (gethash "q1" (plist-get result :answers)) '(:answers ["a"])))
+         (should (equal (gethash "q2" (plist-get result :answers)) '(:answers ["s3cret"])))))
+     ;; The secret isn't shown back
+     (should-not (string-search "s3cret" (buffer-string))))))
+
 ;;; Remote projects
 
 (ert-deftest agent-session-test-remote-paths ()
