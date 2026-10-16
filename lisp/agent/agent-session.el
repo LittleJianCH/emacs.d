@@ -70,9 +70,11 @@
 (defface agent-session-ask '((t :inherit (bold warning)))
   "Awaiting user confirmation.")
 (defface agent-session-button
-  '((t :inherit (mode-line-inactive bold)
-       :box (:line-width (6 . 2) :style released-button)))
-  "Button.")
+  '((((background dark)) :inherit bold :background "#2a2d3e"
+     :box (:line-width (6 . 2) :style flat-button))
+    (t :inherit bold :background "#e9e4dc"
+       :box (:line-width (6 . 2) :style flat-button)))
+  "Button: a flat pill whose padding takes its background color.")
 
 ;;; Session object
 
