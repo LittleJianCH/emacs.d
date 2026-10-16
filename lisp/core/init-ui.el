@@ -130,8 +130,7 @@ A panel's status line would only repeat its buffer name."
   ;; The theme draws the border in the card's own color, so the border is
   ;; padding; the left fringe is a character wide, the right one matches.
   (setf (alist-get 'internal-border-width eldoc-box-frame-parameters) 10
-        (alist-get 'right-fringe eldoc-box-frame-parameters) 8)
-  (setopt eldoc-box-max-pixel-width 720))
+        (alist-get 'right-fringe eldoc-box-frame-parameters) 8))
 
 ;;; Interaction details
 
