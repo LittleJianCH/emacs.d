@@ -1388,82 +1388,49 @@ detached
    ;; Test the confirmation regardless of the default and the user's setting.
    (let* ((agent-collab-confirm t)
           (session agent-session--current)
-          (pending (agent-session-test--call "session_ask" buffer
-                                             :prompt "帮我看看这个 diff" :agent "test-echo2")))
+          (pending (progn (agent-session-open 'test-echo2 default-directory)
+                          (agent-session-test--call "session_ask" buffer
+                                                    :prompt "帮我看看这个 diff"
+                                                    :session "@test-echo2"))))
      (should (eq (car pending) :agent-ui-pending))
-     ;; Nothing starts before the user confirms in the caller's footer.
-     (should (= (length (agent-session-buffers)) 1))
+     ;; Nothing is sent before the user confirms in the caller's footer.
      (should (eq (car (agent-session-test--poll pending)) :agent-ui-pending))
-     (should (string-match-p "向 Echo2 提问（只读子会话）" (agent-session-test--footer)))
+     (should (string-match-p "向 @test-echo2 发送消息" (agent-session-test--footer)))
      (agent-session-approve)
-     (let* ((sub (seq-find (lambda (b) (not (eq b buffer))) (agent-session-buffers)))
-            (child (buffer-local-value 'agent-session--current sub))
-            (reply (agent-session-test--poll pending)))
-       ;; The sub-session runs out of sight, read-only, and knows who started it.
-       (should-not (get-buffer-window sub))
-       (should (eq (agent-session-setting child :mode) 'plan))
-       (should (eq (agent-session-parent child) session))
+     (let ((reply (agent-session-test--poll pending)))
        (should (string-match-p "\\`Reply from @test-echo2 (Echo2):\n\n收到：帮我看看这个 diff" reply))
        (should (string-match-p "Sent by the Echo agent of session \"@test-echo\" through session_ask"
                                reply))
-       (should-not (string-match-p "is the Echo session" reply))
-       (let ((listed (agent-session-test--call "sessions" buffer)))
-         (should (equal (seq-subseq (plist-get listed :agents) -2) ["test-echo" "test-echo2"]))
-         (should (equal (sort (seq-map (lambda (s) (list (plist-get s :id) (plist-get s :started_by)
-                                                         (plist-get s :yours)))
-                                       (plist-get listed :sessions))
-                              :key #'car)
-                        '(("@test-echo" :null t) ("@test-echo2" "@test-echo" :false)))))
-       ;; A sub-session can't ask others, and nobody asks a session that waits for them.
-       (should-error (agent-session-test--call "session_ask" sub :prompt "x"
-                                               :agent "test-echo"))
-       (should-error (agent-session-test--call "session_ask" buffer :prompt "x"
-                                               :session "@test-echo"))
-       ;; Follow-ups go to the existing session.
-       (let ((agent-collab-confirm nil))
-         (should (string-match-p
-                  "收到：再看看"
-                  (agent-session-test--poll
-                   (agent-session-test--call "session_ask" buffer :prompt "再看看"
-                                             :session "@test-echo2")))))
-       ;; Declined: the agent gets an error.
-       (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第三次"
-                                                :session "@test-echo2")))
-         (agent-session-deny)
-         (should-error (agent-session-test--poll pending) :type 'error))
-       ;; Timed out before the user answered: the request closes.
-       (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第四次"
-                                                :session "@test-echo2" :wait 1)))
-         (plist-put (gethash (cadr pending) agent-ui--deferred) :deadline 0)
-         (should-error (agent-session-test--poll pending))
-         (should-not (agent-session--pending-asks session)))))))
-
-(ert-deftest agent-session-test-sub-session-asks ()
-  (agent-session-test--with-session
-   (let* ((parent agent-session--current)
-          (child (buffer-local-value
-                  'agent-session--current
-                  (agent-session-open 'test-echo2 default-directory nil nil
-                                      (list :parent buffer :depth 1))))
-          (answers nil)
-          (ask (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
-                                  :callback (lambda (key) (push key answers)))))
-     ;; The request shows in the parent too; answering there answers the child.
-     (should (string-match-p "@test-echo2：运行 make" (agent-session-test--footer)))
-     (agent-session-approve)
-     (should (equal answers '(allow)))
-     (should (equal (plist-get (agent-session--ask child ask) :answer) "允许"))
-     (should-not (agent-session--pending-asks parent))
-     ;; When the child's turn ends, its copy expires; the parent's turn ending
-     ;; leaves the child's request alone.
-     (setq ask (agent-session-ask child :title "再运行" :choices '((allow "允许"))
-                                  :callback (lambda (key) (push key answers))))
-     (agent-session--settle parent)
-     (should (agent-session--pending-asks child))
-     (agent-session--settle child)
-     (should-not (agent-session--pending-asks child))
-     (should-not (agent-session--pending-asks parent))
-     (should (equal answers '(allow))))))
+       (should-not (string-match-p "is the Echo session" reply)))
+     (let ((listed (agent-session-test--call "sessions" buffer)))
+       (should-not (plist-member listed :agents))
+       (should (equal (sort (seq-map (lambda (s) (list (plist-get s :id) (plist-get s :yours)))
+                                     (plist-get listed :sessions))
+                            :key #'car)
+                      '(("@test-echo" t) ("@test-echo2" :false)))))
+     ;; Agents ask open sessions only: they can't start one or ask their own.
+     (should-error (agent-session-test--call "session_ask" buffer :prompt "x"))
+     (should-error (agent-session-test--call "session_ask" buffer :prompt "x"
+                                             :session "@test-echo"))
+     (should (= (length (agent-session-buffers)) 2))
+     ;; Follow-ups go to the same session.
+     (let ((agent-collab-confirm nil))
+       (should (string-match-p
+                "收到：再看看"
+                (agent-session-test--poll
+                 (agent-session-test--call "session_ask" buffer :prompt "再看看"
+                                           :session "@test-echo2")))))
+     ;; Declined: the agent gets an error.
+     (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第三次"
+                                              :session "@test-echo2")))
+       (agent-session-deny)
+       (should-error (agent-session-test--poll pending) :type 'error))
+     ;; Timed out before the user answered: the request closes.
+     (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第四次"
+                                              :session "@test-echo2" :wait 1)))
+       (plist-put (gethash (cadr pending) agent-ui--deferred) :deadline 0)
+       (should-error (agent-session-test--poll pending))
+       (should-not (agent-session--pending-asks session))))))
 
 (ert-deftest agent-session-test-rpc-deferred ()
   (let* ((polls 0)

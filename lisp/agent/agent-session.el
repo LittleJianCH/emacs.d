@@ -165,12 +165,6 @@ That is the Claude session id or the Codex thread id."
                        session)))
               (agent-session-buffers))))
 
-(defun agent-session-parent (session)
-  "The live session that started SESSION through another agent, or nil."
-  (when-let* ((buffer (plist-get (agent-session-info session) :parent))
-              ((agent-session-buffer-p buffer)))
-    (buffer-local-value 'agent-session--current buffer)))
-
 ;;; Backend interface
 
 (cl-defgeneric agent-session-backend-start (backend session)
@@ -1191,60 +1185,35 @@ the request.  DIFF is already shown by the tool block, so it isn't repeated."
   (let ((id (symbol-name (gensym "ask-"))))
     (setf (agent-session-asks session)
           (append (agent-session-asks session)
-                  ;; :answer and :copies are placeholders modified in place,
-                  ;; so this list entry updates with them.
+                  ;; :answer is a placeholder modified in place, so this list
+                  ;; entry updates with it.
                   (list (list :id id :title title :detail detail :choices choices
-                              :callback callback :tool tool :answer nil :copies nil))))
+                              :callback callback :tool tool :answer nil))))
     (when (and tool (agent-session--block session tool))
       (agent-session--update session tool :note "等待确认"))
     (agent-session--refresh session)
     (message "%s 需要确认：%s（C-c C-y 允许，C-c C-n 拒绝）"
              (agent-session-title session) title)
-    (agent-session--copy-ask session id)
     id))
-
-(defun agent-session--copy-ask (session id)
-  "Repeat confirmation request ID of SESSION in the session that started it.
-A session started by another agent runs out of sight, so the user answers
-its requests where that agent runs; answering either one answers both."
-  (when-let* ((parent (agent-session-parent session)))
-    (let* ((ask (agent-session--ask session id))
-           (tool (agent-session--block session (plist-get ask :tool)))
-           (copy (agent-session-ask
-                  parent
-                  :title (format "@%s：%s" (agent-session-handle session) (plist-get ask :title))
-                  :detail (or (plist-get ask :detail) (plist-get tool :title))
-                  :choices (plist-get ask :choices))))
-      (plist-put (agent-session--ask parent copy) :origin (cons session id))
-      (plist-put ask :copies (cons (cons parent copy) (plist-get ask :copies))))))
 
 (defun agent-session--ask (session id)
   "The confirmation request ID in SESSION."
   (seq-find (lambda (ask) (equal (plist-get ask :id) id)) (agent-session-asks session)))
 
 (defun agent-session--close-ask (session ask label)
-  "Mark confirmation request ASK as handled; note result LABEL on its tool.
-Its copies in other sessions close with it."
+  "Mark confirmation request ASK as handled; note result LABEL on its tool."
   (plist-put ask :answer label)
   (when-let* ((tool (plist-get ask :tool))
               ((agent-session--block session tool)))
-    (agent-session--update session tool :note label))
-  (pcase-dolist (`(,other . ,id) (plist-get ask :copies))
-    (when-let* ((copy (agent-session--ask other id))
-                ((not (plist-get copy :answer))))
-      (agent-session--close-ask other copy label)
-      (agent-session--refresh other))))
+    (agent-session--update session tool :note label)))
 
 (defun agent-session--answer (session id key)
-  "Answer confirmation request ID with KEY.
-A copy answers the request it was made from."
+  "Answer confirmation request ID with KEY."
   (let ((ask (agent-session--ask session id)))
     (unless (or (null ask) (plist-get ask :answer))
-      (if-let* ((origin (plist-get ask :origin)))
-          (agent-session--answer (car origin) (cdr origin) key)
-        (agent-session--close-ask session ask (cadr (assq key (plist-get ask :choices))))
-        (funcall (plist-get ask :callback) key)
-        (agent-session--refresh session)))))
+      (agent-session--close-ask session ask (cadr (assq key (plist-get ask :choices))))
+      (funcall (plist-get ask :callback) key)
+      (agent-session--refresh session))))
 
 (defun agent-session-notice (session text &optional face)
   "Insert a notice line TEXT with FACE into the transcript."

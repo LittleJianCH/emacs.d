@@ -8,13 +8,11 @@
 ;; methods:
 ;;   sessions      list the live sessions
 ;;   session_read  read the latest turns of a session, paging backwards
-;;   session_ask   send a prompt to a new read-only sub-session (or an idle
-;;                 existing session) and wait for the reply
-;; session_ask asks the user first, in the caller's footer, and only sessions
-;; the user started may use it (`agent-collab-max-depth'), so agents can't
-;; spawn sessions without bound.  A sub-session starts in plan mode and stays
-;; out of sight; its confirmation requests are repeated in the caller
-;; (`agent-session--copy-ask').
+;;   session_ask   send a prompt to an idle existing session and wait for the
+;;                 reply
+;; Agents only talk to sessions the user opened; they never start sessions.
+;; With `agent-collab-confirm', session_ask asks the user first, in the
+;; caller's footer.
 
 ;;; Code:
 
@@ -255,20 +253,14 @@ TOOLS is none, summary or full; RUNNING means the turn isn't over."
         :project (agent-session-root session)
         :status (agent-collab--status session)
         :turns (length (agent-collab--turns session))
-        :started_by (agent-ui--json-value
-                     (when-let* ((parent (agent-session-parent session)))
-                       (concat "@" (agent-session-handle parent))))
         :yours (if (eq session caller) t :false)))
 
 (agent-ui-defmethod "sessions" ()
-  "List the agent sessions open in this Emacs and the agents that can start
-new ones.  Each session has an id (its @handle, which the user also uses to
-mention it), agent, title, project, status, number of turns, the session
-that started it (through session_ask), and whether it is your own."
+  "List the agent sessions open in this Emacs.  Each session has an id (its
+@handle, which the user also uses to mention it), agent, title, project,
+status, number of turns, and whether it is your own."
   (let ((caller (agent-ui-caller-session)))
-    (list :agents (vconcat (mapcar (lambda (entry) (symbol-name (car entry)))
-                                   (reverse agent-session-agents)))
-          :sessions (vconcat (mapcar (lambda (buffer)
+    (list :sessions (vconcat (mapcar (lambda (buffer)
                                        (agent-collab--describe
                                         (buffer-local-value 'agent-session--current buffer)
                                         caller))
@@ -314,34 +306,6 @@ with before when you need more."
 
 ;;; Asking another agent
 
-(defun agent-collab--depth (session)
-  "How many sessions started by agents lead to SESSION."
-  (or (plist-get (agent-session-info session) :depth) 0))
-
-(defun agent-collab--agent (name caller)
-  "The agent called NAME, by default the first one unlike CALLER's."
-  (if name
-      (let ((agent (intern name)))
-        (unless (assq agent agent-session-agents)
-          (error "No agent called %s; sessions lists them" name))
-        agent)
-    (or (seq-find (lambda (agent)
-                    (not (eq (agent-session--get agent :backend) (agent-session-backend caller))))
-                  (reverse (mapcar #'car agent-session-agents)))
-        (error "Name the agent to ask; sessions lists them"))))
-
-(defun agent-collab--open (agent caller)
-  "Start a read-only AGENT sub-session for CALLER, out of sight."
-  (let* ((backend (agent-session--get agent :backend))
-         (settings (copy-sequence (alist-get agent agent-session-last-settings)))
-         (modes (agent-session-backend-modes backend nil)))
-    (setq settings (plist-put settings :mode (if (memq 'plan modes) 'plan 'ask)))
-    (buffer-local-value
-     'agent-session--current
-     (agent-session-open agent (agent-session-root caller) nil settings
-                         (list :parent (agent-session-buffer caller)
-                               :depth (1+ (agent-collab--depth caller)))))))
-
 (defun agent-collab--message (caller prompt)
   "PROMPT from the agent of CALLER, with a note on who is asking."
   ;; The quotes keep `agent-collab--mention-note' from explaining @handle again.
@@ -374,45 +338,32 @@ see what it did with session_read."
                       (agent-session-handle target))))))))
 
 (agent-ui-defmethod "session_ask"
-    ((prompt string "The message.  The other agent hasn't seen your conversation:
+    ((session string "The idle session to ask: its @handle, as listed by sessions"
+              required)
+     (prompt string "The message.  The other agent hasn't seen your conversation:
 include the context it needs (files, diff, question)" required)
-     (agent string "Agent of a new sub-session, e.g. codex or claude; default one
-other than yours")
-     (session string "Send to this existing idle session (its @handle) instead of
-starting a new one")
      (wait integer "Seconds to wait for the reply, default 600, at most 1500"))
-  "Ask another agent and wait for its reply: a second opinion, a review of
-your changes, or a question to a session the user mentioned.  By default a
-new sub-session starts in your project in read-only plan mode; follow-ups
-go to it with session.  The user may have to confirm first.  Returns the
-final reply of that turn; if it takes longer than wait, returns the session
-id: read the reply later with session_read."
+  "Ask the agent of another open session and wait for its reply: a second
+opinion, a review of your changes, or a question to a session the user
+mentioned.  The user may have to confirm first.  Returns the final reply of
+that turn; if it takes longer than wait, returns the session id: read the
+reply later with session_read."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_ask works only from an agent session")))
-         (target (and session (agent-collab--session session)))
-         (agent (unless target (agent-collab--agent agent caller)))
+         (target (agent-collab--session session))
          (wait (min agent-collab--max-wait (max 1 (or wait agent-collab-wait))))
          (state (list :phase 'confirm))
          ask)
-    (when (>= (agent-collab--depth caller) agent-collab-max-depth)
-      (error "This session was started by another agent and can't ask others itself"))
-    (when target
-      (when (eq target caller) (error "That is your own session"))
-      (let ((parent caller))
-        (while (setq parent (agent-session-parent parent))
-          (when (eq parent target)
-            (error "@%s is waiting for you; reply to it instead"
-                   (agent-session-handle target)))))
-      (pcase (agent-session-status target)
-        ('running (error "@%s is busy; read it with session_read or try later"
-                         (agent-session-handle target)))
-        ('exited (error "@%s has exited" (agent-session-handle target)))))
+    (when (eq target caller) (error "That is your own session"))
+    (pcase (agent-session-status target)
+      ('running (error "@%s is busy; read it with session_read or try later"
+                       (agent-session-handle target)))
+      ('exited (error "@%s has exited" (agent-session-handle target))))
     (cl-flet ((send ()
                 (condition-case err
-                    (let ((target (or target (agent-collab--open agent caller))))
-                      (setq state (list :phase 'running :target target
-                                        :id (agent-session-submit
-                                             target (agent-collab--message caller prompt)))))
+                    (setq state (list :phase 'running :target target
+                                      :id (agent-session-submit
+                                           target (agent-collab--message caller prompt))))
                   (error (setq state (list :phase 'failed
                                            :error (error-message-string err))))))
               (close-ask (label)
@@ -424,9 +375,7 @@ id: read the reply later with session_read."
           (send)
         (setq ask (agent-session-ask
                    caller
-                   :title (if target
-                              (format "向 @%s 发送消息" (agent-session-handle target))
-                            (format "向 %s 提问（只读子会话）" (agent-session--get agent :title)))
+                   :title (format "向 @%s 发送消息" (agent-session-handle target))
                    :detail prompt
                    :choices '((allow "允许") (deny "拒绝"))
                    :callback (lambda (key)
