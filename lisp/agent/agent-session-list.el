@@ -446,9 +446,15 @@ Clicking it runs COMMAND in the session list window."
 
 ;;;###autoload
 (defun agent-session-list ()
-  "Open the session list on the left.
+  "Toggle the session list on the left of the current frame.
 It shows active sessions and past sessions of the current project."
   (interactive)
+  (if-let* ((window (get-buffer-window agent-session-list--buffer-name)))
+      (quit-window nil window)
+    (agent-session-list--show)))
+
+(defun agent-session-list--show ()
+  "Open the session list for the current project."
   (let* ((root (if-let* ((session agent-session--current))
                    (agent-session-root session)
                  (agent-session--root)))

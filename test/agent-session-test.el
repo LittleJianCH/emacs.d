@@ -342,6 +342,36 @@ The transcript only marks waiting and the outcome on the related tool."
        (agent-session-list-next)
        (should (eq (plist-get (get-text-property (point) 'agent-session-entry) :buffer) buffer))))))
 
+(ert-deftest agent-session-test-list-toggle ()
+  "The list command opens, hides from either window, and reopens the sidebar."
+  (save-window-excursion
+    (agent-session-test--with-session
+     (let ((agent-session-list--buffer-name " *agent-list-toggle-test*")
+           (agent-session-list--timer nil)
+           (agent-session--list-refresh-function nil)
+           (session-buffer (current-buffer))
+           (main-window (selected-window)))
+       (unwind-protect
+           (cl-letf (((symbol-function 'agent-session-list--fetch) #'ignore))
+             (switch-to-buffer session-buffer)
+             (dotimes (pass 2)
+               (call-interactively (lookup-key agent-session-command-map "s"))
+               (let ((window (get-buffer-window agent-session-list--buffer-name)))
+                 (should (window-live-p window))
+                 (should (eq (window-parameter window 'window-side) 'left))
+                 (should (eq (selected-window) window)))
+               ;; Close once from the sidebar, then from the session window.
+               (when (= pass 1) (select-window main-window))
+               (call-interactively (lookup-key agent-session-command-map "s"))
+               (should-not (get-buffer-window agent-session-list--buffer-name))
+               (should (get-buffer agent-session-list--buffer-name))
+               (should (buffer-live-p session-buffer))
+               (should (eq (window-buffer main-window) session-buffer))))
+         (when (timerp agent-session-list--timer)
+           (cancel-timer agent-session-list--timer))
+         (when-let* ((buffer (get-buffer agent-session-list--buffer-name)))
+           (kill-buffer buffer)))))))
+
 (ert-deftest agent-session-test-list-debounce ()
   "The debounced refresh callback refreshes once and does not reschedule itself.
 It used to hang Emacs."
