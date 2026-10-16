@@ -46,6 +46,7 @@
      :salient "#673AB7" :salient-bg "#EDE7F6" :tag-fg "#FFFFFF"
      :popout "#C2552F" :popout-bg "#FFAB91" :popout-soft "#FBE9E7"
      :on-popout "#263238" :flash "#FFD9CC"
+     :accent "#6C4DA4" :on-accent "#FFFFFF" :on-accent-dim "#D9D4E3"
      :critical "#C62828" :green "#2E7D32"
      :added "#E8F5E9" :added-refine "#C8E6C9"
      :removed "#FFEBEE" :removed-refine "#FFCDD2" :changed "#FFF8E1")
@@ -56,6 +57,7 @@
      :salient "#81A1C1" :salient-bg "#3B4A61" :tag-fg "#2E3440"
      :popout "#D08770" :popout-bg "#D08770" :popout-soft "#4A3F3F"
      :on-popout "#2E3440" :flash "#6B4438"
+     :accent "#B48EAD" :on-accent "#242933" :on-accent-dim "#3B4252"
      :critical "#E08A92" :green "#A3BE8C"
      :added "#384539" :added-refine "#4B6150"
      :removed "#4A3439" :removed-refine "#6A4550" :changed "#48463A"))
@@ -67,6 +69,10 @@
 
 (defface my/nano-tag '((t :inherit (bold mode-line-active)))
   "Status tag at the start of the active mode line."
+  :group 'faces)
+
+(defface my/nano-on-accent-dim '((t :inherit shadow))
+  "Secondary text on the accent band of the selected window's mode line."
   :group 'faces)
 
 (defface my/nano-tag-inactive '((t :inherit mode-line-inactive))
@@ -85,13 +91,13 @@
   "Face specs of the theme with PALETTE, for `custom-theme-set-faces'."
   (pcase-let (((map :bg :fg :strong :faded :dim :faint :subtle :highlight :sidebar
                     :salient :salient-bg :tag-fg :popout :popout-bg :popout-soft
-                    :on-popout :flash
+                    :on-popout :flash :accent :on-accent :on-accent-dim
                     :critical :green :added :added-refine
                     :removed :removed-refine :changed)
                palette))
     (let ((pill '(:line-width (6 . 2) :style flat-button))
-          (tag (lambda (color) `(:background ,color :foreground ,tag-fg :weight bold
-                                 :box (:line-width (6 . 1) :color ,color)))))
+          (tag (lambda (bg fg) `(:background ,bg :foreground ,fg :weight bold
+                                 :box (:line-width (6 . 1) :color ,bg)))))
       (mapcar
        (lambda (spec) `(,(car spec) ((t ,@(cdr spec)))))
        `(;; Basics
@@ -139,19 +145,21 @@
          (completions-first-difference :foreground ,strong :weight bold)
          (completions-annotations :foreground ,faded)
 
-         ;; Mode line: a band with room above and below the text; the
-         ;; selected window's band is darker and starts with a colored tag.
-         (mode-line :background ,subtle :foreground ,fg
-                    :box (:line-width (1 . 6) :color ,subtle))
+         ;; Mode line: a band with room above and below the text.  The
+         ;; selected window's band is the accent color, so it is clear where
+         ;; the cursor is; the others are a quiet grey.
+         (mode-line :background ,accent :foreground ,on-accent
+                    :box (:line-width (1 . 6) :color ,accent))
          (mode-line-active :inherit mode-line)
          (mode-line-inactive :background ,highlight :foreground ,faded
                              :box (:line-width (1 . 6) :color ,highlight))
-         (mode-line-emphasis :foreground ,strong :weight bold)
-         (mode-line-buffer-id :foreground ,strong :weight bold)
-         (mode-line-highlight :foreground ,salient)
-         (my/nano-tag ,@(funcall tag salient))
-         (my/nano-tag-modified ,@(funcall tag popout))
-         (my/nano-tag-read-only ,@(funcall tag faded))
+         (mode-line-emphasis :foreground ,on-accent :weight bold)
+         (mode-line-buffer-id :foreground ,on-accent :weight bold)
+         (mode-line-highlight :background ,on-accent-dim :foreground ,strong)
+         (my/nano-on-accent-dim :foreground ,on-accent-dim)
+         (my/nano-tag ,@(funcall tag on-accent accent))
+         (my/nano-tag-modified ,@(funcall tag popout-bg on-popout))
+         (my/nano-tag-read-only ,@(funcall tag on-accent-dim strong))
          (my/nano-tag-inactive :background ,subtle :foreground ,faded
                                :box (:line-width (6 . 1) :color ,subtle))
          ;; Header line: the toolbar of review and session-list buffers.

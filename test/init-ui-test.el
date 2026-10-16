@@ -76,6 +76,48 @@ orange (2.5:1)."
         (when (and (stringp fg) (stringp bg))
           (should (>= (init-ui-test--contrast fg bg) 3.0)))))))
 
+(ert-deftest init-ui-accent-band-is-readable ()
+  "The selected window's mode line is the accent color, its text readable.
+Grey bands of slightly different shades made the selected window hard to
+find."
+  (dolist (variant '(light dark))
+    (let ((palette (alist-get variant my/nano-palettes)))
+      (should (equal (plist-get (init-ui-test--attrs (intern (format "my-nano-%s" variant))
+                                                     'mode-line)
+                                :background)
+                     (plist-get palette :accent)))
+      (should (>= (init-ui-test--contrast (plist-get palette :on-accent)
+                                          (plist-get palette :accent))
+                  4.5))
+      (should (>= (init-ui-test--contrast (plist-get palette :on-accent-dim)
+                                          (plist-get palette :accent))
+                  3.0)))))
+
+(ert-deftest init-ui-own-mode-lines-go-plain-on-the-band ()
+  "Agent sessions' own mode lines drop their colors only when selected."
+  (cl-letf (((symbol-function 'format-mode-line)
+             ;; `format-mode-line' returns "" in batch.
+             (lambda (&rest _)
+               (concat (propertize "Opus" 'face 'agent-session-dim
+                                   'local-map (make-sparse-keymap))
+                       " · 自动"))))
+    (cl-letf (((symbol-function 'mode-line-window-selected-p) (lambda () t)))
+      (let ((text (my/mode-line-plain-when-selected '("x"))))
+        (should-not (get-text-property 0 'face text))
+        ;; Clicking the model still works.
+        (should (get-text-property 0 'local-map text))))
+    (cl-letf (((symbol-function 'mode-line-window-selected-p) #'ignore))
+      (should (eq (get-text-property 0 'face (my/mode-line-plain-when-selected '("x")))
+                  'agent-session-dim))))
+  (should (memq #'my/mode-line-plain-on-band agent-session-mode-hook))
+  (with-temp-buffer
+    (setq mode-line-format '((:eval (own-mode-line))))
+    (my/mode-line-plain-on-band)
+    (my/mode-line-plain-on-band)
+    (should (equal mode-line-format
+                   '((:eval (my/mode-line-plain-when-selected
+                             '((:eval (own-mode-line))))))))))
+
 (ert-deftest init-ui-theme-keeps-structural-attributes ()
   "Theme specs replace defface specs, so they must carry their structure.
 Buttons keep their flat box, panels and diffs extend to the window edge."
