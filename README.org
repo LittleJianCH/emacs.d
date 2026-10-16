@@ -1,0 +1,225 @@
+#+title: emacs.d
+
+面向 *agent 协作开发* 的 Emacs 配置 (Emacs 31，macOS)。
+
+- 在后台运行 ~claude~ / ~codex~ / ~dsh~ (DeepSeek Harness) CLI，走结构化协议；对话、工具调用、diff、
+  审批全部由 Emacs 自己渲染，和代码并排，不嵌入 agent 自带的 TUI。
+- agent 能反过来操作 Emacs：打开文件并高亮、读取诊断和编辑器上下文、执行 Elisp，
+  以及用 Emacs *原生渲染* 带表格、图表、流程图、按钮的页面。
+- 远程项目 (=/rpc:= 路径) 里，agent CLI 跑在远程主机上，界面仍在本地 Emacs。
+- 日常语言：Rust、Go、Emacs Lisp。
+
+* 安装
+
+** 1. 依赖
+
+用 Homebrew 安装：
+
+| 用途                       | 软件                                      |
+|----------------------------+-------------------------------------------|
+| 编辑器                     | Emacs 30.1+ (日常用 emacs-plus 31)        |
+| agent → Emacs 的桥 =bin/emx= | ~node~                                      |
+| 基础工具                   | ~git~ 、 ~python3~ 、 ~ripgrep~ (~C-c r~)         |
+| agent CLI                  | ~claude~ 、 ~codex~ ，可选 ~dsh~ ；各自完成登录 |
+| vterm 首次编译             | ~cmake~                                     |
+| 本地 Rust / Go 开发        | ~rust-analyzer~ (rustup)、 ~gopls~            |
+
+字体： =init-ui.el= 优先用中英文严格等宽对齐的字体，按顺序取第一个已安装的
+*Sarasa Term SC* 、 *Sarasa Mono SC* 、 *Maple Mono NF CN* 。都没有时退回
+JetBrains Mono 等英文字体加 LXGW WenKai Mono / PingFang SC，中文会对不齐。
+
+** 2. 获取配置
+
+#+begin_src sh
+git clone https://github.com/LittleJianCH/emacs.d.git ~/.config/emacs
+#+end_src
+
+Emacs 启动时会自动加载 =~/.config/emacs= 中的配置。
+
+** 3. 首次启动
+
+- 插件从 GNU / NonGNU ELPA 和 MELPA 下载；tramp-rpc 通过 ~:vc~ 从 GitHub 拉取。需要能访问这些站点。
+- tree-sitter 语法首次打开对应语言时会询问是否安装，装到 =tree-sitter/= 。
+- Emacs server 自动启动，agent 通过它回调 Emacs。
+
+** 4. 远程开发 (可选)
+
+远程文件走 [[https://github.com/ArthurHeymans/emacs-tramp-rpc][tramp-rpc]]：用 =/rpc:HOST:/path= 代替 =/ssh:HOST:/path= 。
+在 =~/.ssh/config= 中配好主机即可，例如：
+
+#+begin_example
+Host dev
+    HostName <ip>
+    User <user>
+    IdentityFile ~/.ssh/id_ed25519_dev
+    IdentitiesOnly yes
+#+end_example
+
+tramp-rpc 的服务端在首次连接时从 GitHub Releases 下载并部署到远程主机。远程主机上需要
+agent CLI (用 dsh 时还要 ~python3~ 和 dsh 自己的登录凭据)；其余文件 (emx 中转、dsh 插件、
+上传的图片) 由 Emacs 按需放到远程的 =~/.cache/emacs-agent/= 。远程进程会使用远程登录 shell 的
+~PATH~ ，装在 home 下的工具链 (如 gvm 的 Go、 =~/.cargo/bin= ) 可以直接用。
+
+** 5. 可选组件
+
+- *telega* (Telegram， ~C-c t~ )：Homebrew 的 TDLib 太旧，需要从源码编译到 =~/.local/opt/tdlib= ，
+  步骤见 =lisp/app/init-telega.el= 开头的注释。
+- *sis* (前缀键时自动切到英文输入法)：需要 ~macism~
+  (~brew install laishulu/homebrew/macism~)，目前默认关闭。
+
+* 目录结构
+
+#+begin_example
+early-init.el        首帧之前的设置
+init.el              包管理、模块加载顺序、启用的语言列表 my/languages
+lisp/core/           基础层
+  init-base.el         默认行为、var/ 路径、macOS 环境、evil 开关
+  init-reload.el       M-x my/reload-config：不重启地应用修改过的文件
+  init-ui.el           字体、布局、状态栏、侧边栏
+  init-theme.el        跟随 macOS 外观的亮 / 暗主题
+  init-evil.el         Vim 键位（默认启用）
+  init-completion.el   vertico / orderless / consult / corfu / cape
+  init-dev.el          project、magit、eglot、tree-sitter
+  init-remote.el       远程编辑（tramp-rpc）
+lisp/lang/           语言模块：lang-elisp.el、lang-rust.el、lang-go.el
+lisp/agent/          agent 支持
+  agent-session.el     会话界面与管理（对话记录 + 底部输入区）
+  agent-claude.el      Claude 后端：claude -p stream-json
+  agent-codex.el       Codex 后端：codex app-server JSON-RPC
+  agent-dsh.el         DeepSeek Harness 后端（插件在 dsh/）
+  agent-remote.el      远程项目：agent 跑在远程主机，emx 经 ssh 转发回本地
+  agent-session-list.el  会话侧边栏
+  agent-ui.el          agent → Emacs 的方法注册与 RPC
+  agent-canvas.el      原生页面渲染（render / patch）
+  agent-review.el      分支的原子审查
+  agent-collab.el      会话之间互相协作（@handle）
+  init-agent.el        装配：注册 agent、按键、server
+lisp/app/            独立应用：init-telega.el
+bin/emx              agent 调用 Emacs 的桥：命令行 + MCP server
+skills/              交给 Emacs 启动的 agent 的 skill
+test/                ERT 测试
+var/                 运行时状态（不进 git）
+#+end_example
+
+* 按键
+
+以下是 Emacs 原生键位；默认启用的 evil 键位见下文。
+
+| 按键                                | 功能                                                        |
+|-------------------------------------+-------------------------------------------------------------|
+| ~C-c a a~                             | 显示 / 隐藏右侧的 agent 列                                  |
+| ~C-c a n~                             | 新建会话，用最近用过的 agent (~C-u~ 先选 agent)               |
+| ~C-c a s~                             | 会话列表：进行中的会话 + 本项目的历史会话 (RET 打开 / 恢复) |
+| ~C-c a i~                             | 跳到当前项目会话的输入区                                    |
+| ~C-c a k~                             | 结束会话                                                    |
+| ~C-c a f~                             | 把当前文件引用插入会话输入区 (有选区时带行号范围)           |
+| ~C-c a r~                             | 把选区代码块插入会话输入区                                  |
+| ~C-c a v~                             | 回到 agent 最近展示的页面                                   |
+| ~C-x p p~ 后按 ~a~                      | 切换项目并新建 agent 会话                                   |
+| ~C-x g~                               | magit                                                       |
+| ~C-c r~ / ~C-c f~ / ~C-s~ / ~C-x b~         | ripgrep / 最近文件 / 搜索当前文件 / 切换 buffer             |
+| ~M-g n~ / ~M-g p~ / ~M-g f~               | 下一个 / 上一个 / 列出所有诊断                              |
+| ~C-c e~ / ~C-c l a~ / ~C-c l r~ / ~C-c l f~ | 启动 eglot / 代码操作 / 重命名 / 格式化                     |
+| ~C-c i~                               | 打开 init.el                                                |
+
+Rust (~rust-ts-mode~)： ~C-c C-c~ 运行 cargo 子命令， ~C-c C-t~ 运行光标所在的测试，
+~C-c C-r~ cargo run， ~C-c C-k~ 重新运行上一次命令；保存时用 rustfmt 格式化。
+
+Go (~go-ts-mode~)： ~C-c C-c~ 运行 go 子命令， ~C-c C-r~ go run， ~C-c C-k~ 重新运行；
+保存时通过 gopls 整理 import 并格式化。
+
+Elisp： ~C-c C-b~ eval-buffer， ~C-c C-e~ 求值并美化输出， ~C-c C-m~ 展开宏，
+~C-c C-z~ IELM； ~C-h f/v/k/x~ 使用 helpful。
+
+** 会话 buffer
+
+布局参考 telega：上方是对话，下方一条分隔线 (显示工作中 / 等待确认等状态)，
+其下是辅助行 (待确认请求的选项按钮、排队中的消息) 和提示符 =Claude ❯= ，之后就是输入区。
+模型、推理强度、权限模式和用量显示在状态栏，可用鼠标点击切换。
+
+| 按键              | 功能                                 |
+|-------------------+--------------------------------------|
+| ~C-c C-c~           | 发送 (~C-u~ 时作为 steer 插入当前回合) |
+| ~RET~ / ~C-j~         | 换行；在对话中的按钮上 ~RET~ 为点击    |
+| ~M-p~ / ~M-n~         | 历史输入                             |
+| ~TAB~               | 补全：行首 ~/~ 命令、 ~@~ 文件           |
+| ~C-c C-k~           | 有输入时清空，否则中断 agent         |
+| ~C-c C-y~ / ~C-c C-n~ | 允许 / 拒绝待确认的请求              |
+| ~C-c C-o~           | 会话菜单                             |
+| ~C-c C-b~ / ~C-c C-f~ | 上一条 / 下一条消息                  |
+| ~C-c C-a~           | 插入图片                             |
+
+在对话中打字会自动跳到输入区。 ~/model~ ~/effort~ ~/mode~ ~/agent~ ~/plan~ ~/default~ ~/new~
+~/resume~ 在 Emacs 中执行，其余发给 agent。
+
+agent 页面中： ~TAB~ 折叠区块 / 下一个按钮， ~RET~ 点击， ~c~ 回复 agent， ~g~ 重绘， ~q~ 关闭。
+
+* Vim 键位 (evil)
+
+默认启用。 ~M-x my/toggle-evil~ 在当前 Emacs 中开关， ~C-u M-x my/toggle-evil~ 同时保存为默认值。
+insert state 使用 Emacs 的编辑键，上面的 Emacs 键位在 evil 下照常可用。
+
+leader 为 ~SPC~ ： ~SPC f~ 找文件， ~SPC b~ 切换 buffer， ~SPC r~ 最近文件， ~SPC s~ 搜索当前文件，
+~SPC /~ 项目内搜索， ~SPC p~ 项目命令， ~SPC g~ magit， ~SPC a~ agent 命令 (同 ~C-c a~)，
+~SPC w~ 窗口， ~SPC u~ 前缀参数 (~C-u~ 用于向上翻页)， ~SPC i~ 打开 init.el。
+
+会话起始为 normal： ~i~ / ~a~ / ~o~ 在对话中跳到输入区末尾进入 insert，insert 下 ~C-c C-c~ 发送，
+~ESC~ 回到 normal 浏览； ~]]~ / ~[[~ 在消息间跳转。本地 leader ~,~ ： ~,o~ 菜单， ~,m~ 模型，
+~,e~ 推理强度， ~,M~ 权限模式， ~,p~ 计划模式， ~,A~ 切换 agent， ~,y~ / ~,n~ 允许 / 拒绝，
+~,k~ 中断， ~,s~ 会话列表， ~,N~ 新会话， ~,r~ 恢复会话。
+
+* agent → Emacs
+
+Emacs 启动的 agent 进程里， =bin/= 已加入 ~PATH~ ， ~EMACS_SOCKET_NAME~ 指向当前 Emacs，
+所以 agent 可以直接运行 ~emx~ ：
+
+#+begin_src sh
+emx help                    # 列出所有方法
+emx help render             # 查看页面 block 格式
+emx context                 # 用户正在看的文件、光标、选区
+emx open src/main.rs 42     # 打开文件跳到第 42 行并高亮
+emx render page.json        # 渲染原生页面，JSON：{"title": ..., "blocks": [...]}
+emx eval '(buffer-list)'    # 执行任意 Elisp
+emx reload                  # 热加载修改过的配置文件
+#+end_src
+
+同时这些方法会作为 MCP 工具 (~emacs~) 自动注入给 Emacs 启动的 agent 进程
+(Claude 用 ~--mcp-config~ ，Codex 用 ~-c mcp_servers.emacs.*~ ，dsh 用它自己的 MCP 客户端)，
+不写入任何全局配置，在 Emacs 之外启动的 claude / codex 不受影响。
+
+** 页面能放什么
+
+~render~ 的 block 类型：标题、富文本 (粗体、行内代码、可点击的文件链接)、
+列表 (可嵌套、可勾选)、代码块 (按语言高亮，或直接引用文件片段)、表格、键值对、
+提示框、图表 (柱状、横向柱状、折线)、流程图 (自动布局)、进度条、可折叠区块、
+图片、分隔线、由 agent 写的 Elisp 绘制的区块，以及 *按钮* ：用户点击后，按钮上的 prompt
+会作为消息发回 agent 会话。完整格式见 ~emx help render~ 。
+
+* 开发
+
+修改后用 ~emx reload~ (或 ~M-x my/reload-config~) 热加载，不必重启；测试、编译检查和注意事项见
+[[file:AGENTS.md][AGENTS.md]]。
+
+* 扩展
+
+- *语言* ：新建 =lisp/lang/lang-NAME.el= (末尾 ~(provide 'lang-NAME)~)，
+  再把 ~NAME~ 加入 =init.el= 中的 ~my/languages~ 。
+- *agent* ：参考 =agent-claude.el= 实现 ~agent-session-backend-*~ 泛型函数，把协议消息翻译成
+  ~agent-session-text~ / ~agent-session-tool~ / ~agent-session-ask~ 等界面调用，再在
+  =init-agent.el= 中加一行 ~(agent-session-define-agent NAME :title "...")~ 。
+- *agent 可调用的方法* ：用 ~agent-ui-defmethod~ 定义，MCP 工具列表会自动包含它。
+- *页面 block 类型* ：写一个接收 block plist 的渲染函数，加入 ~agent-canvas-renderers~ 。
+
+* 致谢
+
+界面外观 (=init-theme.el= 的亮 / 暗主题， =init-ui.el= 的留白布局、状态栏和侧边栏) 模仿自
+Nicolas P. Rougier 与 N Λ N O 开发者的 [[https://github.com/rougier/nano-emacs][N Λ N O Emacs]] (GPL-3.0-or-later)，
+设计思路见 Rougier 的文章 [[https://arxiv.org/abs/2008.06030][On the design of text editors]]。语义化的少量 face、
+亮色 (Material Design) 与暗色 ([[https://www.nordtheme.com/][Nord]]) 两套配色、宽留白和带状态标签的状态栏都来自 nano；
+代码是为这份配置和它的 agent 界面重新实现的，没有直接复制。
+
+agent 会话的交互部分参考了 T3 Code 和 Claude Desktop：由 Emacs 自己渲染整段对话 (而不是嵌入
+agent 的 TUI)、按项目列出会话的侧边栏，以及远程项目里让 agent CLI 跑在远程主机上的方式
+(类似 Claude Desktop 的 SSH 模式)。
+
+感谢这些项目！
