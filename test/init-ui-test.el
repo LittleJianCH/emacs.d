@@ -88,6 +88,37 @@ Buttons keep their flat box, panels and diffs extend to the window edge."
       (should (plist-get (init-ui-test--attrs theme face) :extend)))
     (should (plist-get (init-ui-test--attrs theme 'agent-canvas-title) :height))))
 
+(defun init-ui-test--fonts-with (installed)
+  "Run `my/setup-fonts' as if only INSTALLED families existed.
+Return the default family and height, and the family set for Han."
+  (let (default height han)
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'find-font)
+               ;; Font specs hold the family as a symbol.
+               (lambda (spec &rest _) (member (format "%s" (font-get spec :family)) installed)))
+              ((symbol-function 'set-face-attribute)
+               (lambda (face _frame &rest args)
+                 (when (eq face 'default)
+                   (setq default (plist-get args :family)
+                         height (plist-get args :height)))))
+              ((symbol-function 'set-fontset-font)
+               (lambda (_fontset charset spec &rest _)
+                 (when (eq charset 'han) (setq han (format "%s" (font-get spec :family)))))))
+      (my/setup-fonts))
+    (list default height han)))
+
+(ert-deftest init-ui-fonts-prefer-aligned-cjk ()
+  "A font with CJK twice the Latin width serves both scripts, at its size.
+Menlo with PingFang SC put 14px CJK glyphs in 16px of columns, so tables
+with Chinese drifted.  Sarasa needs an even pixel size to stay aligned."
+  (should (equal (init-ui-test--fonts-with
+                  '("Menlo" "PingFang SC" "Maple Mono Normal NL NF CN" "Sarasa Term SC"))
+                 '("Sarasa Term SC" 160 "Sarasa Term SC")))
+  (should (equal (init-ui-test--fonts-with '("Menlo" "PingFang SC" "Maple Mono Normal NL NF CN"))
+                 '("Maple Mono Normal NL NF CN" 140 "Maple Mono Normal NL NF CN")))
+  (should (equal (init-ui-test--fonts-with '("Menlo" "PingFang SC"))
+                 '("Menlo" 140 "PingFang SC"))))
+
 (ert-deftest init-ui-mode-line-tag ()
   "The status tag shows the buffer state, colored by it."
   (with-temp-buffer

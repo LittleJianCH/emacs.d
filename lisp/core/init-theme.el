@@ -16,9 +16,9 @@
 ;;
 ;; Nano's light palette (Material Blue Grey) and dark one (Nord) are kept, but
 ;; its faded and popout colors are darkened for text: as foregrounds they fall
-;; under 2:1 against white.  The light tints remain as backgrounds.  Only
-;; Menlo is installed, which has regular and bold only, so strong is bold
-;; rather than nano's light/medium pair.
+;; under 2:1 against white.  The light tints remain as backgrounds.  Strong
+;; is bold rather than nano's light/medium pair, which needs a font with those
+;; weights (Menlo, the fallback, has regular and bold only).
 ;;
 ;; The themes follow the macOS appearance (emacs-plus).
 ;;

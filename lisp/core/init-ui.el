@@ -5,23 +5,45 @@
 (require 'init-theme)
 
 ;;; Fonts: pick the first installed candidate
+;;
+;; Best is one font whose CJK glyphs are exactly two Latin columns wide: then
+;; tables and other aligned text stay straight.  Otherwise a Latin monospace
+;; font is paired with a separate CJK font, and every CJK character drifts
+;; (Menlo with PingFang SC: 8px Latin, 14px CJK instead of 16px).
+
+(defconst my/aligned-fonts
+  '(("Sarasa Term SC" . 160) ("Sarasa Mono SC" . 160)
+    ("Maple Mono Normal NL NF CN" . 140) ("Maple Mono NF CN" . 140)
+    ("Maple Mono CN" . 140))
+  "Fonts with CJK glyphs exactly two Latin columns wide, preferred first.
+Each comes with its height.  Sarasa's Latin glyphs are half its size
+wide, so it needs an even pixel size: at 15 they would be 7.5px, which
+Emacs rounds, and the alignment breaks again.  At 16 they are 8px, as
+wide as Menlo at 14.")
 
 (defun my/first-font (fonts)
   "Return the first font family in FONTS that is installed."
   (seq-find (lambda (f) (find-font (font-spec :family f))) fonts))
 
 (defun my/setup-fonts (&optional frame)
-  "Set up the monospace and CJK fonts for FRAME."
+  "Set up the monospace and CJK fonts for FRAME.
+An installed font of `my/aligned-fonts' serves both Latin and CJK text."
   (with-selected-frame (or frame (selected-frame))
     (when (display-graphic-p)
-      (when-let* ((mono (my/first-font '("JetBrains Mono" "Roboto Mono" "SF Mono"
-                                         "Iosevka" "Fira Code" "Menlo"))))
-        (set-face-attribute 'default nil :family mono :height 140)
-        (set-face-attribute 'fixed-pitch nil :family mono))
-      (when-let* ((cjk (my/first-font '("Sarasa Mono SC" "LXGW WenKai Mono"
-                                        "PingFang SC" "Hiragino Sans GB"))))
-        (dolist (charset '(han cjk-misc bopomofo kana))
-          (set-fontset-font t charset (font-spec :family cjk))))
+      (let* ((aligned (my/first-font (mapcar #'car my/aligned-fonts)))
+             (mono (or aligned
+                       (my/first-font '("JetBrains Mono" "Roboto Mono" "SF Mono"
+                                        "Iosevka" "Fira Code" "Menlo"))))
+             (cjk (or aligned
+                      (my/first-font '("LXGW WenKai Mono" "PingFang SC"
+                                       "Hiragino Sans GB")))))
+        (when mono
+          (set-face-attribute 'default nil :family mono
+                              :height (alist-get aligned my/aligned-fonts 140 nil #'equal))
+          (set-face-attribute 'fixed-pitch nil :family mono))
+        (when cjk
+          (dolist (charset '(han cjk-misc bopomofo kana))
+            (set-fontset-font t charset (font-spec :family cjk)))))
       (set-fontset-font t 'emoji (font-spec :family "Apple Color Emoji") nil 'prepend))))
 
 (if (daemonp)
