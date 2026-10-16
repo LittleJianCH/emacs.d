@@ -513,6 +513,40 @@ Wrapped diff lines were hard to read and broke the line-number column."
             (kill-buffer buffer)))
         (delete-directory worktree t)))))
 
+(ert-deftest agent-review-test-source-position ()
+  (agent-review-test--with-repo repo
+    (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                      "概览" (agent-review-test--plan))))
+      (unwind-protect
+          (agent-review-test--with-buffer review
+            ;; A character of an added line maps to the same one in the file.
+            (goto-char (point-min))
+            (search-forward "+line two")
+            (backward-char 3)
+            (pcase-let ((`(,buffer . ,pos) (agent-review--source-position (point))))
+              (should (equal (file-truename (buffer-file-name buffer))
+                             (file-truename (expand-file-name "a.txt" repo))))
+              (with-current-buffer buffer
+                (should (= (line-number-at-pos pos) 2))
+                (should (equal (buffer-substring-no-properties pos (+ pos 3)) "two"))))
+            ;; Not on the line numbers, nor on a removed line.
+            (should-not (agent-review--source-position (pos-bol)))
+            (goto-char (point-min))
+            (search-forward "-line 2")
+            (should-not (agent-review--source-position (1- (point))))
+            ;; Not once the buffer visiting the file has another text there.
+            (search-forward "+line two")
+            (with-current-buffer (agent-review--source-buffer "a.txt")
+              (goto-char (point-min))
+              (forward-line 1)
+              (insert "x"))
+            (should-not (agent-review--source-position (1- (point)))))
+        (dolist (buffer (buffer-list))
+          (when (and (buffer-file-name buffer)
+                     (string-match-p "agent-review-repo" (buffer-file-name buffer)))
+            (with-current-buffer buffer (set-buffer-modified-p nil))
+            (kill-buffer buffer)))))))
+
 (ert-deftest agent-review-test-deferred-items ()
   (agent-review-test--with-repo repo
     (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")

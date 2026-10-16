@@ -36,6 +36,12 @@
 (require 'agent-canvas)
 
 (declare-function my/var "init-base")
+(declare-function eglot-managed-p "eglot")
+(declare-function eglot-server-capable "eglot")
+(declare-function eglot-current-server "eglot")
+(declare-function eglot--async-request "eglot")
+(declare-function eglot--TextDocumentPositionParams "eglot")
+(declare-function eglot--hover-info "eglot")
 
 (defgroup agent-review nil
   "Atomic reviews of a branch's changes."
@@ -862,6 +868,8 @@ hunk N of the file, counting from 0; the last one is after its last hunk.")
 (defvar-local agent-review--nav nil "The sidebar buffer of this review buffer.")
 (defvar-local agent-review--checkout 'unknown
   "Worktree at the head of the review shown, or nil; `unknown' before looking.")
+(defvar-local agent-review--source-buffers nil
+  "Cache of the buffers visiting the head's files: file -> buffer or nil.")
 (defvar-local agent-review--current nil "The item at point at the last command.")
 
 (defun agent-review--save-state ()
@@ -1209,7 +1217,10 @@ it, see `agent-review--insert-gap'."
                     (if (plist-get line :newline) ""
                       (propertize " ⏎ 文件末尾无换行" 'face 'agent-review-meta))
                     "\n")
-            (when face (add-face-text-property code-start (point) face t)))
+            (when face (add-face-text-property code-start (point) face t))
+            ;; Where the code starts in the line, past the numbers and the mark.
+            (put-text-property start (point) 'agent-review-code-column
+                               (- (1+ code-start) start)))
           (put-text-property start (point) 'agent-review-target target)
           (dolist (comment (gethash (agent-review--line-key target) comments))
             (agent-review--insert-comment comment))))
@@ -2333,6 +2344,74 @@ its copy is the same; else a read-only copy of the head's version."
                                                   nil nil #'equal))
          (plist-get target :line))))))
 
+;;; Language server
+
+;; Hover on a code line asks the language server of the file the line is in,
+;; through the buffer visiting it.  Only for lines the head has, and only
+;; while that buffer still has the line's text: the server knows the buffer,
+;; not the reviewed commit.
+
+(defun agent-review--source-buffer (file)
+  "Buffer visiting FILE in the head's worktree or the project, or nil.
+Opened once per review buffer, without being shown; nil when neither
+has the file."
+  (let* ((cache (or agent-review--source-buffers
+                    (setq agent-review--source-buffers (make-hash-table :test #'equal))))
+         (buffer (gethash file cache 'missing)))
+    (unless (or (null buffer) (buffer-live-p buffer))
+      (setq buffer
+            (puthash file
+                     (when-let* ((path (seq-find
+                                        #'file-exists-p
+                                        (mapcar (lambda (dir) (expand-file-name file dir))
+                                                (delq nil (delete-dups
+                                                           (list (agent-review--head-checkout)
+                                                                 (plist-get agent-review--review
+                                                                            :root))))))))
+                       (find-file-noselect path))
+                     cache)))
+    buffer))
+
+(defun agent-review--source-position (pos)
+  "Buffer and position in the head's file of the code at POS, or nil.
+Nil for a removed line, off a line's code, or when the buffer visiting
+the file no longer has the line's text."
+  (when-let* ((target (get-text-property pos 'agent-review-target))
+              ((eq (plist-get target :side) 'new))
+              (column (get-text-property pos 'agent-review-code-column))
+              (code (plist-get target :code))
+              (offset (- pos (save-excursion (goto-char pos) (pos-bol)) column))
+              ((<= 0 offset))
+              (buffer (agent-review--source-buffer (plist-get target :file))))
+    (with-current-buffer buffer
+      (save-restriction
+        (widen)
+        (save-excursion
+          (goto-char (point-min))
+          (when (and (zerop (forward-line (1- (plist-get target :line))))
+                     (equal (buffer-substring-no-properties (point) (pos-eol)) code))
+            ;; Past the code is the note that the file has no final newline.
+            (cons buffer (+ (point) (min offset (length code))))))))))
+
+(defun agent-review--eldoc-hover (callback &rest _)
+  "Show what the language server says of the code at point, through CALLBACK.
+A member of `eldoc-documentation-functions' in review buffers; works
+where eglot manages the buffer visiting the file."
+  (when-let* ((source (agent-review--source-position (point))))
+    (with-current-buffer (car source)
+      (when (and (fboundp 'eglot-managed-p) (eglot-managed-p)
+                 (eglot-server-capable :hoverProvider))
+        (eglot--async-request
+         (eglot-current-server) :textDocument/hover
+         (save-excursion (goto-char (cdr source)) (eglot--TextDocumentPositionParams))
+         :success-fn (lambda (hover)
+                       (let ((contents (plist-get hover :contents)))
+                         (funcall callback (and contents (not (seq-empty-p contents))
+                                                (eglot--hover-info contents)))))
+         :error-fn #'ignore
+         :hint :textDocument/hover)
+        t))))
+
 (defun agent-review-toggle-full ()
   "Switch between the items and the full diff."
   (interactive)
@@ -2450,8 +2529,11 @@ N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, al
               header-line-format '(:eval (agent-review--header-line))
               imenu-create-index-function #'agent-review--imenu-index
               revert-buffer-function (lambda (&rest _)
-                                       (setq agent-review--checkout 'unknown)
+                                       (setq agent-review--checkout 'unknown
+                                             agent-review--source-buffers nil)
                                        (agent-review--redraw)))
+  (add-hook 'eldoc-documentation-functions #'agent-review--eldoc-hover nil t)
+  (eldoc-mode 1)
   (add-hook 'post-command-hook #'agent-review--track nil t)
   (add-hook 'imenu-after-jump-hook #'agent-review--reveal nil t)
   (add-hook 'kill-buffer-hook #'agent-review--kill-nav nil t))
