@@ -1,10 +1,7 @@
 ;;; init-ui.el --- Theme, fonts, windows -*- lexical-binding: t; -*-
 
-;; Built-in light Leuven theme; the Modus options apply if switching back to
-;; modus-operandi / modus-vivendi.
-(setq modus-themes-mixed-fonts t
-      modus-themes-bold-constructs t)
-(load-theme 'leuven t)
+;; Nano-style light / dark themes, following the macOS appearance.
+(require 'init-theme)
 
 ;;; Fonts: pick the first installed candidate
 

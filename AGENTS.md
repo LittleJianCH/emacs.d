@@ -25,7 +25,8 @@ init.el                  package setup, then loads modules in order
 lisp/core/               base layer
   init-base.el           defaults, var/ paths, `my/use-evil' + `my/toggle-evil'
   init-reload.el         `my/reload-config': apply edited files to the running Emacs
-  init-ui.el             theme, fonts, windows
+  init-ui.el             fonts, windows
+  init-theme.el          nano-style light / dark themes following the macOS appearance
   init-evil.el           optional Vim bindings (off by default)
   init-completion.el     vertico / orderless / consult / corfu / cape
   init-dev.el            project, magit, eglot, tree-sitter
@@ -39,6 +40,7 @@ skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
+test/init-ui-test.el        ERT suite for the themes
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 var/                     runtime state (history, backups, pasted images...); git-ignored
@@ -139,7 +141,8 @@ Tests (ERT, ~50 tests, a few seconds):
 ```sh
 emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
-      -l test/agent-review-test.el -l test/agent-canvas-test.el \
+      -l test/init-ui-test.el -l test/agent-review-test.el \
+      -l test/agent-canvas-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
