@@ -33,6 +33,7 @@
      :subtle "#ECEFF1" :highlight "#F5F7F8" :sidebar "#F7F9FA"
      :salient "#673AB7" :salient-bg "#EDE7F6" :tag-fg "#FFFFFF"
      :popout "#C2552F" :popout-bg "#FFAB91" :popout-soft "#FBE9E7"
+     :on-popout "#263238" :flash "#FFD9CC"
      :critical "#C62828" :green "#2E7D32"
      :added "#E8F5E9" :added-refine "#C8E6C9"
      :removed "#FFEBEE" :removed-refine "#FFCDD2" :changed "#FFF8E1")
@@ -42,6 +43,7 @@
      :subtle "#3B4252" :highlight "#343A47" :sidebar "#2A2F3A"
      :salient "#81A1C1" :salient-bg "#3B4A61" :tag-fg "#2E3440"
      :popout "#D08770" :popout-bg "#D08770" :popout-soft "#4A3F3F"
+     :on-popout "#2E3440" :flash "#6B4438"
      :critical "#E08A92" :green "#A3BE8C"
      :added "#384539" :added-refine "#4B6150"
      :removed "#4A3439" :removed-refine "#6A4550" :changed "#48463A"))
@@ -71,6 +73,7 @@
   "Face specs of the theme with PALETTE, for `custom-theme-set-faces'."
   (pcase-let (((map :bg :fg :strong :faded :dim :faint :subtle :highlight :sidebar
                     :salient :salient-bg :tag-fg :popout :popout-bg :popout-soft
+                    :on-popout :flash
                     :critical :green :added :added-refine
                     :removed :removed-refine :changed)
                palette))
@@ -117,7 +120,7 @@
          (line-number-minor-tick :foreground ,dim)
          (show-paren-match :foreground ,salient :background ,salient-bg :weight bold)
          (show-paren-mismatch :foreground ,tag-fg :background ,critical)
-         (isearch :foreground ,strong :background ,popout-bg :weight bold)
+         (isearch :foreground ,on-popout :background ,popout-bg :weight bold)
          (isearch-fail :foreground ,critical :background ,popout-soft)
          (lazy-highlight :foreground ,strong :background ,popout-soft)
          (completions-common-part :foreground ,salient :weight bold)
@@ -363,7 +366,7 @@
          (agent-session-list-heading :foreground ,faded :weight bold)
          (agent-session-list-title :foreground ,strong :weight bold)
          (agent-session-list-alert :background ,popout-soft :extend t)
-         (agent-session-list-alert-flash :background ,popout-bg :extend t)
+         (agent-session-list-alert-flash :background ,flash :extend t)
          (agent-canvas-title :foreground ,strong :weight bold :height 1.5)
          (agent-canvas-h1 :foreground ,strong :weight bold :height 1.3)
          (agent-canvas-h2 :foreground ,strong :weight bold :height 1.15)

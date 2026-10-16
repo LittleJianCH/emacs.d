@@ -49,6 +49,32 @@ ones, so after a reload the other appearance kept its old colors."
     (my/nano-define-themes)
     (my/nano-apply-theme)))
 
+(defun init-ui-test--contrast (a b)
+  "WCAG contrast of hex colors A and B.
+Parsed by hand: in batch, `color-name-to-rgb' snaps to terminal colors."
+  (let ((lum (lambda (hex)
+               (apply #'+ (cl-mapcar
+                           (lambda (i w)
+                             (let ((c (/ (string-to-number (substring hex i (+ i 2)) 16)
+                                         255.0)))
+                               (* w (if (<= c 0.03928) (/ c 12.92)
+                                      (expt (/ (+ c 0.055) 1.055) 2.4)))))
+                           '(1 3 5) '(0.2126 0.7152 0.0722))))))
+    (let ((la (funcall lum a)) (lb (funcall lum b)))
+      (/ (+ (max la lb) 0.05) (+ (min la lb) 0.05)))))
+
+(ert-deftest init-ui-theme-text-contrast ()
+  "Faces with their own text and background colors stay readable (>= 3:1).
+In the dark theme the current search match used to be light text on
+orange (2.5:1)."
+  (dolist (variant '(light dark))
+    (dolist (spec (my/nano-face-specs (alist-get variant my/nano-palettes)))
+      (let* ((attrs (cdar (cadr spec)))
+             (fg (plist-get attrs :foreground))
+             (bg (plist-get attrs :background)))
+        (when (and (stringp fg) (stringp bg))
+          (should (>= (init-ui-test--contrast fg bg) 3.0)))))))
+
 (ert-deftest init-ui-theme-keeps-structural-attributes ()
   "Theme specs replace defface specs, so they must carry their structure.
 Buttons keep their flat box, panels and diffs extend to the window edge."
