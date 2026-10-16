@@ -53,12 +53,6 @@ fails, uses `agent-collab-handle-command'."
   "Non-nil means session_ask asks the user before sending a prompt."
   :type 'boolean)
 
-(defcustom agent-collab-max-depth 1
-  "How deep sessions started by agents may nest.
-With 1, sessions the user started may use session_ask, and the
-sub-sessions it starts may not."
-  :type 'integer)
-
 (defcustom agent-collab-text-limit 4000
   "Maximum characters of one message or tool output in session_read."
   :type 'integer)
