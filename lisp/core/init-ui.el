@@ -1,6 +1,7 @@
 ;;; init-ui.el --- Theme, fonts, windows -*- lexical-binding: t; -*-
 
-;; Nano-style light / dark themes, following the macOS appearance.
+;; Nano-style light / dark themes, following the macOS appearance.  The look
+;; is modeled on rougier/nano-emacs; see the credits in init-theme.el.
 (require 'init-theme)
 
 ;;; Fonts: pick the first installed candidate
@@ -27,7 +28,7 @@
     (add-hook 'after-make-frame-functions #'my/setup-fonts)
   (my/setup-fonts))
 
-;;; Layout: wide margins, windows separated by space (nano)
+;;; Layout: wide margins, windows separated by space (after nano-layout.el)
 
 ;; The frame margin itself is set in early-init.el, before the first frame;
 ;; this keeps reloads and frames made later in line.
@@ -50,7 +51,7 @@
 ;; Underlines sit at the descent line instead of crossing descenders.
 (setq x-underline-at-descent-line t)
 
-;;; Status line: nano's header line, kept at the bottom
+;;; Status line: nano's header line (nano-modeline.el), kept at the bottom
 ;;
 ;;   [N] init-ui.el  Elisp · main                       eglot  12:4
 ;;

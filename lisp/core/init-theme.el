@@ -21,6 +21,18 @@
 ;; rather than nano's light/medium pair.
 ;;
 ;; The themes follow the macOS appearance (emacs-plus).
+;;
+;; Credits
+;;
+;; This look is modeled on N Λ N O Emacs ("Emacs made simple") by Nicolas
+;; P. Rougier and the N Λ N O developers, https://github.com/rougier/nano-emacs,
+;; licensed GPL-3.0-or-later, and on the ideas of Rougier's "On the design of
+;; text editors" (https://arxiv.org/abs/2008.06030).  From it come the
+;; semantic face roles above, the two palettes (which nano takes from Material
+;; Design, https://material.io/, and Nord, https://www.nordtheme.com/), the
+;; wide margins and the status line with a state tag (see init-ui.el).  No
+;; nano code is copied; the faces and layout are reimplemented here for this
+;; configuration and its agent UI.  Thank you.
 
 ;;; Code:
 
@@ -390,7 +402,7 @@ Redefining replaces their old settings; enable one afterwards with
   (dolist (variant '(light dark))
     (let ((theme (intern (format "my-nano-%s" variant))))
       (custom-declare-theme theme (custom-make-theme-feature theme)
-                            (format "Nano-style %s theme." variant))
+                            (format "Nano-style %s theme, after rougier/nano-emacs." variant))
       ;; Settings pushed onto a theme that is not enabled are added next to
       ;; the old ones instead of replacing them, so the stale specs would
       ;; still apply: start from an empty, disabled theme.
