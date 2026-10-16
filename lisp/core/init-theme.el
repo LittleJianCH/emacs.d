@@ -283,6 +283,10 @@
          (eglot-highlight-symbol-face :background ,subtle :weight bold)
          (eglot-inlay-hint-face :foreground ,dim :height 0.9)
          (eldoc-highlight-function-argument :foreground ,salient :weight bold)
+         ;; eldoc-box popups: a card in the band color; its border is padding.
+         (eldoc-box-body :background ,subtle :foreground ,fg)
+         (eldoc-box-border :background ,subtle)
+         (eldoc-box-markdown-separator :strike-through ,faint :extend t :height 0.4)
          (xref-file-header :foreground ,strong :weight bold)
          (xref-line-number :foreground ,faded)
          (xref-match :foreground ,strong :background ,popout-soft)

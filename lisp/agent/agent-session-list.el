@@ -418,7 +418,6 @@ With CHOOSE (prefix argument), choose the agent first."
   "Return a clickable header-line button showing LABEL with tooltip HELP.
 Clicking it runs COMMAND in the session list window."
   (propertize label
-              'face 'agent-session-assistant
               'mouse-face 'highlight
               'help-echo help
               'local-map (let ((map (make-sparse-keymap)))
@@ -436,10 +435,10 @@ Clicking it runs COMMAND in the session list window."
               revert-buffer-function (lambda (&rest _) (agent-session-list-refresh))
               header-line-format
               '(:eval (concat " 会话  "
-                              (agent-session-list--header-button "[+ 新建]" #'agent-session-list-create
+                              (agent-session-list--header-button "新建" #'agent-session-list-create
                                                                  "新建会话（c）")
-                              " "
-                              (agent-session-list--header-button "[刷新]" #'agent-session-list-refresh
+                              "  "
+                              (agent-session-list--header-button "刷新" #'agent-session-list-refresh
                                                                  "重新获取历史会话（g）")
                               (propertize "  单击打开 · RET 打开 · k 结束"
                                           'face 'agent-session-dim))))

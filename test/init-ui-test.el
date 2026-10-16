@@ -12,6 +12,7 @@
 (require 'agent-session)
 (require 'agent-session-list)
 (require 'agent-canvas)
+(require 'flymake)
 
 (defun init-ui-test--attrs (theme face)
   "Attributes plist THEME gives FACE."
@@ -100,11 +101,35 @@ Buttons keep their flat box, panels and diffs extend to the window edge."
       (cl-letf (((symbol-function 'mode-line-window-selected-p) #'ignore))
         (should (eq (get-text-property 0 'face (my/mode-line-tag)) 'my/nano-tag-inactive))))))
 
+(ert-deftest init-ui-mode-line-info-hides-empty-diagnostics ()
+  "Diagnostic counters show only when there is something to report."
+  (with-temp-buffer
+    (setq mode-name "Rust")
+    ;; `format-mode-line' returns "" in batch; strings format to themselves.
+    (cl-letf (((symbol-function 'format-mode-line)
+               (lambda (format &rest _) (if (stringp format) format ""))))
+      (let ((flymake-mode t) (flymake-mode-line-counters "[0 0]"))
+        (should (equal (my/mode-line-info) "Rust"))
+        (setq flymake-mode-line-counters "[2 0]")
+        (should (equal (my/mode-line-info) "Rust · [2 0]"))))))
+
 (ert-deftest init-ui-side-panels ()
   "The session list is drawn as a side panel: tinted and without a mode line."
   (with-temp-buffer
     (agent-session-list-mode)
     (should (assq 'default face-remapping-alist))
     (should-not mode-line-format)))
+
+(ert-deftest init-ui-session-list-header-buttons-are-plain ()
+  "The session list's header buttons read like the text around them.
+They used to be bold \"[+ 新建]\" / \"[刷新]\" in the agent heading face."
+  (with-temp-buffer
+    (agent-session-list-mode)
+    (let ((header (eval (cadr header-line-format) t)))
+      (should (string-match-p "会话  新建  刷新" header))
+      (should-not (string-match-p "\\[" header))
+      (let ((pos (string-search "新建" header)))
+        (should-not (get-text-property pos 'face header))
+        (should (get-text-property pos 'mouse-face header))))))
 
 ;;; init-ui-test.el ends here

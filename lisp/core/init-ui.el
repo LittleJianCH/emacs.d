@@ -85,8 +85,9 @@
                                       (substring-no-properties vc-mode))
             parts))
     (when (bound-and-true-p flymake-mode)
+      ;; Only when there is something to report: "[0 0]" is noise.
       (let ((counters (string-trim (format-mode-line flymake-mode-line-counters))))
-        (unless (string-empty-p counters) (push counters parts))))
+        (when (string-match-p "[1-9]" counters) (push counters parts))))
     (propertize (string-join (nreverse parts) " · ") 'face 'shadow)))
 
 (setq-default
@@ -120,6 +121,16 @@ A panel's status line would only repeat its buffer name."
 
 (add-hook 'agent-session-list-mode-hook #'my/nano-sidebar)
 (add-hook 'agent-review-nav-mode-hook #'my/nano-sidebar)
+
+;;; Documentation popups (eldoc-box, when used): a padded card
+
+(defvar eldoc-box-frame-parameters)
+(with-eval-after-load 'eldoc-box
+  ;; The theme draws the border in the card's own color, so the border is
+  ;; padding; the left fringe is a character wide, the right one matches.
+  (setf (alist-get 'internal-border-width eldoc-box-frame-parameters) 10
+        (alist-get 'right-fringe eldoc-box-frame-parameters) 8)
+  (setopt eldoc-box-max-pixel-width 720))
 
 ;;; Interaction details
 
