@@ -485,6 +485,20 @@ The summary can be expanded."
      (should (equal agent-session-test--steered '("顺便加个测试")))
      (should-not (agent-session-queue session)))))
 
+(ert-deftest agent-session-test-ret-newline ()
+  "RET adds a newline in the input area; C-c C-c sends, M-RET steers."
+  (agent-session-test--with-session
+   (should (eq (keymap-lookup agent-session-mode-map "C-c C-c") #'agent-session-send-input))
+   (should (eq (keymap-lookup agent-session-mode-map "M-RET") #'agent-session-steer-input))
+   (goto-char (point-max))
+   (insert "第一行")
+   (agent-session-ret)
+   (insert "第二行")
+   (should (equal (agent-session--input-text agent-session--current) "第一行\n第二行"))
+   (should-not (string-search "收到" (agent-session-test--transcript)))
+   (agent-session-send-input)
+   (should (string-search "收到：第一行\n第二行" (agent-session-test--transcript)))))
+
 (ert-deftest agent-session-test-steer-fallback ()
   "Without backend steer support, interrupt the turn and queue the message first."
   (agent-session-test--with-session
@@ -1002,7 +1016,7 @@ question unanswered, and quitting halfway keeps the answers so far."
      (should (string-search (concat " ? 1. [认证] 用哪种认证？\n"
                                     " ? 2. 要哪些功能？（可多选）\n"
                                     " ? 3. 名字？\n ? 4. 几页？\n ? 5. 备注？\n"
-                                    "   RET / C-c C-y 回答 · C-c C-n 不回答\n")
+                                    "   C-c C-y 回答 · C-c C-n 不回答\n")
                             (agent-session-test--footer)))
      (should-not (string-search "OAuth" (agent-session-test--footer)))
      (should (string-match-p "选方案.*等待回答" (agent-session-test--transcript)))
@@ -1025,12 +1039,12 @@ question unanswered, and quitting halfway keeps the answers so far."
                                     " ? 2. 要哪些功能？（可多选）  → A、B、D\n"
                                     " ? 3. 名字？\n")
                             (agent-session-test--footer)))
-     (should (string-search "RET / C-c C-y 继续回答" (agent-session-test--footer)))
-     ;; RET in the empty input area goes on from there; a number must lie in
+     (should (string-search "C-c C-y 继续回答" (agent-session-test--footer)))
+     ;; Sending the empty input area goes on from there; a number must lie in
      ;; its range
      (goto-char (point-max))
      (agent-session-test--answering '("  小明 " 0 12 3 "")
-       (agent-session-ret))
+       (agent-session-send-input))
      (should (equal answers '((:selected ("OAuth")) (:selected ("A" "B") :custom "D")
                               (:selected nil :custom "小明") (:selected nil :custom "3")
                               nil)))

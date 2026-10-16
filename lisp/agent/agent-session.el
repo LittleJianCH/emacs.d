@@ -1391,7 +1391,7 @@ Questions already answered show their answers."
             "\n")))
        questions)
       "")
-     (propertize (concat "   RET / C-c C-y " (if answers "继续回答" "回答") " · C-c C-n 不回答\n")
+     (propertize (concat "   C-c C-y " (if answers "继续回答" "回答") " · C-c C-n 不回答\n")
                  'face 'agent-session-dim))))
 
 (defun agent-session-notice (session text &optional face)
@@ -1842,16 +1842,23 @@ Local /commands run in Emacs; everything else goes to the agent."
         (agent-session-submit session text)))))
 
 (defun agent-session-send-input ()
-  "Send the contents of the input area."
+  "Send the contents of the input area.
+With an empty input area while the agent asks questions, answer them."
   (interactive)
   (let* ((session (agent-session--this))
          (text (string-trim (agent-session--input-text session))))
-    (when (string-empty-p text) (user-error "输入为空"))
-    (push text (agent-session-history session))
-    (setq agent-session--history-index nil)
-    (let ((inhibit-read-only t))
-      (delete-region (agent-session-input session) (point-max)))
-    (agent-session-send session text)))
+    (cond
+     ((and (string-empty-p text)
+           (when-let* ((id (car (agent-session--pending-asks session))))
+             (plist-get (agent-session--ask session id) :questions)))
+      (agent-session-answer-questions))
+     ((string-empty-p text) (user-error "输入为空"))
+     (t
+      (push text (agent-session-history session))
+      (setq agent-session--history-index nil)
+      (let ((inhibit-read-only t))
+        (delete-region (agent-session-input session) (point-max)))
+      (agent-session-send session text)))))
 
 (defun agent-session-steer (session text)
   "Feed TEXT into the ongoing turn of SESSION (steering).
@@ -1917,15 +1924,10 @@ Delete its display and return (ID . TEXT)."
   (goto-char (point-max)))
 
 (defun agent-session-ret ()
-  "Send in the input area; push a button on one; else go to the input area.
-In an empty input area while the agent asks questions, answer them."
+  "Insert a newline in the input area; push a button on one; else go there.
+Sending is \\[agent-session-send-input]."
   (interactive)
-  (cond ((and (agent-session--in-input-p)
-              (string-blank-p (agent-session--input-text agent-session--current))
-              (when-let* ((id (car (agent-session--pending-asks agent-session--current))))
-                (plist-get (agent-session--ask agent-session--current id) :questions)))
-         (agent-session-answer-questions))
-        ((agent-session--in-input-p) (agent-session-send-input))
+  (cond ((agent-session--in-input-p) (call-interactively #'newline))
         ((button-at (point)) (push-button))
         (t (agent-session-goto-input))))
 
@@ -2439,7 +2441,7 @@ browsing alone; drafts taller than the window use normal cursor scrolling."
 
 
 (defvar-keymap agent-session-mode-map
-  :doc "Keys of agent sessions: RET sends in the input area, C-j adds a newline."
+  :doc "Keys of agent sessions: C-c C-c sends, M-RET steers, RET adds a newline."
   "RET" #'agent-session-ret
   "C-j" #'newline
   "M-p" #'agent-session-previous-input

@@ -11,12 +11,12 @@
 ;;   C-c a i  message the project's session  C-c a s  session list (live + history)
 ;;   C-c a f  input with current file ref    C-c a r  input with region code block
 ;;   C-c a k  end session                    C-c a v  back to agent's last page
-;; In a session buffer: RET sends from the input area, C-j inserts a newline,
+;; In a session buffer: C-c C-c sends the input area, RET inserts a newline,
 ;; M-p / M-n history, TAB completes (/ commands, @ files);
 ;; C-c C-k clears input or interrupts, C-c C-o settings menu, C-c C-y / C-c C-n
 ;; allow / deny;
-;; while the agent runs: RET queues, M-RET steers (sent into the current turn at
-;; once), C-c C-g turns the oldest queued message into a steer;
+;; while the agent runs: C-c C-c queues, M-RET steers (sent into the current
+;; turn at once), C-c C-g turns the oldest queued message into a steer;
 ;; typing in the transcript jumps to the input area.
 ;;
 ;; Adding an agent: implement a backend (see agent-claude.el), then add one
@@ -121,7 +121,7 @@ In visual state a is the text object prefix, so this rebinds it there."
 
 ;; Vim keys (when evil is loaded).  Session buffers start in normal state: i / a / o
 ;; etc. keep their meaning in the input area, and in the transcript jump to the end
-;; of the input area and enter insert state; in insert state RET sends, and ESC
+;; of the input area and enter insert state; in insert state C-c C-c sends, and ESC
 ;; returns to normal state to browse the conversation.  Settings and approvals live
 ;; under the local leader "," (only active in agent buffers).
 (with-eval-after-load 'evil
