@@ -51,7 +51,7 @@ fails, uses `agent-collab-handle-command'."
   "Seconds a naming command may run before the next one is tried."
   :type 'integer)
 
-(defcustom agent-collab-confirm t
+(defcustom agent-collab-confirm nil
   "Non-nil means session_ask asks the user before sending a prompt."
   :type 'boolean)
 

@@ -1385,7 +1385,7 @@ detached
 
 (ert-deftest agent-session-test-session-ask ()
   (agent-session-test--with-session
-   ;; Confirmation is on by default; the user's own setting must not matter.
+   ;; Test the confirmation regardless of the default and the user's setting.
    (let* ((agent-collab-confirm t)
           (session agent-session--current)
           (pending (agent-session-test--call "session_ask" buffer

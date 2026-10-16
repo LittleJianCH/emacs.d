@@ -103,8 +103,9 @@ var/                     runtime state (history, backups, pasted images...); git
   (`@cfi-meaning`) named from its topic by a cheap model of its agent
   (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users
   mention sessions with it. Methods `sessions`, `session_read` (latest turns, paged)
-  and `session_ask` (confirmed by the user; starts a read-only sub-session, hidden, whose
-  confirmations are repeated in the caller, and waits for its reply). Only sessions the
+  and `session_ask` (confirmed by the user when `agent-collab-confirm` is set; starts a
+  read-only sub-session, hidden, whose confirmations are repeated in the caller, and
+  waits for its reply). Only sessions the
   user started may ask (`agent-collab-max-depth`).
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
