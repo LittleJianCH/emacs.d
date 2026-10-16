@@ -77,9 +77,10 @@ An installed font of `my/aligned-fonts' serves both Latin and CJK text."
 ;;
 ;;   [N] init-ui.el  Elisp · main                       eglot  12:4
 ;;
+;; The selected window's line is a band in the accent color (purple in the
+;; light theme), so it is clear where the cursor is; the others are grey.
 ;; The tag shows the evil state (or RW / RO without evil); its color is the
-;; buffer state: accent when clean, popout when modified, faded when read-only.
-;; Buffers with their own mode line (agent sessions) keep it.
+;; buffer state: plain when clean, popout when modified, dim when read-only.
 
 (defvar flymake-mode-line-counters)
 (defvar evil-mode-line-format)
@@ -100,6 +101,10 @@ An installed font of `my/aligned-fonts' serves both Latin and CJK text."
                        'my/nano-tag-modified)
                       (t 'my/nano-tag)))))
 
+(defun my/mode-line-dim ()
+  "Face of secondary mode-line text: a lighter accent on the selected band."
+  (if (mode-line-window-selected-p) 'my/nano-on-accent-dim 'shadow))
+
 (defun my/mode-line-info ()
   "Secondary mode-line text: major mode, VC branch, diagnostics."
   (let ((parts (list (format-mode-line mode-name))))
@@ -111,7 +116,7 @@ An installed font of `my/aligned-fonts' serves both Latin and CJK text."
       ;; Only when there is something to report: "[0 0]" is noise.
       (let ((counters (string-trim (format-mode-line flymake-mode-line-counters))))
         (when (string-match-p "[1-9]" counters) (push counters parts))))
-    (propertize (string-join (nreverse parts) " · ") 'face 'shadow)))
+    (propertize (string-join (nreverse parts) " · ") 'face (my/mode-line-dim))))
 
 (setq-default
  mode-line-format
@@ -125,13 +130,34 @@ An installed font of `my/aligned-fonts' serves both Latin and CJK text."
    mode-line-process
    mode-line-format-right-align
    (:eval (propertize (string-trim (format-mode-line mode-line-misc-info))
-                      'face 'shadow))
+                      'face (my/mode-line-dim)))
    "  "
-   (:eval (propertize (format-mode-line "%l:%c") 'face 'shadow))
+   (:eval (propertize (format-mode-line "%l:%c") 'face (my/mode-line-dim)))
    "  "))
 
 ;; evil's own <N> tag is replaced by the status tag.
 (setq evil-mode-line-format nil)
+
+;; Buffers with their own mode line (agent sessions) keep it, but its colors
+;; would be unreadable on the accent band: the selected window draws it in
+;; the band's colors.
+
+(defun my/mode-line-plain-when-selected (format)
+  "FORMAT as mode-line text, without its faces in the selected window.
+Clickable parts keep working; only the colors go."
+  (let ((text (format-mode-line format)))
+    (when (mode-line-window-selected-p)
+      (remove-list-of-text-properties 0 (length text) '(face) text))
+    text))
+
+(defun my/mode-line-plain-on-band ()
+  "Make this buffer's own mode line readable on the selected window's band."
+  (unless (eq (car-safe (cadr (car-safe mode-line-format)))
+              'my/mode-line-plain-when-selected)
+    (setq mode-line-format
+          `((:eval (my/mode-line-plain-when-selected ',mode-line-format))))))
+
+(add-hook 'agent-session-mode-hook #'my/mode-line-plain-on-band)
 
 ;;; Side panels: a tinted background sets them apart from the editing area
 
