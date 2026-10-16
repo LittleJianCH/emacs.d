@@ -43,6 +43,17 @@
   (eglot-autoshutdown t)
   (eglot-events-buffer-config '(:size 0)))
 
+;; Show eldoc (hover, signature) in a child frame next to point.  Its look, a
+;; padded card in the status-line band color, comes from the theme
+;; (init-theme.el) and init-ui.el.
+(use-package eldoc-box
+  :ensure t
+  ;; Review buffers ask the language server of the reviewed file.
+  :hook ((eglot-managed-mode agent-review-mode) . eldoc-box-hover-at-point-mode)
+  :custom
+  (eldoc-box-max-pixel-width 800)
+  (eldoc-box-max-pixel-height 600))
+
 (defun my/eglot-format-on-save ()
   "Format the current buffer with the language server before saving.
 Only takes effect when eglot is connected.  Language modules add this
