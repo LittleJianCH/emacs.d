@@ -57,7 +57,7 @@
      :salient "#81A1C1" :salient-bg "#3B4A61" :tag-fg "#2E3440"
      :popout "#D08770" :popout-bg "#D08770" :popout-soft "#4A3F3F"
      :on-popout "#2E3440" :flash "#6B4438"
-     :accent "#B48EAD" :on-accent "#242933" :on-accent-dim "#3B4252"
+     :accent "#AF93AA" :on-accent "#242933" :on-accent-dim "#3B4252"
      :critical "#E08A92" :green "#A3BE8C"
      :added "#384539" :added-refine "#4B6150"
      :removed "#4A3439" :removed-refine "#6A4550" :changed "#48463A"))
