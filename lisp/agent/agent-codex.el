@@ -496,6 +496,43 @@ Strip the bash -lc wrapper and keep only the first line."
      :callback (lambda (choice)
                  (agent-codex--respond session id (list :decision (symbol-name choice)))))))
 
+;;; Questions (request_user_input)
+
+(defun agent-codex--user-input (session id params)
+  "Ask the user the questions of request_user_input request ID with PARAMS.
+Answers go back keyed by question id; skipped questions, and all of them
+when the user declines, are left out."
+  (let ((questions
+         (mapcar (lambda (question)
+                   (list :id (plist-get question :id)
+                         :question (plist-get question :question)
+                         :header (plist-get question :header)
+                         :options (mapcar (lambda (option)
+                                            (cons (plist-get option :label)
+                                                  (plist-get option :description)))
+                                          (plist-get question :options))
+                         :other (plist-get question :isOther)
+                         :secret (plist-get question :isSecret)))
+                 (plist-get params :questions))))
+    (agent-session-ask-questions
+     session
+     :questions questions
+     :tool (plist-get params :itemId)
+     :callback
+     (lambda (answers)
+       (let ((table (make-hash-table :test #'equal)))
+         (unless (eq answers 'cancel)
+           (cl-mapc (lambda (question answer)
+                      (when answer
+                        (puthash (plist-get question :id)
+                                 (list :answers
+                                       (vconcat (plist-get answer :selected)
+                                                (when-let* ((custom (plist-get answer :custom)))
+                                                  (list custom))))
+                                 table)))
+                    questions answers))
+         (agent-codex--respond session id (list :answers table)))))))
+
 ;;; Message handling
 
 (cl-defmethod agent-session-backend-handle ((_ (eql codex)) session message)
@@ -519,12 +556,16 @@ Strip the bash -lc wrapper and keep only the first line."
           (when callback (funcall callback (plist-get message :result))))))
      ;; Server requests
      (id
-      (if (member method '("item/commandExecution/requestApproval"
-                           "item/fileChange/requestApproval"))
-          (agent-codex--approval session id method params)
+      (cond
+       ((member method '("item/commandExecution/requestApproval"
+                         "item/fileChange/requestApproval"))
+        (agent-codex--approval session id method params))
+       ((equal method "item/tool/requestUserInput")
+        (agent-codex--user-input session id params))
+       (t
         (agent-session-write session (list :jsonrpc "2.0" :id id
                                            :error (list :code -32601
-                                                        :message (format "Emacs 不支持 %s" method))))))
+                                                        :message (format "Emacs 不支持 %s" method)))))))
      ;; Notifications
      (t
       (pcase method

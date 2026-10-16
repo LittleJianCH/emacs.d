@@ -487,6 +487,11 @@ The value is a plist (:kind :title [:diff])."
       ((or "WebFetch" "WebSearch") (list :kind 'web
                                          :title (or (plist-get input :url) (plist-get input :query))))
       ((or "Task" "Agent") (list :kind 'task :title (or (plist-get input :description) name)))
+      ("AskUserQuestion"
+       (list :kind 'question
+             :title (or (plist-get input :title)
+                        (plist-get (seq-first (plist-get input :questions)) :question)
+                        "提问")))
       ("TodoWrite" (list :kind 'plan :title "更新计划"
                          :output (mapconcat (lambda (todo)
                                               (format "%s %s"
@@ -570,9 +575,82 @@ The value is a plist (:kind :title [:diff])."
                                               (t 'ok))
                                 :output (agent-claude--result-text (plist-get part :content))))))))))
 
+(defun agent-claude--questions (input)
+  "The questions of AskUserQuestion INPUT, for `agent-session-ask-questions'.
+Questions of kind \"text\" have no options; \"number\" ones have a range."
+  (mapcar (lambda (question)
+            (list :question (plist-get question :question)
+                  :header (plist-get question :header)
+                  :detail (plist-get question :description)
+                  :options (mapcar (lambda (option)
+                                     (cons (plist-get option :label) (plist-get option :description)))
+                                   (plist-get question :options))
+                  :multi (plist-get question :multiSelect)
+                  :other t
+                  :range (when (equal (plist-get question :kind) "number")
+                           (list (plist-get question :min) (plist-get question :max)
+                                 (plist-get question :unit)))))
+          (plist-get input :questions)))
+
+(defun agent-claude--answers (questions answers)
+  "The `answers' field of AskUserQuestion: question text -> answer.
+QUESTIONS and ANSWERS are as given to and returned by
+`agent-session-ask-questions'.  Skipped questions are left out; a multiple
+choice answer is an array, which the CLI joins."
+  (let ((table (make-hash-table :test #'equal)))
+    (cl-mapc (lambda (question answer)
+               (when answer
+                 (let ((values (append (plist-get answer :selected)
+                                       (when-let* ((custom (plist-get answer :custom)))
+                                         (list custom)))))
+                   (puthash (plist-get question :question)
+                            (if (plist-get question :multi) (vconcat values) (car values))
+                            table))))
+             questions answers)
+    table))
+
+(defun agent-claude--ask-user-question (session request-id request)
+  "Answer the permission REQUEST (id REQUEST-ID) for AskUserQuestion.
+The user answers in the footer of SESSION; the answers go back to the CLI
+as the tool's input, beside the questions it showed."
+  (let* ((tool-id (plist-get request :tool_use_id))
+         (questions (agent-claude--questions (plist-get request :input)))
+         ;; The CLI refuses an input whose shown fields changed: add to the
+         ;; original JSON only.
+         (raw-input (agent-session-raw-json "request" "input")))
+    (agent-session-ask-questions
+     session
+     :questions questions
+     :tool tool-id
+     :callback
+     (lambda (answers)
+       (agent-session-write
+        session
+        (list :type "control_response"
+              :response
+              (list :subtype "success" :request_id request-id
+                    :response
+                    (if (eq answers 'cancel)
+                        (progn
+                          (agent-claude--set session :declined
+                                             (cons tool-id (agent-claude--state session :declined)))
+                          (list :behavior "deny"
+                                :message "The user declined to answer these questions."))
+                      (let ((input (if (hash-table-p raw-input)
+                                       (copy-hash-table raw-input)
+                                     (make-hash-table :test #'equal))))
+                        (puthash "answers" (agent-claude--answers questions answers) input)
+                        (list :behavior "allow" :updatedInput input))))))))))
+
 (defun agent-claude--permission (session request-id request)
   "Handle permission REQUEST with id REQUEST-ID.
 Ask the user in SESSION, then reply to the CLI."
+  (if (equal (plist-get request :tool_name) "AskUserQuestion")
+      (agent-claude--ask-user-question session request-id request)
+    (agent-claude--ask-permission session request-id request)))
+
+(defun agent-claude--ask-permission (session request-id request)
+  "Ask the user in SESSION whether to allow REQUEST with id REQUEST-ID."
   (let* ((input (plist-get request :input))
          (tool-id (plist-get request :tool_use_id))
          (view (agent-claude--tool-view session (plist-get request :tool_name) input))
