@@ -1218,180 +1218,162 @@ the request.  DIFF is already shown by the tool block, so it isn't repeated."
 ;;; Questions: the agent asks the user to pick options or type an answer
 
 (cl-defun agent-session-ask-questions (session &key questions tool callback)
-  "Ask the user QUESTIONS in the footer of SESSION, one at a time.
-Each question is a plist:
+  "Ask the user QUESTIONS, answered one after another in the minibuffer.
+The footer of SESSION only shows the current question; the user answers
+with `agent-session-answer-questions'.  Each question is a plist:
   :question  the question text
   :header    a short label shown before it
-  :detail    a helper line shown under it
+  :detail    a helper line shown with it
   :options   list of (LABEL . DESCRIPTION); DESCRIPTION may be nil
   :multi     non-nil lets the user pick several options
-  :other     non-nil offers a typed answer (always offered without options)
+  :other     non-nil accepts a typed answer besides the options
   :secret    read the typed answer without echoing it
-  :range     (MIN MAX UNIT): the typed answer is a number in MIN..MAX
+  :range     (MIN MAX UNIT): the answer is a number in MIN..MAX
 TOOL is the id of the related tool block.  When every question has been
-handled, CALLBACK is called with one answer per question, in order: a
-plist (:selected LABELS :custom TEXT), or nil for a skipped question.  When
-the user declines to answer, CALLBACK is called with `cancel' instead."
-  (let ((total (length questions))
-        (answers nil))
-    (cl-labels
-        ((note (text)
-           (when (and tool (agent-session--block session tool))
-             (agent-session--update session tool :note text)))
-         (next (remaining)
-           (if (null remaining)
-               (progn (note "已回答")
-                      (funcall callback (nreverse answers)))
-             (agent-session--ask-question
-              session (car remaining)
-              (and (> total 1) (format "%d/%d" (- total (length remaining) -1) total))
-              tool
-              (lambda (answer)
-                (if (eq answer 'cancel)
-                    (progn (note "未回答") (funcall callback 'cancel))
-                  (push answer answers)
-                  (next (cdr remaining))))))))
-      (next questions))))
-
-(defun agent-session--ask-question (session question position tool callback)
-  "Show QUESTION in the footer of SESSION; CALLBACK receives the answer.
-POSITION, e.g. \"2/3\", tells where it is among the questions asked
-together.  TOOL is the related tool block."
+answered, CALLBACK is called with one answer per question, in order: a
+plist (:selected LABELS :custom TEXT), or nil for a question left empty.
+When the user declines to answer, CALLBACK is called with `cancel'."
   (let ((id (symbol-name (gensym "ask-"))))
     (setf (agent-session-asks session)
           (append (agent-session-asks session)
-                  (list (list :id id :title (plist-get question :question) :question question
-                              :position position :selected nil
+                  ;; :answers grows as questions are answered, so leaving the
+                  ;; minibuffer halfway keeps them.
+                  (list (list :id id :title (plist-get (car questions) :question)
+                              :questions questions :answers nil
                               :callback callback :tool tool :answer nil))))
     (when (and tool (agent-session--block session tool))
       (agent-session--update session tool :note "等待回答"))
     (agent-session--refresh session)
-    (message "%s 有问题等你回答：%s" (agent-session-title session)
-             (plist-get question :question))
+    (message "%s 有问题等你回答：%s（C-c C-y 回答，C-c C-n 不回答）"
+             (agent-session-title session) (plist-get (car questions) :question))
     id))
 
-(defun agent-session--answer-question (session id answer)
-  "Answer question request ID in SESSION with ANSWER.
-ANSWER is a plist (:selected LABELS :custom TEXT), nil to skip the
-question, or `cancel' to decline answering."
-  (let ((ask (agent-session--ask session id)))
-    (unless (or (null ask) (plist-get ask :answer))
-      (agent-session--close-ask
-       session ask
-       (cond ((eq answer 'cancel) "未回答")
-             ((null answer) "已跳过")
-             (t (string-join (append (plist-get answer :selected)
-                                     (when-let* ((custom (plist-get answer :custom)))
-                                       (list (if (plist-get (plist-get ask :question) :secret)
-                                                 "••••" custom))))
-                             "、"))))
-      (funcall (plist-get ask :callback) answer)
-      (agent-session--refresh session))))
+(defun agent-session--question-position (ask)
+  "The current question of request ASK and its position, e.g. \"2/3\".
+The position is nil when ASK has a single question."
+  (let ((questions (plist-get ask :questions))
+        (index (length (plist-get ask :answers))))
+    (cons (nth index questions)
+          (and (cdr questions) (format "%d/%d" (1+ index) (length questions))))))
 
-(defun agent-session--read-typed-answer (question)
-  "Read the typed answer to QUESTION in the minibuffer; nil when empty."
-  (let ((prompt (format "%s " (plist-get question :question))))
-    (pcase (plist-get question :range)
-      (`(,min ,max ,unit)
-       (let ((number nil))
-         (while (not (and (numberp number) (or (null min) (>= number min))
-                          (or (null max) (<= number max))))
-           (setq number (read-number (format "%s（%s–%s%s）" prompt (or min "") (or max "")
-                                             (or unit "")))))
-         (number-to-string number)))
-      (_ (let ((text (string-trim (if (plist-get question :secret)
-                                      (read-passwd prompt)
-                                    (read-string prompt)))))
-           (unless (string-empty-p text) text))))))
+(defun agent-session--question-prompt (question position)
+  "Minibuffer prompt for QUESTION at POSITION (see above)."
+  (concat (when-let* ((detail (plist-get question :detail)))
+            (concat (propertize detail 'face 'agent-session-dim) "\n"))
+          (when-let* ((header (plist-get question :header))) (format "[%s] " header))
+          (plist-get question :question)
+          (when (plist-get question :multi) "（可多选，逗号分隔）")
+          (when position (format "（%s）" position))
+          " "))
 
-(defun agent-session--question-type (session id)
-  "Answer question request ID in SESSION with text read from the minibuffer.
-Options already ticked in a multiple choice question are kept."
-  (let* ((ask (agent-session--ask session id))
-         (text (agent-session--read-typed-answer (plist-get ask :question))))
-    (when text
-      (agent-session--answer-question
-       session id (list :selected (agent-session--question-ticked ask) :custom text)))))
+(defun agent-session--option-table (options)
+  "Completion table of OPTIONS ((LABEL . DESCRIPTION) ...).
+They keep their order and show their descriptions as annotations."
+  (lambda (string predicate action)
+    (if (eq action 'metadata)
+        `(metadata (display-sort-function . identity)
+                   (cycle-sort-function . identity)
+                   (annotation-function
+                    . ,(lambda (label)
+                         (when-let* ((description (cdr (assoc label options)))
+                                     ((not (string-empty-p description))))
+                           (propertize (concat "  " description)
+                                       'face 'completions-annotations)))))
+      (complete-with-action action options string predicate))))
 
-(defun agent-session--question-ticked (ask)
-  "Options ticked in question request ASK, in the order they are listed."
-  (let ((selected (plist-get ask :selected)))
-    (seq-filter (lambda (label) (member label selected))
-                (mapcar #'car (plist-get (plist-get ask :question) :options)))))
-
-(defun agent-session--question-toggle (session id label)
-  "Tick or untick option LABEL of multiple choice request ID in SESSION."
-  (let* ((ask (agent-session--ask session id))
-         (selected (plist-get ask :selected)))
-    (unless (plist-get ask :answer)
-      (plist-put ask :selected (if (member label selected)
-                                   (remove label selected)
-                                 (cons label selected)))
-      (agent-session--refresh session))))
-
-(defun agent-session--question-done (session ask)
-  "Submit the ticked options of multiple choice request ASK in SESSION."
-  (unless (plist-get (plist-get ask :question) :multi)
-    (user-error "请选择一个选项（TAB 移到选项上按 RET，或点击）"))
-  (unless (plist-get ask :selected) (user-error "还没有勾选选项"))
-  (agent-session--answer-question session (plist-get ask :id)
-                                  (list :selected (agent-session--question-ticked ask))))
-
-(defun agent-session--format-question (session ask)
-  "Footer lines of question request ASK in SESSION."
-  (let* ((id (plist-get ask :id))
-         (question (plist-get ask :question))
+(defun agent-session--read-answer (question position)
+  "Read the answer to QUESTION at POSITION in the minibuffer.
+The answer is as described in `agent-session-ask-questions'; empty input
+leaves the question unanswered."
+  (let* ((prompt (agent-session--question-prompt question position))
          (options (plist-get question :options))
-         (multi (plist-get question :multi))
-         (selected (plist-get ask :selected))
-         (button (lambda (label help action)
-                   (make-text-button (format " %s " label) nil 'type 'agent-session-choice
-                                     'help-echo help 'action (lambda (_) (funcall action))))))
+         (labels (mapcar #'car options))
+         (match (not (plist-get question :other)))
+         (answer (lambda (values)
+                   (let ((values (seq-remove #'string-empty-p (mapcar #'string-trim values))))
+                     (when values
+                       (let ((custom (seq-remove (lambda (value) (member value labels)) values)))
+                         (append (list :selected (seq-filter (lambda (label) (member label values))
+                                                             labels))
+                                 (when custom (list :custom (string-join custom ", "))))))))))
+    (cond
+     ((and options (plist-get question :multi))
+      (funcall answer (completing-read-multiple prompt (agent-session--option-table options)
+                                                nil match)))
+     (options
+      (funcall answer (list (completing-read prompt (agent-session--option-table options)
+                                             nil match))))
+     ((plist-get question :range)
+      (pcase-let ((`(,min ,max ,unit) (plist-get question :range))
+                  (number nil))
+        (while (not (and (numberp number) (or (null min) (>= number min))
+                         (or (null max) (<= number max))))
+          (setq number (read-number (format "%s[%s–%s%s] " prompt (or min "") (or max "")
+                                            (or unit "")))))
+        (list :selected nil :custom (number-to-string number))))
+     (t
+      (let ((text (string-trim (if (plist-get question :secret)
+                                   (read-passwd prompt)
+                                 (read-string prompt)))))
+        (unless (string-empty-p text) (list :selected nil :custom text)))))))
+
+(defun agent-session--answer-summary (ask answers)
+  "Short note of ANSWERS to request ASK, shown on its tool."
+  (let ((question (car (plist-get ask :questions)))
+        (answer (car answers)))
+    (cond ((cdr answers) "已回答")
+          ((null answer) "未作答")
+          ((plist-get question :secret) "已回答")
+          (t (string-join (append (plist-get answer :selected)
+                                  (ensure-list (plist-get answer :custom)))
+                          "、")))))
+
+(defun agent-session--question-ask (session)
+  "The question request to answer in SESSION: the one at point, else the oldest."
+  (let ((id (or (get-text-property (point) 'agent-session-ask)
+                (car (agent-session--pending-asks session)))))
+    (or (and id (agent-session--ask session id)) (user-error "没有待回答的问题"))))
+
+(defun agent-session-answer-questions ()
+  "Answer the agent's pending questions in the minibuffer, one by one.
+\\[keyboard-quit] stops halfway; the questions answered so far are kept."
+  (interactive)
+  (let* ((session (agent-session--this))
+         (ask (agent-session--question-ask session)))
+    (unless (plist-get ask :questions) (user-error "这个请求不是问题"))
+    (while (< (length (plist-get ask :answers)) (length (plist-get ask :questions)))
+      (pcase-let ((`(,question . ,position) (agent-session--question-position ask)))
+        (let ((answer (agent-session--read-answer question position)))
+          (when (plist-get ask :answer) (user-error "这个问题已经失效"))
+          (plist-put ask :answers (append (plist-get ask :answers) (list answer)))
+          (agent-session--refresh session))))
+    (let ((answers (plist-get ask :answers)))
+      (agent-session--close-ask session ask (agent-session--answer-summary ask answers))
+      (funcall (plist-get ask :callback) answers)
+      (agent-session--refresh session))))
+
+(defun agent-session--decline-questions (session ask)
+  "Decline to answer question request ASK in SESSION."
+  (unless (plist-get ask :answer)
+    (agent-session--close-ask session ask "未回答")
+    (funcall (plist-get ask :callback) 'cancel)
+    (agent-session--refresh session)))
+
+(defun agent-session--format-question (ask)
+  "Footer line of question request ASK."
+  (pcase-let ((`(,question . ,position) (agent-session--question-position ask)))
     (concat
-     (propertize (concat " ? "
-                         (when-let* ((header (plist-get question :header)))
-                           (format "[%s] " header))
-                         (plist-get question :question)
-                         (when multi "（可多选）")
-                         (when-let* ((position (plist-get ask :position)))
-                           (concat "  " position)))
-                 'face 'agent-session-ask)
-     "\n"
-     (when-let* ((detail (plist-get question :detail)))
-       (propertize (concat "   " detail "\n") 'face 'agent-session-dim))
-     (mapconcat (pcase-lambda (`(,label . ,description))
-                  (concat "   "
-                          (funcall button
-                                   (if multi
-                                       (concat (if (member label selected) "☑ " "☐ ") label)
-                                     label)
-                                   (if multi "勾选 / 取消勾选" "选择这一项")
-                                   (if multi
-                                       (lambda () (agent-session--question-toggle session id label))
-                                     (lambda () (agent-session--answer-question
-                                                 session id (list :selected (list label))))))
-                          (when description
-                            (propertize (concat "  " description) 'face 'agent-session-dim))
-                          "\n"))
-                options "")
-     "   "
-     (string-join
-      (delq nil
-            (list (when multi
-                    (funcall button "完成" "提交勾选的选项"
-                             (lambda () (agent-session--question-done
-                                         session (agent-session--ask session id)))))
-                  (when (or (plist-get question :other) (null options))
-                    (funcall button (cond (options "其他…")
-                                          ((plist-get question :range) "输入数值…")
-                                          (t "回答…"))
-                             "在 minibuffer 里输入回答"
-                             (lambda () (agent-session--question-type session id))))
-                  (funcall button "跳过" "不回答这个问题"
-                           (lambda () (agent-session--answer-question session id nil)))
-                  (funcall button "不回答" "拒绝回答，让 agent 自己决定"
-                           (lambda () (agent-session--answer-question session id 'cancel)))))
-      " ")
+     (make-text-button (concat " ? "
+                               (when-let* ((header (plist-get question :header)))
+                                 (format "[%s] " header))
+                               (plist-get question :question)
+                               (when position (concat "  " position))
+                               " ")
+                       nil 'face 'agent-session-ask 'follow-link t
+                       'agent-session-ask (plist-get ask :id)
+                       'help-echo "回答问题"
+                       'action (lambda (_) (agent-session-answer-questions)))
+     (propertize " RET / C-c C-y 回答 · C-c C-n 不回答" 'face 'agent-session-dim)
      "\n")))
 
 (defun agent-session-notice (session text &optional face)
@@ -1466,7 +1448,7 @@ Send queued messages when idle."
 (defun agent-session-status-label (session)
   "Status label of SESSION (with faces), shared by mode line and session list."
   (cond ((when-let* ((id (car (agent-session--pending-asks session))))
-           (propertize (if (plist-get (agent-session--ask session id) :question)
+           (propertize (if (plist-get (agent-session--ask session id) :questions)
                            "● 等待回答"
                          "● 等待确认")
                        'face 'agent-session-ask)))
@@ -1599,8 +1581,8 @@ That is the separator (ongoing status on its left), auxiliary lines, prompt."
      ;; Auxiliary lines: pending requests (with choice buttons) and queued messages.
      (when-let* ((id (car asks)))
        (let ((ask (agent-session--ask session id)))
-         (if (plist-get ask :question)
-             (agent-session--format-question session ask)
+         (if (plist-get ask :questions)
+             (agent-session--format-question ask)
            (concat
             (propertize (concat " ⚠ " (plist-get ask :title) "  ") 'face 'agent-session-ask)
             (mapconcat (pcase-lambda (`(,key ,label))
@@ -1917,9 +1899,15 @@ Delete its display and return (ID . TEXT)."
   (goto-char (point-max)))
 
 (defun agent-session-ret ()
-  "Send in the input area; push a button on one; else go to the input area."
+  "Send in the input area; push a button on one; else go to the input area.
+In an empty input area while the agent asks questions, answer them."
   (interactive)
-  (cond ((agent-session--in-input-p) (agent-session-send-input))
+  (cond ((and (agent-session--in-input-p)
+              (string-blank-p (agent-session--input-text agent-session--current))
+              (when-let* ((id (car (agent-session--pending-asks agent-session--current))))
+                (plist-get (agent-session--ask agent-session--current id) :questions)))
+         (agent-session-answer-questions))
+        ((agent-session--in-input-p) (agent-session-send-input))
         ((button-at (point)) (push-button))
         (t (agent-session-goto-input))))
 
@@ -1977,16 +1965,11 @@ Delete its display and return (ID . TEXT)."
       (evil-insert-state))))
 
 (defun agent-session-tab ()
-  "Complete in the input area; move to the next button in the transcript.
-In an empty input area with a pending request, go to its first button."
+  "Complete in the input area; move to the next button in the transcript."
   (interactive)
-  (let ((session (agent-session--this)))
-    (cond ((not (agent-session--in-input-p)) (forward-button 1 t))
-          ((and (agent-session--pending-asks session)
-                (string-blank-p (agent-session--input-text session)))
-           (goto-char (agent-session-tail session))
-           (forward-button 1))
-          (t (completion-at-point)))))
+  (if (agent-session--in-input-p)
+      (completion-at-point)
+    (forward-button 1 t)))
 
 (defun agent-session-interrupt ()
   "Interrupt the agent's current turn and clear queued messages."
@@ -2003,12 +1986,12 @@ In an empty input area with a pending request, go to its first button."
 
 (defun agent-session-approve ()
   "Allow the oldest pending request (first choice).
-For a multiple choice question, submit the ticked options."
+For questions, answer them in the minibuffer."
   (interactive)
   (let* ((session (agent-session--this))
          (ask (agent-session--oldest-ask session)))
-    (if (plist-get ask :question)
-        (agent-session--question-done session ask)
+    (if (plist-get ask :questions)
+        (agent-session-answer-questions)
       (agent-session--answer session (plist-get ask :id) (caar (plist-get ask :choices))))))
 
 (defun agent-session-deny ()
@@ -2017,8 +2000,8 @@ For a question, decline to answer it."
   (interactive)
   (let* ((session (agent-session--this))
          (ask (agent-session--oldest-ask session)))
-    (if (plist-get ask :question)
-        (agent-session--answer-question session (plist-get ask :id) 'cancel)
+    (if (plist-get ask :questions)
+        (agent-session--decline-questions session ask)
       (agent-session--answer session (plist-get ask :id)
                              (car (car (last (plist-get ask :choices))))))))
 
@@ -2402,7 +2385,7 @@ shares a line with the input."
    ["回合"
     ("k" "中断" agent-session-interrupt)
     ("g" "引导：最早的排队消息送进当前回合" agent-session-steer-queued)
-    ("y" "允许" agent-session-approve)
+    ("y" "允许 / 回答问题" agent-session-approve)
     ("d" "拒绝" agent-session-deny)]])
 
 ;;; Mode
