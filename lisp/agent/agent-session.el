@@ -32,6 +32,7 @@
 ;; tree-sitter grammars.
 (defvar treesit-auto-install-grammar)
 (declare-function evil-insert-state "evil-states")
+(declare-function agent-session-table-render "agent-session-table" (text))
 (require 'transient)
 
 (defgroup agent-session nil
@@ -635,7 +636,9 @@ invisibility spec of the session buffer."
   (if (require 'markdown-mode nil t)
       (let ((markdown-fontify-code-blocks-natively t)
             (markdown-hide-markup t))
-        (agent-session--fence-labels (agent-session-fontify text 'gfm-mode t)))
+        (require 'agent-session-table)
+        (agent-session-table-render
+         (agent-session--fence-labels (agent-session-fontify text 'gfm-mode t))))
     text))
 
 (defun agent-session--fence-labels (text)

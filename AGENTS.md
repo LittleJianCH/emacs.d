@@ -38,6 +38,7 @@ lisp/app/                standalone applications
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
+test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
 test/init-ui-test.el        ERT suite for the themes, status line and side panels
@@ -55,6 +56,8 @@ var/                     runtime state (history, backups, pasted images...); git
   (user / text / tool / notice) are stored in a hash table and re-rendered in place.
   Also: turn folding, steering, queueing, completion, image attachments, mode-line,
   transient menu `agent-session-menu`, global prefix map on `C-c a`.
+- `agent-session-table.el` — renders complete Markdown tables in replies after
+  fontification, keeping cell faces and lining up CJK text.
 - `agent-claude.el` — Claude Code backend: `claude -p --input-format stream-json
   --output-format stream-json --permission-prompt-tool stdio ...`. Permissions arrive
   as `control_request`/`can_use_tool`; model and permission mode switch live via control
@@ -144,7 +147,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
       -l test/init-ui-test.el -l test/agent-review-test.el \
-      -l test/agent-canvas-test.el \
+      -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
