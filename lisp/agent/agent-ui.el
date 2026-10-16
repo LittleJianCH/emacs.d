@@ -453,7 +453,9 @@ configuration root or absolute. Default: every loaded configuration file changed
 on disk since it was loaded"))
   "Apply edited Emacs configuration files to the running Emacs, no restart.
 Call it once your edits are done, instead of loading the files through eval.
-Files load in dependency order.  Unlike a plain load, keymap definitions are
+Files load in dependency order, byte-compiled first so their functions run
+compiled; compiler warnings are returned per file, and a file that does not
+compile is not loaded.  Unlike a plain load, keymap definitions are
 merged into the live keymaps, options nobody customized move to their new
 default and changed faces are applied; other defvars keep their state.  A file
 whose struct layout changed, and init.el, are not loaded: they report
@@ -466,8 +468,8 @@ restart_required."
            (cond ((null report)
                   "Nothing to reload: no loaded configuration file changed on disk.")
                  ((memq 'failed statuses)
-                  "Fix the errors and call reload again; a failed file may be \
-partly loaded.")
+                  "Fix the errors and call reload again.  A file that failed \
+to compile was not loaded; one that failed while loading may be partly loaded.")
                  ((memq 'restart_required statuses)
                   "Tell the user these changes take effect after restarting \
 Emacs."))))))

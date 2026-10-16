@@ -18,6 +18,8 @@
 (defvar init-reload-test-option)
 (defvar init-reload-test-set-option)
 (defvar init-reload-test-state)
+(defvar init-reload-test-compiled-map)
+(defvar init-reload-test-file)
 
 (defmacro init-reload-test--with-module (var &rest body)
   "Run BODY with VAR bound to a module file in a fresh `my/reload-directory'."
@@ -31,11 +33,14 @@
        (delete-directory dir t))))
 
 (defun init-reload-test--write (file &rest forms)
-  "Write FORMS to FILE, dated after anything loaded so far."
+  "Write FORMS to FILE, dated after anything loaded so far.
+A string in FORMS is inserted as is."
   (sleep-for 0.01)
   (with-temp-file file
     (insert ";;; -*- lexical-binding: t; -*-\n")
-    (dolist (form forms) (prin1 form (current-buffer)) (insert "\n"))))
+    (dolist (form forms)
+      (if (stringp form) (insert form) (prin1 form (current-buffer)))
+      (insert "\n"))))
 
 (ert-deftest init-reload-test-applies-definitions ()
   "Keymaps merge, untouched options and faces update, state stays."
@@ -92,6 +97,76 @@
     (should-not (keymap-lookup init-reload-test-map "C-c c"))
     (should (eq (keymap-lookup init-reload-test-map "C-c o") #'forward-char))))
 
+(ert-deftest init-reload-test-compiles ()
+  "Reloaded functions run compiled and still look like FILE's definitions."
+  (init-reload-test--with-module file
+    (init-reload-test--write
+     file
+     '(defun init-reload-test-fn () "Old." 1)
+     '(defvar-keymap init-reload-test-compiled-map
+        "C-c l" (lambda () (interactive) 'old))
+     '(provide 'init-reload-test-mod))
+    (load file nil t t)
+    ;; A plain load of the source leaves the function interpreted.
+    (should-not (compiled-function-p (symbol-function 'init-reload-test-fn)))
+    (init-reload-test--write
+     file
+     '(defun init-reload-test-fn () "New, with 中文." 2)
+     '(defconst init-reload-test-file load-file-name)
+     '(defvar-keymap init-reload-test-compiled-map
+        "C-c l" (let ((value 'new)) (lambda () (interactive) value)))
+     '(provide 'init-reload-test-mod))
+    ;; From a buffer without lexical binding, as emacsclient may be.
+    (let ((report (with-temp-buffer
+                    (setq-local lexical-binding nil)
+                    (my/reload-config))))
+      (should (equal (mapcar (lambda (entry) (plist-get entry :file)) report)
+                     (list file)))
+      (should (eq (plist-get (car report) :status) 'reloaded))
+      (should (equal (plist-get (car report) :keymaps)
+                     '(init-reload-test-compiled-map)))
+      (should-not (plist-get (car report) :warnings)))
+    (should (compiled-function-p (symbol-function 'init-reload-test-fn)))
+    (should (= (init-reload-test-fn) 2))
+    ;; A command defined inline in a merged keymap is compiled too.
+    (let ((command (keymap-lookup init-reload-test-compiled-map "C-c l")))
+      (should (compiled-function-p command))
+      (should (eq (funcall command) 'new)))
+    ;; The temporary compiled file is gone; the docstring was kept in the code.
+    (should (equal (documentation 'init-reload-test-fn) "New, with 中文."))
+    (should (equal (symbol-file 'init-reload-test-fn 'defun) file))
+    (should (equal init-reload-test-file file))
+    (should (member '(provide . init-reload-test-mod) (cdr (assoc file load-history))))
+    ;; Its load was noted: nothing to reload any more.
+    (should-not (my/reload-config))))
+
+(ert-deftest init-reload-test-compile-problems ()
+  "Compiler warnings are reported; a file that does not compile loads nothing."
+  (init-reload-test--with-module file
+    (init-reload-test--write
+     file '(defun init-reload-test-fn () 1) '(provide 'init-reload-test-mod))
+    (load file nil t t)
+    (init-reload-test--write
+     file
+     '(defun init-reload-test-fn () init-reload-test-free-variable)
+     '(provide 'init-reload-test-mod))
+    (let ((entry (car (my/reload-config))))
+      (should (eq (plist-get entry :status) 'reloaded))
+      (should (= (length (plist-get entry :warnings)) 1))
+      (should (string-match-p "\\`line 2: .*free variable"
+                              (car (plist-get entry :warnings)))))
+    (let ((compiled (symbol-function 'init-reload-test-fn)))
+      (init-reload-test--write
+       file
+       '(defun init-reload-test-fn () 3)
+       '(defun init-reload-test-unloaded ())
+       "(defun init-reload-test-broken (")
+      (let ((entry (car (my/reload-config))))
+        (should (eq (plist-get entry :status) 'failed))
+        (should (string-match-p "End of file" (plist-get entry :error))))
+      (should-not (fboundp 'init-reload-test-unloaded))
+      (should (eq (symbol-function 'init-reload-test-fn) compiled)))))
+
 (ert-deftest init-reload-test-struct-layout ()
   "A changed struct layout is not loaded; appended slots load with a warning."
   (init-reload-test--with-module file
@@ -106,6 +181,9 @@
       (should (eq (plist-get entry :status) 'restart_required))
       (should (string-match-p "init-reload-test-struct" (plist-get entry :error))))
     (should-not (fboundp 'init-reload-test-new-function))
+    ;; Not even compiled: the compiler would have redefined the struct.
+    (should (equal (mapcar #'car (cl-struct-slot-info 'init-reload-test-struct))
+                   '(cl-tag-slot a b)))
     (init-reload-test--write
      file '(cl-defstruct init-reload-test-struct a b c)
      '(provide 'init-reload-test-mod))

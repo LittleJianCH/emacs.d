@@ -5,9 +5,12 @@
 ;; `my/reload-config' reloads configuration files into the running Emacs, for the
 ;; user (M-x my/reload-config) and for agents (the reload method in agent-ui.el).
 ;;
-;; A plain `load' redefines functions but leaves `defvar', `defvar-keymap',
+;; A plain `load' of a source file defines its functions interpreted, which can
+;; be slow enough to freeze Emacs.  It also leaves `defvar', `defvar-keymap',
 ;; `defcustom' and `defface' alone, and quietly breaks live objects when a
-;; `cl-defstruct' layout changes.  Reloading a file here also:
+;; `cl-defstruct' layout changes.  Reloading a file here:
+;;   - byte-compiles it first, so its functions run compiled; a file that does
+;;     not compile is not loaded at all, and compiler warnings are reported;
 ;;   - merges its keymap definitions into the live keymaps: bindings added by
 ;;     other code are kept, bindings the source dropped since the previous
 ;;     reload are removed;
@@ -27,6 +30,13 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+
+;; bytecomp is loaded when the first file is reloaded.
+(defvar byte-compile-current-buffer)
+(defvar byte-compile-dest-file-function)
+(defvar byte-compile-dynamic-docstrings)
+(defvar byte-compile-log-warning-function)
+(defvar byte-compile-verbose)
 
 (defvar my/reload-directory (locate-user-emacs-file "lisp/")
   "Directory whose loaded files `my/reload-config' checks for changes.")
@@ -181,12 +191,18 @@ Return non-nil if LIVE changed."
 (defun my/reload--keymap (var form)
   "Evaluate FORM, which defines keymap VAR, and merge it into the live keymap.
 Return non-nil if the live keymap changed."
+  (require 'bytecomp)                   ; before let-binding its variables
   (let ((live (default-value var))
         fresh)
     ;; `defvar' only assigns an unbound variable.
     (makunbound var)
     (unwind-protect
-        (progn (eval form t)
+        ;; Compiled, so commands defined inline are compiled like the file;
+        ;; `byte-compile' would follow the current buffer's `lexical-binding'.
+        (progn (eval (let ((lexical-binding t)
+                           (byte-compile-log-warning-function #'ignore))
+                       (byte-compile form))
+                     t)
                (setq fresh (default-value var)))
       (set-default var live))
     (prog1 (my/reload--merge-keymap live fresh (gethash var my/reload--keymaps))
@@ -233,6 +249,65 @@ Return non-nil if the live keymap changed."
                      face)))))
             forms))
 
+;;; Compiling
+
+(defun my/reload--compile (file)
+  "Byte-compile FILE and return (CODE . WARNINGS).
+CODE is the text of the compiled file, WARNINGS the compiler's warnings.
+Return nil if FILE sets `no-byte-compile'; signal an error if it does not
+compile."
+  (require 'bytecomp)                   ; before let-binding its variables
+  (let* ((dir (make-temp-file "my-reload-" t))
+         ;; A copy, since `byte-compile-file' offers to save a modified
+         ;; buffer visiting the file it compiles.
+         (copy (expand-file-name (file-name-nondirectory file) dir))
+         (byte-compile-dest-file-function (lambda (source) (concat source "c")))
+         ;; Keep docstrings in the code instead of pointing into the copy.
+         (byte-compile-dynamic-docstrings nil)
+         (byte-compile-verbose nil)
+         (inhibit-message t)
+         (message-log-max nil)
+         warnings errors
+         ;; Collect problems instead of popping up *Compile-Log*.  An error
+         ;; has unwound past its form; the reader stopped after it.
+         (byte-compile-log-warning-function
+          (lambda (string position _fill level)
+            (let* ((line (ignore-errors
+                           (with-current-buffer byte-compile-current-buffer
+                             (line-number-at-pos
+                              (if (eq level :error) (point) position)))))
+                   (problem (if line (format "line %d: %s" line string) string)))
+              (if (eq level :error)
+                  (push problem errors)
+                (push problem warnings))))))
+    (unwind-protect
+        (progn
+          (copy-file file copy)
+          (pcase (byte-compile-file copy)
+            ('no-byte-compile nil)
+            ('nil (error "Does not compile, not loaded: %s"
+                         (if errors (string-join (nreverse errors) "; ") "?")))
+            (_ (with-temp-buffer
+                 (let ((coding-system-for-read 'utf-8-emacs-unix))
+                   (insert-file-contents (concat copy "c")))
+                 (cons (buffer-string) (nreverse warnings))))))
+      (delete-directory dir t))))
+
+(defun my/reload--load-compiled (file code)
+  "Evaluate CODE, compiled from FILE, the way `load' evaluates FILE."
+  (with-temp-buffer
+    ;; Compiled forms don't depend on it; `load' binds nil for .elc files, and
+    ;; without a cookie `eval-buffer' warns.
+    (insert ";; -*- lexical-binding: nil -*-\n" code)
+    ;; As FILE: in `load-history' and for code using `load-file-name'.  A
+    ;; .elc name would also make native-comp queue a compilation of it.
+    (let ((load-file-name file)
+          (load-true-file-name file)
+          (load-in-progress t))
+      (eval-buffer (current-buffer) nil file nil t)))
+  ;; Runs `after-load-functions', which note the time FILE was loaded.
+  (do-after-load-evaluation file))
+
 ;;; Reloading
 
 (defun my/reload--file (file)
@@ -249,22 +324,29 @@ Return non-nil if the live keymap changed."
                              (mapconcat (lambda (struct) (format "%S" (car struct)))
                                         changed ", ")))
       ;; Look before loading: keymaps defined for the first time need no merge.
-      (let ((options (my/reload--untouched-options forms))
-            (keymaps (seq-keep (lambda (form)
-                                 (when-let* ((var (my/reload--keymap-var form)))
-                                   (cons var form)))
-                               forms)))
-        (load file nil t t)
+      ;; Compiling also comes after the struct check: the compiler defines
+      ;; structs as it goes.
+      (let* ((options (my/reload--untouched-options forms))
+             (keymaps (seq-keep (lambda (form)
+                                  (when-let* ((var (my/reload--keymap-var form)))
+                                    (cons var form)))
+                                forms))
+             (compiled (my/reload--compile file)))
+        (if compiled
+            (my/reload--load-compiled file (car compiled))
+          (load file nil t t))
         (list :status 'reloaded
               :keymaps (seq-keep (pcase-lambda (`(,var . ,form))
                                    (and (my/reload--keymap var form) var))
                                  keymaps)
               :options (my/reload--update-options options)
               :faces (my/reload--update-faces forms)
-              :warnings (mapcar (lambda (struct)
-                                  (format "%S gained slots at the end; objects made \
-before this reload lack them" (car struct)))
-                                structs))))))
+              :warnings (append
+                         (mapcar (lambda (struct)
+                                   (format "%S gained slots at the end; objects \
+made before this reload lack them" (car struct)))
+                                 structs)
+                         (cdr compiled)))))))
 
 (defun my/reload-config (&optional files)
   "Reload FILES, by default every configuration file changed on disk.

@@ -192,6 +192,11 @@ checkout, such as a worktree, are not picked up: pass their absolute paths
 against the running config) only when the user wants to try that code. Unlike a
 plain `load`, it:
 
+- byte-compiles each file first (a copy, in a temp dir; nothing lands next to the
+  source) and evaluates the result as if it were the source, so reloaded functions
+  run compiled instead of interpreted — interpreted code in a big module can freeze
+  Emacs. A file that does not compile is reported `failed` and nothing of it is
+  loaded; compiler warnings come back in the file's `warnings`;
 - merges `defvar-keymap` (and keymap `defvar`) definitions into the live keymaps,
   keeping bindings other files added; bindings the source dropped are removed from
   the second reload on, once there is a previous version to compare with;
