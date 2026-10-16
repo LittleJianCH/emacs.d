@@ -39,6 +39,7 @@ bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
+test/agent-session-link-test.el   ERT suite for clickable links in transcripts
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
 test/init-ui-test.el        ERT suite for the themes, status line and side panels
@@ -148,6 +149,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
       -l test/init-ui-test.el -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
+      -l test/agent-session-link-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 

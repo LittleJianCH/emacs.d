@@ -661,6 +661,66 @@ gives the run buttons placed at its end a line of their own."
                       (length text)))))
     text))
 
+;;; Clickable links in replies
+
+(defvar markdown-regex-link-inline)
+(declare-function agent-ui--method-open "agent-ui" (params))
+
+(define-button-type 'agent-session-file-link
+  'face nil 'follow-link t 'action #'agent-session--follow-link)
+
+(defun agent-session--follow-link (button)
+  "Open BUTTON's link, resolving files against its originating project."
+  (let ((target (button-get button 'agent-session-link-target))
+        (root (button-get button 'agent-session-link-root)))
+    (if (string-match-p "^https?://" target)
+        (browse-url target)
+      (let (line column)
+        (when (string-match
+               "\\(.*?\\):\\([1-9][0-9]*\\)\\(?::\\([0-9]+\\)\\)?\\'"
+               target)
+          (setq line (string-to-number (match-string 2 target))
+                column (when (match-string 3 target)
+                         (max 0 (1- (string-to-number (match-string 3 target)))))
+                target (match-string 1 target)))
+        (require 'agent-ui)
+        (agent-ui--method-open
+         (list :path (agent-session-expand-file-name target root)
+               :line line :column column))))))
+
+(defun agent-session--linkify (text root)
+  "Make fontified Markdown links in TEXT clickable relative to ROOT.
+Keep all characters and their positions so code-block offsets stay valid."
+  (if (not (boundp 'markdown-regex-link-inline))
+      text
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (while (re-search-forward markdown-regex-link-inline nil t)
+        (let* ((start (match-beginning 3))
+               (end (match-end 3))
+               (image (match-string 1))
+               (target (string-trim (match-string-no-properties 6)))
+               (face (get-text-property start 'face)))
+          (when (and (not image) (< start end)
+                     (not (get-text-property start 'markdown-gfm-code))
+                     (or (eq face 'markdown-link-face)
+                         (and (listp face) (memq 'markdown-link-face face))))
+            (when (and (string-prefix-p "<" target)
+                       (string-suffix-p ">" target))
+              (setq target (substring target 1 -1)))
+            (unless (or (string-empty-p target)
+                        (string-prefix-p "#" target)
+                        (and (string-match-p "^[[:alpha:]][[:alnum:]+.-]*:" target)
+                             (not (string-match-p "^https?://" target))))
+              (make-text-button
+               start end 'type 'agent-session-file-link
+               'agent-session-link-target target
+               'agent-session-link-root root
+               'mouse-face (list 'highlight)
+               'help-echo (concat "打开：" target "（单击或回车）"))))))
+      (buffer-string))))
+
 ;;; Formats of each block type
 
 (define-button-type 'agent-session-toggle
@@ -718,7 +778,9 @@ done; thinking is folded into one line by default, click to expand."
        (propertize (concat "● " (agent-session-title session)) 'face 'agent-session-assistant)
        "\n"
        (if (plist-get block :done)
-           (agent-session--format-reply session id block text)
+           (agent-session--linkify
+            (agent-session--format-reply session id block text)
+            (agent-session-root session))
          (agent-session--indent text))
        "\n"))))
 
