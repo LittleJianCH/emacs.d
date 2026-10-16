@@ -30,6 +30,11 @@
         (cons 'tramp-own-remote-path
               (delq 'tramp-own-remote-path tramp-remote-path))))
 
+;; Projects on dev keep their per-project settings (e.g. eglot workspace
+;; configuration) in .dir-locals.el; read it for remote files too.  Costs a few
+;; round trips when a file is visited, not while typing.
+(setq enable-remote-dir-locals t)
+
 ;;; No synchronous remote calls on the typing path
 
 ;; Every remote call waits a full network round trip (30-300ms to dev), and Emacs
