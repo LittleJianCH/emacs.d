@@ -32,6 +32,18 @@
         (should (equal custom-enabled-themes '(my-nano-light))))
     (my/nano-apply-theme)))
 
+(ert-deftest init-ui-toggle-theme ()
+  "`my/toggle-theme' is a command that flips between the two themes."
+  (should (commandp #'my/toggle-theme))
+  (unwind-protect
+      (progn
+        (my/nano-apply-theme 'light)
+        (my/toggle-theme)
+        (should (equal custom-enabled-themes '(my-nano-dark)))
+        (my/toggle-theme)
+        (should (equal custom-enabled-themes '(my-nano-light))))
+    (my/nano-apply-theme)))
+
 (ert-deftest init-ui-theme-redefinition-replaces-specs ()
   "Redefining the themes replaces their specs, enabled or not.
 Settings pushed onto a disabled theme used to be added beside the old

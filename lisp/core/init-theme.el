@@ -441,6 +441,12 @@ reloading never stacks themes."
       (unless (frame-parent frame)
         (set-frame-parameter frame 'ns-appearance appearance)))))
 
+(defun my/toggle-theme ()
+  "Switch between the light and dark nano themes.
+The next change of the macOS appearance switches back to following it."
+  (interactive)
+  (my/nano-apply-theme (if (custom-theme-enabled-p 'my-nano-dark) 'light 'dark)))
+
 (my/nano-apply-theme)
 ;; emacs-plus only: follow the system when it switches light / dark.
 (when (boundp 'ns-system-appearance-change-functions)
