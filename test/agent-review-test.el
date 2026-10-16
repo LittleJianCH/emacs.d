@@ -200,6 +200,24 @@
         (should (re-search-forward "^ +6  (b 6)$" nil t))
         (should (memq 'agent-review-other (ensure-list (get-text-property (1- (point)) 'face))))))))
 
+(ert-deftest agent-review-test-code-lines-dont-wrap ()
+  "Review buffers truncate long code lines; prose is filled instead.
+Wrapped diff lines were hard to read and broke the line-number column."
+  (with-temp-buffer
+    (agent-review-mode)
+    (should truncate-lines))
+  (cl-letf (((symbol-function 'agent-review--fill-width) (lambda () 40)))
+    (let ((lines (split-string (agent-review--fill (concat "- " (make-string 30 ?字))) "\n")))
+      (should (> (length lines) 1))
+      (should (seq-every-p (lambda (line) (<= (string-width line) 40)) lines))
+      ;; A list item's continuation lines line up under its text.
+      (should (string-prefix-p "  字" (cadr lines))))
+    ;; Room for a prefix the caller adds, such as an annotation's bar.
+    (should (seq-every-p (lambda (line) (<= (string-width line) 36))
+                         (split-string (agent-review--fill (make-string 30 ?字) 4) "\n")))
+    ;; Short lines and their breaks stay as they are.
+    (should (equal (agent-review--fill "短的一行\n- 列表") "短的一行\n- 列表"))))
+
 (ert-deftest agent-review-test-selection ()
   (agent-review-test--with-repo repo
     (let ((review (agent-review-build (agent-review-snapshot repo "main" "feature")

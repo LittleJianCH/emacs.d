@@ -15,7 +15,7 @@
       frame-resize-pixelwise t)
 (push '(tool-bar-lines . 0) default-frame-alist)
 (push '(vertical-scroll-bars . nil) default-frame-alist)
-(push '(internal-border-width . 8) default-frame-alist)
+(push '(internal-border-width . 24) default-frame-alist) ; wide margins, as in nano
 (push '(width . 200) default-frame-alist)
 (push '(height . 55) default-frame-alist)
 (when (eq system-type 'darwin)
