@@ -61,4 +61,24 @@ Buttons keep their flat box, panels and diffs extend to the window edge."
       (should (plist-get (init-ui-test--attrs theme face) :extend)))
     (should (plist-get (init-ui-test--attrs theme 'agent-canvas-title) :height))))
 
+(ert-deftest init-ui-mode-line-tag ()
+  "The status tag shows the buffer state, colored by it."
+  (with-temp-buffer
+    (let ((evil-local-mode nil))
+      (cl-letf (((symbol-function 'mode-line-window-selected-p) (lambda () t)))
+        (should (equal (my/mode-line-tag) "RW"))
+        (should (eq (get-text-property 0 'face (my/mode-line-tag)) 'my/nano-tag))
+        (setq buffer-read-only t)
+        (should (equal (my/mode-line-tag) "RO"))
+        (should (eq (get-text-property 0 'face (my/mode-line-tag)) 'my/nano-tag-read-only)))
+      (cl-letf (((symbol-function 'mode-line-window-selected-p) #'ignore))
+        (should (eq (get-text-property 0 'face (my/mode-line-tag)) 'my/nano-tag-inactive))))))
+
+(ert-deftest init-ui-side-panels ()
+  "The session list is drawn as a side panel: tinted and without a mode line."
+  (with-temp-buffer
+    (agent-session-list-mode)
+    (should (assq 'default face-remapping-alist))
+    (should-not mode-line-format)))
+
 ;;; init-ui-test.el ends here
