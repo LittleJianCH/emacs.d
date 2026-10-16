@@ -15,8 +15,8 @@
 ;; M-p / M-n history, TAB completes (/ commands, @ files);
 ;; C-c C-k clears input or interrupts, C-c C-o settings menu, C-c C-y / C-c C-n
 ;; allow / deny;
-;; while the agent runs: C-c C-c queues, M-RET steers (sent into the current
-;; turn at once), C-c C-g turns the oldest queued message into a steer;
+;; while the agent runs: C-c C-c queues, C-u C-c C-c steers (sent into the
+;; current turn at once), C-c C-g turns the oldest queued message into a steer;
 ;; typing in the transcript jumps to the input area.
 ;;
 ;; Adding an agent: implement a backend (see agent-claude.el), then add one

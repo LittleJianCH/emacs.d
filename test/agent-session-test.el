@@ -471,25 +471,25 @@ The summary can be expanded."
      (should (eq (agent-session-status session) 'running)))))
 
 (ert-deftest agent-session-test-steer-input ()
-  "M-RET sends as a steer while running; when idle it is a normal send."
+  "C-u C-c C-c sends as a steer while running; when idle it is a normal send."
   (agent-session-test--with-session
    (let ((session agent-session--current)
          (agent-session-test--steered nil))
      (goto-char (point-max)) (insert "先别发")
-     (agent-session-steer-input)                    ; idle: normal send
+     (agent-session-send-input t)                   ; idle: normal send
      (should (string-match-p "收到：先别发" (agent-session-test--transcript)))
      (should-not agent-session-test--steered)
      (agent-session-test--type "hold")
      (goto-char (point-max)) (insert "顺便加个测试")
-     (agent-session-steer-input)
+     (agent-session-send-input t)
      (should (equal agent-session-test--steered '("顺便加个测试")))
      (should-not (agent-session-queue session)))))
 
 (ert-deftest agent-session-test-ret-newline ()
-  "RET adds a newline in the input area; C-c C-c sends, M-RET steers."
+  "RET adds a newline in the input area; C-c C-c sends, M-RET is free."
   (agent-session-test--with-session
    (should (eq (keymap-lookup agent-session-mode-map "C-c C-c") #'agent-session-send-input))
-   (should (eq (keymap-lookup agent-session-mode-map "M-RET") #'agent-session-steer-input))
+   (should-not (keymap-lookup agent-session-mode-map "M-RET"))
    (goto-char (point-max))
    (insert "第一行")
    (agent-session-ret)

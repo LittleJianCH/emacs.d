@@ -1841,10 +1841,12 @@ Local /commands run in Emacs; everything else goes to the agent."
       (unless (agent-session--run-local-command session text)
         (agent-session-submit session text)))))
 
-(defun agent-session-send-input ()
+(defun agent-session-send-input (&optional steer)
   "Send the contents of the input area.
+With prefix argument STEER, send it as steering: while the agent is
+running, it goes into the current turn right away instead of queueing.
 With an empty input area while the agent asks questions, answer them."
-  (interactive)
+  (interactive "P")
   (let* ((session (agent-session--this))
          (text (string-trim (agent-session--input-text session))))
     (cond
@@ -1858,7 +1860,9 @@ With an empty input area while the agent asks questions, answer them."
       (setq agent-session--history-index nil)
       (let ((inhibit-read-only t))
         (delete-region (agent-session-input session) (point-max)))
-      (agent-session-send session text)))))
+      (if steer
+          (agent-session-steer session text)
+        (agent-session-send session text))))))
 
 (defun agent-session-steer (session text)
   "Feed TEXT into the ongoing turn of SESSION (steering).
@@ -1880,20 +1884,6 @@ doesn't support steering, interrupt the current turn and send TEXT first."
         (agent-session-backend-interrupt (agent-session-backend session) session)
         (agent-session-notice session "该 agent 不支持引导，已中断当前回合，随后发送")))
     (agent-session--refresh session))))
-
-(defun agent-session-steer-input ()
-  "Send the input area contents as steering.
-While the agent is running, feed it into the current turn right away
-instead of queueing."
-  (interactive)
-  (let* ((session (agent-session--this))
-         (text (string-trim (agent-session--input-text session))))
-    (when (string-empty-p text) (user-error "输入为空"))
-    (push text (agent-session-history session))
-    (setq agent-session--history-index nil)
-    (let ((inhibit-read-only t))
-      (delete-region (agent-session-input session) (point-max)))
-    (agent-session-steer session text)))
 
 (defun agent-session--take-queued (session id)
   "Take ID (default the oldest) out of the queue of SESSION.
@@ -2441,7 +2431,7 @@ browsing alone; drafts taller than the window use normal cursor scrolling."
 
 
 (defvar-keymap agent-session-mode-map
-  :doc "Keys of agent sessions: C-c C-c sends, M-RET steers, RET adds a newline."
+  :doc "Keys of agent sessions: C-c C-c sends (C-u: steers), RET adds a newline."
   "RET" #'agent-session-ret
   "C-j" #'newline
   "M-p" #'agent-session-previous-input
@@ -2449,7 +2439,6 @@ browsing alone; drafts taller than the window use normal cursor scrolling."
   "TAB" #'agent-session-tab
   "<backtab>" #'backward-button
   "C-c C-c" #'agent-session-send-input
-  "M-RET" #'agent-session-steer-input
   "C-c C-g" #'agent-session-steer-queued
   "C-c C-k" #'agent-session-cancel-dwim
   "C-c C-o" #'agent-session-menu
