@@ -186,6 +186,17 @@ with Chinese drifted.  Sarasa needs an even pixel size to stay aligned."
         (setq flymake-mode-line-counters "[2 0]")
         (should (equal (my/mode-line-info) "Rust · [2 0]"))))))
 
+(ert-deftest init-ui-eldoc-box-popup-starts-at-the-top ()
+  "The doc popup shows its first line in full.
+Its window was left scrolled up a few pixels, cutting off the top line."
+  (with-temp-buffer
+    (dotimes (i 50) (insert (format "line %d\n" i)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (set-window-start (selected-window) (point-max))
+    (my/eldoc-box-show-top)
+    (should (= (window-start (selected-window)) (point-min)))
+    (should (= (window-vscroll (selected-window) t) 0))))
+
 (ert-deftest init-ui-side-panels ()
   "The session list is drawn as a side panel: tinted and without a mode line."
   (with-temp-buffer

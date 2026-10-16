@@ -174,11 +174,23 @@ A panel's status line would only repeat its buffer name."
 ;;; Documentation popups (eldoc-box, when used): a padded card
 
 (defvar eldoc-box-frame-parameters)
+
+(defun my/eldoc-box-show-top (&rest _)
+  "Show the selected popup window from its first line, unscrolled.
+Its lines have different heights (hidden code fences, short separators),
+and redisplay left the window scrolled up a few pixels, which cut off the
+top of the first line."
+  (let ((window (frame-selected-window)))
+    (set-window-start window (with-current-buffer (window-buffer window) (point-min)) t)
+    (set-window-vscroll window 0 t)))
+
 (with-eval-after-load 'eldoc-box
   ;; The theme draws the border in the card's own color, so the border is
   ;; padding; the left fringe is a character wide, the right one matches.
   (setf (alist-get 'internal-border-width eldoc-box-frame-parameters) 10
-        (alist-get 'right-fringe eldoc-box-frame-parameters) 8))
+        (alist-get 'right-fringe eldoc-box-frame-parameters) 8)
+  ;; Runs with the popup's frame selected, once it has its size.
+  (add-hook 'eldoc-box-frame-hook #'my/eldoc-box-show-top))
 
 ;;; Interaction details
 
