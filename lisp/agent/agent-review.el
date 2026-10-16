@@ -1072,6 +1072,36 @@ review does not keep are highlighted together as a fragment instead."
       (cl-mapcar (lambda (code fragment) (or code fragment))
                  codes (agent-review--highlight (plist-get block :file) lines)))))
 
+;; Review buffers don't wrap, so long code lines stay one line each.  Prose
+;; (summary, intents, annotations, answers) is filled when drawn instead.
+
+(defun agent-review--fill-width ()
+  "Columns prose is filled to: the review window's width, at most 100."
+  (min 100 (1- (if-let* ((window (get-buffer-window (current-buffer) t)))
+                   (window-max-chars-per-line window)
+                 81))))
+
+(defun agent-review--fill (text &optional indent)
+  "TEXT with each long line filled to `agent-review--fill-width'.
+Line breaks are kept, and a list item's continuation lines are indented
+under its text.  INDENT columns are taken by a prefix the caller puts
+before every line."
+  (let ((width (- (agent-review--fill-width) (or indent 0))))
+    (mapconcat
+     (lambda (line)
+       (if (<= (string-width line) width)
+           line
+         (with-temp-buffer
+           (insert line)
+           (let ((fill-column width)
+                 (fill-prefix
+                  (progn (string-match "\\`[ \t]*\\(?:[-*+]\\|[0-9]+[.)]\\)?[ \t]*" line)
+                         (make-string (string-width (match-string 0 line)) ?\s))))
+             (fill-region (point-min) (point-max)))
+           (buffer-string))))
+     (split-string text "\n")
+     "\n")))
+
 (defun agent-review--insert-comment (comment)
   "Insert the annotation COMMENT and its answer below its last line."
   (let ((start (point))
@@ -1082,11 +1112,11 @@ review does not keep are highlighted together as a fragment instead."
                                            agent-review-statuses nil nil #'equal))
                         'face '(bold agent-review-comment))
             "\n")
-    (dolist (line (split-string (plist-get comment :comment) "\n"))
+    (dolist (line (split-string (agent-review--fill (plist-get comment :comment) 4) "\n"))
       (insert bar line "\n"))
     (when-let* ((response (plist-get comment :response)))
       (insert bar (propertize "agent 回应" 'face '(bold agent-review-response)) "\n")
-      (dolist (line (split-string response "\n"))
+      (dolist (line (split-string (agent-review--fill response 4) "\n"))
         (insert bar (propertize line 'face 'agent-review-response) "\n")))
     (when agent-review--shown (puthash (plist-get comment :id) t agent-review--shown))
     (put-text-property start (point) 'agent-review-comment (plist-get comment :id))))
@@ -1256,7 +1286,7 @@ WIDTH is the width of the line number columns."
   (let ((id (plist-get item :id))
         (body (point)))
     (when-let* ((intent (plist-get item :intent)))
-      (insert intent "\n"))
+      (insert (agent-review--fill intent) "\n"))
     (dolist (block (agent-review--split-files (plist-get item :diff)))
       (let* ((file (plist-get block :file))
              (key (cons id file))
@@ -1400,11 +1430,11 @@ Redraw it all if the item is not shown."
                                 (plist-get stats :files) (plist-get stats :additions)
                                 (plist-get stats :deletions) (plist-get stats :items))
                         'face 'agent-review-meta)
-            (propertize "选中代码行按 a 写标注，直接发给 agent · r 已审阅 · o 目录 · C 标注列表 · \
-TAB 折叠 · { } 向上/向下展开代码 · f 切换视图 · RET 跳到代码\n"
+            (propertize (agent-review--fill "选中代码行按 a 写标注，直接发给 agent · r 已审阅 · \
+o 目录 · C 标注列表 · TAB 折叠 · { } 向上/向下展开代码 · f 切换视图 · RET 跳到代码")
                         'face 'agent-review-meta)
-            "\n" (propertize "本次变更概览\n" 'face 'agent-review-heading)
-            (plist-get review :summary) "\n\n")
+            "\n\n" (propertize "本次变更概览\n" 'face 'agent-review-heading)
+            (agent-review--fill (plist-get review :summary)) "\n\n")
     (let ((agent-review--shown (make-hash-table :test #'equal))
           (agent-review--all-comments comments))
       (dolist (item items)
@@ -2415,8 +2445,8 @@ N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, al
   "Review the atomic items of a branch's changes and annotate their lines."
   ;; Every redraw would record the whole buffer, which nobody edits.
   (buffer-disable-undo)
-  (setq-local truncate-lines nil
-              word-wrap t
+  ;; Code lines don't wrap; prose is filled when drawn (`agent-review--fill').
+  (setq-local truncate-lines t
               header-line-format '(:eval (agent-review--header-line))
               imenu-create-index-function #'agent-review--imenu-index
               revert-buffer-function (lambda (&rest _)
