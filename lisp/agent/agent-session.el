@@ -2240,6 +2240,36 @@ shares a line with the input."
 
 ;;; Mode
 
+(defun agent-session--keep-input-visible (window)
+  "Keep the draft and one spare line visible in WINDOW while editing.
+Measure displayed text, including wrapped lines.  Leave transcript
+browsing alone; drafts taller than the window use normal cursor scrolling."
+  (when (and agent-session--current
+             (window-live-p window)
+             (eq (window-buffer window) (current-buffer)))
+    (let ((input (agent-session-input agent-session--current)))
+      (when (and input (marker-position input)
+                 (>= (window-point window) input))
+        (let* ((height (window-text-height window t))
+               (spare (window-font-height window))
+               (limit (- height spare))
+               (draft-height
+                (cdr (window-text-pixel-size
+                      window input (point-max) nil height))))
+          (when (and (> limit 0)
+                     (<= draft-height limit)
+                     (or (> (window-start window) input)
+                         (> (cdr (window-text-pixel-size
+                                  window (window-start window) (point-max)
+                                  nil height))
+                            limit)))
+            (with-selected-window window
+              (save-excursion
+                (goto-char (point-max))
+                (let ((scroll-margin 0))
+                  (recenter -2))))))))))
+
+
 (defvar-keymap agent-session-mode-map
   :doc "Keys of agent sessions: RET sends in the input area, C-j adds a newline."
   "RET" #'agent-session-ret
@@ -2277,6 +2307,7 @@ The transcript is on top, the input area follows the footer.
   (add-to-invisibility-spec 'markdown-markup)
   (setq-local dnd-protocol-alist (cons '("^file:" . agent-session--dnd-file) dnd-protocol-alist))
   (add-hook 'post-command-hook #'agent-session--keep-point-out-of-prompt nil t)
+  (add-hook 'pre-redisplay-functions #'agent-session--keep-input-visible nil t)
   (add-hook 'completion-at-point-functions #'agent-session-completion-at-point nil t)
   ;; Pop up completion right after typing /.
   (setq-local corfu-auto-prefix 1
