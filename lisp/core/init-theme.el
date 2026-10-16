@@ -46,7 +46,7 @@
      :salient "#673AB7" :salient-bg "#EDE7F6" :tag-fg "#FFFFFF"
      :popout "#C2552F" :popout-bg "#FFAB91" :popout-soft "#FBE9E7"
      :on-popout "#263238" :flash "#FFD9CC"
-     :accent "#6C4DA4" :on-accent "#FFFFFF" :on-accent-dim "#D9D4E3"
+     :accent "#346FBC" :on-accent "#FFFFFF" :on-accent-dim "#DBE4F0"
      :critical "#C62828" :green "#2E7D32"
      :added "#E8F5E9" :added-refine "#C8E6C9"
      :removed "#FFEBEE" :removed-refine "#FFCDD2" :changed "#FFF8E1")
@@ -146,8 +146,10 @@
          (completions-annotations :foreground ,faded)
 
          ;; Mode line: a band with room above and below the text.  The
-         ;; selected window's band is the accent color, so it is clear where
-         ;; the cursor is; the others are a quiet grey.
+         ;; selected window's band is the band color, so it is clear where
+         ;; the cursor is; the others are a quiet grey.  Each theme's band
+         ;; takes the other theme's hue: blue in the purple light theme,
+         ;; purple in the blue (Nord) dark theme.
          (mode-line :background ,accent :foreground ,on-accent
                     :box (:line-width (1 . 6) :color ,accent))
          (mode-line-active :inherit mode-line)

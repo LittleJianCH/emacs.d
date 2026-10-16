@@ -77,8 +77,9 @@ An installed font of `my/aligned-fonts' serves both Latin and CJK text."
 ;;
 ;;   [N] init-ui.el  Elisp · main                       eglot  12:4
 ;;
-;; The selected window's line is a band in the accent color (purple in the
-;; light theme), so it is clear where the cursor is; the others are grey.
+;; The selected window's line is a colored band (blue in the light theme,
+;; purple in the dark one), so it is clear where the cursor is; the others
+;; are grey.
 ;; The tag shows the evil state (or RW / RO without evil); its color is the
 ;; buffer state: plain when clean, popout when modified, dim when read-only.
 
