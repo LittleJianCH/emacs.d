@@ -125,8 +125,9 @@ Config modes such as `toml-ts-mode' derive from `text-mode', so undo the
 ;; With a Chinese IME active, the second key of a sequence such as C-x a is
 ;; swallowed as pinyin.  sis switches to the English input source while a
 ;; prefix sequence is typed (needs the `macism' CLI:
-;; brew install laishulu/homebrew/macism).
+;; brew install laishulu/homebrew/macism).  Currently disabled.
 (use-package sis
+  :disabled t                           ; misbehaved: kept off until debugged
   :ensure t
   :if (and (eq system-type 'darwin) (executable-find "macism"))
   :config
