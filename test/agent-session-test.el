@@ -944,7 +944,7 @@ an approved plan review switches the session back."
           :params (:questions [(:id "q1" :question "Which?" :multiSelect t
                                 :options [(:label "a") (:label "b")])
                                (:id "q2" :question "Why?" :options [(:label "x")])])))
-       (should (string-search "? Which?  1/2" (agent-session-test--footer)))
+       (should (string-search "? 1. Which?（可多选）\n ? 2. Why?\n" (agent-session-test--footer)))
        (agent-session-test--answering '(("b" "再细一点") "")
          (agent-session-approve))
        (should (equal (car written)
@@ -998,8 +998,12 @@ question unanswered, and quitting halfway keeps the answers so far."
                    (:question "几页？" :range (1 10 "页"))
                    (:question "备注？"))
       :callback (lambda (value) (setq answers value)))
-     (should (string-match-p "? \\[认证\\] 用哪种认证？  1/5 +RET / C-c C-y 回答 · C-c C-n 不回答\n"
-                             (agent-session-test--footer)))
+     ;; Every question shows, the keys on a line of their own
+     (should (string-search (concat " ? 1. [认证] 用哪种认证？\n"
+                                    " ? 2. 要哪些功能？（可多选）\n"
+                                    " ? 3. 名字？\n ? 4. 几页？\n ? 5. 备注？\n"
+                                    "   RET / C-c C-y 回答 · C-c C-n 不回答\n")
+                            (agent-session-test--footer)))
      (should-not (string-search "OAuth" (agent-session-test--footer)))
      (should (string-match-p "选方案.*等待回答" (agent-session-test--transcript)))
      (should (string-match-p "等待回答" (agent-session-test--mode-line)))
@@ -1017,7 +1021,11 @@ question unanswered, and quitting halfway keeps the answers so far."
        (should (string-search "影响登录页\n[认证] 用哪种认证？（1/5）" (car prompts)))
        (should (string-search "要哪些功能？（可多选，逗号分隔）（2/5）" (cadr prompts))))
      (should (eq answers :none))
-     (should (string-search "名字？  3/5" (agent-session-test--footer)))
+     (should (string-search (concat " ? 1. [认证] 用哪种认证？  → OAuth\n"
+                                    " ? 2. 要哪些功能？（可多选）  → A、B、D\n"
+                                    " ? 3. 名字？\n")
+                            (agent-session-test--footer)))
+     (should (string-search "RET / C-c C-y 继续回答" (agent-session-test--footer)))
      ;; RET in the empty input area goes on from there; a number must lie in
      ;; its range
      (goto-char (point-max))
@@ -1063,7 +1071,8 @@ The answers go back keyed by question text, beside the original input."
          (agent-session-backend-handle
           'claude session (json-parse-string line :object-type 'plist :null-object nil
                                              :false-object nil)))
-       (should (string-search "[Lib] Which?  1/3" (agent-session-test--footer)))
+       (should (string-search "? 1. [Lib] Which?\n ? 2. [Feat] Features?（可多选）\n"
+                              (agent-session-test--footer)))
        (agent-session-test--answering '("b" ("y" "z") "")
          (agent-session-approve))
        (let* ((response (plist-get (plist-get (car written) :response) :response))
@@ -1095,7 +1104,7 @@ The answers go back keyed by question text, beside the original input."
           :params (:itemId "i1" :questions [(:id "q1" :header "H" :question "Pick?" :isOther t
                                              :options [(:label "a" :description "da")])
                                             (:id "q2" :header "T" :question "Token?" :isSecret t)])))
-       (should (string-search "[H] Pick?  1/2" (agent-session-test--footer)))
+       (should (string-search "? 1. [H] Pick?\n ? 2. [T] Token?\n" (agent-session-test--footer)))
        (agent-session-test--answering '("a" "s3cret")
          (agent-session-approve))
        (let ((result (plist-get (car written) :result)))

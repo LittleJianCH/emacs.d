@@ -1317,16 +1317,19 @@ leaves the question unanswered."
                                  (read-string prompt)))))
         (unless (string-empty-p text) (list :selected nil :custom text)))))))
 
+(defun agent-session--answer-text (question answer)
+  "Short text of ANSWER to QUESTION."
+  (cond ((null answer) "未作答")
+        ((plist-get question :secret) "••••")
+        (t (string-join (append (plist-get answer :selected)
+                                (ensure-list (plist-get answer :custom)))
+                        "、"))))
+
 (defun agent-session--answer-summary (ask answers)
   "Short note of ANSWERS to request ASK, shown on its tool."
-  (let ((question (car (plist-get ask :questions)))
-        (answer (car answers)))
-    (cond ((cdr answers) "已回答")
-          ((null answer) "未作答")
-          ((plist-get question :secret) "已回答")
-          (t (string-join (append (plist-get answer :selected)
-                                  (ensure-list (plist-get answer :custom)))
-                          "、")))))
+  (if (cdr answers)
+      "已回答"
+    (agent-session--answer-text (car (plist-get ask :questions)) (car answers))))
 
 (defun agent-session--question-ask (session)
   "The question request to answer in SESSION: the one at point, else the oldest."
@@ -1360,21 +1363,36 @@ leaves the question unanswered."
     (agent-session--refresh session)))
 
 (defun agent-session--format-question (ask)
-  "Footer line of question request ASK."
-  (pcase-let ((`(,question . ,position) (agent-session--question-position ask)))
+  "Footer lines of question request ASK: every question, then the keys.
+Questions already answered show their answers."
+  (let* ((questions (plist-get ask :questions))
+         (answers (plist-get ask :answers))
+         (numbered (cdr questions)))
     (concat
-     (make-text-button (concat " ? "
-                               (when-let* ((header (plist-get question :header)))
-                                 (format "[%s] " header))
-                               (plist-get question :question)
-                               (when position (concat "  " position))
-                               " ")
-                       nil 'face 'agent-session-ask 'follow-link t
-                       'agent-session-ask (plist-get ask :id)
-                       'help-echo "回答问题"
-                       'action (lambda (_) (agent-session-answer-questions)))
-     (propertize " RET / C-c C-y 回答 · C-c C-n 不回答" 'face 'agent-session-dim)
-     "\n")))
+     (string-join
+      (seq-map-indexed
+       (lambda (question index)
+         (let ((answered (< index (length answers))))
+           (concat
+            (make-text-button
+             (concat " ? "
+                     (when numbered (format "%d. " (1+ index)))
+                     (when-let* ((header (plist-get question :header)))
+                       (format "[%s] " header))
+                     (plist-get question :question)
+                     (when (plist-get question :multi) "（可多选）"))
+             nil 'face (if answered 'agent-session-dim 'agent-session-ask) 'follow-link t
+             'agent-session-ask (plist-get ask :id)
+             'help-echo "回答问题"
+             'action (lambda (_) (agent-session-answer-questions)))
+            (when answered
+              (propertize (concat "  → " (agent-session--answer-text question (nth index answers)))
+                          'face 'agent-session-ok))
+            "\n")))
+       questions)
+      "")
+     (propertize (concat "   RET / C-c C-y " (if answers "继续回答" "回答") " · C-c C-n 不回答\n")
+                 'face 'agent-session-dim))))
 
 (defun agent-session-notice (session text &optional face)
   "Insert a notice line TEXT with FACE into the transcript."
