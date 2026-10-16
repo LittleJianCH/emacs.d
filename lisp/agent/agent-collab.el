@@ -384,9 +384,9 @@ starting a new one")
   "Ask another agent and wait for its reply: a second opinion, a review of
 your changes, or a question to a session the user mentioned.  By default a
 new sub-session starts in your project in read-only plan mode; follow-ups
-go to it with session.  The user confirms first.  Returns the final reply
-of that turn; if it takes longer than wait, returns the session id: read
-the reply later with session_read."
+go to it with session.  The user may have to confirm first.  Returns the
+final reply of that turn; if it takes longer than wait, returns the session
+id: read the reply later with session_read."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_ask works only from an agent session")))
          (target (and session (agent-collab--session session)))

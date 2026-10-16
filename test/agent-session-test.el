@@ -1385,7 +1385,9 @@ detached
 
 (ert-deftest agent-session-test-session-ask ()
   (agent-session-test--with-session
-   (let* ((session agent-session--current)
+   ;; Confirmation is on by default; the user's own setting must not matter.
+   (let* ((agent-collab-confirm t)
+          (session agent-session--current)
           (pending (agent-session-test--call "session_ask" buffer
                                              :prompt "帮我看看这个 diff" :agent "test-echo2")))
      (should (eq (car pending) :agent-ui-pending))

@@ -452,11 +452,12 @@ layout or calling a mode's commands."
 configuration root or absolute. Default: every loaded configuration file changed \
 on disk since it was loaded"))
   "Apply edited Emacs configuration files to the running Emacs, no restart.
-Call it once your edits are done.  Files load in dependency order.  Unlike a
-plain load, keymap definitions are merged into the live keymaps, options nobody
-customized move to their new default and changed faces are applied; other
-defvars keep their state.  A file whose struct layout changed, and init.el, are
-not loaded: they report restart_required."
+Call it once your edits are done, instead of loading the files through eval.
+Files load in dependency order.  Unlike a plain load, keymap definitions are
+merged into the live keymaps, options nobody customized move to their new
+default and changed faces are applied; other defvars keep their state.  A file
+whose struct layout changed, and init.el, are not loaded: they report
+restart_required."
   (let* ((report (my/reload-config (and files (split-string files))))
          (statuses (mapcar (lambda (entry) (plist-get entry :status)) report)))
     (list :files (vconcat (mapcar #'agent-ui--reload-entry report))

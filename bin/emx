@@ -323,29 +323,27 @@ function help(name) {
 
 // ---------------------------------------------------------------- MCP
 
-const MCP_INSTRUCTIONS = `These tools operate the Emacs instance the user is working in (your session is hosted inside it).
-- To present formatted content (option comparisons, plans, review results, architecture
-  diagrams, charts, progress), use render to build a native page; it is far clearer than
-  long markdown in the chat. Pages can contain buttons whose prompts are sent back to your
-  session when the user clicks them. Use patch to update parts of a page afterwards.
-- To point the user at code, use open to show and highlight it instead of only citing a path.
-- Use show to display an existing org / markdown document or a diff.
-- For an atomic review of a branch (原子审查 / atomic review), use the emacs-atomic-review
-  skill: it starts with review_snapshot, and annotations are answered with review_reply.
-- Call context first to see which file, cursor position and selection the user is looking at.
-- For editor operations the other tools do not cover, run Elisp with eval.
-- Other agent sessions (Claude, Codex) may run in this Emacs. Each has an @handle, and the
-  user mentions sessions with it. sessions lists them, session_read reads their latest
-  turns, and session_ask asks another agent (a second opinion, a review of your changes)
-  and waits for its reply.
-- After editing the Lisp files of this Emacs configuration, apply them with reload rather
-  than loading them through eval.
-- The user reads Chinese: write page content and notifications in Chinese unless asked otherwise.`;
+// Clients may repeat these instructions in front of every tool description (Codex
+// does), so they only say when to reach for each tool; how to use it belongs in the
+// tool's own description.
+const MCP_HEAD = `Your session is hosted in the user's Emacs: this conversation is an Emacs buffer, and these tools operate that Emacs.
+- When the user means the current page, window, input box or editor, that is Emacs unless they name another app: call context first.`;
+
+const MCP_BODY = `
+- Formatted content (option comparisons, plans, review results, diagrams, progress):
+  render a native page, far clearer than long markdown in the chat.
+- Point the user at code with open rather than only citing a path; show displays a
+  document or diff.
+- Atomic review (原子审查): follow the emacs-atomic-review skill.
+- @handles name other agent sessions in this Emacs: sessions, session_read, session_ask.
+- After editing the Lisp of this Emacs configuration, call reload.
+- Other editor operations: eval.
+- The user reads Chinese: write page content and notifications in Chinese.`;
 
 const REMOTE_INSTRUCTIONS = `
-- Your own file tools work on the project's host, not on the machine Emacs runs on. To
-  work on this Emacs configuration (${CONFIG_DIR}), use config_read, config_edit and
-  config_write; read its AGENTS.md first. Edits take effect after reload.`;
+- Your shell and file tools run on the project's host; Emacs and its configuration
+  (${CONFIG_DIR}) are on the user's machine. Work on the configuration with
+  config_read, config_edit and config_write (read its AGENTS.md first), then reload.`;
 
 function mcpServer() {
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
@@ -357,7 +355,7 @@ function mcpServer() {
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: 'emacs', version: VERSION },
-      instructions: MCP_INSTRUCTIONS + (REMOTE_AGENT ? REMOTE_INSTRUCTIONS : ''),
+      instructions: MCP_HEAD + (REMOTE_AGENT ? REMOTE_INSTRUCTIONS : '') + MCP_BODY,
     }),
     ping: () => ({}),
     'tools/list': () => {
