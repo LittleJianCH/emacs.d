@@ -107,15 +107,20 @@ For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
   "Set backend state KEY of SESSION to VALUE."
   (setf (agent-session-state session) (plist-put (agent-session-state session) key value)))
 
-(defun agent-codex--request (session method params &optional callback)
+(defun agent-codex--request (session method params &optional callback error-callback)
   "Send a JSON-RPC request for METHOD with PARAMS.
-When the result arrives, call CALLBACK with it."
+Call CALLBACK with the result, or ERROR-CALLBACK with the RPC error.
+Without ERROR-CALLBACK, display the error as a session notice."
   (let ((id (1+ (or (agent-codex--state session :next-id) 0))))
     (agent-codex--set session :next-id id)
     (when callback
       (unless (agent-codex--state session :callbacks)
         (agent-codex--set session :callbacks (make-hash-table)))
       (puthash id callback (agent-codex--state session :callbacks)))
+    (when error-callback
+      (unless (agent-codex--state session :error-callbacks)
+        (agent-codex--set session :error-callbacks (make-hash-table)))
+      (puthash id error-callback (agent-codex--state session :error-callbacks)))
     (agent-session-write session (list :jsonrpc "2.0" :id id :method method
                                        :params (or params (make-hash-table))))))
 
@@ -150,15 +155,60 @@ When the result arrives, call CALLBACK with it."
             (lambda (_result) (agent-codex--start-thread session)))
          (agent-codex--start-thread session))))))
 
+(defun agent-codex--developer-instructions (root result)
+  "Append Emacs context to the effective config in RESULT for ROOT.
+Reject malformed config/read results instead of replacing unknown user
+instructions.  Preserve the existing instruction string verbatim."
+  (let* ((config (plist-get result :config))
+         (existing (and (listp config)
+                        (plist-get config :developer_instructions))))
+    (unless (and (plist-member result :config) config (listp config)
+                 (or (null existing) (stringp existing)))
+      (error "Invalid config/read result"))
+    (concat
+     (when existing (concat existing "\n\n"))
+     "This session is hosted by the user's Emacs; the conversation UI is an Emacs buffer.\n"
+     "Unless the user explicitly refers to another application, references to the current page, window, editor, or input box mean Emacs; first discover and call the emacs MCP context tool.\n"
+     "Use the emacs MCP tools to inspect and operate that UI."
+     (when (file-remote-p root)
+       (concat "\nThe agent shell runs on the project host; Emacs and its configuration are on the user's machine. "
+               "Edit that configuration with config_read/config_edit/config_write, then reload.")))))
+
 (defun agent-codex--start-thread (session)
-  "Start or resume the thread of SESSION, then go idle."
+  "Read effective config, then start or resume SESSION.
+A failed read leaves developerInstructions unset so Codex retains the
+user's configured instructions; report that Emacs context was omitted."
+  (let* ((cwd (agent-session-process-directory (agent-session-root session)))
+         (read-failed
+          (lambda (reason)
+            (agent-session-notice
+             session (format "读取 Codex 配置失败，未注入 Emacs 环境说明；保留原有指令：%s"
+                             reason)
+             'agent-session-error))))
+    (agent-codex--request
+     session "config/read" (list :cwd cwd)
+     (lambda (result)
+       (let ((instructions
+              (condition-case err
+                  (agent-codex--developer-instructions (agent-session-root session) result)
+                (error (funcall read-failed (error-message-string err)) nil))))
+         (agent-codex--start-thread-with-instructions session cwd instructions)))
+     (lambda (err)
+       (funcall read-failed (plist-get err :message))
+       (agent-codex--start-thread-with-instructions session cwd nil)))))
+
+(defun agent-codex--start-thread-with-instructions (session cwd instructions)
+  "Start or resume SESSION at CWD with optional developer INSTRUCTIONS.
+Codex ignores instruction overrides when resuming an already running
+thread; sending this field does not guarantee updating such a thread."
   (pcase-let* ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session))
                (resume (agent-codex--state session :resume)))
     (agent-codex--request
      session (if resume "thread/resume" "thread/start")
-     (append (list :cwd (agent-session-process-directory (agent-session-root session))
+     (append (list :cwd cwd
                    :approvalPolicy approval
                    :sandbox sandbox)
+             (when instructions (list :developerInstructions instructions))
              (when resume (list :threadId resume :excludeTurns t))
              (when-let* ((model (agent-session-setting session :model)))
                (list :model model)))
@@ -455,13 +505,18 @@ Strip the bash -lc wrapper and keep only the first line."
     (cond
      ;; Responses to our requests
      ((and id (not method))
-      (if-let* ((err (plist-get message :error)))
-          (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
-                                'agent-session-error)
-        (when-let* ((callbacks (agent-codex--state session :callbacks))
-                    (callback (gethash id callbacks)))
-          (remhash id callbacks)
-          (funcall callback (plist-get message :result)))))
+      (let* ((callbacks (agent-codex--state session :callbacks))
+             (errors (agent-codex--state session :error-callbacks))
+             (callback (and callbacks (gethash id callbacks)))
+             (error-callback (and errors (gethash id errors))))
+        (when callbacks (remhash id callbacks))
+        (when errors (remhash id errors))
+        (if-let* ((err (plist-get message :error)))
+            (if error-callback
+                (funcall error-callback err)
+              (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
+                                    'agent-session-error))
+          (when callback (funcall callback (plist-get message :result))))))
      ;; Server requests
      (id
       (if (member method '("item/commandExecution/requestApproval"
