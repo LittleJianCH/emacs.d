@@ -27,7 +27,7 @@ lisp/core/               base layer
   init-reload.el         `my/reload-config': apply edited files to the running Emacs
   init-ui.el             fonts, layout (nano margins), status line, side panels
   init-theme.el          nano-style light / dark themes following the macOS appearance
-  init-evil.el           optional Vim bindings (off by default)
+  init-evil.el           Vim bindings (on by default, `my/use-evil')
   init-completion.el     vertico / orderless / consult / corfu / cape
   init-dev.el            project, magit, eglot, tree-sitter
   init-remote.el         remote editing (tramp-rpc)
@@ -136,10 +136,12 @@ temp request/response files (`agent-ui-rpc`).
 
 Run from the repo root.
 
-Tests (ERT, ~50 tests, a few seconds):
+Tests (ERT, ~50 tests, a few seconds). They exercise the native Emacs keys, so turn
+evil off first (it is on by default and its normal state would eat typed keys):
 
 ```sh
-emacs --batch --init-directory=. -l init.el -l test/agent-session-test.el \
+emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
+      -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
       -l test/init-ui-test.el -l test/agent-review-test.el \
       -l test/agent-canvas-test.el \
@@ -233,9 +235,10 @@ Other caveats:
   attribution trailers. Git identity for this repo is `简 <chenhowe0529@gmail.com>`.
   Only push when the user asks, and check the outgoing commits for sensitive data
   (local paths, credentials, internal hosts) first.
-- **Keys.** Emacs keybindings are the default. evil is optional (`my/use-evil`, toggled
-  with `M-x my/toggle-evil`; `C-u` saves the choice) and every evil binding must stay
-  inside `with-eval-after-load 'evil`.
+- **Keys.** evil is on by default but optional (`my/use-evil`, toggled with
+  `M-x my/toggle-evil`; `C-u` saves the choice), so every feature must also work with
+  the native Emacs keybindings, and every evil binding must stay inside
+  `with-eval-after-load 'evil`.
 - **Modularity.** New languages go in `lisp/lang/lang-NAME.el` and are enabled in
   `my/languages`. A new agent is a backend implementing the generics plus one
   `agent-session-define-agent` line in `init-agent.el`. New agent -> Emacs abilities are

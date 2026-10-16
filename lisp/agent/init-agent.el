@@ -91,8 +91,8 @@ In the transcript, jump to the end of the input area and enter insert state." co
        (goto-char (point-max))
        (evil-insert-state))))
 
-;; evil is not loaded by default (see `my/use-evil'); declare the functions used
-;; here so compilation does not warn.
+;; evil may be turned off (see `my/use-evil'); declare the functions used here
+;; so compilation does not warn.
 (declare-function evil-insert "evil-commands")
 (declare-function evil-append "evil-commands")
 (declare-function evil-insert-line "evil-commands")

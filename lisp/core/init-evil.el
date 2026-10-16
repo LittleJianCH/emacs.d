@@ -13,14 +13,14 @@
 ;; Insert state uses Emacs editing keys; Escape returns to normal state.
 ;; evil is not enabled in the minibuffer, which keeps normal editing.
 ;;
-;; Whether it loads is controlled by `my/use-evil' in init-base.el (off by
+;; Whether it loads is controlled by `my/use-evil' in init-base.el (on by
 ;; default); toggle at runtime with M-x my/toggle-evil, and with a C-u prefix
 ;; argument also save that as the default.
 
 ;;; Code:
 
-;; evil isn't loaded by default, so declare its functions for the byte-compiler
-;; (they are loaded along with evil at runtime).
+;; evil isn't loaded at compile time, so declare its functions for the
+;; byte-compiler (they are loaded along with evil at runtime).
 (declare-function evil-set-leader "evil-core")
 (declare-function evil-define-key* "evil-core")
 

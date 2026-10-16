@@ -138,7 +138,7 @@ Config modes such as `toml-ts-mode' derive from `text-mode', so undo the
 
 ;;; Vim keybinding toggle
 
-(defcustom my/use-evil nil
+(defcustom my/use-evil t
   "Non-nil means load evil (Vim keys, see init-evil.el) at startup.
 nil means use the native Emacs keybindings.  Toggle it in a running
 session with `my/toggle-evil'."
