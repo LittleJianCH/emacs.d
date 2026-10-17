@@ -71,7 +71,7 @@ agent CLI (用 dsh 时还要 ~python3~ 和 dsh 自己的登录凭据)；其余�
 
 #+begin_example
 early-init.el        首帧之前的设置
-init.el              包管理、模块加载顺序、启用的语言列表 my/languages
+init.el              包管理、模块加载顺序、启用的语言 my/languages 与后端 my/agents
 lisp/core/           基础层
   init-base.el         默认行为、var/ 路径、macOS 环境、evil 开关
   init-reload.el       M-x my/reload-config：不重启地应用修改过的文件
@@ -82,18 +82,19 @@ lisp/core/           基础层
   init-dev.el          project、magit、eglot、tree-sitter
   init-remote.el       远程编辑（tramp-rpc）
 lisp/lang/           语言模块：lang-elisp.el、lang-rust.el、lang-go.el
-lisp/agent/          agent 支持
+lisp/agent/          agent 公共设施
+  backend/            各 agent 后端，通过 my/agents 启用
+    agent-claude.el    Claude 后端：claude -p stream-json
+    agent-codex.el     Codex 后端：codex app-server JSON-RPC
+    agent-dsh.el       DeepSeek Harness 后端（插件在 backend/dsh/）
   agent-session.el     会话界面与管理（对话记录 + 底部输入区）
-  agent-claude.el      Claude 后端：claude -p stream-json
-  agent-codex.el       Codex 后端：codex app-server JSON-RPC
-  agent-dsh.el         DeepSeek Harness 后端（插件在 dsh/）
   agent-remote.el      远程项目：agent 跑在远程主机，emx 经 ssh 转发回本地
   agent-session-list.el  会话侧边栏
   agent-ui.el          agent → Emacs 的方法注册与 RPC
   agent-canvas.el      原生页面渲染（render / patch）
   agent-review.el      分支的原子审查
   agent-collab.el      会话之间互相协作（@handle）
-  init-agent.el        装配：注册 agent、按键、server
+  init-agent.el        装配：加载后端、按键、server
 lisp/app/            独立应用：init-telega.el
 bin/emx              agent 调用 Emacs 的桥：命令行 + MCP server
 skills/              交给 Emacs 启动的 agent 的 skill
@@ -206,7 +207,8 @@ emx reload                  # 热加载修改过的配置文件
   再把 ~NAME~ 加入 =init.el= 中的 ~my/languages~ 。
 - *agent* ：参考 =agent-claude.el= 实现 ~agent-session-backend-*~ 泛型函数，把协议消息翻译成
   ~agent-session-text~ / ~agent-session-tool~ / ~agent-session-ask~ 等界面调用，再在
-  =init-agent.el= 中加一行 ~(agent-session-define-agent NAME :title "...")~ 。
+  =lisp/agent/backend/agent-NAME.el= 中用 ~(agent-session-define-agent NAME :title "...")~
+  注册，末尾 ~(provide 'agent-NAME)~，再把 ~NAME~ 加入 =init.el= 中的 ~my/agents~ 。
 - *agent 可调用的方法* ：用 ~agent-ui-defmethod~ 定义，MCP 工具列表会自动包含它。
 - *页面 block 类型* ：写一个接收 block plist 的渲染函数，加入 ~agent-canvas-renderers~ 。
 

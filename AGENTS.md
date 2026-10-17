@@ -32,11 +32,15 @@ lisp/core/               base layer
   init-dev.el            project, magit, eglot, tree-sitter
   init-remote.el         remote editing (tramp-rpc)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
-lisp/agent/              agent support (see below)
+lisp/agent/              shared agent support (see below)
+  backend/              individual backends, enabled via `my/agents' in init.el
+    agent-NAME.el       backend implementation and registration
+    dsh/                DeepSeek Harness bridge plugin and profile patch
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
+test/agent-backend-test.el  ERT suite for backend module startup and selection
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
 test/agent-session-link-test.el   ERT suite for clickable links in transcripts
@@ -59,19 +63,19 @@ var/                     runtime state (history, backups, pasted images...); git
   transient menu `agent-session-menu`, global prefix map on `C-c a`.
 - `agent-session-table.el` — renders complete Markdown tables in replies after
   fontification, keeping cell faces and lining up CJK text.
-- `agent-claude.el` — Claude Code backend: `claude -p --input-format stream-json
+- `backend/agent-claude.el` — Claude Code backend: `claude -p --input-format stream-json
   --output-format stream-json --permission-prompt-tool stdio ...`. Permissions arrive
   as `control_request`/`can_use_tool`; model and permission mode switch live via control
   requests; effort needs a restart with `--resume`. History and replay read
   `~/.claude/projects/<encoded-root>/<session-id>.jsonl`; the same file is watched to
   show messages written by other clients (Claude Desktop, terminal), and the CLI is
   restarted with `--resume` before the next send so its context catches up.
-- `agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
+- `backend/agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
-- `agent-dsh.el` — DeepSeek Harness (`dsh`) backend. dsh's own SDK/ACP protocols are too
-  thin (SDK cannot cancel or approve), so we ship a dsh plugin, `dsh/emacs-bridge.mjs`,
-  mounted into the stock `sdk` profile by `dsh/emacs.yml` (`dsh --profile sdk --patch
+- `backend/agent-dsh.el` — DeepSeek Harness (`dsh`) backend. dsh's own SDK/ACP protocols are too
+  thin (SDK cannot cancel or approve), so we ship a dsh plugin, `backend/dsh/emacs-bridge.mjs`,
+  mounted into the stock `sdk` profile by `backend/dsh/emacs.yml` (`dsh --profile sdk --patch
   ...`). It drives one dsh agent through dsh's internal API (`ctx.agents`,
   `agent/assistant-stream`, `session/event`, `approval/request`) and speaks our own
   line-delimited JSON-RPC, documented at the top of the plugin. Modes map to dsh
@@ -149,7 +153,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
       -l test/init-ui-test.el -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
-      -l test/agent-session-link-test.el \
+      -l test/agent-session-link-test.el -l test/agent-backend-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
@@ -161,14 +165,14 @@ emacs --batch --init-directory=. -l init.el --eval '
 (let ((out (make-temp-file "elc-" t)))
   (setq byte-compile-dest-file-function
         (lambda (f) (expand-file-name (concat (file-name-nondirectory f) "c") out)))
-  (dolist (dir (list "lisp/core" "lisp/agent" "lisp/lang" "lisp/app"))
+  (dolist (dir (list "lisp/core" "lisp/agent" "lisp/agent/backend" "lisp/lang" "lisp/app"))
     (dolist (f (directory-files dir t "\\.el$"))
       (byte-compile-file f))))' 2>&1 | grep -A3 -E '^[a-z-]+\.el:[0-9]+|Error'
 ```
 
 No output means a clean compile. It must stay warning-free, including with evil disabled (declare evil functions
 with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macro).
-`node --check bin/emx` for the bridge, `node --check lisp/agent/dsh/emacs-bridge.mjs`
+`node --check bin/emx` for the bridge, `node --check lisp/agent/backend/dsh/emacs-bridge.mjs`
 for the dsh plugin.
 
 Add or update a regression test for every bug fix and UI behavior change. Tests that
@@ -250,8 +254,9 @@ Other caveats:
   the native Emacs keybindings, and every evil binding must stay inside
   `with-eval-after-load 'evil`.
 - **Modularity.** New languages go in `lisp/lang/lang-NAME.el` and are enabled in
-  `my/languages`. A new agent is a backend implementing the generics plus one
-  `agent-session-define-agent` line in `init-agent.el`. New agent -> Emacs abilities are
+  `my/languages`. A new agent lives in `lisp/agent/backend/agent-NAME.el`,
+  implements the generics, registers itself with `agent-session-define-agent`,
+  and is enabled via `my/agents` in init.el. New agent -> Emacs abilities are
   `agent-ui-defmethod`s; only work that needs no Emacs state (like the `config_*` file
   tools) belongs in emx itself.
 - **Packages.** use-package with GNU ELPA first, then NonGNU, then MELPA; pin to MELPA

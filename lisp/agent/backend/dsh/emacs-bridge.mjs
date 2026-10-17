@@ -3,7 +3,7 @@
 // Loaded into the shipped `sdk` profile by emacs.yml, which disables the SDK
 // JSON-RPC server and mounts this plugin in its place:
 //
-//   dsh --profile sdk --patch lisp/agent/dsh/emacs.yml
+//   dsh --profile sdk --patch lisp/agent/backend/dsh/emacs.yml
 //
 // Wire format: newline-delimited JSON-RPC 2.0. One process drives one session.
 //

@@ -601,5 +601,7 @@ when the user declines, are left out."
                                                  (plist-get (plist-get params :error) :message))
                                  'agent-session-error))))))))
 
+(agent-session-define-agent codex :title "Codex")
+
 (provide 'agent-codex)
 ;;; agent-codex.el ends here

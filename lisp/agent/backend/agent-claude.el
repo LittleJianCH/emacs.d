@@ -734,5 +734,7 @@ Ask the user in SESSION, then reply to the CLI."
                                    'agent-session-error)
            (when callback (funcall callback (plist-get response :response)))))))))
 
+(agent-session-define-agent claude :title "Claude")
+
 (provide 'agent-claude)
 ;;; agent-claude.el ends here
