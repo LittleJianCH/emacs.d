@@ -139,19 +139,7 @@ Config modes such as `toml-ts-mode' derive from `text-mode', so undo the
 
 (my/nix-profile-paths)
 
-;; With a Chinese IME active, the second key of a sequence such as C-x a is
-;; swallowed as pinyin.  sis switches to the English input source while a
-;; prefix sequence is typed (needs the `macism' CLI:
-;; brew install laishulu/homebrew/macism).  Currently disabled.
-(use-package sis
-  :disabled t                           ; misbehaved: kept off until debugged
-  :ensure t
-  :if (and (eq system-type 'darwin) (executable-find "macism"))
-  :config
-  ;; These are plain `defvar's, so `:custom' would not apply them.
-  (setq sis-prefix-override-keys '("C-c" "C-x" "C-h" "M-g" "M-s"))
-  (sis-ism-lazyman-config "com.apple.keylayout.ABC" nil 'macism)
-  (sis-global-respect-mode 1))
+(require 'init-input)
 
 ;;; Vim keybinding toggle
 
