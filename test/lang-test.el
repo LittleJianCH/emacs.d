@@ -238,6 +238,69 @@
       (should (local-variable-p 'process-environment))
       (should (equal exec-path '("/project/bin"))))))
 
+(ert-deftest lang-agda-markdown-activation ()
+  "Literate Markdown selects Polymode after the environment is ready."
+  (let ((envrc-global-mode nil))
+    (with-temp-buffer
+      (setq buffer-file-name "/tmp/Proof.lagda.md")
+      (setq-local process-environment '("AGDA_DIR=/project/.agda"))
+      (setq-local exec-path '("/project/bin"))
+      (cl-letf (((symbol-function 'agda2-mode)
+                 (lambda () (ert-fail "Must use the Markdown host")))
+                ((symbol-function 'poly-markdown-mode)
+                 (lambda ()
+                   (kill-all-local-variables)
+                   (should (equal (getenv "AGDA_DIR") "/project/.agda"))
+                   (setq major-mode 'markdown-mode))))
+        (my/agda-activate)
+        (should (eq major-mode 'markdown-mode))
+        (should (equal (getenv "AGDA_DIR") "/project/.agda"))
+        (should (equal exec-path '("/project/bin")))))))
+
+(defvar-local lang-test--agda-initialized nil)
+
+(ert-deftest lang-agda-polymode-cold-start ()
+  "A fresh code buffer fully initializes with the host's project tools."
+  (require 'poly-markdown)
+  (let ((base (generate-new-buffer " *lang-agda-polymode-test*"))
+        (baseline (default-value 'process-environment))
+        (envrc-global-mode nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agda2-mode)
+                   (lambda ()
+                     (kill-all-local-variables)
+                     (setq major-mode 'agda2-mode)
+                     ;; Agda checks its compiler from a temp buffer before
+                     ;; completing its highlighting and input setup.
+                     (with-temp-buffer
+                       (should (equal (getenv "AGDA_DIR") "/project/.agda"))
+                       (should (equal exec-path '("/project/bin"))))
+                     (setq-local lang-test--agda-initialized t))))
+          (with-current-buffer base
+            (setq buffer-file-name "/tmp/Proof.lagda.md")
+            (insert "# Proof\n\n```agda\nmodule Proof where\n```\n")
+            (set-buffer-modified-p nil)
+            (setq-local process-environment '("AGDA_DIR=/project/.agda"))
+            (setq-local exec-path '("/project/bin"))
+            (my/agda-activate)
+            (poly-lock-fontify-now (point-min) (point-max))
+            (should (eq major-mode 'markdown-mode))
+            (should-not markdown-fontify-code-blocks-natively)
+            (should (slot-value pm/chunkmode 'protect-font-lock))
+            (let ((inner (pm-get-buffer-of-mode 'agda2-mode)))
+              (should (buffer-live-p inner))
+              (with-current-buffer inner
+                (should lang-test--agda-initialized)
+                (should (equal (getenv "AGDA_DIR") "/project/.agda"))
+                (should (local-variable-p 'process-environment))
+                (should (equal exec-path '("/project/bin")))))
+            (should (eq (default-value 'process-environment) baseline))))
+      (when (buffer-live-p base)
+        (dolist (buffer (buffer-list))
+          (when (eq (buffer-base-buffer buffer) base)
+            (kill-buffer buffer)))
+        (kill-buffer base)))))
+
 (ert-deftest lang-nix-environment-refresh-does-not-duplicate-save-hooks ()
   "Repeated async environment updates install the formatter only once."
   (let ((count 0))

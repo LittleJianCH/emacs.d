@@ -139,6 +139,9 @@ Nix (~nix-mode~)：安装 ~nil~ 后自动连接 Eglot，提供补全和诊断；
 
 Agda：安装 Agda 并让 Emacs 的 PATH 能找到 ~agda~；首次打开 =.agda= / =.lagda= 及其
 literate 文件时加载该版本自带的官方 ~agda2-mode~，兼容旧版的 ~agda-mode locate~。
+=.lagda.md= 自动启用 ~poly-markdown-mode~：正文使用 Markdown 排版，光标进入
+Agda 代码块后使用官方 Agda 模式。代码块继承项目环境，保留语义高亮和定义跳转。
+以下 Agda 快捷键在代码块内使用。
 ~C-c C-l~ 加载 / 检查， ~C-c C-,~ 查看目标和上下文， ~C-c C-c~ 分情况，
 ~C-c C-SPC~ 填入目标；在 Agda 输入法中用 ~\lambda~ / ~\to~ 输入 Unicode。
 官方安装说明：[[https://agda.readthedocs.io/en/stable/getting-started/installation.html][Agda]]；nil 的项目设置见 [[https://github.com/oxalica/nil/blob/main/docs/configuration.md][配置文档]]。

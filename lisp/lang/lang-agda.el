@@ -4,6 +4,7 @@
 
 ;; Load the Emacs mode shipped with the project's Agda after envrc has
 ;; supplied its PATH and AGDA_DIR.  Nix evaluation stays asynchronous.
+;; Literate Markdown uses Polymode with the same Agda mode in code blocks.
 ;;
 ;; Native Agda keys:
 ;;   C-c C-l    load / type-check the buffer
@@ -19,8 +20,13 @@
 (require 'subr-x)
 (require 'init-env)
 (require 'inheritenv)
+(require 'eieio)
 
 (declare-function agda2-mode "agda2-mode")
+(declare-function poly-markdown-mode "poly-markdown")
+(defvar polymode-mode-name-aliases)
+(defvar pm/chunkmode)
+(defvar markdown-fontify-code-blocks-natively)
 (defvar envrc-global-mode)
 (defvar-local my/agda-waiting-for-environment nil)
 
@@ -70,11 +76,48 @@ Try the current command first, then the pre-2.8 helper."
     ;; buffers.  Suspend envrc while inheritenv changes global defaults so
     ;; it cannot cache a diff against this temporary baseline.
     (cl-letf (((symbol-function 'envrc-mode) #'ignore))
-      (inheritenv (agda2-mode)))
+      (inheritenv
+        (if (and buffer-file-name
+                 (string-suffix-p ".lagda.md" buffer-file-name)
+                 (not (buffer-base-buffer)))
+            (poly-markdown-mode)
+          (agda2-mode))))
     (setq-local process-environment saved-env)
     (setq-local exec-path saved-path)
     (when (bound-and-true-p envrc-global-mode)
       (envrc-mode 1))))
+
+(defun my/agda-polymode-environment (original mode &optional buffer)
+  "Give Polymode's Agda MODE the host environment before ORIGINAL runs.
+BUFFER is the optional target buffer passed to Polymode's mode setup."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((base (buffer-base-buffer)))
+      (if (and (eq mode 'agda2-mode) base)
+          (let ((saved-env (buffer-local-value 'process-environment base))
+                (saved-path (buffer-local-value 'exec-path base)))
+            (setq-local process-environment saved-env exec-path saved-path)
+            ;; Agda starts its compiler before mode hooks and highlighting
+            ;; setup.  Inherit through major-mode resets and temp buffers.
+            (prog1 (cl-letf (((symbol-function 'envrc-mode) #'ignore))
+                     (inheritenv (funcall original mode buffer)))
+              (setq-local process-environment saved-env exec-path saved-path)))
+        (funcall original mode buffer)))))
+
+(defun my/agda-markdown-setup ()
+  "Keep Markdown fontification out of Agda's semantic annotations."
+  (when (and buffer-file-name
+             (string-suffix-p ".lagda.md" buffer-file-name)
+             (not (buffer-base-buffer)))
+    (setq-local markdown-fontify-code-blocks-natively nil)
+    (setf (slot-value pm/chunkmode 'protect-font-lock) t)))
+
+(use-package poly-markdown
+  :ensure t
+  :commands poly-markdown-mode
+  :config
+  (add-to-list 'polymode-mode-name-aliases '(agda . agda2-mode))
+  (add-hook 'poly-markdown-mode-hook #'my/agda-markdown-setup)
+  (advice-add 'pm--mode-setup :around #'my/agda-polymode-environment))
 
 (defun my/agda-environment-ready ()
   "Activate a waiting Agda buffer when its project environment is ready."
