@@ -33,7 +33,7 @@
 
 ;;; Modules
 
-(defvar my/languages '(elisp rust go)
+(defvar my/languages '(elisp rust go nix agda)
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
 
 (defvar my/agents '(claude codex dsh)

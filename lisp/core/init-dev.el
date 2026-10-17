@@ -30,6 +30,10 @@
   (ediff-window-setup-function #'ediff-setup-windows-plain)
   (ediff-split-window-function #'split-window-horizontally))
 
+;;; Project environments (direnv / nix-shell)
+
+(require 'init-env)
+
 ;;; Language servers and diagnostics
 
 (use-package eglot
