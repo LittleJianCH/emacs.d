@@ -222,4 +222,8 @@ agent 会话的交互部分参考了 T3 Code 和 Claude Desktop：由 Emacs 自�
 agent 的 TUI)、按项目列出会话的侧边栏，以及远程项目里让 agent CLI 跑在远程主机上的方式
 (类似 Claude Desktop 的 SSH 模式)。
 
+分支原子审查 (=agent-review.el=) 的设计与交互流程借鉴自 HerrCai0907 的 [[https://github.com/HerrCai0907/cui][cui]]：
+让 agent 将分支的提交变更按独立意图拆解为原子审查项、严格保证每行改动被完整覆盖，并通过
+侧边栏导航与行内标注向 agent 提问和获取答复。
+
 感谢这些项目！
