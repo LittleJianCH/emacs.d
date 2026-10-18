@@ -36,7 +36,7 @@
 (defvar my/languages '(elisp rust go nix agda)
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
 
-(defvar my/agents '(claude codex dsh)
+(defvar my/agents '(claude codex dsh opencode)
   "Enabled agent backends, loaded from lisp/agent/backend/agent-NAME.el.")
 
 (require 'init-base)        ; defaults, paths, macOS environment
