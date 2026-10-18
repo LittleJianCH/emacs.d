@@ -104,12 +104,16 @@ BUFFER is the optional target buffer passed to Polymode's mode setup."
         (funcall original mode buffer)))))
 
 (defun my/agda-markdown-setup ()
-  "Keep Markdown fontification out of Agda's semantic annotations."
+  "Protect Agda annotations and use theme-aware code backgrounds."
   (when (and buffer-file-name
-             (string-suffix-p ".lagda.md" buffer-file-name)
-             (not (buffer-base-buffer)))
-    (setq-local markdown-fontify-code-blocks-natively nil)
-    (setf (slot-value pm/chunkmode 'protect-font-lock) t)))
+             (string-suffix-p ".lagda.md" buffer-file-name))
+    (if (buffer-base-buffer)
+        (when (eq major-mode 'agda2-mode)
+          ;; Numeric offsets bake the current theme's RGB into the text.
+          ;; A named face follows theme changes without refontification.
+          (setf (slot-value pm/chunkmode 'adjust-face) 'markdown-code-face))
+      (setq-local markdown-fontify-code-blocks-natively nil)
+      (setf (slot-value pm/chunkmode 'protect-font-lock) t))))
 
 (use-package poly-markdown
   :ensure t

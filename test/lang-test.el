@@ -291,6 +291,8 @@
               (should (buffer-live-p inner))
               (with-current-buffer inner
                 (should lang-test--agda-initialized)
+                (should (eq (slot-value pm/chunkmode 'adjust-face)
+                            'markdown-code-face))
                 (should (equal (getenv "AGDA_DIR") "/project/.agda"))
                 (should (local-variable-p 'process-environment))
                 (should (equal exec-path '("/project/bin")))))
