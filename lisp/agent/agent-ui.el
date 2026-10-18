@@ -21,6 +21,7 @@
 (require 'flymake)
 (require 'project)
 (require 'agent-session)
+(require 'agent-usage)
 (require 'agent-session-list)
 (require 'init-reload)
 
@@ -263,6 +264,20 @@ files on its host."
           :first_line (line-number-at-pos (window-start window))
           :last_line (line-number-at-pos (max (window-start window)
                                               (1- (window-end window t)))))))
+
+(agent-ui-defmethod "usage"
+    ((period string "Calendar period: today (default), week, month, or all")
+     (group string "Group by project (default), date, backend, model, session, or turn")
+     (project string "Exact Emacs project root, including remote prefix")
+     (backend string "Backend name, e.g. codex, claude, or dsh")
+     (details boolean "Include per-turn metadata; also included when grouping by turn"))
+  "Query local usage of turns delivered from Emacs.
+History replay and activity from other clients are excluded. Input tokens
+include cached input; reasoning tokens are part of output. Unknown fields
+are null. Costs are backend estimates, not subscription spend. Coverage
+and unknown/partial turn counts indicate incomplete measurements."
+  (agent-usage-query :period (or period "today") :group (or group "project")
+                     :project project :backend backend :details details))
 
 (agent-ui-defmethod "context" ()
   "Return what the user is looking at: the file in the main window, cursor line and column,

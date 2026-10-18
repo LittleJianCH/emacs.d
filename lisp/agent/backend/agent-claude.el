@@ -19,6 +19,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-usage)
 (require 'agent-remote)
 
 (defgroup agent-claude nil
@@ -344,6 +345,12 @@ Do nothing if it is already watched or the file doesn't exist yet."
                 (agent-claude--set session :external t)))))))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
+  (agent-claude--set session :usage-cost
+                     (unless (agent-claude--state session :resume) 0))
+  (agent-claude--set session :usage-models
+                     (unless (agent-claude--state session :resume) 'empty))
+  (agent-claude--set session :usage-session (agent-claude--state session :resume))
+  (agent-claude--set session :usage-messages (make-hash-table :test #'equal))
   (when (and (agent-claude--state session :resume)
              (zerop (hash-table-count (agent-session-blocks session))))
     (agent-claude--replay session))
@@ -508,6 +515,90 @@ The value is a plist (:kind :title [:diff])."
   (if (stringp content)
       content
     (mapconcat (lambda (part) (or (plist-get part :text) "")) content "\n")))
+
+;;; Local usage
+
+(defun agent-claude--usage-metrics (usage &optional model-usage)
+  "Normalize disjoint Claude USAGE, optionally in MODEL-USAGE field format."
+  (let* ((input (plist-get usage (if model-usage :inputTokens :input_tokens)))
+         (output (plist-get usage (if model-usage :outputTokens :output_tokens)))
+         (read (plist-get usage (if model-usage :cacheReadInputTokens
+                                  :cache_read_input_tokens)))
+         (write (plist-get usage (if model-usage :cacheCreationInputTokens
+                                   :cache_creation_input_tokens)))
+         (inclusive (and (numberp input) (+ input (or read 0) (or write 0)))))
+    (list :input_tokens inclusive :output_tokens output
+          :cache_read_tokens (if input (or read 0) read)
+          :cache_write_tokens (if input (or write 0) write)
+          :total_tokens (and inclusive (numberp output) (+ inclusive output)))))
+
+(defun agent-claude--track-stream-usage (session message)
+  "Track provisional per-request usage in live MESSAGE, including children."
+  (let* ((event (plist-get message :event))
+         (parent (or (plist-get message :parent_tool_use_id) "main"))
+         (messages (or (agent-claude--state session :usage-messages)
+                       (let ((table (make-hash-table :test #'equal)))
+                         (agent-claude--set session :usage-messages table) table))))
+    (pcase (plist-get event :type)
+      ("message_start"
+       (let* ((msg (plist-get event :message)) (id (plist-get msg :id)))
+         (puthash parent id messages)
+         (agent-usage-record session id
+                             (append (agent-claude--usage-metrics (plist-get msg :usage))
+                                     (list :model (plist-get msg :model))) t)))
+      ("message_delta"
+       (agent-usage-record session (gethash parent messages)
+                           (agent-claude--usage-metrics (plist-get event :usage)) t)))))
+
+(defun agent-claude--result-key (message)
+  "Return a small duplicate-detection key for result MESSAGE."
+  (or (plist-get message :uuid) (secure-hash 'sha256 (prin1-to-string message))))
+
+(defun agent-claude--track-result-usage (session message)
+  "Reconcile turn usage with cumulative model and cost totals in MESSAGE."
+  (unless (equal (agent-claude--result-key message)
+                 (agent-claude--state session :usage-last-result))
+    (let* ((models (plist-get message :modelUsage))
+           (previous (agent-claude--state session :usage-models))
+           (cost (plist-get message :total_cost_usd))
+           (old-cost (agent-claude--state session :usage-cost))
+           (native (plist-get message :session_id))
+           (old-native (agent-claude--state session :usage-session))
+           (complete (and models previous))
+           counts names)
+      ;; /clear and /new start new counters inside the same process.
+      (when (and native old-native (not (equal native old-native)))
+	(setq previous 'empty old-cost 0 complete (not (null models))))
+      (when complete
+	(cl-loop for (model usage) on models by #'cddr do
+		 (let* ((current (agent-claude--usage-metrics usage t))
+			(old (if (eq previous 'empty) nil (plist-get previous model)))
+			(baseline (if old (agent-claude--usage-metrics old t)
+                                    '(:input_tokens 0 :output_tokens 0
+						    :cache_read_tokens 0 :cache_write_tokens 0
+						    :total_tokens 0)))
+			(delta (agent-usage-difference current baseline)))
+                   (if delta
+                       (progn (push delta counts)
+                              (when (> (or (plist-get delta :total_tokens) 0) 0)
+				(push (substring (symbol-name model) 1) names)))
+                     (setq complete nil)))))
+      (when (agent-usage--state session)
+	(let ((metrics (if complete (agent-usage--sum counts)
+			 (agent-claude--usage-metrics (plist-get message :usage)))))
+          (when (and (numberp cost) (numberp old-cost) (>= cost old-cost))
+            (setq metrics (plist-put metrics :cost_usd (- cost old-cost))))
+          (when names
+            (setq metrics (plist-put metrics :model
+                                     (if (length= names 1) (car names) "multiple"))))
+          (if (numberp (plist-get metrics :total_tokens))
+              (agent-usage-replace session metrics (not complete))
+            ;; A crash can omit result usage. Keep already observed requests.
+            (agent-usage-record session "result" metrics t))))
+      (agent-claude--set session :usage-models models)
+      (agent-claude--set session :usage-cost cost)
+      (agent-claude--set session :usage-session native)
+      (agent-claude--set session :usage-last-result (agent-claude--result-key message)))))
 
 ;;; Message handling
 
@@ -688,9 +779,14 @@ Ask the user in SESSION, then reply to the CLI."
                                              (list :updatedPermissions raw-suggestions))))))))))))
 
 (cl-defmethod agent-session-backend-handle ((_ (eql claude)) session message)
+  (when (equal (plist-get message :type) "stream_event")
+    (agent-claude--track-stream-usage session message))
   ;; Don't show the steps of subagents (non-nil parent_tool_use_id), only
   ;; their final result.
-  (unless (plist-get message :parent_tool_use_id)
+  (unless (or (plist-get message :parent_tool_use_id)
+              (and (equal (plist-get message :type) "result")
+                   (equal (agent-claude--result-key message)
+                 (agent-claude--state session :usage-last-result))))
     (pcase (plist-get message :type)
       ("system"
        (when (equal (plist-get message :subtype) "init")
@@ -703,6 +799,7 @@ Ask the user in SESSION, then reply to the CLI."
       ("assistant" (agent-claude--assistant session (plist-get message :message)))
       ("user" (agent-claude--tool-results session (plist-get message :message)))
       ("result"
+       (agent-claude--track-result-usage session message)
        (agent-session-set-info session :cost (plist-get message :total_cost_usd))
        (when (plist-get message :is_error)
          (agent-session-notice session (format "出错：%s" (or (plist-get message :result)

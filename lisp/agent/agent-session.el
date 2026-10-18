@@ -1485,9 +1485,16 @@ Tools still running are marked interrupted; unanswered confirmations expire."
     (unless (plist-get ask :answer)
       (agent-session--close-ask session ask "已失效"))))
 
+(defvar agent-session-before-send-functions nil
+  "Functions called with the session immediately before delivering a turn.")
+
+(defvar agent-session-status-change-functions nil
+  "Functions called with the session and new status, before queue delivery.")
+
 (defun agent-session-set-status (session status)
   "Set the session STATUS: idle / running / exited.
 Send queued messages when idle."
+  (run-hook-with-args 'agent-session-status-change-functions session status)
   (let ((previous (agent-session-status session))
         (info (agent-session-info session)))
     (when (and (eq status 'running) (not (eq previous 'running)))
@@ -1875,9 +1882,14 @@ send; the transcript keeps showing what the user wrote.")
 
 (defun agent-session--deliver (session text)
   "Hand TEXT to the backend of SESSION for sending."
-  (agent-session-set-status session 'running)
-  (agent-session-backend-send (agent-session-backend session) session
-                              (agent-session--outgoing session text)))
+  (let ((outgoing (agent-session--outgoing session text)))
+    (run-hook-with-args 'agent-session-before-send-functions session)
+    (agent-session-set-status session 'running)
+    (condition-case err
+        (agent-session-backend-send (agent-session-backend session) session outgoing)
+      (error
+       (agent-session-set-status session 'idle)
+       (signal (car err) (cdr err))))))
 
 (defun agent-session-submit (session text)
   "Send TEXT as the user: show it in the transcript; queue it if busy.
@@ -2677,6 +2689,7 @@ agent's latest settings; INFO is the initial info plist."
       (setq default-directory root)
       (add-hook 'kill-buffer-hook
                 (lambda ()
+                  (run-hook-with-args 'agent-session-status-change-functions session 'exited)
                   (agent-session-backend-stop (agent-session-backend session) session)
                   ;; The buffer isn't deleted yet; refresh the session list later.
                   (when agent-session--list-refresh-function

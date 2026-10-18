@@ -33,6 +33,7 @@ const REMOTE_AGENT = process.env.EMX_REMOTE_AGENT === '1';
 // Maps positional arguments to parameter names; other parameters use --key value.
 const POSITIONAL = {
   open: ['path', 'line', 'end_line'],
+  usage: ['period', 'group'],
   show: ['path'],
   eval: ['code'],
   notify: ['message'],

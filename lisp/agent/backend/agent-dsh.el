@@ -24,6 +24,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-usage)
 (require 'agent-remote)
 
 (defgroup agent-dsh nil
@@ -480,6 +481,24 @@ what `agent-session-deny' picks."
                             questions
                             (if (eq answers 'cancel) (make-list (length questions) nil) answers))))))))))
 
+;;; Local usage
+
+(defun agent-dsh--track-usage (session params)
+  "Record per-attempt disjoint usage from live bridge PARAMS."
+  (let* ((usage (plist-get params :usage))
+         (input (plist-get usage :inputTokens))
+         (output (plist-get usage :outputTokens))
+         (read (plist-get usage :cacheReadTokens))
+         (write (plist-get usage :cacheWriteTokens))
+         (inclusive (and (numberp input) (+ input (or read 0) (or write 0)))))
+    (agent-usage-record
+     session (plist-get params :id)
+     (list :input_tokens inclusive :output_tokens output
+           :cache_read_tokens read :cache_write_tokens write
+           :total_tokens (or (plist-get usage :totalTokens)
+                             (and inclusive (numberp output) (+ inclusive output)))
+           :model (plist-get params :model)))))
+
 ;;; Message handling
 
 (defun agent-dsh--notification (session method params)
@@ -529,6 +548,7 @@ what `agent-session-deny' picks."
        (agent-session-notice session "输出达到 token 上限" 'agent-session-error)))
     ("config" (agent-dsh--apply-config session (plist-get params :config)))
     ("usage"
+     (agent-dsh--track-usage session params)
      (agent-session-set-info session :tokens
                              (plist-get (plist-get params :usage) :totalTokens)))
     ("error"

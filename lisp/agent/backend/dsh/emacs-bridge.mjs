@@ -48,7 +48,7 @@
 //   tool       {id, name, arguments}                       tool call committed
 //   tool/done  {id, isError, output}                       tool result
 //   turn/end   {reason, error?}
-//   usage      {usage}
+//   usage      {id, model, usage}                         per-attempt snapshot
 //   config     {config}                                    settings changed by dsh
 //   error      {message}
 
@@ -122,6 +122,7 @@ export function apply(ctx) {
   let configuring = Promise.resolve()
   // attemptId -> Map(block index -> {id, kind, text})
   const attempts = new Map()
+  const attemptModels = new Map()
 
   const write = (message) => {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n')
@@ -142,6 +143,7 @@ export function apply(ctx) {
     switch (frame.type) {
       case 'start':
         attempts.set(frame.attemptId, new Map())
+        attemptModels.set(frame.attemptId, currentConfig().model)
         break
       case 'chunk': {
         const blocks = attempts.get(frame.attemptId)
@@ -166,13 +168,14 @@ export function apply(ctx) {
             notify('text/done', { id: block.id, text: block.text })
           }
         } else if (chunk.type === 'usage') {
-          notify('usage', { usage: chunk.usage })
+          notify('usage', { id: frame.attemptId, model: attemptModels.get(frame.attemptId), usage: chunk.usage })
         }
         break
       }
       case 'end': {
         const blocks = attempts.get(frame.attemptId)
         attempts.delete(frame.attemptId)
+        attemptModels.delete(frame.attemptId)
         if (blocks === undefined) break
         if (frame.outcome.kind === 'abandoned') {
           notify('discard', { ids: [...blocks.values()].map((block) => block.id) })

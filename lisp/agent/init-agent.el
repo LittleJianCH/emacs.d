@@ -31,6 +31,12 @@
   (with-eval-after-load 'project
     (add-to-list 'project-switch-commands '(agent-session-create "Agent" ?a) t)))
 
+(use-package agent-usage
+  :demand t
+  :after agent-session
+  :config
+  (keymap-set agent-session-command-map "u" #'agent-usage-show))
+
 (defvar my/agents)
 
 (dolist (agent my/agents)
@@ -128,6 +134,7 @@ In visual state a is the text object prefix, so this rebinds it there."
     "k" #'agent-session-interrupt
     "g" #'agent-session-steer-queued
     "x" #'agent-session-cancel-queued
+    "u" #'agent-usage-show
     "s" #'agent-session-list
     "N" #'agent-session-new
     "r" #'agent-session-resume)
@@ -157,6 +164,15 @@ In visual state a is the text object prefix, so this rebinds it there."
     "gr" #'agent-session-list-refresh
     "]]" #'agent-session-list-next
     "[[" #'agent-session-list-previous
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-usage-mode 'normal)
+  (evil-define-key* '(normal motion) agent-usage-mode-map
+    (kbd "RET") #'agent-usage-drill-down
+    "p" #'agent-usage-select-period
+    "G" #'agent-usage-select-group
+    "b" #'agent-usage-back
+    "gr" #'revert-buffer
     "q" #'quit-window)
 
   (evil-set-initial-state 'agent-canvas-mode 'normal)

@@ -17,6 +17,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-usage)
 (require 'agent-remote)
 
 (defgroup agent-codex nil
@@ -136,6 +137,13 @@ Without ERROR-CALLBACK, display the error as a session notice."
 ;;; Backend interface
 
 (cl-defmethod agent-session-backend-start ((_ (eql codex)) session)
+  (agent-codex--set session :usage-total
+                    (unless (agent-codex--state session :resume)
+                      (agent-codex--usage-metrics
+                       '(:inputTokens 0 :outputTokens 0 :cachedInputTokens 0
+                         :cacheWriteInputTokens 0 :reasoningOutputTokens 0
+                         :totalTokens 0))))
+  (agent-codex--set session :usage-turn nil)
   (let ((skills (agent-session-skills-dir session)))
     (agent-session-start-process session (agent-codex--command session))
     (agent-codex--request
@@ -351,6 +359,9 @@ there first."
                      (agent-session-message-images text)))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql codex)) session text)
+  (agent-codex--set session :usage-turn nil)
+  (agent-codex--set session :usage-counts nil)
+  (agent-codex--set session :usage-partial nil)
   (agent-codex--request
    session "turn/start"
    (pcase-let ((`(,approval ,sandbox ,_ ,reviewer) (agent-codex--mode session)))
@@ -367,7 +378,13 @@ there first."
       (when-let* ((model (agent-session-setting session :model))) (list :model model))
       (when-let* ((effort (agent-session-setting session :effort))) (list :effort effort))))
    (lambda (result)
-     (agent-codex--set session :turn (plist-get (plist-get result :turn) :id)))))
+     (let ((turn (plist-get (plist-get result :turn) :id)))
+       (agent-codex--set session :turn turn)
+       (agent-codex--set session :usage-turn turn)))
+   (lambda (err)
+     (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
+                           'agent-session-error)
+     (agent-session-set-status session 'idle))))
 
 (defun agent-codex--interrupt (session)
   "Interrupt the current turn of SESSION.
@@ -389,6 +406,41 @@ If the turn id isn't known yet, interrupt once turn/started arrives."
 
 (cl-defmethod agent-session-backend-interrupt ((_ (eql codex)) session)
   (agent-codex--interrupt session))
+
+;;; Local usage
+
+(defun agent-codex--usage-metrics (usage)
+  "Normalize inclusive Codex USAGE counters without counting subsets twice."
+  (let (metrics)
+    (dolist (pair '((:inputTokens . :input_tokens) (:outputTokens . :output_tokens)
+                    (:cachedInputTokens . :cache_read_tokens)
+                    (:cacheWriteInputTokens . :cache_write_tokens)
+                    (:reasoningOutputTokens . :reasoning_tokens)
+                    (:totalTokens . :total_tokens)) metrics)
+      (when (numberp (plist-get usage (car pair)))
+        (setq metrics (plist-put metrics (cdr pair) (plist-get usage (car pair))))))))
+
+(defun agent-codex--track-usage (session params)
+  "Observe thread totals in PARAMS, counting only SESSION's owned turn.
+The first snapshot after an unknown resume establishes a baseline only."
+  (let* ((usage (plist-get params :tokenUsage))
+         (current (agent-codex--usage-metrics (plist-get usage :total)))
+         (previous (agent-codex--state session :usage-total)))
+    (when (equal (plist-get params :threadId) (agent-codex--state session :thread))
+      (when (and (agent-usage--state session)
+                 (agent-codex--state session :usage-turn)
+                 (equal (plist-get params :turnId)
+                        (agent-codex--state session :usage-turn)))
+        (if-let* ((delta (agent-usage-difference current previous)))
+            (let ((counts (agent-usage--sum
+                           (list delta (agent-codex--state session :usage-counts)))))
+              (agent-codex--set session :usage-counts counts)
+              (agent-usage-record
+               session "codex-turn"
+               (append counts (list :model (plist-get (agent-session-info session) :model)))
+               (agent-codex--state session :usage-partial)))
+          (agent-codex--set session :usage-partial t)))
+      (when current (agent-codex--set session :usage-total current)))))
 
 ;;; Displaying items
 
@@ -592,6 +644,7 @@ when the user declines, are left out."
         ("item/commandExecution/outputDelta"
          (agent-session-tool-output session (plist-get params :itemId) (plist-get params :delta)))
         ("thread/tokenUsage/updated"
+         (agent-codex--track-usage session params)
          (agent-session-set-info session :tokens
                                  (plist-get (plist-get (plist-get params :tokenUsage) :last)
                                             :totalTokens)))

@@ -41,6 +41,7 @@ lisp/app/                standalone applications
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 test/agent-backend-test.el  ERT suite for backend module startup and selection
+test/agent-usage-test.el    ERT suite for Emacs-only usage accounting
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
 test/agent-session-link-test.el   ERT suite for clickable links in transcripts
@@ -134,6 +135,22 @@ var/                     runtime state (history, backups, pasted images...); git
   Data lives under `var/reviews/` as Lisp data.  The workflow for agents is the
   `emacs-atomic-review` skill (`skills/`), which replaces the CLIs' web page
   `atomic-review` skill in the sessions Emacs starts.
+- `agent-usage.el` — local usage journals and the native usage page (`C-c a u`,
+  `M-x agent-usage-show`). Only the session's before-send hook opens a scope;
+  queued messages open one when delivered and steering stays in the current scope.
+  Backend usage snapshots are deduplicated within that scope; replay and external
+  transcript sync never open one. `emx usage [today|week|month|all] [project|date|
+  backend|model|session|turn]` returns the same structured query as the page.
+  `--project` and `--backend` filter exact values. Runtime snapshots live under
+  `var/usage/`, one append-only JSONL journal per Emacs process; only the latest
+  snapshot per id counts. Prompts and responses are never stored. Calendar groups
+  use the turn's local start date, and weeks start Monday. Input includes caches;
+  reasoning is a subset of output. Backend costs are estimates with separate
+  coverage counts, never inferred subscription spend. Missing resume baselines
+  establish a baseline without importing history: Codex may omit the first call;
+  Claude falls back to main-loop per-turn tokens until cumulative model and cost
+  baselines are available. Unknown and partial turns are explicit. Multi-model
+  turns group under `multiple`; this version does not allocate them per model.
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
 
 The emx MCP server is only configured for agent processes started from Emacs (via
@@ -148,12 +165,13 @@ Tests (ERT, ~50 tests, a few seconds). They exercise the native Emacs keys, so t
 evil off first (it is on by default and its normal state would eat typed keys):
 
 ```sh
-emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
+emacs --batch --init-directory=. --eval '(setq my/use-evil nil agent-usage-enabled nil)' -l init.el \
       -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
       -l test/init-ui-test.el -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
+      -l test/agent-usage-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
