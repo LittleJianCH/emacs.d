@@ -62,6 +62,10 @@ fails, uses `agent-collab-handle-command'."
   "Maximum characters of one message or tool output in session_read."
   :type 'integer)
 
+(defcustom agent-collab-reply-limit 30000
+  "Maximum characters of a reply delivered to the session that asked for it."
+  :type 'integer)
+
 (defcustom agent-collab-confirm-timeout 600
   "Seconds the user has to confirm a message or a session an agent starts.
 The agent's call waits for the answer; it never waits for the reply,
@@ -187,16 +191,18 @@ Blocks before the first user message and queued messages are left out."
             (turns (push entry (car turns)))))
     (nreverse (mapcar #'reverse turns))))
 
-(defun agent-collab--clip (text &optional tail)
-  "TEXT as plain text of at most `agent-collab-text-limit' characters.
-Keep its end with TAIL, else its start."
+(defun agent-collab--clip (text &optional tail limit)
+  "TEXT as plain text of at most LIMIT characters.
+LIMIT defaults to `agent-collab-text-limit'.  Keep its end with TAIL,
+else its start."
   (let* ((text (string-trim (substring-no-properties (or text ""))))
-         (extra (- (length text) agent-collab-text-limit)))
+         (limit (or limit agent-collab-text-limit))
+         (extra (- (length text) limit)))
     (cond ((<= extra 0) text)
           (tail (format "… (%d characters before)\n%s" extra
                         (substring text extra)))
           (t (format "%s\n… (%d more characters)"
-                     (substring text 0 agent-collab-text-limit) extra)))))
+                     (substring text 0 limit) extra)))))
 
 (defun agent-collab--tool-line (block)
   "One line describing tool call BLOCK."
@@ -321,6 +327,29 @@ It is sent with the message but not shown, which names its sender."
 reply goes back to it.)"
           (agent-session-title caller) (agent-session-handle caller)))
 
+(defun agent-collab--save-reply (handle text)
+  "Save reply TEXT of session HANDLE under the var directory; return its path."
+  (let* ((dir (expand-file-name "replies/" (locate-user-emacs-file "var/")))
+         (file (expand-file-name
+                (format "%s-%s.md" handle (format-time-string "%Y%m%d-%H%M%S"))
+                dir))
+         (coding-system-for-write 'utf-8-unix))
+    (make-directory dir t)
+    (write-region text nil file nil 'silent)
+    file))
+
+(defun agent-collab--clip-reply (handle text)
+  "Reply TEXT of session HANDLE, clipped to `agent-collab-reply-limit'.
+A longer reply is also saved whole under the var directory, and the
+delivered text ends with its path."
+  (let* ((text (string-trim (substring-no-properties (or text ""))))
+         (full (and (> (length text) agent-collab-reply-limit)
+                    (agent-collab--save-reply handle text))))
+    (if full
+        (concat (agent-collab--clip text nil agent-collab-reply-limit)
+                "\n\nFull reply: " full " (read it with your file tools).")
+      (agent-collab--clip text nil agent-collab-reply-limit))))
+
 (defun agent-collab--reply (target id)
   "The reply to user message ID in TARGET as (TEXT), or nil while it runs."
   (let ((block (agent-session--block target id)))
@@ -342,7 +371,9 @@ reply goes back to it.)"
         (list (format "Reply from \"@%s\" (%s)%s:\n\n%s\n\n%s"
                       handle (agent-session-title target)
                       (if (eq (agent-session-status target) 'exited) ", which then exited" "")
-                      (if reply (agent-collab--clip (plist-get (cdr reply) :text)) "(no reply)")
+                      (if reply
+                          (agent-collab--clip-reply handle (plist-get (cdr reply) :text))
+                        "(no reply)")
                       (if (agent-session-child-p target)
                           (concat (agent-collab--tool-summary turn)
                                   "It takes no follow-ups; for more work, start another \

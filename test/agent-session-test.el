@@ -2389,6 +2389,50 @@ by Emacs; not from the user.)" (plist-get mail :hidden)))
      (should (string-search "\"@worker-4\" ended without replying: \"@worker-4\" was closed before \
 it replied" (plist-get (cdr (agent-session-test--last-user session)) :text))))))
 
+(ert-deftest agent-session-test-subagent-long-reply ()
+  "A reply over `agent-collab-reply-limit' is clipped and saved whole."
+  (let* ((user-emacs-directory (make-temp-file "agent-session-test-" t))
+         (agent-collab-reply-limit 50)
+         (long-prompt (make-string 200 ?x))
+         (full-reply (concat "收到：Your task:\n" long-prompt)))
+    (unwind-protect
+        (agent-session-test--with-profiles
+         (let ((session agent-session--current))
+           (agent-session-set-status session 'running)
+           (agent-session-test--poll
+            (agent-session-test--call "session_start" buffer :profile "worker"
+                                      :prompt long-prompt))
+           (agent-session-set-status session 'idle)
+           (let* ((mail (plist-get (cdr (agent-session-test--last-user session)) :text))
+                  (path (and (string-match
+                              "Full reply: \\([^\n]+\\) (read it with your file tools)\\."
+                              mail)
+                             (match-string 1 mail))))
+             ;; Clipped, but it says where the rest is.
+             (should (string-search "… (" mail))
+             (should path)
+             (should (file-exists-p path))
+             (should (string-search
+                      full-reply
+                      (let ((coding-system-for-read 'utf-8-unix))
+                        (with-temp-buffer
+                          (insert-file-contents path)
+                          (buffer-string))))))
+           ;; A reply under the limit is delivered whole, with no path; the
+           ;; hidden task note makes even a short reply a few hundred
+           ;; characters, so raise the limit for it.
+           (let ((agent-collab-reply-limit 1000))
+             (agent-session-set-status session 'running)
+             (agent-session-test--poll
+              (agent-session-test--call "session_start" buffer :profile "worker"
+                                        :prompt "短"))
+             (agent-session-set-status session 'idle))
+           (let ((mail (plist-get (cdr (agent-session-test--last-user session)) :text)))
+             (should (string-search "收到：Your task:\n短" mail))
+             (should-not (string-search "Full reply:" mail))
+             (should-not (string-search "more characters" mail)))))
+      (delete-directory user-emacs-directory t))))
+
 (ert-deftest agent-session-test-subagent-close-finished ()
   "A child closes once its reply has reached its parent, unless it is on
 screen; the reply lists what its tools did."
