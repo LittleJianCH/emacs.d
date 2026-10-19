@@ -107,6 +107,11 @@ carries the permission mode, cost and confirmation the user set.
 parent's own model); the tool description lists the enabled ones. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
+The description also carries `agent-collab-start-guidance`, on when to start
+a session at all: investigations to explorer, specified code to the coders, a
+review before committing, independent pieces at once; doing it yourself when
+explaining would take longer than the work. Without it agents rarely
+delegated even when a profile fitted.
 Costs come in five tiers, minimal, low, medium, high and premium, so the most
 expensive models stand apart: DeepSeek flash is minimal, Haiku low, Codex's
 gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.

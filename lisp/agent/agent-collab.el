@@ -585,7 +585,8 @@ gathers evidence.")
            :description "Writes code that needs more judgment than coder-flash: \
 changes across files, debugging, refactoring.")
     (reviewer :agent codex :model "gpt-6-astra" :mode plan :cost high
-              :description "Reviews changes independently; doesn't edit files.")
+              :description "Reviews changes independently and reproduces what it \
+finds; doesn't edit files.  Use it before committing a change that isn't trivial.")
     (generalist :agent claude :model "opus" :mode auto :cost high
                 :description "Does demanding work of any kind.")
     (expert :agent claude :model "fable" :mode plan :cost premium :confirm t
@@ -607,6 +608,25 @@ Profiles of agents that aren't enabled are left out."
   "Most sessions one session's agent may have working at once."
   :type 'integer)
 
+(defcustom agent-collab-start-guidance
+  "When to start a session: hand off work whose result you need but whose \
+steps you don't.
+- Investigations that read many files, logs or docs to answer one \
+question: explorer, and keep working while it reads.
+- Code you can specify in a few paragraphs (files, behavior, how to \
+verify): coder-flash, or coder when it needs judgment.
+- A change that isn't trivial, before you commit it: reviewer.
+- Independent pieces at once, one session each; never two sessions \
+editing the same files.
+Do it yourself when explaining the background would take longer than the \
+work, or when it needs the user; fork when it needs both your context and \
+your level.  A session's reply is a report, not proof: check its work \
+before you rely on it."
+  "Advice to agents on when to start sessions, shown with session_start.
+It is part of every agent's tools, so changing it refreshes them in live
+sessions (see agent-ui.el)."
+  :type 'string)
+
 (defcustom agent-collab-handoff-limit 60000
   "Most characters of its conversation a session hands over to one it starts."
   :type 'integer)
@@ -627,8 +647,11 @@ Profiles of agents that aren't enabled are left out."
              (mapconcat (lambda (entry) (symbol-name (car entry))) (agent-collab--profiles) ", "))))
 
 (defun agent-collab--profiles-description ()
-  "The profiles, for the description of session_start."
-  (concat "Profiles, by cost from minimal through low, medium and high to premium:\n"
+  "The guidance and profiles, for the description of session_start."
+  (concat (when (and agent-collab-start-guidance
+                     (not (string-empty-p agent-collab-start-guidance)))
+            (concat agent-collab-start-guidance "\n\n"))
+          "Profiles, by cost from minimal through low, medium and high to premium:\n"
           (mapconcat (pcase-lambda (`(,name . ,plist))
                        (format "- %s: %s%s, %s cost.  %s"
                                name
