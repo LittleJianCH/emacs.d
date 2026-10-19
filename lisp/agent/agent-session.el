@@ -337,12 +337,22 @@ E.g. to switch settings that can only be given at startup."
 
 ;;; Background process
 
+(defun agent-session-tools-stamp ()
+  "File whose content changes when the methods Emacs gives agents change.
+emx watches it to have its client list the tools again (see agent-ui.el)."
+  (expand-file-name (concat "emx-tools-" server-name) (locate-user-emacs-file "var/")))
+
+(defconst agent-session-emx-variables
+  '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER" "EMX_TOOLS_STAMP")
+  "Variables of `agent-session-environment' that emx needs.")
+
 (defun agent-session-environment (session)
   "Environment of the background process: it can find emx and reach this Emacs."
   (append
    (list (concat "PATH=" agent-session-bin-directory path-separator (getenv "PATH"))
          (concat "EMACS_SOCKET_NAME=" (expand-file-name server-name server-socket-dir))
-         (concat "EMX_AGENT_BUFFER=" (buffer-name (agent-session-buffer session))))
+         (concat "EMX_AGENT_BUFFER=" (buffer-name (agent-session-buffer session)))
+         (concat "EMX_TOOLS_STAMP=" (agent-session-tools-stamp)))
    process-environment))
 
 (defun agent-session-emx-command ()

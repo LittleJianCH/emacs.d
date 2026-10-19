@@ -119,7 +119,12 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's
   `tools/list` is generated from these, so a new method is automatically an MCP tool.
   A method that waits for something slow returns `agent-ui-defer` at once and emx polls
-  it (`_poll`), so Emacs never blocks while an agent waits.
+  it (`_poll`), so Emacs never blocks while an agent waits. When the methods change (a
+  reload, a changed profile), a timer writes their signature to
+  `var/emx-tools-<server-name>` (`EMX_TOOLS_STAMP`); each emx watches it and sends
+  `notifications/tools/list_changed`, which Claude and dsh act on. Codex ignores it, so
+  a saved Codex thread whose tools changed is resumed in a new process before the next
+  send; a Codex child keeps the tools it started with.
 - `agent-collab.el` — agents working with each other. Every session has a handle
   (`@cfi-meaning`) named from its topic by a cheap model of its agent
   (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users

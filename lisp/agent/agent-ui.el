@@ -482,8 +482,8 @@ configuration.  It must not depend on the calling session: a forked
 session has to see exactly its parent's tools, or it loses the prompt
 cache it shares with the parent.")
 
-(agent-ui-defmethod "describe" ()
-  "List all methods with their parameter schemas (used by emx help and MCP tools/list)."
+(defun agent-ui--describe ()
+  "The methods for agents: their names, descriptions and parameter schemas."
   (vconcat
    (seq-keep (pcase-lambda (`(,name . ,entry))
                (unless (equal name "describe")
@@ -495,6 +495,53 @@ cache it shares with the parent.")
                                  (concat "\n\n" (funcall fn))))
                        :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
+
+(agent-ui-defmethod "describe" ()
+  "List all methods with their parameter schemas (used by emx help and MCP tools/list)."
+  (agent-ui--describe))
+
+;;; Announcing changed methods
+;;
+;; Agents read the methods as MCP tools when they start.  When they change
+;; (a reload, a changed profile), the file `agent-session-tools-stamp' gets
+;; their new signature; each emx watches it and tells its client to list the
+;; tools again.  Claude and dsh do; Codex doesn't, so its backend compares
+;; the signature it started with before each send.
+
+(defun agent-ui-tools-signature ()
+  "A hash of the methods as agents see them, which changes with any of them."
+  (secure-hash 'sha1 (json-serialize (agent-ui--describe)
+                                     :null-object :null :false-object :false)))
+
+(defvar agent-ui--tools-signature nil
+  "The signature last written to the stamp file.")
+
+(defun agent-ui--update-tools-stamp ()
+  "Write the signature of the methods to the stamp file if it changed."
+  ;; From a timer: a module half reloaded mustn't raise errors here.
+  (ignore-errors
+    (let ((signature (agent-ui-tools-signature))
+          (file (agent-session-tools-stamp)))
+      (unless (equal signature agent-ui--tools-signature)
+        (unless (equal signature (ignore-errors
+                                   (with-temp-buffer
+                                     (insert-file-contents file)
+                                     (buffer-string))))
+          (make-directory (file-name-directory file) t)
+          (write-region signature nil file nil 'silent))
+        ;; Only once written: a failed write is tried again.
+        (setq agent-ui--tools-signature signature)))))
+
+(defvar agent-ui--tools-timer nil
+  "Timer running `agent-ui--update-tools-stamp'.")
+
+;; Not an idle timer: that repeats only once Emacs stopped being idle, and
+;; the emacsclient calls of emx and reload don't count.  A check takes about
+;; 0.1 ms.  Batch Emacs serves no agents; a reload replaces the timer.
+(unless noninteractive
+  (when (timerp agent-ui--tools-timer)
+    (cancel-timer agent-ui--tools-timer))
+  (setq agent-ui--tools-timer (run-with-timer 2 2 #'agent-ui--update-tools-stamp)))
 
 ;;; Buffers of files written by emx
 

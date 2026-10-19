@@ -15,7 +15,10 @@
 // The config_* methods are emx's own (see "Config files" below).
 // Environment: EMACS_SOCKET_NAME selects the server (set automatically inside agent
 //              sessions), EMX_EMACSCLIENT sets the emacsclient path, EMX_REMOTE_AGENT=1
-//              (set for agents of remote projects) enables the config_* methods.
+//              (set for agents of remote projects) enables the config_* methods,
+//              EMX_TOOLS_STAMP is a file Emacs writes when the methods it offers
+//              change (set for agents it starts): emx tells its MCP client to list
+//              the tools again when the file changes.
 
 'use strict';
 const { execFileSync } = require('node:child_process');
@@ -350,15 +353,36 @@ function mcpServer() {
   const reply = (id, result) => send({ jsonrpc: '2.0', id, result });
   const fail = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, message } });
 
+  // Emacs writes the signature of the methods it offers to this file, which may not
+  // exist yet (or ever).
+  const STAMP = process.env.EMX_TOOLS_STAMP;
+  const readStamp = () => {
+    try {
+      return fs.readFileSync(STAMP, 'utf8').trim();
+    } catch {
+      return null;
+    }
+  };
+  // The stamp seen by the latest tools/list, whether one has happened, and the stamp
+  // last announced: never notify before the client has listed the tools at least once.
+  let seen = null;
+  let listed = false;
+  let announced = null;
+
   const handlers = {
     initialize: (params) => ({
       protocolVersion: (params && params.protocolVersion) || '2025-06-18',
-      capabilities: { tools: { listChanged: false } },
+      capabilities: { tools: { listChanged: true } },
       serverInfo: { name: 'emacs', version: VERSION },
       instructions: MCP_HEAD + (REMOTE_AGENT ? REMOTE_INSTRUCTIONS : '') + MCP_BODY,
     }),
     ping: () => ({}),
     'tools/list': () => {
+      seen = readStamp();
+      listed = true;
+      // The client has caught up: any later change is news again, even one back to a
+      // stamp announced before.
+      announced = null;
       try {
         return { tools: [...call('describe'), ...configTools()] };
       } catch (err) {
@@ -380,6 +404,18 @@ function mcpServer() {
   };
   // Calls still waiting for their result, by request id, so they can be cancelled.
   const running = new Map();
+
+  // Tell the client to list the tools again when Emacs's method set changes. persistent
+  // false so a watch of a file that does not exist still lets emx exit with stdin.
+  if (STAMP) {
+    fs.watchFile(STAMP, { interval: 1000, persistent: false }, () => {
+      const stamp = readStamp();
+      if (listed && stamp !== null && stamp !== seen && stamp !== announced) {
+        announced = stamp;
+        send({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+      }
+    });
+  }
 
   const rl = readline.createInterface({ input: process.stdin });
   rl.on('line', (line) => {

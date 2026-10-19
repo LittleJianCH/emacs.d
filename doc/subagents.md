@@ -116,6 +116,12 @@ gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 1. An agent's tools and their descriptions depend on the configuration only,
    never on the calling session (`agent-ui-description-functions`). A test
    compares the parent's and the child's `describe` output.
+   When Emacs's tools change (a reload, a changed profile), live sessions are
+   told: emx sends `tools/list_changed` (Claude and dsh list again; Codex
+   ignores it, so a saved Codex thread resumes in a new process before its
+   next send). Every session, a fork's parent included, then sees the new
+   tools, so forks keep matching. A Codex child never refreshes: its thread
+   isn't saved, and it closes after one task anyway.
 2. What a child is told goes in its first user message, after any inherited
    history; never in system prompts or developer instructions.
 3. Refusals (depth, concurrency, profile, children asking) happen at call time;

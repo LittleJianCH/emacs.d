@@ -130,7 +130,7 @@ A remote agent reaches emx through the relay of agent-remote.el."
       ;; emx its variables explicitly.  The relay needs none.
       (unless (file-remote-p (agent-session-root session))
         (list :env (let ((env (make-hash-table :test #'equal)))
-                     (dolist (name '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER") env)
+                     (dolist (name agent-session-emx-variables env)
                        (when-let* ((entry (seq-find (lambda (e) (string-prefix-p (concat name "=") e))
                                                     (agent-session-environment session))))
                          (puthash name (substring entry (1+ (length name))) env))))))))))

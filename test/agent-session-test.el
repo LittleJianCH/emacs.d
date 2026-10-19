@@ -1553,6 +1553,99 @@ subagent's, neither end the turn nor show in the transcript."
       'codex session '(:method "turn/completed" :params (:threadId "parent" :turn (:id "t1"))))
      (should (eq (agent-session-status session) 'idle)))))
 
+;; Changed tools
+
+(ert-deftest agent-session-test-tools-stamp ()
+  "The methods' signature changes with their descriptions, and the stamp
+file is written only when it changes."
+  (let* ((dir (make-temp-file "agent-tools-" t))
+         (stamp (expand-file-name "stamp" dir))
+         (agent-ui--tools-signature nil)
+         (extra "one"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-session-tools-stamp) (lambda () stamp)))
+          (let ((agent-ui-description-functions
+                 (cons (cons "sessions" (lambda () extra)) agent-ui-description-functions)))
+            (should (equal (agent-ui-tools-signature) (agent-ui-tools-signature)))
+            (agent-ui--update-tools-stamp)
+            (let ((first (with-temp-buffer (insert-file-contents stamp) (buffer-string))))
+              (should (equal first (agent-ui-tools-signature)))
+              ;; Unchanged: not written again.
+              (set-file-times stamp '(0 0))
+              (agent-ui--update-tools-stamp)
+              (should (time-equal-p (file-attribute-modification-time (file-attributes stamp))
+                                    '(0 0)))
+              ;; A failed write is tried again.
+              (setq extra "two")
+              (cl-letf (((symbol-function 'write-region)
+                         (lambda (&rest _) (error "Disk full"))))
+                (agent-ui--update-tools-stamp))
+              (should (equal first (with-temp-buffer (insert-file-contents stamp)
+                                                     (buffer-string))))
+              (agent-ui--update-tools-stamp)
+              (should-not (equal first (with-temp-buffer (insert-file-contents stamp)
+                                                         (buffer-string)))))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-session-test-codex-stale-tools ()
+  "A saved Codex thread resumes in a new process before the next send once
+Emacs's tools changed; a child, or a session started before, doesn't."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (signature "old")
+         restarted sent)
+     (cl-letf (((symbol-function 'agent-codex--tools-signature) (lambda () signature))
+               ((symbol-function 'agent-session-restart-process)
+                (lambda (s) (setq restarted s) (setf (agent-session-status s) 'starting)))
+               ((symbol-function 'agent-codex--request)
+                (lambda (_s method params &rest _) (push (cons method params) sent))))
+       (agent-codex--set session :resume "thread-1")
+       ;; Started before this code was loaded: refreshed once.
+       (should (agent-codex--tools-stale-p session))
+       (agent-codex--set session :tools "old")
+       (should-not (agent-codex--tools-stale-p session))
+       (agent-session-backend-send 'codex session "一")
+       (should (equal (caar sent) "turn/start"))
+       (setq signature "new" sent nil)
+       (should (agent-codex--tools-stale-p session))
+       (agent-session-set-status session 'running)
+       (agent-session-backend-send 'codex session "二")
+       (should (eq restarted session))
+       (should-not sent)
+       (should (eq (agent-session-status session) 'running))
+       (should (string-search "重启 Codex" (agent-session-test--transcript)))
+       ;; Once the thread is back, the message goes and the turn stays running.
+       (agent-codex--thread-ready session)
+       (should (equal (caar sent) "turn/start"))
+       (should-not (agent-codex--state session :pending-send))
+       (should (eq (agent-session-status session) 'running))
+       ;; A child's thread isn't saved: it keeps its tools.
+       (with-temp-buffer
+         (setf (agent-session-info session)
+               (plist-put (agent-session-info session) :parent (current-buffer)))
+         (should-not (agent-codex--tools-stale-p session)))))))
+
+(ert-deftest agent-session-test-codex-resume-failed ()
+  "A thread that fails to resume after a restart for changed tools doesn't
+leave the session running with the message stuck; the next send retries."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         on-error)
+     (cl-letf (((symbol-function 'agent-codex--request)
+                (lambda (_s _method _params &optional _callback error-callback)
+                  (setq on-error error-callback))))
+       (agent-codex--set session :resume "thread-1")
+       (agent-codex--set session :tools "new")
+       (agent-codex--set session :pending-send "二")
+       (agent-session-set-status session 'running)
+       (agent-codex--start-thread-with-instructions session "/tmp/" nil)
+       (funcall on-error '(:message "no rollout found"))
+       (should (eq (agent-session-status session) 'idle))
+       (should-not (agent-codex--state session :pending-send))
+       (should (string-search "这条消息没有发出" (agent-session-test--transcript)))
+       (cl-letf (((symbol-function 'agent-codex--tools-signature) (lambda () "new")))
+         (should (agent-codex--tools-stale-p session)))))))
+
 (ert-deftest agent-session-test-skills ()
   "Skills Emacs gives are copied for the agent and replace the ones they supersede."
   (agent-session-test--with-session

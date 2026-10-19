@@ -90,7 +90,7 @@ overrides and the multi_agent feature flag does not."
                                                   (agent-session-environment session))))
                              (format "%s=%s" name (agent-codex--toml-string
                                                    (substring entry (1+ (length name)))))))
-                         '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER"))))
+                         agent-session-emx-variables)))
        (list "-c" (concat "mcp_servers.emacs.command=" (agent-codex--toml-string (car emx)))
              "-c" (format "mcp_servers.emacs.args=[%s]"
                           (mapconcat #'agent-codex--toml-string (cdr emx) ","))
@@ -144,7 +144,24 @@ Without ERROR-CALLBACK, display the error as a session notice."
 
 ;;; Backend interface
 
+(declare-function agent-ui-tools-signature "agent-ui" ())
+
+(defun agent-codex--tools-signature ()
+  "Signature of the methods Emacs gives agents, or nil without agent-ui."
+  (and (fboundp 'agent-ui-tools-signature) (agent-ui-tools-signature)))
+
+(defun agent-codex--tools-stale-p (session)
+  "Non-nil if Emacs's tools changed since the codex of SESSION started.
+Codex lists MCP tools once per thread and ignores tools/list_changed, so a
+saved thread is resumed in a new process to see them.  An unknown
+signature, from a process started before this code was loaded, counts as
+changed.  A child's thread isn't saved: it keeps the tools it started with."
+  (and (agent-codex--state session :resume)
+       (not (agent-session-child-p session))
+       (not (equal (agent-codex--state session :tools) (agent-codex--tools-signature)))))
+
 (cl-defmethod agent-session-backend-start ((_ (eql codex)) session)
+  (agent-codex--set session :tools (agent-codex--tools-signature))
   (let ((skills (agent-session-skills-dir session)))
     (agent-session-start-process session (agent-codex--command session))
     (agent-codex--request
@@ -247,7 +264,26 @@ thread; sending this field does not guarantee updating such a thread."
        (agent-session-set-info session :model (plist-get result :model))
        (if (and resume (zerop (hash-table-count (agent-session-blocks session))))
            (agent-codex--replay session)
+         (agent-codex--thread-ready session)))
+     (lambda (err)
+       (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
+                             'agent-session-error)
+       ;; Restarted for a message: don't leave it waiting, and try again
+       ;; with the next one.
+       (when (agent-codex--state session :pending-send)
+         (agent-codex--set session :pending-send nil)
+         (agent-codex--set session :tools nil)
+         (agent-session-notice session "恢复 Codex 会话失败，这条消息没有发出；再发一次会重试"
+                               'agent-session-error)
          (agent-session-set-status session 'idle))))))
+
+(defun agent-codex--thread-ready (session)
+  "Send the message SESSION was restarted for, if any, else go idle."
+  (if-let* ((text (agent-codex--state session :pending-send)))
+      (progn
+        (agent-codex--set session :pending-send nil)
+        (agent-codex--send-turn session text))
+    (agent-session-set-status session 'idle)))
 
 (defun agent-codex--replay (session)
   "Fetch and render the past turns of a resumed session, then go idle."
@@ -379,6 +415,16 @@ there first."
                      (agent-session-message-images text)))))
 
 (cl-defmethod agent-session-backend-send ((_ (eql codex)) session text)
+  (if (not (agent-codex--tools-stale-p session))
+      (agent-codex--send-turn session text)
+    ;; The thread resumes in a new process; the message goes once it has.
+    (agent-session-notice session "Emacs 的工具有更新，重启 Codex 后继续")
+    (agent-codex--set session :pending-send text)
+    (agent-session-restart-process session)
+    (agent-session-set-status session 'running)))
+
+(defun agent-codex--send-turn (session text)
+  "Start a turn of SESSION with user message TEXT."
   (agent-codex--request
    session "turn/start"
    (pcase-let ((`(,approval ,sandbox ,_ ,reviewer) (agent-codex--mode session)))
