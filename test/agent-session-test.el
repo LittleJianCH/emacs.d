@@ -1636,10 +1636,30 @@ session opens; an unreachable host isn't asked again at once."
        (setq reachable nil)
        (agent-session-check-programs "/rpc:down:/x/")
        (should (plist-get (gethash "/rpc:down:/x/" agent-session--remote-programs) :failed))
-       (should-not (member "/rpc:down:/x/" (agent-session-known-places)))
+       (should (member "/rpc:down:/x/" (agent-session-known-places)))
        (setq reachable t)
        (agent-session-ensure-programs "/rpc:down:/x/")
-       (should (= (length commands) 2))))))
+       (should (= (length commands) 2))
+       ;; A known absence survives a failed lookup.
+       (let ((programs (plist-get (gethash bare agent-session--remote-programs) :programs)))
+         (setq reachable nil)
+         (agent-session-check-programs bare)
+         (should (equal (plist-get (gethash bare agent-session--remote-programs) :programs)
+                        programs))
+         (should (plist-get (gethash bare agent-session--remote-programs) :failed))
+         (should-not (agent-session-agent-available-p 'test-missing bare)))
+       (should (= (length commands) 2))
+       ;; A failed lookup isn't retried until the retry time has passed.
+       (setq reachable t)
+       (agent-session-refresh-programs "/rpc:down:/x/")
+       (should (= (length commands) 2))
+       (plist-put (gethash "/rpc:down:/x/" agent-session--remote-programs) :failed
+                  (- (float-time) 1000))
+       (agent-session-refresh-programs "/rpc:down:/x/")
+       (should (= (length commands) 3))
+       ;; Opening a session refreshes a place whose lookup succeeded.
+       (agent-session-refresh-programs dev)
+       (should (= (length commands) 4))))))
 
 (ert-deftest agent-session-test-codex-stale-tools ()
   "A saved Codex thread resumes in a new process before the next send once

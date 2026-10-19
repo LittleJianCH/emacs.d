@@ -124,8 +124,8 @@ on one host may have different agents."
 
 (defvar agent-session--remote-programs (make-hash-table :test #'equal)
   "Agent programs looked up in remote projects: place -> plist.
-:programs ((PROGRAM . FOUND) ...) once looked up, :failed TIME after a
-failed lookup.")
+:programs ((PROGRAM . FOUND) ...) from the last lookup that worked, and
+:failed TIME if the latest one failed.")
 
 (defconst agent-session--retry-lookup 300
   "Seconds before a failed lookup of a remote project's programs is retried.")
@@ -153,9 +153,24 @@ then echo 1; else echo 0; fi; done"
                                    (cl-mapcar (lambda (program line)
                                                 (cons program (equal line "1")))
                                               programs found))))))))
-                 ;; Unreachable: don't wait for it again soon.
-                 (list :failed (float-time)))
+                 ;; Unreachable: keep what was known, and don't wait for it
+                 ;; again soon.
+                 (list :programs (plist-get (gethash place agent-session--remote-programs)
+                                            :programs)
+                       :failed (float-time)))
              agent-session--remote-programs)))
+
+(defun agent-session--lookup-failed-p (place)
+  "Non-nil if the latest lookup at PLACE failed less than a while ago."
+  (when-let* ((failed (plist-get (gethash place agent-session--remote-programs) :failed)))
+    (< (- (float-time) failed) agent-session--retry-lookup)))
+
+(defun agent-session-refresh-programs (root)
+  "Look up the programs of remote project ROOT again, as a session opens.
+Not if a lookup there failed recently: it would wait for the host again."
+  (when-let* ((place (agent-session-place root)))
+    (unless (agent-session--lookup-failed-p place)
+      (agent-session-check-programs root))))
 
 (defun agent-session-ensure-programs (root)
   "Look up the programs of remote project ROOT unless already known.
@@ -164,15 +179,13 @@ A failed lookup is retried after `agent-session--retry-lookup' seconds."
     (let ((known (gethash place agent-session--remote-programs)))
       (when (or (null known)
                 (and (plist-get known :failed)
-                     (> (- (float-time) (plist-get known :failed))
-                        agent-session--retry-lookup)))
+                     (not (agent-session--lookup-failed-p place))))
         (agent-session-check-programs root)))))
 
 (defun agent-session-known-places ()
-  "This machine (nil) and the remote projects whose programs are known."
-  (cons nil (seq-filter (lambda (place)
-                          (plist-get (gethash place agent-session--remote-programs) :programs))
-                        (hash-table-keys agent-session--remote-programs))))
+  "This machine (nil) and the remote projects looked up, even unsuccessfully:
+their sessions' tools still change with the configuration."
+  (cons nil (hash-table-keys agent-session--remote-programs)))
 
 (defun agent-session-agent-available-p (agent &optional place)
   "Non-nil if the program of AGENT is installed at PLACE.
@@ -3041,8 +3054,8 @@ agent's latest settings; INFO is the initial info plist."
                     (run-at-time 0 nil agent-session--list-refresh-function)))
                 nil t)
       (goto-char (point-max)))
-    ;; Its agent may start sessions of the agents installed on its host.
-    (agent-session-check-programs root)
+    ;; Its agent may start sessions of the agents installed where it runs.
+    (agent-session-refresh-programs root)
     (agent-session-backend-start (agent-session-backend session) session)
     buffer))
 
