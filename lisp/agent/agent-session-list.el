@@ -255,6 +255,31 @@ HEAD is cut first, so the handle stays readable."
              handle)
      width nil nil "…")))
 
+(defun agent-session-list--insert-live (buffer indent)
+  "Insert the entry of the live session BUFFER, indented by INDENT."
+  (let* ((session (buffer-local-value 'agent-session--current buffer))
+         (project (agent-session-list--project-name (agent-session-root session)))
+         (start (point)))
+    (agent-session-list--insert-entry
+     (list :buffer buffer)
+     (agent-session-list--head-line
+      (concat indent (agent-session-status-label session)
+              (propertize (format "  %s · %s" (agent-session-title session) project)
+                          'face 'agent-session-dim))
+      (if-let* ((handle (agent-session-handle session)))
+          (propertize (concat "  @" handle) 'face 'agent-session-dim)
+        ""))
+     (agent-session-list--kill-button buffer)
+     "\n" (make-string (+ 2 (string-width indent)) ?\s)
+     (propertize (agent-session-list--truncate (agent-session-display-title session))
+                 'face 'agent-session-list-title)
+     "\n")
+    (when-let* ((face (agent-session-list--alert-face buffer)))
+      (add-face-text-property start (point) face t)
+      (let ((reason (buffer-local-value 'agent-session-list--alert buffer)))
+        (when (and reason (not (string-empty-p reason)))
+          (agent-session-list--set-help start (point) (concat reason "\n点击打开")))))))
+
 (defun agent-session-list--render ()
   "Redraw the session list in the current buffer.
 Try to keep point on the same entry."
@@ -267,29 +292,17 @@ Try to keep point on the same entry."
     (insert (propertize "进行中\n" 'face 'agent-session-list-heading))
     (if (null live)
         (insert (propertize "  还没有会话，按 c 新建\n" 'face 'agent-session-dim))
-      (dolist (buffer live)
-        (let* ((session (buffer-local-value 'agent-session--current buffer))
-               (project (agent-session-list--project-name (agent-session-root session)))
-               (start (point)))
-          (agent-session-list--insert-entry
-           (list :buffer buffer)
-           (agent-session-list--head-line
-            (concat "  " (agent-session-status-label session)
-                    (propertize (format "  %s · %s" (agent-session-title session) project)
-                                'face 'agent-session-dim))
-            (if-let* ((handle (agent-session-handle session)))
-                (propertize (concat "  @" handle) 'face 'agent-session-dim)
-              ""))
-           (agent-session-list--kill-button buffer)
-           "\n    "
-           (propertize (agent-session-list--truncate (agent-session-display-title session))
-                       'face 'agent-session-list-title)
-           "\n")
-          (when-let* ((face (agent-session-list--alert-face buffer)))
-            (add-face-text-property start (point) face t)
-            (let ((reason (buffer-local-value 'agent-session-list--alert buffer)))
-              (when (and reason (not (string-empty-p reason)))
-                (agent-session-list--set-help start (point) (concat reason "\n点击打开"))))))))
+      ;; Sessions started by an agent follow the session that started them.
+      (let ((parent (lambda (buffer)
+                      (when-let* ((parent (agent-session-parent
+                                           (buffer-local-value 'agent-session--current buffer))))
+                        (car (memq (agent-session-buffer parent) live))))))
+        (dolist (buffer live)
+          (unless (funcall parent buffer)
+            (agent-session-list--insert-live buffer "  ")
+            (dolist (child live)
+              (when (eq (funcall parent child) buffer)
+                (agent-session-list--insert-live child "    ↳ ")))))))
     (insert "\n" (propertize (format "历史 · %s\n" (agent-session-list--project-name root))
                              'face 'agent-session-list-heading))
     (if (null history)

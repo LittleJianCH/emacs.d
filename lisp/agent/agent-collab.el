@@ -210,7 +210,10 @@ Keep its end with TAIL, else its start."
 (defun agent-collab--format-turn (number turn tools running)
   "Turn NUMBER (TURN from `agent-collab--turns') as text.
 TOOLS is none, summary or full; RUNNING means the turn isn't over."
-  (let ((parts (list (format "## Turn %d%s\nUser:\n%s" number (if running " (in progress)" "")
+  (let ((parts (list (format "## Turn %d%s\n%s:\n%s" number (if running " (in progress)" "")
+                             (if-let* ((origin (plist-get (cdar turn) :origin)))
+                                 (concat "Message from " origin)
+                               "User")
                              (agent-collab--clip (agent-session-message-text
                                                   (plist-get (cdar turn) :text))))))
         (pending nil))
@@ -247,12 +250,18 @@ TOOLS is none, summary or full; RUNNING means the turn isn't over."
         :project (agent-session-root session)
         :status (agent-collab--status session)
         :turns (length (agent-collab--turns session))
-        :yours (if (eq session caller) t :false)))
+        :yours (if (eq session caller) t :false)
+        :parent (agent-ui--json-value
+                 (when-let* ((parent (agent-session-parent session)))
+                   (concat "@" (agent-session-handle parent))))
+        :children (vconcat (mapcar (lambda (child) (concat "@" (agent-session-handle child)))
+                                   (agent-session-children session)))))
 
 (agent-ui-defmethod "sessions" ()
   "List the agent sessions open in this Emacs.  Each session has an id (its
 @handle, which the user also uses to mention it), agent, title, project,
-status, number of turns, and whether it is your own."
+status, number of turns, whether it is your own, the session that started
+it (parent) and the sessions it started (children)."
   (let ((caller (agent-ui-caller-session)))
     (list :sessions (vconcat (mapcar (lambda (buffer)
                                        (agent-collab--describe
@@ -357,7 +366,8 @@ reply later with session_read."
                 (condition-case err
                     (setq state (list :phase 'running :target target
                                       :id (agent-session-submit
-                                           target (agent-collab--message caller prompt))))
+                                           target (agent-collab--message caller prompt)
+                                           (concat "@" (agent-session-handle caller)))))
                   (error (setq state (list :phase 'failed
                                            :error (error-message-string err))))))
               (close-ask (label)

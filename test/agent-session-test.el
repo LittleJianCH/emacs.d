@@ -1876,6 +1876,55 @@ subagent's, neither end the turn nor show in the transcript."
        (should-error (agent-session-test--poll pending))
        (should-not (agent-session--pending-asks session))))))
 
+(ert-deftest agent-session-test-subagent-relations ()
+  "A session started by another session's agent is linked to it: listed
+under it, named in sessions and the mode line, and its messages show who
+sent them."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (child-buffer (agent-session-open 'test-echo2 default-directory nil nil
+                                            (list :parent buffer)))
+          (child (buffer-local-value 'agent-session--current child-buffer))
+          (peer (buffer-local-value 'agent-session--current (agent-session-test-echo t)))
+          (list-buffer (generate-new-buffer " *subagent-list*")))
+     (unwind-protect
+         (progn
+           (should (eq (agent-session-parent child) session))
+           (should-not (agent-session-parent session))
+           (should (equal (agent-session-children session) (list child)))
+           (should-not (agent-session-children peer))
+           (with-current-buffer child-buffer
+             (should (string-search "↖ @test-echo" (agent-session-test--mode-line))))
+           (with-current-buffer buffer
+             (should-not (string-search "↖" (agent-session-test--mode-line))))
+           (let ((listed (seq-map (lambda (s) (list (plist-get s :id) (plist-get s :parent)
+                                                    (plist-get s :children)))
+                                  (plist-get (agent-session-test--call "sessions" buffer)
+                                             :sessions))))
+             (should (member '("@test-echo" :null ["@test-echo2"]) listed))
+             (should (member '("@test-echo2" "@test-echo" []) listed)))
+           ;; The child follows its parent in the session list, indented.
+           (with-current-buffer list-buffer
+             (agent-session-list-mode)
+             (setq agent-session-list--root temporary-file-directory)
+             (agent-session-list--render)
+             (let ((text (buffer-string)))
+               (should (string-match-p "\n  ○.*@test-echo  ×.*\n.*\n    ↳ .*@test-echo2  ×" text))
+               (should (= (length (split-string text "@test-echo2  ×")) 2))))
+           ;; A message from another session's agent names it, in the
+           ;; transcript and for agents reading the session.
+           (let ((agent-collab-confirm nil))
+             (agent-session-test--poll
+              (agent-session-test--call "session_ask" buffer :prompt "检查一下"
+                                        :session "@test-echo2")))
+           (with-current-buffer child-buffer
+             (should (string-search "▍ @test-echo\n" (agent-session-test--transcript)))
+             (should-not (string-search "▍ 你" (agent-session-test--transcript))))
+           (should (string-search "Message from @test-echo:"
+                                  (agent-session-test--call "session_read" nil
+                                                            :session "@test-echo2"))))
+       (kill-buffer list-buffer)))))
+
 (ert-deftest agent-session-test-rpc-deferred ()
   (let* ((polls 0)
          (agent-ui--methods

@@ -166,6 +166,22 @@ That is the Claude session id or the Codex thread id."
                        session)))
               (agent-session-buffers))))
 
+;;; Subagents: sessions an agent started (see agent-collab.el)
+
+(defun agent-session-parent (session)
+  "The live session whose agent started SESSION, or nil."
+  (when-let* ((buffer (plist-get (agent-session-info session) :parent))
+              ((buffer-live-p buffer)))
+    (buffer-local-value 'agent-session--current buffer)))
+
+(defun agent-session-children (session)
+  "Live sessions started by the agent of SESSION, most recently used first."
+  (let ((buffer (agent-session-buffer session)))
+    (seq-keep (lambda (other)
+                (let ((child (buffer-local-value 'agent-session--current other)))
+                  (and (eq (plist-get (agent-session-info child) :parent) buffer) child)))
+              (agent-session-buffers))))
+
 ;;; Backend interface
 
 (cl-defgeneric agent-session-backend-start (backend session)
@@ -778,7 +794,8 @@ Keep all characters and their positions so code-block offsets stay valid."
 When the turn is folded, a one-line summary of the process follows below
 \(click to expand)."
   (let ((fold (plist-get block :fold)))
-    (concat (propertize "▍ 你" 'face 'agent-session-user)
+    (concat (propertize (concat "▍ " (or (plist-get block :origin) "你"))
+                        'face 'agent-session-user)
             (cond ((plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim))
                   ((plist-get block :steer) (propertize "  ↪ 引导" 'face 'agent-session-dim))
                   (t ""))
@@ -1636,7 +1653,14 @@ HELP is the help echo."
                  'face 'agent-session-dim)
      (when-let* ((handle (agent-session-handle session)))
        (propertize (concat " @" handle) 'face 'agent-session-dim
-                   'help-echo "在其他会话里用这个名字提及本会话")))))
+                   'help-echo "在其他会话里用这个名字提及本会话"))
+     (when-let* ((parent (agent-session-parent session)))
+       (concat "  " (agent-session--mode-line-control
+                     (propertize (concat "↖ @" (agent-session-handle parent))
+                                 'face 'agent-session-dim)
+                     (lambda () (interactive)
+                       (select-window (agent-session-display (agent-session-buffer parent))))
+                     "本会话由它委派，回到它"))))))
 
 (defvar agent-session--list-refresh-function nil
   "Refresh function of the session list (set by it), called on status changes.")
@@ -1914,16 +1938,19 @@ send; the transcript keeps showing what the user wrote.")
   (agent-session-backend-send (agent-session-backend session) session
                               (agent-session--outgoing session text)))
 
-(defun agent-session-submit (session text)
+(defun agent-session-submit (session text &optional origin)
   "Send TEXT as the user: show it in the transcript; queue it if busy.
-Return the id of its block in the transcript."
+ORIGIN names the sender when it isn't the user, such as the @handle of
+another session; the transcript shows it instead of 你.  Return the id of
+the message's block in the transcript."
   (unless (plist-get (agent-session-info session) :title)
     (setf (agent-session-info session)
           (plist-put (agent-session-info session) :title (agent-session--title-seed text))))
   (run-hook-with-args 'agent-session-submit-functions session text)
   (let ((id (format "user-%s" (random)))
         (busy (memq (agent-session-status session) '(running starting))))
-    (agent-session--new-block session id (list :type 'user :text text :queued busy))
+    (agent-session--new-block session id (list :type 'user :text text :queued busy
+                                               :origin origin))
     (if busy
         (progn
           (setf (agent-session-queue session)
