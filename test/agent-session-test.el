@@ -1564,7 +1564,7 @@ file is written only when it changes."
   (let* ((dir (make-temp-file "agent-tools-" t))
          (stamp (expand-file-name "stamp" dir))
          (agent-ui--tools-signatures (make-hash-table :test #'equal))
-         (agent-session--host-programs (make-hash-table :test #'equal))
+         (agent-session--remote-programs (make-hash-table :test #'equal))
          (extra "one"))
     (unwind-protect
         (cl-letf (((symbol-function 'agent-session-tools-stamp) (lambda (&optional _) stamp)))
@@ -1591,37 +1591,55 @@ file is written only when it changes."
                                                          (buffer-string)))))))
       (delete-directory dir t))))
 
-(ert-deftest agent-session-test-host-programs ()
-  "Agents see the profiles of the agents installed on the host they run on,
-looked up there in one round trip as a session opens."
+(ert-deftest agent-session-test-place-programs ()
+  "Agents see the profiles of the agents installed where they run: this
+machine, or a remote project, looked up there in one round trip as a
+session opens; an unreachable host isn't asked again at once."
   (agent-session-test--with-profiles
-   (let ((agent-session--host-programs (make-hash-table :test #'equal))
+   (let ((agent-session--remote-programs (make-hash-table :test #'equal))
          (agent-session-test--missing-program "agent-session-test-remote-only")
          (agent-collab-start-guidance nil)
+         (dev "/rpc:dev:/home/u/p/")
+         (bare "/rpc:dev:/home/u/q/")
+         (reachable t)
          commands)
      (cl-letf (((symbol-function 'process-file)
                 (lambda (_program _infile _buffer _display &rest args)
-                  (push args commands)
-                  ;; The test agent's program is found, the others aren't.
+                  (unless reachable (error "Connection timed out"))
+                  (push (cons default-directory args) commands)
+                  ;; Only project p (its direnv, say) has the test agent.
                   (insert (mapconcat (lambda (program)
-                                       (if (equal program "agent-session-test-remote-only")
+                                       (if (and (equal program "agent-session-test-remote-only")
+                                                (equal default-directory dev))
                                            "1" "0"))
                                      (nthcdr 3 args) "\n")
                           "\n")
                   0)))
-       (agent-session-check-host "/rpc:dev:/home/u/p/"))
-     (should (= (length commands) 1))
-     (should (member "/rpc:dev:" (agent-session-known-hosts)))
-     (should (agent-session-agent-available-p 'test-missing "/rpc:dev:"))
-     (should-not (agent-session-agent-available-p 'test-missing))
-     ;; Not looked up yet: assumed there.
-     (should (agent-session-agent-available-p 'test-missing "/rpc:other:"))
-     (should (string-search "- absent:" (agent-collab--profiles-description "/rpc:dev:")))
-     (should-not (string-search "absent" (agent-collab--profiles-description nil)))
-     (should (agent-collab--profile "absent" "/rpc:dev:"))
-     (should-error (agent-collab--profile "absent"))
-     ;; Each host has its own stamp.
-     (should-not (equal (agent-session-tools-stamp) (agent-session-tools-stamp "/rpc:dev:"))))))
+       (agent-session-check-programs dev)
+       (agent-session-check-programs bare)
+       (should (= (length commands) 2))
+       (should (equal (agent-session-known-places) (list nil bare dev)))
+       (should (agent-session-agent-available-p 'test-missing dev))
+       (should-not (agent-session-agent-available-p 'test-missing bare))
+       (should-not (agent-session-agent-available-p 'test-missing))
+       ;; Not looked up yet: assumed there.
+       (should (agent-session-agent-available-p 'test-missing "/rpc:other:/x/"))
+       (should (string-search "- absent:" (agent-collab--profiles-description dev)))
+       (should-not (string-search "absent" (agent-collab--profiles-description nil)))
+       (should (agent-collab--profile "absent" dev))
+       (should-error (agent-collab--profile "absent"))
+       ;; Each place has its own stamp.
+       (should-not (equal (agent-session-tools-stamp) (agent-session-tools-stamp dev)))
+       ;; Known: not looked up again.  Unreachable: not again soon.
+       (agent-session-ensure-programs dev)
+       (should (= (length commands) 2))
+       (setq reachable nil)
+       (agent-session-check-programs "/rpc:down:/x/")
+       (should (plist-get (gethash "/rpc:down:/x/" agent-session--remote-programs) :failed))
+       (should-not (member "/rpc:down:/x/" (agent-session-known-places)))
+       (setq reachable t)
+       (agent-session-ensure-programs "/rpc:down:/x/")
+       (should (= (length commands) 2))))))
 
 (ert-deftest agent-session-test-codex-stale-tools ()
   "A saved Codex thread resumes in a new process before the next send once

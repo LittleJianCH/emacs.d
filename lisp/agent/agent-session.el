@@ -115,46 +115,76 @@ PLIST supports :backend :title :key.")
       (let ((program (and (boundp variable) (symbol-value variable))))
         (and (stringp program) (not (string-empty-p program)) program)))))
 
-(defvar agent-session--host-programs (make-hash-table :test #'equal)
-  "Agent programs looked up on remote hosts.
-Remote prefix (\"/rpc:dev:\") -> ((PROGRAM . FOUND) ...).")
+(defun agent-session-place (root)
+  "Where agents of project ROOT run, as far as their tools go: nil for this
+machine, else ROOT itself.  A remote project's agents run on its host in
+the project's environment (tramp-rpc applies its direnv), so two projects
+on one host may have different agents."
+  (and (file-remote-p root) (file-name-as-directory root)))
 
-(defun agent-session-check-host (root)
-  "Look up which agent programs the host of remote ROOT has; remember it.
-One round trip, made as a session opens there: an agent installed on a
-host shows once a session opens on it again."
-  (when-let* ((host (file-remote-p root))
+(defvar agent-session--remote-programs (make-hash-table :test #'equal)
+  "Agent programs looked up in remote projects: place -> plist.
+:programs ((PROGRAM . FOUND) ...) once looked up, :failed TIME after a
+failed lookup.")
+
+(defconst agent-session--retry-lookup 300
+  "Seconds before a failed lookup of a remote project's programs is retried.")
+
+(defun agent-session-check-programs (root)
+  "Look up which agent programs remote project ROOT has; remember it.
+One round trip, made as a session opens there: an agent installed there
+shows once a session opens on it again."
+  (when-let* ((place (agent-session-place root))
               (programs (delete-dups
                          (seq-filter #'stringp (mapcar (lambda (entry)
                                                          (agent-session--program (car entry)))
                                                        agent-session-agents)))))
-    (ignore-errors
-      (with-temp-buffer
-        (let ((default-directory root))
-          (when (zerop (apply #'process-file "sh" nil t nil "-c"
-                              "for p; do if command -v \"$p\" >/dev/null 2>&1; \
+    (puthash place
+             (or (ignore-errors
+                   (with-temp-buffer
+                     (let ((default-directory root))
+                       (when (zerop (apply #'process-file "sh" nil t nil "-c"
+                                           "for p; do if command -v \"$p\" >/dev/null 2>&1; \
 then echo 1; else echo 0; fi; done"
-                              "sh" programs))
-            (let ((found (split-string (buffer-string) "\n" t)))
-              (when (= (length found) (length programs))
-                (puthash host (cl-mapcar (lambda (program line) (cons program (equal line "1")))
-                                         programs found)
-                         agent-session--host-programs)))))))))
+                                           "sh" programs))
+                         (let ((found (split-string (buffer-string) "\n" t)))
+                           (when (= (length found) (length programs))
+                             (list :programs
+                                   (cl-mapcar (lambda (program line)
+                                                (cons program (equal line "1")))
+                                              programs found))))))))
+                 ;; Unreachable: don't wait for it again soon.
+                 (list :failed (float-time)))
+             agent-session--remote-programs)))
 
-(defun agent-session-known-hosts ()
-  "This machine (nil) and the remote hosts whose programs were looked up."
-  (cons nil (hash-table-keys agent-session--host-programs)))
+(defun agent-session-ensure-programs (root)
+  "Look up the programs of remote project ROOT unless already known.
+A failed lookup is retried after `agent-session--retry-lookup' seconds."
+  (when-let* ((place (agent-session-place root)))
+    (let ((known (gethash place agent-session--remote-programs)))
+      (when (or (null known)
+                (and (plist-get known :failed)
+                     (> (- (float-time) (plist-get known :failed))
+                        agent-session--retry-lookup)))
+        (agent-session-check-programs root)))))
 
-(defun agent-session-agent-available-p (agent &optional host)
-  "Non-nil if the program of AGENT is installed on HOST.
-HOST is a remote prefix such as \"/rpc:dev:\", nil for this machine.  An
-agent that names no program counts as available, and so does one on a
-host not looked up yet (see `agent-session-check-host')."
+(defun agent-session-known-places ()
+  "This machine (nil) and the remote projects whose programs are known."
+  (cons nil (seq-filter (lambda (place)
+                          (plist-get (gethash place agent-session--remote-programs) :programs))
+                        (hash-table-keys agent-session--remote-programs))))
+
+(defun agent-session-agent-available-p (agent &optional place)
+  "Non-nil if the program of AGENT is installed at PLACE.
+PLACE is from `agent-session-place': nil for this machine.  An agent that
+names no program counts as available, and so does one in a remote
+project not looked up (see `agent-session-check-programs')."
   (let ((program (agent-session--program agent)))
     (cond ((eq program 'none) t)
           ((null program) nil)
-          ((null host) (and (executable-find program) t))
-          (t (let ((known (assoc program (gethash host agent-session--host-programs))))
+          ((null place) (and (executable-find program) t))
+          (t (let ((known (assoc program (plist-get (gethash place agent-session--remote-programs)
+                                                    :programs))))
                (or (null known) (cdr known)))))))
 
 (defun agent-session-display-title (session)
@@ -387,13 +417,13 @@ E.g. to switch settings that can only be given at startup."
 
 ;;; Background process
 
-(defun agent-session-tools-stamp (&optional host)
-  "File whose content changes when the methods agents on HOST see change.
-HOST is a remote prefix, nil for this machine: agents can start sessions
-of the agents installed where they run.  emx watches it to have its
-client list the tools again (see agent-ui.el)."
+(defun agent-session-tools-stamp (&optional place)
+  "File whose content changes when the methods agents at PLACE see change.
+PLACE is from `agent-session-place': agents can start sessions of the
+agents installed where they run.  emx watches it to have its client list
+the tools again (see agent-ui.el)."
   (expand-file-name (concat "emx-tools-" server-name
-                            (and host (concat "-" (substring (secure-hash 'sha1 host) 0 12))))
+                            (and place (concat "-" (substring (secure-hash 'sha1 place) 0 12))))
                     (locate-user-emacs-file "var/")))
 
 (defconst agent-session-emx-variables
@@ -407,7 +437,7 @@ client list the tools again (see agent-ui.el)."
          (concat "EMACS_SOCKET_NAME=" (expand-file-name server-name server-socket-dir))
          (concat "EMX_AGENT_BUFFER=" (buffer-name (agent-session-buffer session)))
          (concat "EMX_TOOLS_STAMP="
-                 (agent-session-tools-stamp (file-remote-p (agent-session-root session)))))
+                 (agent-session-tools-stamp (agent-session-place (agent-session-root session)))))
    process-environment))
 
 (defun agent-session-emx-command ()
@@ -3012,7 +3042,7 @@ agent's latest settings; INFO is the initial info plist."
                 nil t)
       (goto-char (point-max)))
     ;; Its agent may start sessions of the agents installed on its host.
-    (agent-session-check-host root)
+    (agent-session-check-programs root)
     (agent-session-backend-start (agent-session-backend session) session)
     buffer))
 

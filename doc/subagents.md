@@ -105,13 +105,15 @@ carries the permission mode, cost and confirmation the user set.
 (Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
 (Claude Fable, plan, confirmed by the user each time: a fork only reaches the
 parent's own model); the tool description lists those whose agent is enabled
-and installed where the caller runs: children start on their parent's host, so
+and installed where the caller runs: children start where their parent runs, so
 an agent on this machine sees the agents installed here and one in a `/rpc:dev:`
-project those on dev. A remote host's programs are looked up in one round trip
-(`command -v`) as a session opens there, so installing an agent on a host shows
-once a session opens on it again; the timer never makes round trips. A child that
-fails to start anyway is closed (only that one, found by a token in its info:
-others may open while it waits for the host) and the error returned. An agent
+project those of that project on dev (per project, since tramp-rpc applies its
+direnv). A remote project's programs are looked up in one round trip (`command
+-v`) as a session opens there, so installing an agent shows once a session opens
+there again; the timer never makes round trips, and an unreachable host isn't
+asked again for 5 minutes. A child that fails to start anyway is closed (only
+that one, found by a token in its info: others may open while it waits for the
+host) and the error returned. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start
@@ -130,12 +132,13 @@ gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 
 ### Rules
 
-1. An agent's tools and their descriptions depend on the configuration and the
-   host the agent runs on, never otherwise on the calling session
-   (`agent-ui-description-functions`): a fork runs on its parent's host. A test
-   compares the parent's and the child's `describe` output. Each host has its
-   own stamp file, so installing an agent on one host doesn't refresh (and cost
-   the prompt cache of) sessions on another.
+1. An agent's tools and their descriptions depend on the configuration and
+   where the agent runs, never otherwise on the calling session
+   (`agent-ui-description-functions`): a fork runs where its parent does. A
+   test compares the parent's and the child's `describe` output. Each place has
+   its own stamp file, so installing an agent in one doesn't refresh (and cost
+   the prompt cache of) sessions elsewhere. Remote sessions whose emx started
+   before per-place stamps watch this machine's stamp until they restart.
    When Emacs's tools change (a reload, a changed profile), live sessions are
    told: emx sends `tools/list_changed` (Claude and dsh list again; Codex
    ignores it, so a saved Codex thread resumes in a new process before its

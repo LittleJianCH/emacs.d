@@ -601,8 +601,8 @@ Each entry is (NAME . PLIST), with PLIST keys:
   :cost         minimal, low, medium, high or premium, to help agents choose
   :description  what it is good for, shown to agents
   :confirm      non-nil asks the user before each start
-Profiles of agents that aren't enabled, or not installed on the host
-the starting session runs on, are left out."
+Profiles of agents that aren't enabled, or not installed where the
+starting session runs, are left out."
   :type '(alist :key-type symbol :value-type plist))
 
 (defcustom agent-collab-max-active 4
@@ -640,26 +640,26 @@ sessions (see agent-ui.el)."
 (defconst agent-collab--modes '(plan ask edits auto full)
   "Permission modes from the narrowest to the broadest.")
 
-(defun agent-collab--profiles (&optional host)
+(defun agent-collab--profiles (&optional place)
   "Entries of `agent-collab-profiles' whose agent is enabled and installed
-on HOST, a remote prefix (nil for this machine): sessions start on the
-host of the session starting them."
+at PLACE, from `agent-session-place' (nil for this machine): sessions
+start where the session starting them runs."
   (seq-filter (lambda (entry)
                 (let ((agent (plist-get (cdr entry) :agent)))
                   (and (assq agent agent-session-agents)
-                       (agent-session-agent-available-p agent host))))
+                       (agent-session-agent-available-p agent place))))
               agent-collab-profiles))
 
-(defun agent-collab--profile (name &optional host)
-  "The profile called NAME usable on HOST; signal an error if there is none."
-  (or (and name (assq (intern name) (agent-collab--profiles host)))
+(defun agent-collab--profile (name &optional place)
+  "The profile called NAME usable at PLACE; signal an error if there is none."
+  (or (and name (assq (intern name) (agent-collab--profiles place)))
       (error "%s; choose one of: %s"
              (if name (format "No profile %s here" name) "Name a profile")
              (mapconcat (lambda (entry) (symbol-name (car entry)))
-                        (agent-collab--profiles host) ", "))))
+                        (agent-collab--profiles place) ", "))))
 
-(defun agent-collab--profiles-description (host)
-  "The guidance and the profiles usable on HOST, for session_start.
+(defun agent-collab--profiles-description (place)
+  "The guidance and the profiles usable at PLACE, for session_start.
 Installing or removing an agent there changes the tools agents see,
 which refreshes them in live sessions."
   (concat (when (and agent-collab-start-guidance
@@ -674,7 +674,7 @@ which refreshes them in live sessions."
                                (if-let* ((model (plist-get plist :model))) (concat " " model) "")
                                (or (plist-get plist :cost) "unknown")
                                (or (plist-get plist :description) "")))
-                     (agent-collab--profiles host) "\n")))
+                     (agent-collab--profiles place) "\n")))
 
 (setf (alist-get "session_start" agent-ui-description-functions nil nil #'equal)
       #'agent-collab--profiles-description)
@@ -872,7 +872,7 @@ one to finish" working))
                plist (agent-collab--fork-plist caller)
                info (list :fork-from source))))
       ((or "fresh" "handoff")
-       (let ((entry (agent-collab--profile profile (file-remote-p (agent-session-root caller)))))
+       (let ((entry (agent-collab--profile profile (agent-session-place (agent-session-root caller)))))
          (setq name (symbol-name (car entry))
                plist (cdr entry)
                history (and (equal context "handoff") (agent-collab--handoff caller)))))

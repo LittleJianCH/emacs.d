@@ -144,13 +144,13 @@ Without ERROR-CALLBACK, display the error as a session notice."
 
 ;;; Backend interface
 
-(declare-function agent-ui-tools-signature "agent-ui" (&optional host))
+(declare-function agent-ui-tools-signature "agent-ui" (&optional place))
 
 (defun agent-codex--tools-signature (session)
   "Signature of the methods Emacs gives the agent of SESSION, or nil without
-agent-ui.  They depend on the host it runs on."
+agent-ui.  They depend on where it runs."
   (and (fboundp 'agent-ui-tools-signature)
-       (agent-ui-tools-signature (file-remote-p (agent-session-root session)))))
+       (agent-ui-tools-signature (agent-session-place (agent-session-root session)))))
 
 (defun agent-codex--tools-stale-p (session)
   "Non-nil if Emacs's tools changed since the codex of SESSION started.
@@ -163,6 +163,9 @@ changed.  A child's thread isn't saved: it keeps the tools it started with."
        (not (equal (agent-codex--state session :tools) (agent-codex--tools-signature session)))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql codex)) session)
+  ;; Know the project's programs first, as emx will when it lists the
+  ;; tools; else the signature changes once it does.
+  (agent-session-ensure-programs (agent-session-root session))
   (agent-codex--set session :tools (agent-codex--tools-signature session))
   (let ((skills (agent-session-skills-dir session)))
     (agent-session-start-process session (agent-codex--command session))

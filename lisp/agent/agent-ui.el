@@ -476,17 +476,17 @@ Emacs."))))))
 
 (defvar agent-ui-description-functions nil
   "Functions extending method descriptions: ((NAME . FUNCTION) ...).
-FUNCTION is called with the host the calling agent runs on (a remote
-prefix such as \"/rpc:dev:\", nil for this machine) and returns text
-appended to the description of method NAME, such as choices from the
-user's configuration or programs installed there.  It must not depend
-on the calling session otherwise: a forked session, which runs on its
-parent's host, has to see exactly its parent's tools, or it loses the
-prompt cache it shares with the parent.")
+FUNCTION is called with where the calling agent runs (a place from
+`agent-session-place': nil for this machine, else a remote project) and
+returns text appended to the description of method NAME, such as choices
+from the user's configuration or programs installed there.  It must not
+depend on the calling session otherwise: a forked session, which runs
+where its parent does, has to see exactly its parent's tools, or it
+loses the prompt cache it shares with the parent.")
 
-(defun agent-ui--describe (&optional host)
-  "The methods for agents on HOST: names, descriptions and parameter schemas.
-HOST is a remote prefix, nil for this machine."
+(defun agent-ui--describe (&optional place)
+  "The methods for agents at PLACE: names, descriptions and parameter schemas.
+PLACE is from `agent-session-place', nil for this machine."
   (vconcat
    (seq-keep (pcase-lambda (`(,name . ,entry))
                (unless (equal name "describe")
@@ -495,48 +495,46 @@ HOST is a remote prefix, nil for this machine."
                        (concat (plist-get entry :description)
                                (when-let* ((fn (alist-get name agent-ui-description-functions
                                                           nil nil #'equal)))
-                                 (concat "\n\n" (funcall fn host))))
+                                 (concat "\n\n" (funcall fn place))))
                        :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
 
 (agent-ui-defmethod "describe" ()
   "List all methods with their parameter schemas (used by emx help and MCP tools/list)."
-  (let* ((root (agent-ui--caller-root))
-         (host (and root (file-remote-p root))))
-    ;; A session opened before hosts were looked up.
-    (when (and host (not (member host (agent-session-known-hosts))))
-      (agent-session-check-host root))
-    (agent-ui--describe host)))
+  (let ((root (agent-ui--caller-root)))
+    ;; A session opened before its project was looked up.
+    (when root (agent-session-ensure-programs root))
+    (agent-ui--describe (and root (agent-session-place root)))))
 
 ;;; Announcing changed methods
 ;;
 ;; Agents read the methods as MCP tools when they start.  When they change
 ;; (a reload, a changed profile, an agent installed), the file
-;; `agent-session-tools-stamp' of each host gets their new signature there;
+;; `agent-session-tools-stamp' of each place gets their new signature there;
 ;; each emx watches its agent's and tells its client to list the tools again.
 ;; Claude and dsh do; Codex doesn't, so its backend compares the signature it
 ;; started with before each send.
 
-(defun agent-ui-tools-signature (&optional host)
-  "A hash of the methods as agents on HOST see them; it changes with any.
-HOST is a remote prefix, nil for this machine.  A host not looked up yet
+(defun agent-ui-tools-signature (&optional place)
+  "A hash of the methods as agents at PLACE see them; it changes with any.
+PLACE is from `agent-session-place'.  A remote project not looked up yet
 isn't looked up here."
-  (secure-hash 'sha1 (json-serialize (agent-ui--describe host)
+  (secure-hash 'sha1 (json-serialize (agent-ui--describe place)
                                      :null-object :null :false-object :false)))
 
 (defvar agent-ui--tools-signatures (make-hash-table :test #'equal)
-  "Host -> the signature last written to its stamp file.")
+  "Place -> the signature last written to its stamp file.")
 
 (defun agent-ui--update-tools-stamp ()
-  "Write the signature of the methods to each host's stamp if it changed.
-Only hosts already looked up: this runs on a timer, where a round trip to
+  "Write the signature of the methods to each place's stamp if it changed.
+Only places already looked up: this runs on a timer, where a round trip to
 a host would freeze Emacs."
-  (dolist (host (agent-session-known-hosts))
+  (dolist (place (agent-session-known-places))
     ;; From a timer: a module half reloaded mustn't raise errors here.
     (ignore-errors
-      (let ((signature (agent-ui-tools-signature host))
-            (file (agent-session-tools-stamp host)))
-        (unless (equal signature (gethash host agent-ui--tools-signatures))
+      (let ((signature (agent-ui-tools-signature place))
+            (file (agent-session-tools-stamp place)))
+        (unless (equal signature (gethash place agent-ui--tools-signatures))
           (unless (equal signature (ignore-errors
                                      (with-temp-buffer
                                        (insert-file-contents file)
@@ -544,7 +542,7 @@ a host would freeze Emacs."
             (make-directory (file-name-directory file) t)
             (write-region signature nil file nil 'silent))
           ;; Only once written: a failed write is tried again.
-          (puthash host signature agent-ui--tools-signatures))))))
+          (puthash place signature agent-ui--tools-signatures))))))
 
 (defvar agent-ui--tools-timer nil
   "Timer running `agent-ui--update-tools-stamp'.")
