@@ -239,9 +239,8 @@ Buttons, such as ×, keep their own tooltips."
    (make-text-button "×" nil 'face 'agent-session-dim 'follow-link t
                      'help-echo "结束这个会话"
                      'action (lambda (_)
-                               (when (yes-or-no-p (format "结束 %s？" (buffer-name buffer)))
-                                 (kill-buffer buffer)
-                                 (agent-session-list--refresh))))))
+                               (kill-buffer buffer)
+                               (agent-session-list--refresh)))))
 
 (defun agent-session-list--truncate (string)
   "Truncate STRING to fit the window width."
