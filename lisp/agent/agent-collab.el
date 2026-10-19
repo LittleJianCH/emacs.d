@@ -783,9 +783,10 @@ doesn't say which block it is."
     (agent-session--update caller (car entry) :subagent (agent-session-buffer child)
                            :subagent-handle (agent-session-handle child))))
 
-(defun agent-collab--open-child (caller name plist title &optional info)
+(defun agent-collab--open-child (caller name plist title &optional info handle)
   "Start a session of profile NAME (PLIST) for the agent of CALLER.
-TITLE is its title; INFO is more of its info, such as :fork-from."
+TITLE is its title; INFO is more of its info, such as :fork-from.  It is
+called HANDLE, made unique, else after the profile."
   (let* ((token (list 'start))
          (buffer (condition-case err
                      (agent-session-open
@@ -808,7 +809,7 @@ TITLE is its title; INFO is more of its info, such as :fork-from."
                               (agent-session-kill-quietly other)))
                           (signal (car err) (cdr err)))))
          (child (buffer-local-value 'agent-session--current buffer)))
-    (agent-session-set-handle child name)
+    (agent-session-set-handle child (or handle name))
     (agent-collab--link-tool caller child)
     child))
 
@@ -825,9 +826,13 @@ context fork")
      (context string "How it gets context: fresh (default), handoff or fork")
      (prompt string "The task.  With fresh, include everything it needs: it hasn't seen
 your conversation" required)
+     (handle string "Its name after its task: one or two lowercase English words
+joined by '-', at most 16 characters, such as cgu-measure.  You and the user
+refer to it by it; default: the profile's name")
      (title string "A short title for the session, a few words")
      (wait integer "Seconds to wait for its final reply.  0 (default) returns at once
-while it works; at most 1500"))
+while it works; at most 1500.  Waiting holds up your whole turn, the user's
+messages included: prefer 0 and keep working"))
   "Start a subagent: a new session that does one task for you and reports
 back, shown to the user under your session.  Choose how it gets context:
 - fork: a clone of you (your agent and model) that inherits your whole
@@ -886,7 +891,7 @@ one to finish" working))
               (let ((child (agent-collab--open-child
                             caller name plist
                             (or title (agent-session--title-seed prompt))
-                            info)))
+                            info (and handle (agent-collab--clean-handle handle)))))
                 (cons child (agent-session-submit
                              child (agent-collab--task caller prompt history)
                              (concat "@" (agent-session-handle caller))

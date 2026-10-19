@@ -135,7 +135,8 @@ var/                     runtime state (history, backups, pasted images...); git
   `session_start` starts a subagent: a child session of a profile in
   `agent-collab-profiles` (agent, model, effort, mode, cost; profiles of agents whose
   program isn't installed here, per `agent-session-define-agent`'s `:executable`, are
-  left out, judged where the caller runs: here, or its remote project), linked to the caller
+  left out, judged where the caller runs: here, or its remote project), named by the
+  caller after its task (`handle`, else the profile), linked to the caller
   (`:parent` in its info, listed under it), given the prompt alone (`fresh`), the
   caller's conversation as text too (`handoff`), or, for a session of the caller's
   own agent and settings, a copy of its conversation that shares its prompt cache

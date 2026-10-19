@@ -2144,6 +2144,13 @@ to premium:\n- worker: Echo2 big, low cost.  Test worker." description))
                    (agent-session-test--call "session_start" buffer :profile "worker"
                                              :prompt "实现 Y" :wait 30))))
        (should (string-match-p "\\`Reply from \"@worker-2\" (Echo2):\n\n收到：Your task:\n实现 Y" reply)))
+     ;; Named after its task when the caller says.
+     (should (string-prefix-p
+              "Started @cgu-measure "
+              (agent-session-test--poll
+               (agent-session-test--call "session_start" buffer :profile "worker"
+                                         :prompt "测量" :handle "CGU Measure"))))
+     (should (agent-session-find "@cgu-measure"))
      ;; Only so many at work at once.
      (let ((agent-collab-max-active 2))
        (dolist (child (agent-session-children session))

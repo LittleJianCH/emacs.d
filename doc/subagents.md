@@ -113,7 +113,12 @@ direnv). A remote project's programs are looked up in one round trip (`command
 there again; the timer never makes round trips, and an unreachable host isn't
 asked again for 5 minutes. A child that fails to start anyway is closed (only
 that one, found by a token in its info: others may open while it waits for the
-host) and the error returned. An agent
+host) and the error returned.
+
+The caller names a child after its task (`handle`, such as `cgu-measure`); it
+knows the task best and needs no model call to do it. Without one the child is
+named after its profile. `wait` other than 0 holds up the caller's whole turn,
+the user's messages included, so the description says to prefer 0. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start
