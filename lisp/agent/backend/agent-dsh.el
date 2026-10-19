@@ -165,6 +165,17 @@ A remote agent reaches emx through the relay of agent-remote.el."
 (cl-defmethod agent-session-backend-start ((_ (eql dsh)) session)
   (agent-dsh--set session :ready nil)
   (agent-session-start-process session (agent-dsh--command (agent-session-root session)))
+  (let ((fork (and (not (agent-dsh--state session :resume))
+                   (plist-get (agent-session-info session) :fork-from)))
+        (parent (agent-session-parent session)))
+    (if (and fork parent (eq (agent-session-backend parent) 'dsh))
+        ;; The fork reads the source's log from disk: complete it first.
+        (agent-dsh--request parent "flush" nil
+                            (lambda (_) (agent-dsh--initialize session fork)))
+      (agent-dsh--initialize session fork))))
+
+(defun agent-dsh--initialize (session fork)
+  "Initialize the bridge of SESSION; FORK is a dsh session to fork, or nil."
   (agent-dsh--request
    session "initialize"
    (append (list :cwd (directory-file-name (agent-session-process-directory
@@ -173,6 +184,7 @@ A remote agent reaches emx through the relay of agent-remote.el."
                  :plan (if (eq (agent-session-setting session :mode) 'plan) t :false)
                  :mcpServers (agent-dsh--mcp-servers session))
            (when-let* ((resume (agent-dsh--state session :resume))) (list :resume resume))
+           (when fork (list :forkFrom fork))
            ;; A session another agent started lives with its buffer: keep it
            ;; out of the history.  Its parent is named by its dsh session
            ;; when it has one.
@@ -583,6 +595,9 @@ what `agent-session-deny' picks."
                                                         :message (format "unsupported: %s" method)))))))
      ;; Notification
      (t (agent-dsh--notification session method params)))))
+
+(cl-defmethod agent-session-backend-fork-p ((_ (eql dsh)))
+  t)
 
 (agent-session-define-agent dsh :title "DeepSeek")
 

@@ -78,8 +78,12 @@ Model, reasoning effort and permission mode come from the session settings."
        (unless (equal model "default") (list "--model" model)))
      (when-let* ((effort (agent-session-setting session :effort)))
        (list "--effort" effort))
-     (when-let* ((resume (plist-get (agent-session-state session) :resume)))
-       (list "--resume" resume))
+     (if-let* ((resume (plist-get (agent-session-state session) :resume)))
+         (list "--resume" resume)
+       ;; A fork starts as a copy of its source's conversation.  With the
+       ;; same flags as the source it shares the source's prompt cache.
+       (when-let* ((fork (plist-get (agent-session-info session) :fork-from)))
+         (list "--resume" fork "--fork-session")))
      ;; Claude loads the skills under .claude/skills/ of an added directory.
      (when-let* ((skills (agent-session-skills-dir session)))
        (list "--add-dir" skills))
@@ -1069,6 +1073,9 @@ Ask the user in SESSION, then reply to the CLI."
              (agent-session-notice session (format "控制请求失败：%s" (plist-get response :error))
                                    'agent-session-error)
            (when callback (funcall callback (plist-get response :response)))))))))
+
+(cl-defmethod agent-session-backend-fork-p ((_ (eql claude)))
+  t)
 
 (agent-session-define-agent claude :title "Claude")
 

@@ -257,6 +257,14 @@ caller falls back to \"interrupt, then send\"."
   (ignore backend session text)
   nil)
 
+(cl-defgeneric agent-session-backend-fork-p (backend)
+  "Non-nil if sessions of BACKEND can be forked.
+A fork is a new session of the same agent that starts as a copy of its
+source's conversation, named by `:fork-from' in its info (the source's
+own session id), so its first request shares the source's prompt cache."
+  (ignore backend)
+  nil)
+
 (cl-defgeneric agent-session-backend-history (backend root callback)
   "List past sessions in project ROOT, calling CALLBACK with the list.
 CALLBACK may be called asynchronously.  Each item is (:id ID :title TITLE

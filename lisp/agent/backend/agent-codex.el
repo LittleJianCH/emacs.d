@@ -183,10 +183,23 @@ instructions.  Preserve the existing instruction string verbatim."
        (concat "\nThe agent shell runs on the project host; Emacs and its configuration are on the user's machine. "
                "Edit that configuration with config_read/config_edit/config_write, then reload.")))))
 
+(defun agent-codex--fork-source (session)
+  "The thread SESSION is to fork, or nil; once started it resumes its own."
+  (and (not (agent-codex--state session :resume))
+       (plist-get (agent-session-info session) :fork-from)))
+
 (defun agent-codex--start-thread (session)
   "Read effective config, then start or resume SESSION.
 A failed read leaves developerInstructions unset so Codex retains the
-user's configured instructions; report that Emacs context was omitted."
+user's configured instructions; report that Emacs context was omitted.
+A fork needs no config: it copies the instructions with the history."
+  (if (agent-codex--fork-source session)
+      (agent-codex--start-thread-with-instructions
+       session (agent-session-process-directory (agent-session-root session)) nil)
+    (agent-codex--read-config-and-start session)))
+
+(defun agent-codex--read-config-and-start (session)
+  "Read effective config, then start or resume SESSION."
   (let* ((cwd (agent-session-process-directory (agent-session-root session)))
          (read-failed
           (lambda (reason)
@@ -211,14 +224,18 @@ user's configured instructions; report that Emacs context was omitted."
 Codex ignores instruction overrides when resuming an already running
 thread; sending this field does not guarantee updating such a thread."
   (pcase-let* ((`(,approval ,_ ,sandbox ,_) (agent-codex--mode session))
-               (resume (agent-codex--state session :resume)))
+               (resume (agent-codex--state session :resume))
+               (fork (agent-codex--fork-source session)))
     (agent-codex--request
-     session (if resume "thread/resume" "thread/start")
-     (append (list :cwd cwd
-                   :approvalPolicy approval
-                   :sandbox sandbox)
-             (when instructions (list :developerInstructions instructions))
+     session (cond (resume "thread/resume") (fork "thread/fork") (t "thread/start"))
+     (append (list :approvalPolicy approval :sandbox sandbox)
+             ;; A fork takes its directory and instructions from the history
+             ;; it copies; giving them again would change its prompt.
+             (unless fork (list :cwd cwd))
+             (when (and instructions (not fork)) (list :developerInstructions instructions))
              (when resume (list :threadId resume :excludeTurns t))
+             ;; Only an ephemeral fork keeps the source's prompt cache.
+             (when fork (list :threadId fork :excludeTurns t))
              ;; A session another agent started lives with its buffer.
              (when (agent-session-child-p session) (list :ephemeral t))
              (when-let* ((model (agent-session-setting session :model)))
@@ -621,6 +638,9 @@ when the user declines, are left out."
            (agent-session-notice session (format "出错：%s"
                                                  (plist-get (plist-get params :error) :message))
                                  'agent-session-error))))))))
+
+(cl-defmethod agent-session-backend-fork-p ((_ (eql codex)))
+  t)
 
 (agent-session-define-agent codex :title "Codex")
 

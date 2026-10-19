@@ -327,7 +327,7 @@ final reply goes back to it.)"
   (let ((block (agent-session--block target id)))
     (cond
      ((not (buffer-live-p (agent-session-buffer target)))
-      (error "@%s was closed before it replied" (agent-session-handle target)))
+      (error "\"@%s\" was closed before it replied" (agent-session-handle target)))
      ((null block) (error "The user withdrew the message"))
      ((or (plist-get block :queued)
           (memq (agent-session-status target) '(running starting)))
@@ -340,7 +340,7 @@ final reply goes back to it.)"
                                      (not (eq (plist-get (cdr entry) :kind) 'thinking))))
                               (reverse (cdr turn))))
              (handle (agent-session-handle target)))
-        (list (format "Reply from @%s (%s)%s:\n\n%s\n\n%s"
+        (list (format "Reply from \"@%s\" (%s)%s:\n\n%s\n\n%s"
                       handle (agent-session-title target)
                       (if (eq (agent-session-status target) 'exited) ", which then exited" "")
                       (if reply (agent-collab--clip (plist-get (cdr reply) :text)) "(no reply)")
@@ -372,7 +372,7 @@ AWAITED means its call waits for the reply for now."
     (let* ((target (plist-get entry :target))
            (reply (condition-case err
                       (agent-collab--reply target (plist-get entry :id))
-                    (error (list (format "@%s ended without replying: %s"
+                    (error (list (format "\"@%s\" ended without replying: %s"
                                          (agent-session-handle target)
                                          (error-message-string err)))))))
       (when reply
@@ -658,10 +658,11 @@ text, so their prompts share a prefix and the cache."
           (puthash session (cons latest text) agent-collab--handoffs)
           text)))))
 
-(defun agent-collab--task (caller prompt history)
+(defun agent-collab--task (caller prompt history &optional fork)
   "The first message of a session the agent of CALLER starts with PROMPT.
-HISTORY is the conversation handed over, or nil.  The task comes last, so
-sessions started with the same history share the prompt prefix."
+HISTORY is the conversation handed over, or nil.  FORK means the session
+is a fork of CALLER's.  The task comes last, so sessions started with the
+same history share the prompt prefix."
   (let ((handle (agent-session-handle caller)))
     (concat
      (when history
@@ -669,10 +670,16 @@ sessions started with the same history share the prompt prefix."
 not requests to act on.  Read more of it with session_read session=@%s.\n\n%s\n\n---\n\n"
                handle handle history))
      "Your task:\n" prompt
-     (format "\n\n(From the %s agent of session \"@%s\", which started this session \
+     (if fork
+         (format "\n\n(You are a fork of session \"@%s\": the conversation above is \
+its own, up to the session_start call that started you, which may show as \
+interrupted or unanswered.  Do this task only; your final reply goes back to it.  \
+You can't start sessions yourself.)"
+                 handle)
+       (format "\n\n(From the %s agent of session \"@%s\", which started this session \
 with session_start.  Your final reply goes back to it.  You can't start sessions \
 yourself.)"
-             (agent-session-title caller) handle))))
+               (agent-session-title caller) handle)))))
 
 (defun agent-collab--link-tool (caller child)
   "Show the progress of CHILD under CALLER's session_start tool block.
@@ -689,25 +696,34 @@ doesn't say which block it is."
           (plist-put (agent-session-info child) :parent-tool (car entry)))
     (agent-session--update caller (car entry) :subagent (agent-session-buffer child))))
 
-(defun agent-collab--open-child (caller name plist title)
+(defun agent-collab--open-child (caller name plist title &optional info)
   "Start a session of profile NAME (PLIST) for the agent of CALLER.
-TITLE is its title."
+TITLE is its title; INFO is more of its info, such as :fork-from."
   (let* ((buffer (agent-session-open
                   (plist-get plist :agent) (agent-session-root caller) nil
                   (list :model (plist-get plist :model) :effort (plist-get plist :effort)
                         :mode (agent-collab--child-mode (plist-get plist :mode) caller))
                   ;; Named after its profile right away: the caller refers to it
                   ;; by that handle, which must not change.
-                  (list :parent (agent-session-buffer caller) :profile name :named t
-                        :title title)))
+                  (append (list :parent (agent-session-buffer caller) :profile name
+                                :named t :title title)
+                          info)))
          (child (buffer-local-value 'agent-session--current buffer)))
     (agent-session-set-handle child name)
     (agent-collab--link-tool caller child)
     child))
 
+(defun agent-collab--fork-plist (caller)
+  "A profile-like plist for a fork of CALLER: its agent and settings."
+  (list :agent (agent-session-agent caller)
+        :model (plist-get (agent-session-settings caller) :model)
+        :effort (plist-get (agent-session-settings caller) :effort)
+        :mode (agent-session-setting caller :mode)))
+
 (agent-ui-defmethod "session_start"
-    ((profile string "The kind of session to start: one of the profiles below")
-     (context string "How it gets context: fresh (default) or handoff")
+    ((profile string "The kind of session to start: one of the profiles below.  Not with
+context fork")
+     (context string "How it gets context: fresh (default), handoff or fork")
      (prompt string "The task.  With fresh, include everything it needs: it hasn't seen
 your conversation" required)
      (title string "A short title for the session, a few words")
@@ -715,11 +731,16 @@ your conversation" required)
 while it works; at most 1500"))
   "Start a subagent: a new session that does one task for you and reports
 back, shown to the user under your session.  Choose how it gets context:
-- fresh: it starts from your prompt alone.  Use it for self-contained work,
-  and write the prompt so it stands alone.
-- handoff: it also gets a text copy of your recent conversation (no prompt
-  cache, and tool output is cut).  Use it when the task needs your context
-  but a cheaper model can do it.
+- fork: a clone of you (your agent and model) that inherits your whole
+  conversation through the prompt cache, so its input is cheap; its output
+  costs what yours does.  Prefer it when the task is hard enough to need
+  your own level of reasoning.  Omit profile.  Claude, Codex and DeepSeek
+  sessions can fork.
+- handoff: a cheaper profile gets a text copy of your recent conversation
+  (no prompt cache, and tool output is cut).  Use it when the task needs
+  your context but a cheaper model can do it.
+- fresh: a profile starts from your prompt alone.  Use it for
+  self-contained work, and write the prompt so it stands alone.
 Prefer the cheapest profile that can do the job.  By default (wait 0) it
 returns the session's @handle at once, and its final reply reaches you as a
 message when it finishes: don't poll it.  A session you start does one
@@ -727,20 +748,33 @@ task, takes no follow-ups and closes with yours; for more work start
 another.  Stop one with session_stop."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_start works only from an agent session")))
-         (entry (agent-collab--profile profile))
-         (name (symbol-name (car entry)))
-         (plist (cdr entry))
-         (history (pcase (or context "fresh")
-                    ("fresh" nil)
-                    ("handoff" (agent-collab--handoff caller))
-                    (other (error "context must be fresh or handoff, not %s" other))))
-         (working (length (agent-collab--working (agent-session-children caller)))))
+         (context (or context "fresh"))
+         (fork (equal context "fork"))
+         (working (length (agent-collab--working (agent-session-children caller))))
+         name plist history info)
     (when (agent-session-parent caller)
       (error "A session started by another session can't start sessions; do the task \
 yourself"))
     (when (>= working agent-collab-max-active)
       (error "%d sessions you started are still working, the most at once; wait for \
 one to finish" working))
+    (pcase context
+      ("fork"
+       (when profile
+         (error "A fork uses your own agent and model; omit profile"))
+       (unless (agent-session-backend-fork-p (agent-session-backend caller))
+         (error "%s sessions can't fork; use handoff" (agent-session-title caller)))
+       (let ((source (or (agent-session-resume-id caller)
+                         (error "Your session has no conversation to fork yet"))))
+         (setq name (concat (agent-session-handle caller) "-fork")
+               plist (agent-collab--fork-plist caller)
+               info (list :fork-from source))))
+      ((or "fresh" "handoff")
+       (let ((entry (agent-collab--profile profile)))
+         (setq name (symbol-name (car entry))
+               plist (cdr entry)
+               history (and (equal context "handoff") (agent-collab--handoff caller)))))
+      (_ (error "context must be fresh, handoff or fork, not %s" context)))
     (agent-collab--converse
      caller
      :confirm (and (plist-get plist :confirm) (format "启动子会话 %s" name))
@@ -749,9 +783,10 @@ one to finish" working))
      :start (lambda ()
               (let ((child (agent-collab--open-child
                             caller name plist
-                            (or title (agent-session--title-seed prompt)))))
+                            (or title (agent-session--title-seed prompt))
+                            info)))
                 (cons child (agent-session-submit
-                             child (agent-collab--task caller prompt history)
+                             child (agent-collab--task caller prompt history fork)
                              (concat "@" (agent-session-handle caller))))))
      :started (lambda (child)
                 (format "Started @%s (%s%s, %s).  Its final reply will reach you as a \
@@ -759,7 +794,7 @@ message when it finishes; don't poll it.  Keep working, or end your turn if \
 there is nothing else to do."
                         (agent-session-handle child) (agent-session-title child)
                         (if-let* ((model (plist-get plist :model))) (concat " " model) "")
-                        (or context "fresh"))))))
+                        context)))))
 
 (agent-ui-defmethod "session_stop"
     ((session string "The session to stop: one you started, by its @handle" required))

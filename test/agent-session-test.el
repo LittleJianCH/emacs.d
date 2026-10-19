@@ -1844,7 +1844,7 @@ subagent's, neither end the turn nor show in the transcript."
      (should (string-match-p "向 @test-echo2 发送消息" (agent-session-test--footer)))
      (agent-session-approve)
      (let ((reply (agent-session-test--poll pending)))
-       (should (string-match-p "\\`Reply from @test-echo2 (Echo2):\n\n收到：帮我看看这个 diff" reply))
+       (should (string-match-p "\\`Reply from \"@test-echo2\" (Echo2):\n\n收到：帮我看看这个 diff" reply))
        (should (string-match-p "Sent by the Echo agent of session \"@test-echo\" through session_ask"
                                reply))
        (should-not (string-match-p "is the Echo session" reply)))
@@ -1987,7 +1987,7 @@ profile, its mode capped by the caller's, the task last in its message."
      (let ((reply (agent-session-test--poll
                    (agent-session-test--call "session_start" buffer :profile "worker"
                                              :prompt "实现 Y" :wait 30))))
-       (should (string-match-p "\\`Reply from @worker-2 (Echo2):\n\n收到：Your task:\n实现 Y" reply)))
+       (should (string-match-p "\\`Reply from \"@worker-2\" (Echo2):\n\n收到：Your task:\n实现 Y" reply)))
      ;; Only so many at work at once.
      (let ((agent-collab-max-active 2))
        (dolist (child (agent-session-children session))
@@ -2134,10 +2134,13 @@ one message, naming who sent them."
        (should (equal (plist-get mail :origin) "@worker"))
        (should (string-prefix-p "(Replies to messages you sent to other sessions, delivered \
 by Emacs; not from the user.)" (plist-get mail :text)))
-       (should (string-search "Reply from @worker (Echo2):\n\n收到：Your task:\n任务一"
+       (should (string-search "Reply from \"@worker\" (Echo2):\n\n收到：Your task:\n任务一"
                               (plist-get mail :text)))
        (should (string-search "See what it did with session_read session=@worker."
-                              (plist-get mail :text))))
+                              (plist-get mail :text)))
+       ;; The handles in it aren't mentions to explain.
+       (should (equal (agent-session--outgoing session (plist-get mail :text))
+                      (plist-get mail :text))))
      ;; Several replies come together.
      (agent-session-set-status session 'running)
      (dolist (task '("任务二" "任务三"))
@@ -2156,7 +2159,7 @@ by Emacs; not from the user.)" (plist-get mail :text)))
        (kill-buffer (agent-session-buffer (agent-session-find "@worker-4")))
        (accept-process-output nil 0.05)
        (agent-session-set-status session 'idle))
-     (should (string-search "@worker-4 ended without replying: @worker-4 was closed before \
+     (should (string-search "\"@worker-4\" ended without replying: \"@worker-4\" was closed before \
 it replied" (plist-get (cdr (agent-session-test--last-user session)) :text))))))
 
 (ert-deftest agent-session-test-subagent-wait ()
@@ -2168,7 +2171,7 @@ for the user, and then the reply later as a message."
      (let ((reply (agent-session-test--poll
                    (agent-session-test--call "session_start" buffer :profile "worker"
                                              :prompt "等我" :wait 30))))
-       (should (string-prefix-p "Reply from @worker (Echo2)" reply)))
+       (should (string-prefix-p "Reply from \"@worker\" (Echo2)" reply)))
      ;; Answered through the wait: nothing more comes.
      (agent-session-set-status session 'idle)
      (should-not (plist-get (cdr (agent-session-test--last-user session)) :origin))
@@ -2216,6 +2219,88 @@ for the user, and then the reply later as a message."
      (agent-session-set-status session 'idle)
      (should (string-search "收到：看看"
                             (plist-get (cdr (agent-session-test--last-user session)) :text))))))
+
+(ert-deftest agent-session-test-session-start-fork ()
+  "A fork is a child of the caller's own agent and settings, told it is one."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current))
+     ;; The fake agent can't fork.
+     (should-error (agent-session-test--call "session_start" buffer :context "fork"
+                                             :prompt "x"))
+     (cl-letf (((symbol-function 'agent-session-backend-fork-p) (lambda (_) t)))
+       (should-error (agent-session-test--call "session_start" buffer :context "fork"
+                                               :prompt "x"))
+       (setf (agent-session-state session) (list :resume "source-1"))
+       (agent-session-configure session :model "big" :effort "high" :mode 'edits)
+       (should-error (agent-session-test--call "session_start" buffer :context "fork"
+                                               :profile "worker" :prompt "x"))
+       (should (string-match-p
+                "\\`Started @test-echo-fork (Echo big, fork)"
+                (agent-session-test--poll
+                 (agent-session-test--call "session_start" buffer :context "fork"
+                                           :prompt "继续查这个 bug"))))
+       (let ((child (agent-session-find "@test-echo-fork")))
+         (should (eq (agent-session-agent child) 'test-echo))
+         (should (eq (agent-session-parent child) session))
+         (should (equal (agent-session-setting child :model) "big"))
+         (should (equal (agent-session-setting child :effort) "high"))
+         (should (eq (agent-session-setting child :mode) 'edits))
+         (should (equal (plist-get (agent-session-info child) :fork-from) "source-1"))
+         (should (string-prefix-p "Your task:\n继续查这个 bug\n\n(You are a fork of session \
+\"@test-echo\""
+                                  (agent-session-test--first-message child))))))))
+
+(ert-deftest agent-session-test-fork-backends ()
+  "Each backend starts a fork from its source's conversation."
+  (agent-session-test--with-session
+   (let* ((fork-of (lambda (source)
+                     (buffer-local-value 'agent-session--current
+                                         (agent-session-open 'test-echo2 default-directory nil
+                                                             nil (list :parent buffer
+                                                                       :fork-from source)))))
+          (child (funcall fork-of "source-1"))
+          sent)
+     (cl-letf (((symbol-function 'agent-session-skills-dir) #'ignore)
+               ((symbol-function 'agent-codex--request)
+                (lambda (s method params &rest _) (push (list s method params) sent)))
+               ((symbol-function 'agent-dsh--request)
+                (lambda (s method params &optional callback)
+                  (push (list s method params) sent)
+                  (when (equal method "flush") (funcall callback nil))))
+               ((symbol-function 'agent-session-start-process) #'ignore))
+       ;; Claude resumes the source as a new session.
+       (let ((command (agent-claude--command child)))
+         (should (equal (cadr (member "--resume" command)) "source-1"))
+         (should (member "--fork-session" command)))
+       ;; Once started, it resumes its own.
+       (agent-claude--set child :resume "own")
+       (should (equal (cadr (member "--resume" (agent-claude--command child))) "own"))
+       (should-not (member "--fork-session" (agent-claude--command child)))
+       ;; Codex forks the thread ephemerally, with no config read.
+       (setq child (funcall fork-of "thread-1"))
+       (agent-codex--start-thread child)
+       (pcase-let ((`(,_ ,method ,params) (car sent)))
+         (should (equal method "thread/fork"))
+         (should (equal (plist-get params :threadId) "thread-1"))
+         (should (eq (plist-get params :ephemeral) t))
+         (should (eq (plist-get params :excludeTurns) t))
+         (should-not (plist-member params :cwd))
+         (should-not (plist-member params :developerInstructions)))
+       (should (= (length sent) 1))
+       ;; dsh flushes the source's log, then forks it.
+       (setq sent nil)
+       (setf (agent-session-backend agent-session--current) 'dsh)
+       (setf (agent-session-state agent-session--current) (list :resume "dsh-1"))
+       (setq child (funcall fork-of "dsh-1"))
+       (agent-session-backend-start 'dsh child)
+       (pcase-let ((`((,s1 ,m1 ,_) (,s2 ,m2 ,p2)) (reverse sent)))
+         (should (eq s1 agent-session--current))
+         (should (equal m1 "flush"))
+         (should (eq s2 child))
+         (should (equal m2 "initialize"))
+         (should (equal (plist-get p2 :forkFrom) "dsh-1"))
+         (should (equal (plist-get p2 :parent) "dsh-1")))
+       (setf (agent-session-backend agent-session--current) 'test-echo)))))
 
 (ert-deftest agent-session-test-subagent-ask-mirror ()
   "A child's confirmations and questions also wait in its parent's footer,

@@ -8,17 +8,24 @@
 // Wire format: newline-delimited JSON-RPC 2.0. One process drives one session.
 //
 // Requests (Emacs -> dsh):
-//   initialize {cwd, resume?, model?, effort?, preset?, plan?, mcpServers?, parent?}
+//   initialize {cwd, resume?, model?, effort?, preset?, plan?, mcpServers?, parent?,
+//               forkFrom?}
 //                -> {sessionId, version, title, config, models, presets, plan,
 //                    commands, history, warnings}
 //   configure  {model?, effort?, preset?, plan?}         -> {config}
 //   prompt     {text, images?}       -> {messageId} | {command: {kind, text?}, status}
 //   steer      {text, images?}                           -> {messageId}
 //   cancel     {}                                        -> {}
+//   flush      {}                                        -> {}
 //   sessions/list {cwds}            -> {sessions: [{id, cwd, title, time}]}  (no initialize needed)
 //
 // parent marks a new session that another session's agent started: it is
 // recorded as the session's parentSession, so sessions/list leaves it out.
+// forkFrom names a dsh session to fork: the new session starts with a copy of
+// its stored log up to its latest event (a tool call still open there gets a
+// synthetic result) and the model it last used, so its first request reuses
+// that session's prompt cache. Its history is not returned. flush makes a
+// session's log complete on disk first, for a fork from another process.
 //
 // images are absolute file paths. A prompt naming a dsh slash command runs
 // the command instead of starting a turn. mcpServers are stdio servers
@@ -79,6 +86,8 @@ const dshVersion = (() => {
 const { createUserMessage, ReasoningEffortId } = await import(dshRequire.resolve('@deepseek-ai/dsh-llm'))
 const { installModelSelection } = await import(dshRequire.resolve('@deepseek-ai/dsh-agent'))
 const McpClient = await import(dshRequire.resolve('@deepseek-ai/dsh-mcp-client'))
+const { buildForkSeed, SessionLogOffset, foldRequestHeader } =
+  await import(dshRequire.resolve('@deepseek-ai/dsh-session'))
 
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                       '.gif': 'image/gif', '.webp': 'image/webp' }
@@ -386,7 +395,38 @@ export function apply(ctx) {
       }
       const fallback = ctx.get('agentDefaultModel')?.currentSelection()
       const fallbackModel = fallback && `${fallback.provider}/${fallback.model}`
-      if (params.resume) {
+      if (params.forkFrom) {
+        // Read the source's stored log without taking it over: its own
+        // process keeps writing it.
+        const reader = await ctx.sessionPersistence.open(params.forkFrom, 'read')
+        let events
+        try {
+          events = (await reader.read(0)).events
+        } finally {
+          await reader.close()
+        }
+        const boundary = events.at(-1)?.seq
+        // The source's route exactly as it last sent it, as a resume does: a
+        // different request would miss its cache.
+        const logged = foldRequestHeader(events)
+        selection.current = logged
+          ? { provider: logged.config.provider, model: logged.config.model,
+              ...logged.config.reasoningEffort === undefined
+                || logged.adapterDefaults?.reasoningEffort === true
+                ? {} : { reasoningEffort: logged.config.reasoningEffort } }
+          : await resolveSelection(params.model ?? fallbackModel, params.effort ?? fallback?.reasoningEffort)
+        handle = await ctx.agents.create({
+          sessionId: randomUUID(),
+          meta: { cwd: params.cwd, parentSession: params.parent ?? params.forkFrom,
+                  ...boundary === undefined ? {} : { isSeeded: true } },
+          ...boundary === undefined ? {} : {
+            seed: buildForkSeed(events, boundary),
+            inheritedEventCount: SessionLogOffset(boundary + 1),
+          },
+          agentOptions: { ...selection.current },
+          setup,
+        })
+      } else if (params.resume) {
         handle = await ctx.agents.resume({
           resumeSessionId: params.resume,
           setup: async (agentCtx, agent) => {
@@ -520,6 +560,10 @@ export function apply(ctx) {
     },
     cancel() {
       handle?.agent.cancel({ kind: 'user' })
+      return {}
+    },
+    async flush() {
+      if (handle !== null) await ctx.sessions.flush(handle.agent.session)
       return {}
     },
   }
