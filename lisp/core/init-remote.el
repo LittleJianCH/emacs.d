@@ -45,11 +45,15 @@
 ;; but `auto-revert-check-vc-info' still runs `vc-refresh-state' on remote buffers
 ;; every second: a dozen remote calls per round, enough to keep Emacs busy in that
 ;; timer forever.  Remote buffers refresh VC state only when visited and saved.
+;; Set it again whenever a major mode starts: a mode change (such as re-running
+;; `org-mode') kills buffer-local variables, and a single buffer that lost the
+;; setting kept Emacs blocked for 1.5s of every second.
 (defun my/remote-buffer-setup ()
   "Turn off polling-style remote access in remote buffers."
   (when (file-remote-p default-directory)
     (setq-local auto-revert-check-vc-info nil)))
 (add-hook 'find-file-hook #'my/remote-buffer-setup)
+(add-hook 'after-change-major-mode-hook #'my/remote-buffer-setup)
 
 ;; `vc-registered' tries every backend in turn, and on a remote file each attempt
 ;; is another network round trip.
