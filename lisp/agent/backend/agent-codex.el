@@ -144,11 +144,13 @@ Without ERROR-CALLBACK, display the error as a session notice."
 
 ;;; Backend interface
 
-(declare-function agent-ui-tools-signature "agent-ui" ())
+(declare-function agent-ui-tools-signature "agent-ui" (&optional host))
 
-(defun agent-codex--tools-signature ()
-  "Signature of the methods Emacs gives agents, or nil without agent-ui."
-  (and (fboundp 'agent-ui-tools-signature) (agent-ui-tools-signature)))
+(defun agent-codex--tools-signature (session)
+  "Signature of the methods Emacs gives the agent of SESSION, or nil without
+agent-ui.  They depend on the host it runs on."
+  (and (fboundp 'agent-ui-tools-signature)
+       (agent-ui-tools-signature (file-remote-p (agent-session-root session)))))
 
 (defun agent-codex--tools-stale-p (session)
   "Non-nil if Emacs's tools changed since the codex of SESSION started.
@@ -158,10 +160,10 @@ signature, from a process started before this code was loaded, counts as
 changed.  A child's thread isn't saved: it keeps the tools it started with."
   (and (agent-codex--state session :resume)
        (not (agent-session-child-p session))
-       (not (equal (agent-codex--state session :tools) (agent-codex--tools-signature)))))
+       (not (equal (agent-codex--state session :tools) (agent-codex--tools-signature session)))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql codex)) session)
-  (agent-codex--set session :tools (agent-codex--tools-signature))
+  (agent-codex--set session :tools (agent-codex--tools-signature session))
   (let ((skills (agent-session-skills-dir session)))
     (agent-session-start-process session (agent-codex--command session))
     (agent-codex--request

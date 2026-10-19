@@ -121,7 +121,8 @@ var/                     runtime state (history, backups, pasted images...); git
   A method that waits for something slow returns `agent-ui-defer` at once and emx polls
   it (`_poll`), so Emacs never blocks while an agent waits. When the methods change (a
   reload, a changed profile), a timer writes their signature to
-  `var/emx-tools-<server-name>` (`EMX_TOOLS_STAMP`); each emx watches it and sends
+  `var/emx-tools-<server-name>[-<host hash>]`, one per host (`EMX_TOOLS_STAMP`); each
+  emx watches its agent's and sends
   `notifications/tools/list_changed`, which Claude and dsh act on. Codex ignores it, so
   a saved Codex thread whose tools changed is resumed in a new process before the next
   send; a Codex child keeps the tools it started with.
@@ -134,7 +135,7 @@ var/                     runtime state (history, backups, pasted images...); git
   `session_start` starts a subagent: a child session of a profile in
   `agent-collab-profiles` (agent, model, effort, mode, cost; profiles of agents whose
   program isn't installed here, per `agent-session-define-agent`'s `:executable`, are
-  only named, for remote projects whose host has it), linked to the caller
+  left out, judged on the host the caller runs on), linked to the caller
   (`:parent` in its info, listed under it), given the prompt alone (`fresh`), the
   caller's conversation as text too (`handoff`), or, for a session of the caller's
   own agent and settings, a copy of its conversation that shares its prompt cache
@@ -150,9 +151,12 @@ confirmations and questions also wait in its parent's footer, and the parent's
 `session_start` tool block shows the child's progress. The CLIs' own
   subagents are off (`agent-claude-disallowed-tools`, `agent-codex-native-subagents`,
   `agent-dsh-native-subagents` with `backend/dsh/no-subagents.yml`). An agent's tools
-  and their descriptions must depend on the configuration only, never on the calling
-  session (see `agent-ui-description-functions`): a forked session has to see exactly
-  its parent's tools to share its prompt cache. Design and measurements:
+  and their descriptions may depend on the configuration and the host the agent runs
+  on (which agents are installed there), never otherwise on the calling session (see
+  `agent-ui-description-functions`): a forked session, on its parent's host, has to
+  see exactly its parent's tools to share its prompt cache. A remote host's programs
+  are looked up in one round trip as a session opens there
+  (`agent-session-check-host`), never on a timer. Design and measurements:
   `doc/subagents.md`.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).

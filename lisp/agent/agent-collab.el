@@ -601,8 +601,8 @@ Each entry is (NAME . PLIST), with PLIST keys:
   :cost         minimal, low, medium, high or premium, to help agents choose
   :description  what it is good for, shown to agents
   :confirm      non-nil asks the user before each start
-Profiles of agents that aren't enabled are left out; those whose program
-isn't installed here are only named, for remote projects."
+Profiles of agents that aren't enabled, or not installed on the host
+the starting session runs on, are left out."
   :type '(alist :key-type symbol :value-type plist))
 
 (defcustom agent-collab-max-active 4
@@ -635,49 +635,41 @@ sessions (see agent-ui.el)."
 (defconst agent-collab--modes '(plan ask edits auto full)
   "Permission modes from the narrowest to the broadest.")
 
-(defun agent-collab--profiles ()
-  "Entries of `agent-collab-profiles' whose agent is enabled.
-Their program may still be missing here: a remote project's host can
-have it."
-  (seq-filter (lambda (entry) (assq (plist-get (cdr entry) :agent) agent-session-agents))
+(defun agent-collab--profiles (&optional host)
+  "Entries of `agent-collab-profiles' whose agent is enabled and installed
+on HOST, a remote prefix (nil for this machine): sessions start on the
+host of the session starting them."
+  (seq-filter (lambda (entry)
+                (let ((agent (plist-get (cdr entry) :agent)))
+                  (and (assq agent agent-session-agents)
+                       (agent-session-agent-available-p agent host))))
               agent-collab-profiles))
 
-(defun agent-collab--profile (name)
-  "The enabled profile called NAME; signal an error if there is none."
-  (or (and name (assq (intern name) (agent-collab--profiles)))
+(defun agent-collab--profile (name &optional host)
+  "The profile called NAME usable on HOST; signal an error if there is none."
+  (or (and name (assq (intern name) (agent-collab--profiles host)))
       (error "%s; choose one of: %s"
-             (if name (format "No profile %s" name) "Name a profile")
-             (mapconcat (lambda (entry) (symbol-name (car entry))) (agent-collab--profiles) ", "))))
+             (if name (format "No profile %s here" name) "Name a profile")
+             (mapconcat (lambda (entry) (symbol-name (car entry)))
+                        (agent-collab--profiles host) ", "))))
 
-(defun agent-collab--profiles-description ()
-  "The guidance and profiles, for the description of session_start.
-Profiles whose program isn't installed here are only named: a remote
-project's host may have it, but the description can't depend on the
-caller.  Installing or removing an agent changes the tools agents see,
+(defun agent-collab--profiles-description (host)
+  "The guidance and the profiles usable on HOST, for session_start.
+Installing or removing an agent there changes the tools agents see,
 which refreshes them in live sessions."
-  (let* ((installed (seq-group-by (lambda (entry)
-                                    (and (agent-session-agent-available-p
-                                          (plist-get (cdr entry) :agent))
-                                         t))
-                                  (agent-collab--profiles)))
-         (missing (alist-get nil installed)))
-    (concat (when (and agent-collab-start-guidance
-                       (not (string-empty-p agent-collab-start-guidance)))
-              (concat agent-collab-start-guidance "\n\n"))
-            "Profiles, by cost from minimal through low, medium and high to premium:\n"
-            (mapconcat (pcase-lambda (`(,name . ,plist))
-                         (format "- %s: %s%s, %s cost.  %s"
-                                 name
-                                 (or (agent-session--get (plist-get plist :agent) :title)
-                                     (plist-get plist :agent))
-                                 (if-let* ((model (plist-get plist :model))) (concat " " model) "")
-                                 (or (plist-get plist :cost) "unknown")
-                                 (or (plist-get plist :description) "")))
-                       (alist-get t installed) "\n")
-            (when missing
-              (format "\nNot installed on this machine, so only for a remote project \
-whose host has them: %s."
-                      (mapconcat (lambda (entry) (symbol-name (car entry))) missing ", "))))))
+  (concat (when (and agent-collab-start-guidance
+                     (not (string-empty-p agent-collab-start-guidance)))
+            (concat agent-collab-start-guidance "\n\n"))
+          "Profiles, by cost from minimal through low, medium and high to premium:\n"
+          (mapconcat (pcase-lambda (`(,name . ,plist))
+                       (format "- %s: %s%s, %s cost.  %s"
+                               name
+                               (or (agent-session--get (plist-get plist :agent) :title)
+                                   (plist-get plist :agent))
+                               (if-let* ((model (plist-get plist :model))) (concat " " model) "")
+                               (or (plist-get plist :cost) "unknown")
+                               (or (plist-get plist :description) "")))
+                     (agent-collab--profiles host) "\n")))
 
 (setf (alist-get "session_start" agent-ui-description-functions nil nil #'equal)
       #'agent-collab--profiles-description)
@@ -874,7 +866,7 @@ one to finish" working))
                plist (agent-collab--fork-plist caller)
                info (list :fork-from source))))
       ((or "fresh" "handoff")
-       (let ((entry (agent-collab--profile profile)))
+       (let ((entry (agent-collab--profile profile (file-remote-p (agent-session-root caller)))))
          (setq name (symbol-name (car entry))
                plist (cdr entry)
                history (and (equal context "handoff") (agent-collab--handoff caller)))))

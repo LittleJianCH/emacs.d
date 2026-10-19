@@ -1563,12 +1563,13 @@ subagent's, neither end the turn nor show in the transcript."
 file is written only when it changes."
   (let* ((dir (make-temp-file "agent-tools-" t))
          (stamp (expand-file-name "stamp" dir))
-         (agent-ui--tools-signature nil)
+         (agent-ui--tools-signatures (make-hash-table :test #'equal))
+         (agent-session--host-programs (make-hash-table :test #'equal))
          (extra "one"))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-session-tools-stamp) (lambda () stamp)))
+        (cl-letf (((symbol-function 'agent-session-tools-stamp) (lambda (&optional _) stamp)))
           (let ((agent-ui-description-functions
-                 (cons (cons "sessions" (lambda () extra)) agent-ui-description-functions)))
+                 (cons (cons "sessions" (lambda (_host) extra)) agent-ui-description-functions)))
             (should (equal (agent-ui-tools-signature) (agent-ui-tools-signature)))
             (agent-ui--update-tools-stamp)
             (let ((first (with-temp-buffer (insert-file-contents stamp) (buffer-string))))
@@ -1590,6 +1591,38 @@ file is written only when it changes."
                                                          (buffer-string)))))))
       (delete-directory dir t))))
 
+(ert-deftest agent-session-test-host-programs ()
+  "Agents see the profiles of the agents installed on the host they run on,
+looked up there in one round trip as a session opens."
+  (agent-session-test--with-profiles
+   (let ((agent-session--host-programs (make-hash-table :test #'equal))
+         (agent-session-test--missing-program "agent-session-test-remote-only")
+         (agent-collab-start-guidance nil)
+         commands)
+     (cl-letf (((symbol-function 'process-file)
+                (lambda (_program _infile _buffer _display &rest args)
+                  (push args commands)
+                  ;; The test agent's program is found, the others aren't.
+                  (insert (mapconcat (lambda (program)
+                                       (if (equal program "agent-session-test-remote-only")
+                                           "1" "0"))
+                                     (nthcdr 3 args) "\n")
+                          "\n")
+                  0)))
+       (agent-session-check-host "/rpc:dev:/home/u/p/"))
+     (should (= (length commands) 1))
+     (should (member "/rpc:dev:" (agent-session-known-hosts)))
+     (should (agent-session-agent-available-p 'test-missing "/rpc:dev:"))
+     (should-not (agent-session-agent-available-p 'test-missing))
+     ;; Not looked up yet: assumed there.
+     (should (agent-session-agent-available-p 'test-missing "/rpc:other:"))
+     (should (string-search "- absent:" (agent-collab--profiles-description "/rpc:dev:")))
+     (should-not (string-search "absent" (agent-collab--profiles-description nil)))
+     (should (agent-collab--profile "absent" "/rpc:dev:"))
+     (should-error (agent-collab--profile "absent"))
+     ;; Each host has its own stamp.
+     (should-not (equal (agent-session-tools-stamp) (agent-session-tools-stamp "/rpc:dev:"))))))
+
 (ert-deftest agent-session-test-codex-stale-tools ()
   "A saved Codex thread resumes in a new process before the next send once
 Emacs's tools changed; a child, or a session started before, doesn't."
@@ -1597,7 +1630,7 @@ Emacs's tools changed; a child, or a session started before, doesn't."
    (let ((session agent-session--current)
          (signature "old")
          restarted sent)
-     (cl-letf (((symbol-function 'agent-codex--tools-signature) (lambda () signature))
+     (cl-letf (((symbol-function 'agent-codex--tools-signature) (lambda (_) signature))
                ((symbol-function 'agent-session-restart-process)
                 (lambda (s) (setq restarted s) (setf (agent-session-status s) 'starting)))
                ((symbol-function 'agent-codex--request)
@@ -1646,7 +1679,7 @@ leave the session running with the message stuck; the next send retries."
        (should (eq (agent-session-status session) 'idle))
        (should-not (agent-codex--state session :pending-send))
        (should (string-search "这条消息没有发出" (agent-session-test--transcript)))
-       (cl-letf (((symbol-function 'agent-codex--tools-signature) (lambda () "new")))
+       (cl-letf (((symbol-function 'agent-codex--tools-signature) (lambda (_) "new")))
          (should (agent-codex--tools-stale-p session)))))))
 
 (ert-deftest agent-session-test-skills ()
@@ -2058,10 +2091,8 @@ profile, its mode capped by the caller's, the task last in its message."
 to premium:\n- worker: Echo2 big, low cost.  Test worker." description))
        (should (string-search "When to start a session:" description))
        (should-not (string-search "gone" description))
-       ;; Not installed here: only named, for remote projects.
-       (should-not (string-search "- absent" description))
-       (should (string-search "Not installed on this machine, so only for a remote \
-project whose host has them: absent." description)))
+       ;; Not installed where the caller runs.
+       (should-not (string-search "absent" description)))
      (should-error (agent-session-test--call "session_start" buffer :profile "gone" :prompt "x"))
      (should-error (agent-session-test--call "session_start" buffer :prompt "x"))
      (should-error (agent-session-test--call "session_start" buffer :profile "worker"

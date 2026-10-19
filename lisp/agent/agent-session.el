@@ -107,14 +107,55 @@ PLIST supports :backend :title :key.")
   "Return property PROP of the registered AGENT."
   (plist-get (alist-get agent agent-session-agents) prop))
 
-(defun agent-session-agent-available-p (agent)
-  "Non-nil if the program of AGENT is installed on this machine.
-An agent that names no program counts as available."
+(defun agent-session--program (agent)
+  "Program AGENT runs: a string, `none' if it names none, nil if unset."
   (let ((variable (agent-session--get agent :executable)))
-    (or (null variable)
-        (let ((program (and (boundp variable) (symbol-value variable))))
-          (and (stringp program) (not (string-empty-p program))
-               (executable-find program))))))
+    (if (null variable)
+        'none
+      (let ((program (and (boundp variable) (symbol-value variable))))
+        (and (stringp program) (not (string-empty-p program)) program)))))
+
+(defvar agent-session--host-programs (make-hash-table :test #'equal)
+  "Agent programs looked up on remote hosts.
+Remote prefix (\"/rpc:dev:\") -> ((PROGRAM . FOUND) ...).")
+
+(defun agent-session-check-host (root)
+  "Look up which agent programs the host of remote ROOT has; remember it.
+One round trip, made as a session opens there: an agent installed on a
+host shows once a session opens on it again."
+  (when-let* ((host (file-remote-p root))
+              (programs (delete-dups
+                         (seq-filter #'stringp (mapcar (lambda (entry)
+                                                         (agent-session--program (car entry)))
+                                                       agent-session-agents)))))
+    (ignore-errors
+      (with-temp-buffer
+        (let ((default-directory root))
+          (when (zerop (apply #'process-file "sh" nil t nil "-c"
+                              "for p; do if command -v \"$p\" >/dev/null 2>&1; \
+then echo 1; else echo 0; fi; done"
+                              "sh" programs))
+            (let ((found (split-string (buffer-string) "\n" t)))
+              (when (= (length found) (length programs))
+                (puthash host (cl-mapcar (lambda (program line) (cons program (equal line "1")))
+                                         programs found)
+                         agent-session--host-programs)))))))))
+
+(defun agent-session-known-hosts ()
+  "This machine (nil) and the remote hosts whose programs were looked up."
+  (cons nil (hash-table-keys agent-session--host-programs)))
+
+(defun agent-session-agent-available-p (agent &optional host)
+  "Non-nil if the program of AGENT is installed on HOST.
+HOST is a remote prefix such as \"/rpc:dev:\", nil for this machine.  An
+agent that names no program counts as available, and so does one on a
+host not looked up yet (see `agent-session-check-host')."
+  (let ((program (agent-session--program agent)))
+    (cond ((eq program 'none) t)
+          ((null program) nil)
+          ((null host) (and (executable-find program) t))
+          (t (let ((known (assoc program (gethash host agent-session--host-programs))))
+               (or (null known) (cdr known)))))))
 
 (defun agent-session-display-title (session)
   "Title of SESSION: the one carried over on resume, else the first message."
@@ -346,10 +387,14 @@ E.g. to switch settings that can only be given at startup."
 
 ;;; Background process
 
-(defun agent-session-tools-stamp ()
-  "File whose content changes when the methods Emacs gives agents change.
-emx watches it to have its client list the tools again (see agent-ui.el)."
-  (expand-file-name (concat "emx-tools-" server-name) (locate-user-emacs-file "var/")))
+(defun agent-session-tools-stamp (&optional host)
+  "File whose content changes when the methods agents on HOST see change.
+HOST is a remote prefix, nil for this machine: agents can start sessions
+of the agents installed where they run.  emx watches it to have its
+client list the tools again (see agent-ui.el)."
+  (expand-file-name (concat "emx-tools-" server-name
+                            (and host (concat "-" (substring (secure-hash 'sha1 host) 0 12))))
+                    (locate-user-emacs-file "var/")))
 
 (defconst agent-session-emx-variables
   '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER" "EMX_TOOLS_STAMP")
@@ -361,7 +406,8 @@ emx watches it to have its client list the tools again (see agent-ui.el)."
    (list (concat "PATH=" agent-session-bin-directory path-separator (getenv "PATH"))
          (concat "EMACS_SOCKET_NAME=" (expand-file-name server-name server-socket-dir))
          (concat "EMX_AGENT_BUFFER=" (buffer-name (agent-session-buffer session)))
-         (concat "EMX_TOOLS_STAMP=" (agent-session-tools-stamp)))
+         (concat "EMX_TOOLS_STAMP="
+                 (agent-session-tools-stamp (file-remote-p (agent-session-root session)))))
    process-environment))
 
 (defun agent-session-emx-command ()
@@ -2965,6 +3011,8 @@ agent's latest settings; INFO is the initial info plist."
                     (run-at-time 0 nil agent-session--list-refresh-function)))
                 nil t)
       (goto-char (point-max)))
+    ;; Its agent may start sessions of the agents installed on its host.
+    (agent-session-check-host root)
     (agent-session-backend-start (agent-session-backend session) session)
     buffer))
 

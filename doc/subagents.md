@@ -104,13 +104,14 @@ carries the permission mode, cost and confirmation the user set.
 `explorer` (Claude haiku, plan), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
 (Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
 (Claude Fable, plan, confirmed by the user each time: a fork only reaches the
-parent's own model); the tool description lists those whose agent is enabled and whose
-program is installed on this machine, so agents don't keep choosing one that
-can't start. Enabled profiles whose program is missing here are only named, as
-usable in a remote project whose host has it: the description can't depend on
-the caller. A child that fails to start is closed (only that one, found by a
-token in its info: others may open while it waits for the host) and the error
-returned. An agent
+parent's own model); the tool description lists those whose agent is enabled
+and installed where the caller runs: children start on their parent's host, so
+an agent on this machine sees the agents installed here and one in a `/rpc:dev:`
+project those on dev. A remote host's programs are looked up in one round trip
+(`command -v`) as a session opens there, so installing an agent on a host shows
+once a session opens on it again; the timer never makes round trips. A child that
+fails to start anyway is closed (only that one, found by a token in its info:
+others may open while it waits for the host) and the error returned. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start
@@ -124,9 +125,12 @@ gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 
 ### Rules
 
-1. An agent's tools and their descriptions depend on the configuration only,
-   never on the calling session (`agent-ui-description-functions`). A test
-   compares the parent's and the child's `describe` output.
+1. An agent's tools and their descriptions depend on the configuration and the
+   host the agent runs on, never otherwise on the calling session
+   (`agent-ui-description-functions`): a fork runs on its parent's host. A test
+   compares the parent's and the child's `describe` output. Each host has its
+   own stamp file, so installing an agent on one host doesn't refresh (and cost
+   the prompt cache of) sessions on another.
    When Emacs's tools change (a reload, a changed profile), live sessions are
    told: emx sends `tools/list_changed` (Claude and dsh list again; Codex
    ignores it, so a saved Codex thread resumes in a new process before its
