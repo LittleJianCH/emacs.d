@@ -101,8 +101,15 @@ The model picks a profile, not a free harness and model pair: harness and model
 don't combine freely, model lists come from running processes, and a profile
 carries the permission mode, cost and confirmation the user set.
 `agent-collab-profiles` defaults to `coder-flash` (dsh, DeepSeek flash, auto),
-`explorer` (Claude haiku, plan) and `reviewer` (Codex, plan); the tool
-description lists the enabled ones.
+`explorer` (Claude haiku, plan), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
+(Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
+(Claude Fable, plan, confirmed by the user each time: a fork only reaches the
+parent's own model); the tool description lists the enabled ones. An agent
+never picks a profile of its own agent and model: it forks instead, getting the
+same model with its context and prompt cache.
+Costs come in five tiers, minimal, low, medium, high and premium, so the most
+expensive models stand apart: DeepSeek flash is minimal, Haiku low, Codex's
+gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 
 ### Rules
 

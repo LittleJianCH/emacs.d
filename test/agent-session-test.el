@@ -1957,7 +1957,8 @@ profile, its mode capped by the caller's, the task last in its message."
      (let ((description (plist-get (seq-find (lambda (m) (equal (plist-get m :name) "session_start"))
                                              (agent-session-test--call "describe" buffer))
                                    :description)))
-       (should (string-search "- worker: Echo2 big, low cost.  Test worker." description))
+       (should (string-search "Profiles, by cost from minimal through low, medium and high \
+to premium:\n- worker: Echo2 big, low cost.  Test worker." description))
        (should-not (string-search "gone" description)))
      (should-error (agent-session-test--call "session_start" buffer :profile "gone" :prompt "x"))
      (should-error (agent-session-test--call "session_start" buffer :prompt "x"))

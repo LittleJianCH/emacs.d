@@ -576,20 +576,28 @@ reply will reach you as a message."
 ;;; Starting sessions (subagents)
 
 (defcustom agent-collab-profiles
-  '((coder-flash :agent dsh :model "deepseek-official/deepseek-flash" :mode auto :cost low
+  '((coder-flash :agent dsh :model "deepseek-official/deepseek-flash" :mode auto :cost minimal
                  :description "Writes code and tests to a clear specification.")
     (explorer :agent claude :model "haiku" :mode plan :cost low
               :description "Investigates without editing: finds code, reads docs, \
 gathers evidence.")
-    (reviewer :agent codex :mode plan :cost medium
-              :description "Reviews changes independently; doesn't edit files."))
+    (coder :agent codex :model "gpt-6.1-sol" :mode auto :cost medium
+           :description "Writes code that needs more judgment than coder-flash: \
+changes across files, debugging, refactoring.")
+    (reviewer :agent codex :model "gpt-6-astra" :mode plan :cost high
+              :description "Reviews changes independently; doesn't edit files.")
+    (generalist :agent claude :model "opus" :mode auto :cost high
+                :description "Does demanding work of any kind.")
+    (expert :agent claude :model "fable" :mode plan :cost premium :confirm t
+            :description "Works through the hardest problems: subtle bugs, tricky \
+designs.  Use it when you are stuck, not for routine work."))
   "The sessions agents can start with session_start, by name.
 Each entry is (NAME . PLIST), with PLIST keys:
   :agent        a registered agent, such as dsh
   :model        its model; nil means the agent's default
   :effort       its reasoning effort; nil means the model's default
   :mode         its permission mode, at most that of the starting session
-  :cost         low, medium or high, to help agents choose
+  :cost         minimal, low, medium, high or premium, to help agents choose
   :description  what it is good for, shown to agents
   :confirm      non-nil asks the user before each start
 Profiles of agents that aren't enabled are left out."
@@ -620,7 +628,7 @@ Profiles of agents that aren't enabled are left out."
 
 (defun agent-collab--profiles-description ()
   "The profiles, for the description of session_start."
-  (concat "Profiles:\n"
+  (concat "Profiles, by cost from minimal through low, medium and high to premium:\n"
           (mapconcat (pcase-lambda (`(,name . ,plist))
                        (format "- %s: %s%s, %s cost.  %s"
                                name
@@ -783,7 +791,9 @@ back, shown to the user under your session.  Choose how it gets context:
   your context but a cheaper model can do it.
 - fresh: a profile starts from your prompt alone.  Use it for
   self-contained work, and write the prompt so it stands alone.
-Prefer the cheapest profile that can do the job.  By default (wait 0) it
+Prefer the cheapest profile that can do the job.  Never pick a profile of
+your own agent and model: fork instead, which is the same model with your
+context and prompt cache.  By default (wait 0) it
 returns the session's @handle at once, and its final reply reaches you as a
 message when it finishes: don't poll it.  A session you start does one
 task, takes no follow-ups and closes once its reply reaches you; for more
