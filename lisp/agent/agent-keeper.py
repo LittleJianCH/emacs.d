@@ -46,6 +46,7 @@ import traceback
 DIR = os.path.expanduser('~/.cache/emacs-agent/keeper')
 IDLE = 24 * 3600
 STOP_GRACE = 5
+STOP_GIVE_UP = 30
 CHUNK = 1 << 16
 ERR_TAIL = 4096
 
@@ -71,6 +72,7 @@ class Keeper:
         self.to_child = bytearray()
         self.code = None       # the agent's exit status, once it has exited
         self.stop_at = None    # when the agent was asked to stop
+        self.group_gone = False  # its process group, since it was
         self.alone_since = time.monotonic()
         self.sel = selectors.DefaultSelector()
         self.sel.register(listener, selectors.EVENT_READ, self.accept)
@@ -293,12 +295,16 @@ connection."""
                 self.child.stdout.close()
             if self.code is not None:
                 self.update_client()
-            stopping = self.stop_at is not None
-            if stopping and now - self.stop_at > STOP_GRACE:
-                # Whatever of the group outlived SIGTERM, the agent included.
-                stopping = self.signal_group(signal.SIGKILL)
+            stopping = self.stop_at is not None and not self.group_gone
+            if stopping and now - self.stop_at > STOP_GRACE + STOP_GIVE_UP:
+                # Only zombies left, under an init that doesn't reap them.
+                stopping = False
             elif stopping:
-                stopping = self.signal_group(0)
+                # SIGKILL whatever of the group outlived SIGTERM, the agent
+                # included.  Once gone, never signal it again: its number
+                # may then name another group.
+                stopping = self.signal_group(signal.SIGKILL if now - self.stop_at > STOP_GRACE else 0)
+            self.group_gone = self.stop_at is not None and not stopping
             if self.client is None and now - self.alone_since > IDLE:
                 if self.code is not None and self.stop_at is None:
                     self.finish()
