@@ -219,6 +219,8 @@ thread; sending this field does not guarantee updating such a thread."
                    :sandbox sandbox)
              (when instructions (list :developerInstructions instructions))
              (when resume (list :threadId resume :excludeTurns t))
+             ;; A session another agent started lives with its buffer.
+             (when (agent-session-child-p session) (list :ephemeral t))
              (when-let* ((model (agent-session-setting session :model)))
                (list :model model)))
      (lambda (result)

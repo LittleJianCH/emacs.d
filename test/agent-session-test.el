@@ -69,9 +69,11 @@
            (with-current-buffer buffer
              (goto-char (point-max))
              ,@body))
-       ;; Clean up all sessions this test created (including those from switching agent).
-       (dolist (b (agent-session-buffers))
-         (unless (memq b before) (kill-buffer b))))))
+       ;; Clean up all sessions this test created (including those from switching
+       ;; agent), without asking about the sessions they started.
+       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+         (dolist (b (agent-session-buffers))
+           (unless (memq b before) (kill-buffer b)))))))
 
 (defun agent-session-test--type (string)
   "Type STRING at the end of the input area and send it."
@@ -1916,13 +1918,14 @@ sent them."
            (let ((agent-collab-confirm nil))
              (agent-session-test--poll
               (agent-session-test--call "session_ask" buffer :prompt "检查一下"
-                                        :session "@test-echo2")))
-           (with-current-buffer child-buffer
+                                        :session (concat "@" (agent-session-handle peer)))))
+           (with-current-buffer (agent-session-buffer peer)
              (should (string-search "▍ @test-echo\n" (agent-session-test--transcript)))
              (should-not (string-search "▍ 你" (agent-session-test--transcript))))
            (should (string-search "Message from @test-echo:"
-                                  (agent-session-test--call "session_read" nil
-                                                            :session "@test-echo2"))))
+                                  (agent-session-test--call
+                                   "session_read" nil
+                                   :session (concat "@" (agent-session-handle peer))))))
        (kill-buffer list-buffer)))))
 
 (defmacro agent-session-test--with-profiles (&rest body)
@@ -2015,6 +2018,8 @@ turns that fit and the first; sessions started in one turn share it."
   (agent-session-test--with-profiles
    (let ((session agent-session--current))
      (dotimes (i 6) (agent-session-test--type (format "问题%d %s" i (make-string 300 ?x))))
+     ;; An agent starts sessions during its turn.
+     (agent-session-set-status session 'running)
      (let* ((agent-collab-handoff-limit 1500)
             (start (lambda ()
                      (agent-session-test--poll
@@ -2025,7 +2030,7 @@ turns that fit and the first; sessions started in one turn share it."
        (should (string-prefix-p "Conversation handed over from session \"@test-echo\"" first))
        ;; The first message without its reply, the latest turn whole.
        (should (string-match-p "## Turn 1\nUser:\n问题0 x+\n\n(Turns 2-5 left out; read them \
-with session_read.)\n\n## Turn 6\nUser:\n问题5 x+\n\nAssistant:\n收到：问题5" first))
+with session_read.)\n\n## Turn 6 (in progress)\nUser:\n问题5 x+\n\nAssistant:\n收到：问题5" first))
        (should-not (string-search "收到：问题0" first))
        (should-not (string-search "问题3" first))
        (should (string-match-p "---\n\nYour task:\n接着做\n\n(From the Echo agent" first))
@@ -2035,10 +2040,182 @@ with session_read.)\n\n## Turn 6\nUser:\n问题5 x+\n\nAssistant:\n收到：问�
        (should (equal (agent-session-test--first-message (agent-session-find "@worker-2"))
                       first))
        ;; After another turn, the history moves on.
+       (agent-session-set-status session 'idle)
        (agent-session-test--type "问题6")
        (funcall start)
        (should (string-search "问题6" (agent-session-test--first-message
                                        (agent-session-find "@worker-3"))))))))
+
+(defun agent-session-test--last-user (session)
+  "The last user block of SESSION, as (ID . BLOCK)."
+  (seq-find (pcase-lambda (`(,_ . ,block)) (eq (plist-get block :type) 'user))
+            (reverse (agent-session--blocks-in-order session))))
+
+(ert-deftest agent-session-test-subagent-no-persistence ()
+  "Every backend keeps the sessions agents start out of its saved history."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (child (buffer-local-value 'agent-session--current
+                                     (agent-session-open 'test-echo2 default-directory nil nil
+                                                         (list :parent buffer))))
+          sent restarted)
+     (cl-letf (((symbol-function 'agent-session-skills-dir) #'ignore)
+               ((symbol-function 'agent-codex--request)
+                (lambda (_ method params &rest _) (push (cons method params) sent)))
+               ((symbol-function 'agent-dsh--request)
+                (lambda (_ method params &rest _) (push (cons method params) sent)))
+               ((symbol-function 'agent-session-start-process) #'ignore)
+               ((symbol-function 'agent-session-restart-process)
+                (lambda (s) (push s restarted))))
+       (should (member "--no-session-persistence" (agent-claude--command child)))
+       (should-not (member "--no-session-persistence" (agent-claude--command session)))
+       (agent-codex--start-thread-with-instructions child "/p" nil)
+       (agent-codex--start-thread-with-instructions session "/p" nil)
+       (should (eq (plist-get (cdr (assoc "thread/start" (reverse sent))) :ephemeral) t))
+       (should-not (plist-member (cdr (assoc "thread/start" sent)) :ephemeral))
+       (setq sent nil)
+       (agent-session-backend-start 'dsh child)
+       (should (equal (plist-get (cdr (assoc "initialize" sent)) :parent) "emacs"))
+       (setq sent nil)
+       (agent-session-backend-start 'dsh session)
+       (should-not (plist-member (cdr (assoc "initialize" sent)) :parent))
+       ;; Without a saved transcript Claude can't restart to change the effort.
+       (agent-session-backend-apply-settings 'claude child '(:effort))
+       (should-not restarted)
+       (agent-session-backend-apply-settings 'claude session '(:effort))
+       (should (equal restarted (list session)))))))
+
+(ert-deftest agent-session-test-subagent-close-with-parent ()
+  "Closing a session closes those it started, asking first if one works."
+  (agent-session-test--with-profiles
+   (let* ((child-of (lambda (parent)
+                      (buffer-local-value 'agent-session--current
+                                          (agent-session-open 'test-echo2 default-directory nil
+                                                              nil (list :parent parent)))))
+          (child (funcall child-of buffer))
+          (answer nil)
+          (asked nil))
+     (cl-letf (((symbol-function 'yes-or-no-p)
+                (lambda (prompt) (setq asked prompt) answer)))
+       (agent-session-set-status child 'running)
+       ;; Declined: both stay.
+       (should-not (kill-buffer buffer))
+       (should (string-match-p "@test-echo2 还在运行" asked))
+       (should (buffer-live-p buffer))
+       (should (buffer-live-p (agent-session-buffer child)))
+       ;; Accepted: both go.
+       (setq answer t)
+       (should (kill-buffer buffer))
+       (should-not (buffer-live-p (agent-session-buffer child)))
+       ;; An idle child goes without asking.
+       (setq buffer (agent-session-test-echo t) asked nil)
+       (let ((idle (funcall child-of buffer)))
+         (kill-buffer buffer)
+         (should-not asked)
+         (should-not (buffer-live-p (agent-session-buffer idle))))))))
+
+(ert-deftest agent-session-test-subagent-mailbox ()
+  "Replies the caller didn't wait for reach its agent once it is idle, in
+one message, naming who sent them."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current))
+     (agent-session-set-status session 'running)
+     (should (string-match-p "will reach you as a message"
+                             (agent-session-test--poll
+                              (agent-session-test--call "session_start" buffer :profile "worker"
+                                                        :prompt "任务一"))))
+     ;; The child replied at once, but its parent is busy.
+     (should (eq (plist-get (cdr (agent-session-test--last-user session)) :origin) nil))
+     (agent-session-set-status session 'idle)
+     (let ((mail (cdr (agent-session-test--last-user session))))
+       ;; Mail neither titles nor names the session it goes to.
+       (should (equal (agent-session-display-title session) "新会话"))
+       (should (equal (agent-session-handle session) "test-echo"))
+       (should (equal (plist-get mail :origin) "@worker"))
+       (should (string-prefix-p "(Replies to messages you sent to other sessions, delivered \
+by Emacs; not from the user.)" (plist-get mail :text)))
+       (should (string-search "Reply from @worker (Echo2):\n\n收到：Your task:\n任务一"
+                              (plist-get mail :text)))
+       (should (string-search "See what it did with session_read session=@worker."
+                              (plist-get mail :text))))
+     ;; Several replies come together.
+     (agent-session-set-status session 'running)
+     (dolist (task '("任务二" "任务三"))
+       (agent-session-test--poll
+        (agent-session-test--call "session_start" buffer :profile "worker" :prompt task)))
+     (agent-session-set-status session 'idle)
+     (let ((mail (cdr (agent-session-test--last-user session))))
+       (should (equal (plist-get mail :origin) "会话回复"))
+       (should (string-search "任务二" (plist-get mail :text)))
+       (should (string-search "任务三" (plist-get mail :text))))
+     ;; A child closed before replying.
+     (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
+       (agent-session-set-status session 'running)
+       (agent-session-test--poll
+        (agent-session-test--call "session_start" buffer :profile "worker" :prompt "任务四"))
+       (kill-buffer (agent-session-buffer (agent-session-find "@worker-4")))
+       (accept-process-output nil 0.05)
+       (agent-session-set-status session 'idle))
+     (should (string-search "@worker-4 ended without replying: @worker-4 was closed before \
+it replied" (plist-get (cdr (agent-session-test--last-user session)) :text))))))
+
+(ert-deftest agent-session-test-subagent-wait ()
+  "A caller waiting for a child gets its reply, or a note once the child waits
+for the user, and then the reply later as a message."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current))
+     (agent-session-set-status session 'running)
+     (let ((reply (agent-session-test--poll
+                   (agent-session-test--call "session_start" buffer :profile "worker"
+                                             :prompt "等我" :wait 30))))
+       (should (string-prefix-p "Reply from @worker (Echo2)" reply)))
+     ;; Answered through the wait: nothing more comes.
+     (agent-session-set-status session 'idle)
+     (should-not (plist-get (cdr (agent-session-test--last-user session)) :origin))
+     (agent-session-set-status session 'running)
+     (let* ((pending (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
+                       (agent-session-test--call "session_start" buffer :profile "worker"
+                                                 :prompt "要确认" :wait 30)))
+            (child (agent-session-find "@worker-2")))
+       (should (eq (car (agent-session-test--poll pending)) :agent-ui-pending))
+       (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
+                          :callback #'ignore)
+       (should (string-match-p "waiting for the user to confirm"
+                               (agent-session-test--poll pending)))
+       (agent-session-text child "r1" "确认后做完了")
+       (agent-session-set-status child 'idle)
+       (agent-session-set-status session 'idle)
+       (should (string-search "确认后做完了"
+                              (plist-get (cdr (agent-session-test--last-user session)) :text)))))))
+
+(ert-deftest agent-session-test-subagent-limits ()
+  "Children take no messages and send none; a parent may stop its own."
+  (agent-session-test--with-profiles
+   (let* ((session agent-session--current)
+          (peer-buffer (agent-session-open 'test-echo2 default-directory))
+          (peer (buffer-local-value 'agent-session--current peer-buffer)))
+     (agent-session-test--poll
+      (agent-session-test--call "session_start" buffer :profile "worker" :prompt "x"))
+     (let ((child (agent-session-find "@worker")))
+       (should-error (agent-session-test--call "session_ask" buffer :session "@worker"
+                                               :prompt "再做点"))
+       (should-error (agent-session-test--call "session_ask" (agent-session-buffer child)
+                                               :session (concat "@" (agent-session-handle peer))
+                                               :prompt "帮我"))
+       (should-error (agent-session-test--call "session_stop" peer-buffer :session "@worker"))
+       (should (equal (agent-session-test--call "session_stop" buffer :session "@worker")
+                      "Stopped and closed @worker."))
+       (should-not (buffer-live-p (agent-session-buffer child))))
+     ;; Between the user's sessions, wait 0 sends and the reply comes as a message.
+     (agent-session-set-status session 'running)
+     (should (string-match-p "will reach you as a message"
+                             (agent-session-test--poll
+                              (agent-session-test--call "session_ask" buffer
+                                                        :session (concat "@" (agent-session-handle peer))
+                                                        :prompt "看看" :wait 0))))
+     (agent-session-set-status session 'idle)
+     (should (string-search "收到：看看"
+                            (plist-get (cdr (agent-session-test--last-user session)) :text))))))
 
 (ert-deftest agent-session-test-rpc-deferred ()
   (let* ((polls 0)

@@ -8,7 +8,7 @@
 // Wire format: newline-delimited JSON-RPC 2.0. One process drives one session.
 //
 // Requests (Emacs -> dsh):
-//   initialize {cwd, resume?, model?, effort?, preset?, plan?, mcpServers?}
+//   initialize {cwd, resume?, model?, effort?, preset?, plan?, mcpServers?, parent?}
 //                -> {sessionId, version, title, config, models, presets, plan,
 //                    commands, history, warnings}
 //   configure  {model?, effort?, preset?, plan?}         -> {config}
@@ -16,6 +16,9 @@
 //   steer      {text, images?}                           -> {messageId}
 //   cancel     {}                                        -> {}
 //   sessions/list {cwds}            -> {sessions: [{id, cwd, title, time}]}  (no initialize needed)
+//
+// parent marks a new session that another session's agent started: it is
+// recorded as the session's parentSession, so sessions/list leaves it out.
 //
 // images are absolute file paths. A prompt naming a dsh slash command runs
 // the command instead of starting a turn. mcpServers are stdio servers
@@ -414,7 +417,7 @@ export function apply(ctx) {
         }
         handle = await ctx.agents.create({
           sessionId: randomUUID(),
-          meta: { cwd: params.cwd },
+          meta: { cwd: params.cwd, ...params.parent ? { parentSession: params.parent } : {} },
           agentOptions: { ...selection.current },
           setup,
         })

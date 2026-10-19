@@ -6,13 +6,19 @@
 ;; cheap model of its own agent (e.g. @cfi-meaning).  The user mentions
 ;; sessions with it in messages, and agents name sessions with it in these
 ;; methods:
-;;   sessions      list the live sessions
-;;   session_read  read the latest turns of a session, paging backwards
-;;   session_ask   send a prompt to an idle existing session and wait for the
-;;                 reply
-;; Agents only talk to sessions the user opened; they never start sessions.
-;; With `agent-collab-confirm', session_ask asks the user first, in the
-;; caller's footer.
+;;   sessions       list the live sessions
+;;   session_read   read the latest turns of a session, paging backwards
+;;   session_ask    send a prompt to an idle session the user opened and wait
+;;                  for the reply
+;;   session_start  start a subagent: a child session of a profile in
+;;                  `agent-collab-profiles' that does one task and reports
+;;   session_stop   stop and close a child session
+;; Sessions the user opened talk to each other with session_ask (confirmed
+;; first with `agent-collab-confirm').  A child session lives with its
+;; buffer and its parent, takes no messages from agents and asks no one: it
+;; reports through its final reply.  A reply its asker stopped waiting for
+;; (wait 0, a timeout) goes to the asker's mailbox, and is sent to its agent
+;; once it is idle, with whatever else arrived meanwhile.
 
 ;;; Code:
 
@@ -321,7 +327,7 @@ final reply goes back to it.)"
   (let ((block (agent-session--block target id)))
     (cond
      ((not (buffer-live-p (agent-session-buffer target)))
-      (error "The session was closed before it replied"))
+      (error "@%s was closed before it replied" (agent-session-handle target)))
      ((null block) (error "The user withdrew the message"))
      ((or (plist-get block :queued)
           (memq (agent-session-status target) '(running starting)))
@@ -332,29 +338,108 @@ final reply goes back to it.)"
              (reply (seq-find (lambda (entry)
                                 (and (eq (plist-get (cdr entry) :type) 'text)
                                      (not (eq (plist-get (cdr entry) :kind) 'thinking))))
-                              (reverse (cdr turn)))))
-        (list (format "Reply from @%s (%s)%s:\n\n%s\n\nFollow up with session_ask session=@%s; \
-see what it did with session_read."
-                      (agent-session-handle target) (agent-session-title target)
+                              (reverse (cdr turn))))
+             (handle (agent-session-handle target)))
+        (list (format "Reply from @%s (%s)%s:\n\n%s\n\n%s"
+                      handle (agent-session-title target)
                       (if (eq (agent-session-status target) 'exited) ", which then exited" "")
                       (if reply (agent-collab--clip (plist-get (cdr reply) :text)) "(no reply)")
-                      (agent-session-handle target))))))))
+                      (if (agent-session-child-p target)
+                          (format "See what it did with session_read session=@%s." handle)
+                        (format "Follow up with session_ask session=@%s; see what it did \
+with session_read." handle)))))))))
+
+;;; Mailbox: replies that come after their asker stopped waiting
+
+(defvar agent-collab--pending nil
+  "Replies asked for: plists (:target SESSION :id ID :asker SESSION :awaited BOOL).
+ID is the message's block in TARGET.  While :awaited, the asker's call
+waits for the reply; otherwise it goes to the asker's mailbox.")
+
+(defvar agent-collab--mailbox (make-hash-table :test #'eq :weakness 'key)
+  "Replies waiting for their asker to be idle: SESSION -> ((HANDLE . TEXT) ...).")
+
+(defun agent-collab--track (target id asker awaited)
+  "Note that ASKER wants the reply to message ID in TARGET; return the entry.
+AWAITED means its call waits for the reply for now."
+  (let ((entry (list :target target :id id :asker asker :awaited awaited)))
+    (push entry agent-collab--pending)
+    entry))
+
+(defun agent-collab--settle (entry)
+  "Post the reply of ENTRY to its asker's mailbox once there is one."
+  (unless (plist-get entry :awaited)
+    (let* ((target (plist-get entry :target))
+           (reply (condition-case err
+                      (agent-collab--reply target (plist-get entry :id))
+                    (error (list (format "@%s ended without replying: %s"
+                                         (agent-session-handle target)
+                                         (error-message-string err)))))))
+      (when reply
+        (setq agent-collab--pending (delq entry agent-collab--pending))
+        (let ((asker (plist-get entry :asker)))
+          (when (buffer-live-p (agent-session-buffer asker))
+            (puthash asker (append (gethash asker agent-collab--mailbox)
+                                   (list (cons (agent-session-handle target) (car reply))))
+                     agent-collab--mailbox)
+            (agent-collab--deliver asker)))))))
+
+(defun agent-collab--deliver (session)
+  "Send SESSION's mailbox to its agent, in one message, if it is idle."
+  (when-let* ((mail (and (eq (agent-session-status session) 'idle)
+                         (buffer-live-p (agent-session-buffer session))
+                         (gethash session agent-collab--mailbox))))
+    (remhash session agent-collab--mailbox)
+    (agent-session-submit
+     session
+     (concat "(Replies to messages you sent to other sessions, delivered by Emacs; \
+not from the user.)\n\n"
+             (mapconcat #'cdr mail "\n\n---\n\n"))
+     (if (cdr mail) "会话回复" (concat "@" (caar mail))))))
+
+(defun agent-collab--status-changed (session _previous)
+  "Settle the replies SESSION owed and deliver its mailbox, as its status changes."
+  (dolist (entry agent-collab--pending)
+    (when (eq (plist-get entry :target) session)
+      (agent-collab--settle entry)))
+  (agent-collab--deliver session))
+
+(add-hook 'agent-session-status-functions #'agent-collab--status-changed)
+
+(defun agent-collab--buffer-killed ()
+  "Settle the replies the session of this buffer owed: it was closed."
+  (when-let* ((session (and (agent-session-buffer-p (current-buffer)) agent-session--current)))
+    ;; Settle once the buffer is gone, so the replies say it was closed.
+    (run-at-time 0 nil (lambda ()
+                         (dolist (entry agent-collab--pending)
+                           (when (eq (plist-get entry :target) session)
+                             (agent-collab--settle entry)))))))
+
+(add-hook 'kill-buffer-hook #'agent-collab--buffer-killed)
 
 (agent-ui-defmethod "session_ask"
     ((session string "The idle session to ask: its @handle, as listed by sessions"
               required)
      (prompt string "The message.  The other agent hasn't seen your conversation:
 include the context it needs (files, diff, question)" required)
-     (wait integer "Seconds to wait for the reply, default 600, at most 1500"))
-  "Ask the agent of another open session and wait for its reply: a second
-opinion, a review of your changes, or a question to a session the user
-mentioned.  The user may have to confirm first.  Returns the final reply of
-that turn; if it takes longer than wait, returns the session id: read the
-reply later with session_read."
+     (wait integer "Seconds to wait for the reply: default 600, at most 1500; 0
+returns at once"))
+  "Ask the agent of another session the user opened and wait for its reply: a
+second opinion, a review of your changes, or a question to a session the
+user mentioned.  The user may have to confirm first.  Returns the final
+reply of that turn; if it takes longer than wait, the reply reaches you
+later as a message.  Sessions started with session_start take no messages."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_ask works only from an agent session")))
          (target (agent-collab--session session)))
     (when (eq target caller) (error "That is your own session"))
+    (when (agent-session-child-p caller)
+      (error "A session started for a task reports through its final reply; it \
+doesn't ask other sessions"))
+    (when (agent-session-child-p target)
+      (error "@%s works on a task it was started for and takes no messages; for more \
+work, start another session (context handoff passes your conversation)"
+             (agent-session-handle target)))
     (pcase (agent-session-status target)
       ('running (error "@%s is busy; read it with session_read or try later"
                        (agent-session-handle target)))
@@ -364,33 +449,63 @@ reply later with session_read."
      :confirm (and agent-collab-confirm
                    (format "向 @%s 发送消息" (agent-session-handle target)))
      :detail prompt
-     :wait (min agent-collab--max-wait (max 1 (or wait agent-collab-wait)))
+     :wait (min agent-collab--max-wait (max 0 (or wait agent-collab-wait)))
      :start (lambda ()
               (cons target (agent-session-submit
                             target (agent-collab--message caller prompt)
-                            (concat "@" (agent-session-handle caller))))))))
+                            (concat "@" (agent-session-handle caller)))))
+     :started (lambda (target)
+                (format "Sent to @%s.  Its reply will reach you as a message; don't poll \
+for it." (agent-session-handle target))))))
 
 (cl-defun agent-collab--converse (caller &key confirm detail wait start started)
   "Send a message for the agent of CALLER and return a deferred result.
 START sends it: called with no arguments, it returns (TARGET . ID), the
 session it went to and the id of its block there.  With CONFIRM, a title,
 the user confirms first in CALLER's footer, seeing DETAIL.  The result is
-the reply to the message, or after WAIT seconds a note that TARGET is
-still working.  With WAIT 0, it is STARTED called with TARGET as soon as
-the message is sent."
+the reply to the message.  With WAIT 0 it is STARTED called with TARGET as
+soon as the message is sent; after WAIT seconds, or once TARGET waits for
+the user, a note that it is still working.  Either way the reply then
+reaches CALLER's agent through its mailbox."
   (let ((state (list :phase 'confirm))
         (deadline (if (zerop wait) agent-collab-wait wait))
         ask)
-    (cl-flet ((send ()
-                (condition-case err
-                    (pcase-let ((`(,target . ,id) (funcall start)))
-                      (setq state (list :phase 'running :target target :id id)))
-                  (error (setq state (list :phase 'failed :error (error-message-string err))))))
-              (close-ask (label)
-                (when-let* ((pending (and ask (agent-session--ask caller ask))))
-                  (unless (plist-get pending :answer)
-                    (agent-session--close-ask caller pending label)
-                    (agent-session--refresh caller)))))
+    (cl-flet* ((send ()
+                 (condition-case err
+                     (pcase-let ((`(,target . ,id) (funcall start)))
+                       (setq state (list :phase 'running :target target :id id
+                                         :entry (agent-collab--track target id caller
+                                                                     (> wait 0))))
+                       ;; The reply may already be there.
+                       (agent-collab--settle (plist-get state :entry)))
+                   (error (setq state (list :phase 'failed
+                                            :error (error-message-string err))))))
+               (close-ask (label)
+                 (when-let* ((pending (and ask (agent-session--ask caller ask))))
+                   (unless (plist-get pending :answer)
+                     (agent-session--close-ask caller pending label)
+                     (agent-session--refresh caller))))
+               (let-go ()
+                 ;; The caller stops waiting: the reply goes to its mailbox.
+                 (when-let* ((entry (plist-get state :entry)))
+                   (plist-put entry :awaited nil)
+                   (agent-collab--settle entry)))
+               (reply ()
+                 (let ((target (plist-get state :target))
+                       (entry (plist-get state :entry)))
+                   (cond
+                    ((zerop wait) (list (funcall started target)))
+                    ((agent-session--pending-asks target)
+                     (let-go)
+                     (list (format "@%s is waiting for the user to confirm something; \
+its reply will reach you as a message." (agent-session-handle target))))
+                    (t (condition-case err
+                           (when-let* ((done (agent-collab--reply target
+                                                                  (plist-get state :id))))
+                             (setq agent-collab--pending (delq entry agent-collab--pending))
+                             done)
+                         (error (setq agent-collab--pending (delq entry agent-collab--pending))
+                                (signal (car err) (cdr err)))))))))
       (if (not confirm)
           (send)
         (setq ask (agent-session-ask
@@ -409,18 +524,18 @@ the message is sent."
                        (error "The confirmation expired")))
            ('denied (error "The user declined"))
            ('failed (error "Failed: %s" (plist-get state :error)))
-           ('running (if (zerop wait)
-                         (list (funcall started (plist-get state :target)))
-                       (agent-collab--reply (plist-get state :target) (plist-get state :id))))))
+           ('running (reply))))
        :wait deadline
        :timeout (lambda ()
                   (if (eq (plist-get state :phase) 'running)
-                      (format "No reply within %d seconds; @%s is still working.  \
-Read its reply later with session_read."
-                              wait (agent-session-handle (plist-get state :target)))
+                      (progn
+                        (let-go)
+                        (format "No reply within %d seconds; @%s is still working.  Its \
+reply will reach you as a message."
+                                wait (agent-session-handle (plist-get state :target))))
                     (close-ask "已超时")
                     (error "The user didn't confirm within %d seconds" deadline)))
-       :cancel (lambda () (close-ask "已取消"))))))
+       :cancel (lambda () (close-ask "已取消") (let-go))))))
 
 ;;; Starting sessions (subagents)
 
@@ -582,17 +697,18 @@ your conversation" required)
      (title string "A short title for the session, a few words")
      (wait integer "Seconds to wait for its final reply.  0 (default) returns at once
 while it works; at most 1500"))
-  "Start a subagent: a new session that works on a task for you, shown to the
-user under your session.  Choose how it gets context:
+  "Start a subagent: a new session that does one task for you and reports
+back, shown to the user under your session.  Choose how it gets context:
 - fresh: it starts from your prompt alone.  Use it for self-contained work,
   and write the prompt so it stands alone.
 - handoff: it also gets a text copy of your recent conversation (no prompt
   cache, and tool output is cut).  Use it when the task needs your context
-  but is simple enough for a cheaper model.
-Prefer the cheapest profile that can do the job.  Returns the session's
-@handle at once, or with wait its final reply.  Read its progress and reply
-with session_read, follow up with session_ask.  Sessions you start can't
-start sessions themselves."
+  but a cheaper model can do it.
+Prefer the cheapest profile that can do the job.  By default (wait 0) it
+returns the session's @handle at once, and its final reply reaches you as a
+message when it finishes: don't poll it.  A session you start does one
+task, takes no follow-ups and closes with yours; for more work start
+another.  Stop one with session_stop."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_start works only from an agent session")))
          (entry (agent-collab--profile profile))
@@ -622,11 +738,28 @@ one to finish" working))
                              child (agent-collab--task caller prompt history)
                              (concat "@" (agent-session-handle caller))))))
      :started (lambda (child)
-                (format "Started @%s (%s%s, %s).  It works in the background; read its \
-progress and final reply with session_read session=@%s."
+                (format "Started @%s (%s%s, %s).  Its final reply will reach you as a \
+message when it finishes; don't poll it.  Keep working, or end your turn if \
+there is nothing else to do."
                         (agent-session-handle child) (agent-session-title child)
                         (if-let* ((model (plist-get plist :model))) (concat " " model) "")
-                        (or context "fresh") (agent-session-handle child))))))
+                        (or context "fresh"))))))
+
+(agent-ui-defmethod "session_stop"
+    ((session string "The session to stop: one you started, by its @handle" required))
+  "Stop a session you started with session_start and close it: when its task
+is no longer needed or it went the wrong way.  Its reply won't come."
+  (let* ((caller (or (agent-ui-caller-session)
+                     (error "session_stop works only from an agent session")))
+         (target (agent-collab--session session)))
+    (unless (eq (agent-session-parent target) caller)
+      (error "@%s isn't a session you started" (agent-session-handle target)))
+    ;; Nothing is owed any more.
+    (setq agent-collab--pending
+          (seq-remove (lambda (entry) (eq (plist-get entry :target) target))
+                      agent-collab--pending))
+    (agent-session-kill-quietly (agent-session-buffer target))
+    (format "Stopped and closed @%s." (agent-session-handle target))))
 
 (provide 'agent-collab)
 ;;; agent-collab.el ends here

@@ -71,6 +71,9 @@ Model, reasoning effort and permission mode come from the session settings."
            "--permission-mode" (agent-claude--mode session))
      (when agent-claude-disallowed-tools
        (list "--disallowedTools" (string-join agent-claude-disallowed-tools ",")))
+     ;; A session another agent started lives with its buffer.
+     (when (agent-session-child-p session)
+       (list "--no-session-persistence"))
      (when-let* ((model (agent-session-setting session :model)))
        (unless (equal model "default") (list "--model" model)))
      (when-let* ((effort (agent-session-setting session :effort)))
@@ -721,10 +724,15 @@ offset read up to."
   ;; Reasoning effort can only be set at startup: restart with --resume now
   ;; if idle, otherwise wait for the turn to end.
   (when (memq :effort changed)
-    (if (eq (agent-session-status session) 'running)
-        (progn (agent-claude--set session :restart-pending t)
-               (agent-session-notice session "推理强度将在本回合结束后生效"))
-      (agent-session-restart-process session))))
+    (cond
+     ;; Without a saved transcript a restart would lose the conversation.
+     ((agent-session-child-p session)
+      (agent-session-notice session "子会话不保存记录，不能重启来改推理强度"
+                            'agent-session-error))
+     ((eq (agent-session-status session) 'running)
+      (agent-claude--set session :restart-pending t)
+      (agent-session-notice session "推理强度将在本回合结束后生效"))
+     (t (agent-session-restart-process session)))))
 
 (defun agent-claude--content (text)
   "Return the content of user message TEXT.

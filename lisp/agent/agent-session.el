@@ -168,11 +168,35 @@ That is the Claude session id or the Codex thread id."
 
 ;;; Subagents: sessions an agent started (see agent-collab.el)
 
+(defun agent-session-child-p (session)
+  "Non-nil if SESSION was started by another session's agent.
+Such a session lives with its buffer: it isn't saved for resuming."
+  (and (plist-get (agent-session-info session) :parent) t))
+
 (defun agent-session-parent (session)
   "The live session whose agent started SESSION, or nil."
   (when-let* ((buffer (plist-get (agent-session-info session) :parent))
               ((buffer-live-p buffer)))
     (buffer-local-value 'agent-session--current buffer)))
+
+(defun agent-session-kill-quietly (buffer)
+  "Kill session BUFFER without asking about the sessions it started."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      ;; Buffer-local, so bound in the buffer itself.
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer)))))
+
+(defun agent-session--confirm-kill-children ()
+  "Ask before killing this session buffer while sessions it started work.
+They are killed with it (see `agent-session-open')."
+  (let ((working (seq-filter (lambda (child)
+                               (memq (agent-session-status child) '(running starting)))
+                             (agent-session-children agent-session--current))))
+    (or (null working)
+        (yes-or-no-p (format "%s 还在运行，一起关掉吗？"
+                             (mapconcat (lambda (child) (concat "@" (agent-session-handle child)))
+                                        working "、"))))))
 
 (defun agent-session-children (session)
   "Live sessions started by the agent of SESSION, most recently used first."
@@ -1537,9 +1561,19 @@ Tools still running are marked interrupted; unanswered confirmations expire."
     (unless (plist-get ask :answer)
       (agent-session--close-ask session ask "已失效"))))
 
+(defvar agent-session-status-functions nil
+  "Functions called with a session and its previous status when it changes.")
+
 (defun agent-session-set-status (session status)
   "Set the session STATUS: idle / running / exited.
 Send queued messages when idle."
+  (let ((previous (agent-session-status session)))
+    (agent-session--set-status session status)
+    (unless (eq previous status)
+      (run-hook-with-args 'agent-session-status-functions session previous))))
+
+(defun agent-session--set-status (session status)
+  "Set the STATUS of SESSION, for `agent-session-set-status'."
   (let ((previous (agent-session-status session))
         (info (agent-session-info session)))
     (when (and (eq status 'running) (not (eq previous 'running)))
@@ -1925,7 +1959,7 @@ Each is called with the session and the text and returns the text to
 send; the transcript keeps showing what the user wrote.")
 
 (defvar agent-session-submit-functions nil
-  "Functions called with the session and the text of each submitted message.")
+  "Functions called with the session and the text of each message the user sent.")
 
 (defun agent-session--outgoing (session text)
   "TEXT as sent to the agent of SESSION, after `agent-session-send-filters'."
@@ -1941,12 +1975,14 @@ send; the transcript keeps showing what the user wrote.")
 (defun agent-session-submit (session text &optional origin)
   "Send TEXT as the user: show it in the transcript; queue it if busy.
 ORIGIN names the sender when it isn't the user, such as the @handle of
-another session; the transcript shows it instead of 你.  Return the id of
-the message's block in the transcript."
-  (unless (plist-get (agent-session-info session) :title)
-    (setf (agent-session-info session)
-          (plist-put (agent-session-info session) :title (agent-session--title-seed text))))
-  (run-hook-with-args 'agent-session-submit-functions session text)
+another session; the transcript shows it instead of 你, and the session
+takes neither its title nor its name from it.  Return the id of the
+message's block in the transcript."
+  (unless origin
+    (unless (plist-get (agent-session-info session) :title)
+      (setf (agent-session-info session)
+            (plist-put (agent-session-info session) :title (agent-session--title-seed text))))
+    (run-hook-with-args 'agent-session-submit-functions session text))
   (let ((id (format "user-%s" (random)))
         (busy (memq (agent-session-status session) '(running starting))))
     (agent-session--new-block session id (list :type 'user :text text :queued busy
@@ -2737,8 +2773,12 @@ agent's latest settings; INFO is the initial info plist."
     (agent-session--setup-buffer session)
     (with-current-buffer buffer
       (setq default-directory root)
+      (add-hook 'kill-buffer-query-functions #'agent-session--confirm-kill-children nil t)
       (add-hook 'kill-buffer-hook
                 (lambda ()
+                  ;; Sessions its agent started go with it.
+                  (dolist (child (agent-session-children session))
+                    (agent-session-kill-quietly (agent-session-buffer child)))
                   (agent-session-backend-stop (agent-session-backend session) session)
                   ;; The buffer isn't deleted yet; refresh the session list later.
                   (when agent-session--list-refresh-function

@@ -173,6 +173,14 @@ A remote agent reaches emx through the relay of agent-remote.el."
                  :plan (if (eq (agent-session-setting session :mode) 'plan) t :false)
                  :mcpServers (agent-dsh--mcp-servers session))
            (when-let* ((resume (agent-dsh--state session :resume))) (list :resume resume))
+           ;; A session another agent started lives with its buffer: keep it
+           ;; out of the history.  Its parent is named by its dsh session
+           ;; when it has one.
+           (when (agent-session-child-p session)
+             (list :parent (let ((parent (agent-session-parent session)))
+                             (or (and parent (eq (agent-session-backend parent) 'dsh)
+                                      (agent-session-resume-id parent))
+                                 "emacs"))))
            (when-let* ((model (agent-session-setting session :model))) (list :model model))
            (when-let* ((effort (agent-session-setting session :effort))) (list :effort effort)))
    (lambda (result)
