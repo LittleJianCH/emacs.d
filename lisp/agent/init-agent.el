@@ -11,6 +11,7 @@
 ;;   C-c a i  message the project's session  C-c a s  session list (live + history)
 ;;   C-c a f  input with current file ref    C-c a r  input with region code block
 ;;   C-c a k  end session                    C-c a v  back to agent's last page
+;;   C-c a u  usage and quota of the agents
 ;; In a session buffer: C-c C-c sends the input area, RET inserts a newline,
 ;; M-p / M-n history, TAB completes (/ commands, @ files);
 ;; C-c C-k clears input or interrupts, C-c C-o settings menu, C-c C-y / C-c C-n
@@ -63,6 +64,15 @@
 (use-package agent-collab
   :demand t
   :after agent-ui)
+
+;; What the agents used from this Emacs, and what their accounts have left:
+;; the quota line in the echo area.
+(use-package agent-usage
+  :demand t
+  :after agent-session
+  :config
+  (keymap-set agent-session-command-map "u" #'agent-usage)
+  (agent-usage-echo-mode 1))
 
 (defmacro agent-session--evil-enter (name command)
   "Define NAME to run evil's COMMAND in the input area.
@@ -165,6 +175,17 @@ In visual state a is the text object prefix, so this rebinds it there."
     (kbd "TAB") #'agent-canvas-tab
     (kbd "<backtab>") #'backward-button
     "c" #'agent-canvas-comment
+    "gr" #'revert-buffer
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-usage-mode 'normal)
+  (evil-define-key* '(normal motion) agent-usage-mode-map
+    (kbd "RET") #'agent-usage-select
+    "u" #'agent-usage-unfilter
+    "r" #'agent-usage-cycle-range
+    "c" #'agent-usage-toggle-cache
+    "]]" #'agent-usage-next
+    "[[" #'agent-usage-previous
     "gr" #'revert-buffer
     "q" #'quit-window)
 

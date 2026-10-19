@@ -403,7 +403,13 @@
                               :box (:line-width (6 . 3) :style flat-button))
          (agent-review-comment :foreground ,popout)
          (agent-review-response :foreground ,faded :slant italic)
-         (agent-review-brand :foreground ,salient :weight bold :height 1.1))))))
+         (agent-review-brand :foreground ,salient :weight bold :height 1.1)
+         (agent-usage-bar :foreground ,salient)
+         (agent-usage-track :foreground ,subtle)
+         (agent-usage-low :foreground ,popout)
+         (agent-usage-out :foreground ,critical :weight bold)
+         (agent-usage-big :foreground ,strong :weight bold :height 1.4)
+         (agent-usage-heading :foreground ,faded :weight bold))))))
 
 (defun my/nano-define-themes ()
   "Define `my-nano-light' and `my-nano-dark' from `my/nano-palettes'.

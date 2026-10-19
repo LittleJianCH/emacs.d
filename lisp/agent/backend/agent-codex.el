@@ -18,6 +18,7 @@
 (require 'subr-x)
 (require 'agent-session)
 (require 'agent-remote)
+(require 'agent-usage)
 
 (defgroup agent-codex nil
   "Codex backend."
@@ -174,6 +175,10 @@ changed.  A child's thread isn't saved: it keeps the tools it started with."
      (list :clientInfo (list :name "emacs" :title "Emacs" :version emacs-version))
      (lambda (_result)
        (agent-codex--notify session "initialized")
+       (agent-codex--request
+        session "account/rateLimits/read" nil
+        (lambda (result) (agent-codex--rate-limits session (plist-get result :rateLimits)))
+        #'ignore)
        (agent-codex--request
         session "model/list" (list :limit 50)
         (lambda (result) (agent-codex--set session :models (plist-get result :data))))
@@ -670,6 +675,7 @@ when the user declines, are left out."
              (agent-session-notice session (format "出错：%s" (plist-get err :message))
                                    'agent-session-error))
            (agent-codex--set session :turn nil)
+           (agent-usage-end-turn session)
            (agent-session-set-status session 'idle)))
         ("item/started" (agent-codex--item-started session (plist-get params :item)))
         ("item/completed" (agent-codex--item-completed session (plist-get params :item)))
@@ -680,15 +686,79 @@ when the user declines, are left out."
                              (plist-get params :delta) 'thinking))
         ("item/commandExecution/outputDelta"
          (agent-session-tool-output session (plist-get params :itemId) (plist-get params :delta)))
-        ("thread/tokenUsage/updated"
-         (agent-session-set-info session :tokens
-                                 (plist-get (plist-get (plist-get params :tokenUsage) :last)
-                                            :totalTokens)))
+        ("thread/tokenUsage/updated" (agent-codex--token-usage session params))
+        ("account/rateLimits/updated"
+         (agent-codex--rate-limits session (plist-get params :rateLimits)))
+        ("model/rerouted" (agent-session-set-info session :model (plist-get params :toModel)))
         ("error"
          (unless (plist-get params :willRetry)
            (agent-session-notice session (format "出错：%s"
                                                  (plist-get (plist-get params :error) :message))
                                  'agent-session-error))))))))
+
+;;; Usage and quota
+
+(defun agent-codex--refresh-quota ()
+  "Ask a running Codex for the account's rate limits, once per host."
+  (let (hosts)
+    (dolist (buffer (agent-session-buffers nil 'codex))
+      (let* ((session (buffer-local-value 'agent-session--current buffer))
+             (host (file-remote-p (agent-session-root session) 'host)))
+        (when (and (process-live-p (agent-session-process session))
+                   (not (member host hosts)))
+          (push host hosts)
+          (agent-codex--request
+           session "account/rateLimits/read" nil
+           (lambda (result) (agent-codex--rate-limits session (plist-get result :rateLimits)))
+           #'ignore))))))
+
+(add-hook 'agent-usage-refresh-functions #'agent-codex--refresh-quota)
+
+(defun agent-codex--token-usage (session params)
+  "Note the usage of the model call reported by thread/tokenUsage/updated.
+Its last breakdown is that call; one arriving outside a turn repeats
+earlier usage (a resumed or forked thread), and so does one whose thread
+total hasn't changed."
+  (let* ((usage (plist-get params :tokenUsage))
+         (last (plist-get usage :last))
+         (total (plist-get usage :total)))
+    (agent-session-set-info session :tokens (plist-get last :totalTokens))
+    (when (and (agent-codex--state session :turn)
+               (not (equal total (agent-codex--state session :usage-total))))
+      (agent-codex--set session :usage-total total)
+      ;; Codex's input tokens include the cached ones.
+      (let ((cached (or (plist-get last :cachedInputTokens) 0))
+            (written (or (plist-get last :cacheWriteInputTokens) 0)))
+        (agent-usage-add-call
+         session (or (plist-get (agent-session-info session) :model) "codex")
+         (list :input (max 0 (- (or (plist-get last :inputTokens) 0) cached written))
+               :cache-read cached
+               :cache-write written
+               :output (or (plist-get last :outputTokens) 0)))))))
+
+(defun agent-codex--rate-limits (session snapshot)
+  "Note the account's rate limits from SNAPSHOT, a RateLimitSnapshot.
+Updates are sparse: what is missing keeps its known value."
+  (when snapshot
+    (let ((credits (plist-get snapshot :credits)))
+      (apply #'agent-usage-set-quota
+             session
+             :plan (plist-get snapshot :planType)
+             :windows (cl-loop for key in '(:primary :secondary)
+                               for window = (plist-get snapshot key)
+                               when window
+                               collect (let ((minutes (plist-get window :windowDurationMins)))
+                                         (list :id (format "%s" (or minutes key))
+                                               :label (agent-usage-window-label minutes)
+                                               :minutes minutes
+                                               :used (/ (or (plist-get window :usedPercent) 0)
+                                                        100.0)
+                                               :resets (plist-get window :resetsAt))))
+             ;; Unlimited replaces a known balance; no balance keeps it.
+             (cond ((null credits) nil)
+                   ((plist-get credits :unlimited) (list :credits 'unlimited))
+                   ((plist-get credits :balance)
+                    (list :credits (string-to-number (plist-get credits :balance)))))))))
 
 (cl-defmethod agent-session-backend-fork-p ((_ (eql codex)))
   t)

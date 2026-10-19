@@ -87,7 +87,7 @@
   buffer
   process
   (status 'starting)   ; starting / idle / running / disconnected / exited
-  info           ; info plist shown in the header line: :model :tokens :cost ...
+  info           ; info plist shown in the header line: :model :tokens ...
   state          ; backend-private state plist
   (blocks (make-hash-table :test #'equal))
   tail           ; end of the transcript (where new blocks are inserted)
@@ -1953,7 +1953,7 @@ Questions already answered show their answers."
                                                                        :face face)))
 
 (defun agent-session-set-info (session &rest props)
-  "Update the header-line info PROPS: :model :tokens :cost etc."
+  "Update the header-line info PROPS: :model :tokens etc."
   (cl-loop for (key value) on props by #'cddr
            do (setf (agent-session-info session)
                     (plist-put (agent-session-info session) key value)))
@@ -2094,8 +2094,6 @@ HELP is the help echo."
                                          #'agent-session-select-mode "切换权限模式（M）"))
      (when-let* ((tokens (plist-get info :tokens)))
        (propertize (format "  %.1fk" (/ tokens 1000.0)) 'face 'agent-session-dim))
-     (when-let* ((cost (plist-get info :cost)))
-       (propertize (format " · $%.2f" cost) 'face 'agent-session-dim))
      (when-let* ((queued (length (agent-session-queue session)))
                  ((> queued 0)))
        (propertize (format "  排队 %d" queued) 'face 'agent-session-dim))

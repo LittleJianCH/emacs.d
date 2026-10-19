@@ -53,6 +53,7 @@ test/init-ui-test.el        ERT suite for the themes, status line and side panel
 test/init-term-test.el      ERT suite for the terminal module
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
+test/agent-usage-test.el    ERT suite for usage records, quotas and the usage page
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -173,6 +174,23 @@ confirmations and questions also wait in its parent's footer, and the parent's
   (`agent-session-check-programs`; a failed lookup isn't retried for 5 minutes),
   never on a timer. Design and measurements:
   `doc/subagents.md`.
+- `agent-usage.el` — the tokens the agents started from this Emacs used, and what
+  their accounts have left (no prices: the accounts are mostly coding-plan
+  subscriptions). Backends report each turn with `agent-usage-record` (Claude: deltas
+  of the CLI's running `modelUsage` totals; a CLI started with `--resume` may carry on
+  with totals restored from an older save, so a process's first result must prove
+  where it started (`agent-usage-totals`), else only that turn's own usage is
+  recorded; Codex: each model call's usage summed per turn with
+  `agent-usage-add-call` / `agent-usage-end-turn`, counted only inside a turn so
+  replayed usage isn't); records are appended to `var/agent-usage.eld`, so other
+  clients of the same accounts aren't counted. Quotas come with the agents' own
+  traffic, never polled: Claude's `rate_limit_event` (5-hour and weekly windows)
+  and Codex's `account/rateLimits/*`. The latest per agent and host
+  is kept in `var/agent-quota.eld` and shown in the echo area while idle
+  (`agent-usage-echo-mode`, drawn into ` *Minibuf-0*`). `C-c a u` opens the usage
+  page (modeled on magpie's): allowances with pace, the period's totals and timeline,
+  and usage by harness, model and project; RET on a row filters to it.
+  `M-x agent-usage-clear` deletes the ledger after a `yes-or-no-p`; keep it unbound.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
   An `elisp` block runs the agent's Lisp at point on every redraw (resize, theme change,
@@ -212,6 +230,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
+      -l test/agent-usage-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 

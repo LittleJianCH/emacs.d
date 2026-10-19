@@ -20,6 +20,7 @@
 (require 'subr-x)
 (require 'agent-session)
 (require 'agent-remote)
+(require 'agent-usage)
 
 (defgroup agent-claude nil
   "Claude Code backend."
@@ -771,6 +772,8 @@ first and the text last."
   ;; transcript.
   (when (agent-claude--state session :external)
     (agent-claude--set session :external nil)
+    ;; The CLI may carry on with the conversation's totals, theirs included.
+    (agent-usage-forget-totals session)
     (agent-session-notice session "载入其他客户端的消息后继续")
     (agent-session-restart-process session)
     (agent-session-set-status session 'running))
@@ -896,6 +899,52 @@ The value is a plist (:kind :title [:diff])."
                      (or (plist-get usage :cache_read_input_tokens) 0)
                      (or (plist-get usage :output_tokens) 0))))
       (when (> tokens 0) (agent-session-set-info session :tokens tokens)))))
+
+(defun agent-claude--model-usage (session result)
+  "Record what the turn ending with RESULT used, per model.
+Its modelUsage holds running totals: since the process started, or
+carried on from those a resumed conversation restored.  When what is new
+can't be told from them (see `agent-usage-totals'), only the turn's own
+usage is recorded, under the session's model."
+  (let* ((usage (plist-get result :usage))
+         (turn (list :input (plist-get usage :input_tokens)
+                     :cache-read (plist-get usage :cache_read_input_tokens)
+                     :cache-write (plist-get usage :cache_creation_input_tokens)
+                     :output (plist-get usage :output_tokens)))
+         (totals (cl-loop for (key model-usage) on (plist-get result :modelUsage) by #'cddr
+                          collect (cons (substring (symbol-name key) 1)
+                                        (list :input (plist-get model-usage :inputTokens)
+                                              :cache-read (plist-get model-usage :cacheReadInputTokens)
+                                              :cache-write (plist-get model-usage :cacheCreationInputTokens)
+                                              :output (plist-get model-usage :outputTokens)))))
+         (deltas (agent-usage-totals session totals turn))
+         (model (plist-get (agent-session-info session) :model)))
+    (if (eq deltas 'unknown)
+        (apply #'agent-usage-record session :model (or model (caar totals)) turn)
+      ;; The session's model counts the turn, not a helper model it used.
+      (let ((main (or (assoc model deltas) (car deltas))))
+        (pcase-dolist (`(,name . ,delta) deltas)
+          (apply #'agent-usage-record session :model name
+                 :turns (if (eq (assoc name deltas) main) 1 0)
+                 delta))))))
+
+(defconst agent-claude--window-labels
+  '(("five_hour" . "5h") ("seven_day" . "周")
+    ("seven_day_opus" . "周·Opus") ("seven_day_sonnet" . "周·Sonnet"))
+  "Labels of Claude's rate-limit windows.")
+
+(defun agent-claude--rate-limit (session info)
+  "Note the account's rate-limit windows from rate_limit_info INFO."
+  (when-let* ((windows (plist-get info :unifiedWindows)))
+    (agent-usage-set-quota
+     session
+     :windows (cl-loop for (key window) on windows by #'cddr
+                       for id = (substring (symbol-name key) 1)
+                       collect (list :id id
+                                     :label (or (cdr (assoc id agent-claude--window-labels)) id)
+                                     :minutes (if (string-prefix-p "five_hour" id) 300 10080)
+                                     :used (plist-get window :utilization)
+                                     :resets (plist-get window :resetsAt))))))
 
 (defun agent-claude--assistant (session message)
   "Handle complete assistant MESSAGE: fill in the tool call argument display."
@@ -1048,8 +1097,9 @@ Ask the user in SESSION, then reply to the CLI."
       ("stream_event" (agent-claude--stream-event session (plist-get message :event)))
       ("assistant" (agent-claude--assistant session (plist-get message :message)))
       ("user" (agent-claude--tool-results session (plist-get message :message)))
+      ("rate_limit_event" (agent-claude--rate-limit session (plist-get message :rate_limit_info)))
       ("result"
-       (agent-session-set-info session :cost (plist-get message :total_cost_usd))
+       (agent-claude--model-usage session message)
        (when (plist-get message :is_error)
          (agent-session-notice session (format "出错：%s" (or (plist-get message :result)
                                                              (plist-get message :subtype)))
