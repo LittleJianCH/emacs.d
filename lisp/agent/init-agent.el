@@ -19,8 +19,8 @@
 ;; current turn at once), C-c C-g turns the oldest queued message into a steer;
 ;; typing in the transcript jumps to the input area.
 ;;
-;; Adding an agent: implement a backend (see agent-claude.el), then add one
-;; `agent-session-define-agent' line.
+;; Adding an agent: implement and register it in backend/agent-NAME.el,
+;; then add NAME to `my/agents' in init.el.
 
 ;;; Code:
 
@@ -31,23 +31,10 @@
   (with-eval-after-load 'project
     (add-to-list 'project-switch-commands '(agent-session-create "Agent" ?a) t)))
 
-(use-package agent-claude
-  :after agent-session
-  :demand t
-  :config
-  (agent-session-define-agent claude :title "Claude"))
+(defvar my/agents)
 
-(use-package agent-codex
-  :after agent-session
-  :demand t
-  :config
-  (agent-session-define-agent codex :title "Codex"))
-
-(use-package agent-dsh
-  :after agent-session
-  :demand t
-  :config
-  (agent-session-define-agent dsh :title "DeepSeek"))
+(dolist (agent my/agents)
+  (require (intern (format "agent-%s" agent))))
 
 (use-package agent-session-list
   :after agent-session

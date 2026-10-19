@@ -7,7 +7,7 @@
 - agent 能反过来操作 Emacs：打开文件并高亮、读取诊断和编辑器上下文、执行 Elisp，
   以及用 Emacs *原生渲染* 带表格、图表、流程图、按钮的页面。
 - 远程项目 (=/rpc:= 路径) 里，agent CLI 跑在远程主机上，界面仍在本地 Emacs。
-- 日常语言：Rust、Go、Emacs Lisp。
+- 支持语言：Rust、Go、Emacs Lisp、Nix、Agda。
 
 * 安装
 
@@ -71,7 +71,7 @@ agent CLI (用 dsh 时还要 ~python3~ 和 dsh 自己的登录凭据)；其余�
 
 #+begin_example
 early-init.el        首帧之前的设置
-init.el              包管理、模块加载顺序、启用的语言列表 my/languages
+init.el              包管理、模块加载顺序、启用的语言 my/languages 与后端 my/agents
 lisp/core/           基础层
   init-base.el         默认行为、var/ 路径、macOS 环境、evil 开关
   init-reload.el       M-x my/reload-config：不重启地应用修改过的文件
@@ -80,20 +80,22 @@ lisp/core/           基础层
   init-evil.el         Vim 键位（默认启用）
   init-completion.el   vertico / orderless / consult / corfu / cape
   init-dev.el          project、magit、eglot、tree-sitter
+  init-env.el          项目环境：direnv / nix-shell，异步且按 buffer 隔离
   init-remote.el       远程编辑（tramp-rpc）
-lisp/lang/           语言模块：lang-elisp.el、lang-rust.el、lang-go.el
-lisp/agent/          agent 支持
+lisp/lang/           语言模块：lang-{elisp,rust,go,nix,agda}.el
+lisp/agent/          agent 公共设施
+  backend/            各 agent 后端，通过 my/agents 启用
+    agent-claude.el    Claude 后端：claude -p stream-json
+    agent-codex.el     Codex 后端：codex app-server JSON-RPC
+    agent-dsh.el       DeepSeek Harness 后端（插件在 backend/dsh/）
   agent-session.el     会话界面与管理（对话记录 + 底部输入区）
-  agent-claude.el      Claude 后端：claude -p stream-json
-  agent-codex.el       Codex 后端：codex app-server JSON-RPC
-  agent-dsh.el         DeepSeek Harness 后端（插件在 dsh/）
   agent-remote.el      远程项目：agent 跑在远程主机，emx 经 ssh 转发回本地
   agent-session-list.el  会话侧边栏
   agent-ui.el          agent → Emacs 的方法注册与 RPC
   agent-canvas.el      原生页面渲染（render / patch）
   agent-review.el      分支的原子审查
   agent-collab.el      会话之间互相协作（@handle）
-  init-agent.el        装配：注册 agent、按键、server
+  init-agent.el        装配：加载后端、按键、server
 lisp/app/            独立应用：init-telega.el
 bin/emx              agent 调用 Emacs 的桥：命令行 + MCP server
 skills/              交给 Emacs 启动的 agent 的 skill
@@ -131,6 +133,34 @@ Go (~go-ts-mode~)： ~C-c C-c~ 运行 go 子命令， ~C-c C-r~ go run， ~C-c C
 Elisp： ~C-c C-b~ eval-buffer， ~C-c C-e~ 求值并美化输出， ~C-c C-m~ 展开宏，
 ~C-c C-z~ IELM； ~C-h f/v/k/x~ 使用 helpful。
 
+Nix (~nix-mode~)：安装 ~nil~ 后自动连接 Eglot，提供补全和诊断；另装 ~nixfmt~ 后保存时自动格式化。
+项目设置可放在 ~eglot-workspace-configuration~ 的 ~:nil~ 中，服务器命令由 ~my/nil-command~ 配置。
+没有这些工具时仍可使用语法高亮和缩进。
+
+Agda：安装 Agda 并让 Emacs 的 PATH 能找到 ~agda~；首次打开 =.agda= / =.lagda= 及其
+literate 文件时加载该版本自带的官方 ~agda2-mode~，兼容旧版的 ~agda-mode locate~。
+=.lagda.md= 自动启用 ~poly-markdown-mode~：正文使用 Markdown 排版，光标进入
+Agda 代码块后使用官方 Agda 模式。代码块继承项目环境，保留语义高亮和定义跳转。
+以下 Agda 快捷键在代码块内使用。
+~C-c C-l~ 加载 / 检查， ~C-c C-,~ 查看目标和上下文， ~C-c C-c~ 分情况，
+~C-c C-SPC~ 填入目标；在 Agda 输入法中用 ~\lambda~ / ~\to~ 输入 Unicode。
+官方安装说明：[[https://agda.readthedocs.io/en/stable/getting-started/installation.html][Agda]]；nil 的项目设置见 [[https://github.com/oxalica/nil/blob/main/docs/configuration.md][配置文档]]。
+
+
+项目环境通过 [[https://github.com/purcell/envrc][envrc.el]] 按 buffer 隔离，异步执行 [[https://direnv.net/][direnv]]，可直接使用
+~nix-shell~ 的 ~shellHook~。先安装 ~direnv~（~brew install direnv~），
+再在项目中创建 =.envrc=：
+
+#+begin_src sh
+use nix
+#+end_src
+
+运行 ~direnv allow~ 授权这个项目，或在 Emacs 中用 ~M-x envrc-allow~。
+首次加载时 Agda buffer 会等待环境，准备好后自动启用模式；Nix 的 Eglot
+也会在环境就绪后连接。~C-c E~ 是环境操作前缀，~M-x envrc-reload~
+重新加载，~M-x envrc-show-log~ 查看日志。修改 =.envrc= 后需要重新授权。
+配置还会自动识别标准 Nix profile 路径，方便从 Dock 启动 Emacs。
+
 ** 会话 buffer
 
 布局参考 telega：上方是对话，下方一条分隔线 (显示工作中 / 等待确认等状态)，
@@ -167,6 +197,24 @@ leader 为 ~SPC~ ： ~SPC f~ 找文件， ~SPC b~ 切换 buffer， ~SPC r~ 最�
 ~ESC~ 回到 normal 浏览； ~]]~ / ~[[~ 在消息间跳转。本地 leader ~,~ ： ~,o~ 菜单， ~,m~ 模型，
 ~,e~ 推理强度， ~,M~ 权限模式， ~,p~ 计划模式， ~,A~ 切换 agent， ~,y~ / ~,n~ 允许 / 拒绝，
 ~,k~ 中断， ~,s~ 会话列表， ~,N~ 新会话， ~,r~ 恢复会话。
+
+Agda 的模式命令前缀是 ~SPC m~（normal / motion / visual 状态）：
+
+| 按键      | 功能                         |
+|-----------+------------------------------|
+| ~SPC m l~ | 加载 / 类型检查              |
+| ~SPC m c~ | 查看目标和上下文             |
+| ~SPC m t~ | 查看目标、上下文和推断类型   |
+| ~SPC m s~ | 分情况                       |
+| ~SPC m g~ | 填入目标                     |
+| ~SPC m r~ | 精化目标                     |
+| ~SPC m n~ | 下一个目标                   |
+| ~SPC m p~ | 上一个目标                   |
+| ~SPC m R~ | 重启 Agda                    |
+| ~SPC m q~ | 中断计算                     |
+
+项目环境操作：~SPC E r~ 重新加载，~SPC E a~ 授权，~SPC E d~ 撤销授权，
+~SPC E l~ 查看日志。原有 ~C-c~ 按键在 Evil 中照常使用。
 
 * agent → Emacs
 
@@ -206,7 +254,8 @@ emx reload                  # 热加载修改过的配置文件
   再把 ~NAME~ 加入 =init.el= 中的 ~my/languages~ 。
 - *agent* ：参考 =agent-claude.el= 实现 ~agent-session-backend-*~ 泛型函数，把协议消息翻译成
   ~agent-session-text~ / ~agent-session-tool~ / ~agent-session-ask~ 等界面调用，再在
-  =init-agent.el= 中加一行 ~(agent-session-define-agent NAME :title "...")~ 。
+  =lisp/agent/backend/agent-NAME.el= 中用 ~(agent-session-define-agent NAME :title "...")~
+  注册，末尾 ~(provide 'agent-NAME)~，再把 ~NAME~ 加入 =init.el= 中的 ~my/agents~ 。
 - *agent 可调用的方法* ：用 ~agent-ui-defmethod~ 定义，MCP 工具列表会自动包含它。
 - *页面 block 类型* ：写一个接收 block plist 的渲染函数，加入 ~agent-canvas-renderers~ 。
 
@@ -221,5 +270,9 @@ Nicolas P. Rougier 与 N Λ N O 开发者的 [[https://github.com/rougier/nano-e
 agent 会话的交互部分参考了 T3 Code 和 Claude Desktop：由 Emacs 自己渲染整段对话 (而不是嵌入
 agent 的 TUI)、按项目列出会话的侧边栏，以及远程项目里让 agent CLI 跑在远程主机上的方式
 (类似 Claude Desktop 的 SSH 模式)。
+
+分支原子审查 (=agent-review.el=) 的设计与交互流程借鉴自 HerrCai0907 的 [[https://github.com/HerrCai0907/cui][cui]]：
+让 agent 将分支的提交变更按独立意图拆解为原子审查项、严格保证每行改动被完整覆盖，并通过
+侧边栏导航与行内标注向 agent 提问和获取答复。
 
 感谢这些项目！

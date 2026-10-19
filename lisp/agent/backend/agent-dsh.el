@@ -560,5 +560,7 @@ what `agent-session-deny' picks."
      ;; Notification
      (t (agent-dsh--notification session method params)))))
 
+(agent-session-define-agent dsh :title "DeepSeek")
+
 (provide 'agent-dsh)
 ;;; agent-dsh.el ends here

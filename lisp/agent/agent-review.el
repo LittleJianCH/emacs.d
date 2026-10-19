@@ -9,6 +9,9 @@
 ;; annotation, which goes straight to the session that made the review with
 ;; the selected code; the agent's answers appear under the annotations.
 ;;
+;; The idea and workflow of atomic reviews are inspired by HerrCai0907's cui
+;; (https://github.com/HerrCai0907/cui).
+;;
 ;; The agent-ui methods are
 ;;   review_snapshot  pin base and head, list the hunks to plan with
 ;;   review_build     assemble the agent's plan, check coverage, show the review

@@ -5,7 +5,8 @@
 ;; Tests the session UI with a fake backend (echoes immediately) instead of a real agent.
 ;; Layout modeled on telega: conversation | footer (separator, aux line, prompt) | input.
 ;; Run:
-;;   emacs --batch -L lisp/agent -l test/agent-session-test.el -f ert-run-tests-batch-and-exit
+;;   emacs --batch -L lisp/agent -L lisp/agent/backend
+;;     -l test/agent-session-test.el -f ert-run-tests-batch-and-exit
 
 ;;; Code:
 

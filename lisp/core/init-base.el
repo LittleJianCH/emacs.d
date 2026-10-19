@@ -122,19 +122,24 @@ Config modes such as `toml-ts-mode' derive from `text-mode', so undo the
   :config
   (exec-path-from-shell-initialize))
 
-;; With a Chinese IME active, the second key of a sequence such as C-x a is
-;; swallowed as pinyin.  sis switches to the English input source while a
-;; prefix sequence is typed (needs the `macism' CLI:
-;; brew install laishulu/homebrew/macism).  Currently disabled.
-(use-package sis
-  :disabled t                           ; misbehaved: kept off until debugged
-  :ensure t
-  :if (and (eq system-type 'darwin) (executable-find "macism"))
-  :config
-  ;; These are plain `defvar's, so `:custom' would not apply them.
-  (setq sis-prefix-override-keys '("C-c" "C-x" "C-h" "M-g" "M-s"))
-  (sis-ism-lazyman-config "com.apple.keylayout.ABC" nil 'macism)
-  (sis-global-respect-mode 1))
+
+;; Nix's installer may configure only interactive shells.  Keep GUI Emacs
+;; usable even when its login shell omits the profile directories.
+(defun my/nix-profile-paths ()
+  "Add existing Nix profile bin directories to PATH and exec-path."
+  (dolist (directory (reverse
+                      (list (expand-file-name "~/.nix-profile/bin")
+                            "/nix/var/nix/profiles/default/bin")))
+    (when (file-directory-p directory)
+      (add-to-list 'exec-path directory)
+      (let ((paths (split-string (or (getenv "PATH") "") path-separator t)))
+        (unless (member directory paths)
+          (setenv "PATH" (mapconcat #'identity (cons directory paths)
+                                   path-separator)))))))
+
+(my/nix-profile-paths)
+
+(require 'init-input)
 
 ;;; Vim keybinding toggle
 

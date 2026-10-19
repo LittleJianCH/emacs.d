@@ -1,5 +1,5 @@
 # Patch for the shipped dsh `sdk` profile: serve Emacs instead of SDK clients.
-#   dsh --profile sdk --patch lisp/agent/dsh/emacs.yml
+#   dsh --profile sdk --patch lisp/agent/backend/dsh/emacs.yml
 
 - id: sdk-jsonrpc-server
   disabled: true
