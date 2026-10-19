@@ -35,9 +35,17 @@
   "The dsh command."
   :type 'string)
 
+(defcustom agent-dsh-native-subagents nil
+  "Non-nil lets dsh start its own subagents (its subagent and workflow tools).
+Off by default: subagents go through Emacs (agent-collab.el)."
+  :type 'boolean)
+
 (defconst agent-dsh--patch
   (expand-file-name "dsh/emacs.yml" (file-name-directory (or load-file-name buffer-file-name)))
   "Profile patch that mounts the Emacs bridge plugin.")
+
+(defconst agent-dsh--no-subagents-patch "no-subagents.yml"
+  "Profile patch next to `agent-dsh--patch' that turns off dsh's subagent tools.")
 
 (defconst agent-dsh--presets
   '((ask . "read-only")
@@ -63,8 +71,10 @@ The plugin uses dsh internals, so other versions may need changes.")
 
 (defun agent-dsh--plugin-files ()
   "The local plugin files, the patch last."
-  (list (expand-file-name "emacs-bridge.mjs" (file-name-directory agent-dsh--patch))
-        agent-dsh--patch))
+  (let ((dir (file-name-directory agent-dsh--patch)))
+    (list (expand-file-name "emacs-bridge.mjs" dir)
+          (expand-file-name agent-dsh--no-subagents-patch dir)
+          agent-dsh--patch)))
 
 (defun agent-dsh--remote-plugin-dir (root files)
   "Directory on the host of remote ROOT that holds FILES.
@@ -97,7 +107,13 @@ so its presence marks a complete upload."
 
 (defun agent-dsh--command (root)
   "Command line that starts the bridge for project ROOT."
-  (list agent-dsh-executable "--profile" "sdk" "--patch" (agent-dsh--patch-file root)))
+  (let ((patch (agent-dsh--patch-file root)))
+    (append (list agent-dsh-executable "--profile" "sdk" "--patch" patch)
+            (unless agent-dsh-native-subagents
+              ;; The other patch lies next to it, on the host too.  A plain
+              ;; concat: a remote patch's directory is in the host's terms.
+              (list "--patch" (concat (file-name-directory patch)
+                                      agent-dsh--no-subagents-patch))))))
 
 (defun agent-dsh--mcp-servers (session)
   "MCP servers mounted for the agent of SESSION: the emx bridge back to Emacs.

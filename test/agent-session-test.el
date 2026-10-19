@@ -1502,6 +1502,55 @@ detached
   "TOML strings escape quotes, backslashes and control characters."
   (should (equal (agent-codex--toml-string "a\"b\\c\nd\te") "\"a\\\"b\\\\c\\nd\\te\"")))
 
+(ert-deftest agent-session-test-native-subagents-off ()
+  "The CLIs don't start subagents of their own; Emacs runs subagents."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (cl-letf (((symbol-function 'agent-session-skills-dir) #'ignore))
+       (should (equal (cadr (member "--disallowedTools" (agent-claude--command session)))
+                      "Agent,Workflow,SendMessage,ListAgents"))
+       (let ((agent-claude-disallowed-tools nil))
+         (should-not (member "--disallowedTools" (agent-claude--command session))))
+       (should (member "agents.enabled=false" (agent-codex--command session)))
+       (let ((agent-codex-native-subagents t))
+         (should-not (member "agents.enabled=false" (agent-codex--command session))))
+       (let ((command (agent-dsh--command default-directory)))
+         (should (equal (seq-filter (lambda (arg) (string-suffix-p ".yml" arg)) command)
+                        (list agent-dsh--patch
+                              (expand-file-name "no-subagents.yml"
+                                                (file-name-directory agent-dsh--patch)))))
+         (should (file-exists-p (car (last command)))))
+       (let ((agent-dsh-native-subagents t))
+         (should (equal (last (agent-dsh--command default-directory) 2)
+                        (list "--patch" agent-dsh--patch))))))))
+
+(ert-deftest agent-session-test-codex-foreign-thread ()
+  "Notifications of another thread on the connection, such as a Codex
+subagent's, neither end the turn nor show in the transcript."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-codex--set session :thread "parent")
+     (agent-session-backend-handle
+      'codex session '(:method "turn/started" :params (:threadId "parent" :turn (:id "t1"))))
+     ;; A child's turn doesn't replace the one an interrupt goes to.
+     (agent-session-backend-handle
+      'codex session '(:method "turn/started" :params (:threadId "child" :turn (:id "t2"))))
+     (should (equal (agent-codex--state session :turn) "t1"))
+     (agent-session-backend-handle
+      'codex session '(:method "item/agentMessage/delta"
+                       :params (:threadId "child" :itemId "c1" :delta "from the child")))
+     (agent-session-backend-handle
+      'codex session '(:method "turn/completed" :params (:threadId "child" :turn (:id "t2"))))
+     (should (eq (agent-session-status session) 'running))
+     (should-not (string-search "from the child" (agent-session-test--transcript)))
+     (agent-session-backend-handle
+      'codex session '(:method "item/agentMessage/delta"
+                       :params (:threadId "parent" :itemId "p1" :delta "from the parent")))
+     (should (string-search "from the parent" (agent-session-test--transcript)))
+     (agent-session-backend-handle
+      'codex session '(:method "turn/completed" :params (:threadId "parent" :turn (:id "t1"))))
+     (should (eq (agent-session-status session) 'idle)))))
+
 (ert-deftest agent-session-test-skills ()
   "Skills Emacs gives are copied for the agent and replace the ones they supersede."
   (agent-session-test--with-session
@@ -1911,9 +1960,16 @@ File name handlers are off, so tramp never tries to reach the host."
                 (let ((patch (agent-dsh--patch-file "/rpc:dev:/home/u/p/")))
                   (should (string-match-p "\\`~/\\.cache/emacs-agent/dsh/[0-9a-f]\\{16\\}/emacs\\.yml\\'"
                                           patch))
-                  (should (equal (mapcar #'car (reverse copied)) '("emacs-bridge.mjs" "emacs.yml")))
+                  (should (equal (mapcar #'car (reverse copied))
+                                 '("emacs-bridge.mjs" "no-subagents.yml" "emacs.yml")))
                   (should (equal (file-name-directory (cdar copied))
                                  (file-name-directory (cdadr copied))))))
+              ;; The second patch is named next to the first, in the host's terms
+              (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t)))
+                (let ((command (agent-dsh--command "/rpc:dev:/home/u/p/")))
+                  (should (string-match-p
+                           "\\`~/\\.cache/emacs-agent/dsh/[0-9a-f]\\{16\\}/no-subagents\\.yml\\'"
+                           (car (last command))))))
               (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t))
                         ((symbol-function 'copy-file) (lambda (&rest _) (error "Copied again"))))
                 (agent-dsh--patch-file "/rpc:dev:/home/u/p/"))))

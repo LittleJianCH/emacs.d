@@ -1,0 +1,22 @@
+# Patch for the dsh `sdk` profile, applied after emacs.yml unless
+# agent-dsh-native-subagents is set: no subagents of dsh's own, since Emacs
+# runs subagents (agent-collab.el). The services stay mounted; only the
+# model-facing tools that start and steer children go.
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-workflow
+  disabled: true
+
+- id: workflow-ptc
+  disabled: true

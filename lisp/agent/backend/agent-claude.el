@@ -34,6 +34,13 @@
   "Extra command-line arguments."
   :type '(repeat string))
 
+(defcustom agent-claude-disallowed-tools '("Agent" "Workflow" "SendMessage" "ListAgents")
+  "Built-in tools the CLI may not use.
+Subagents and messages between agents go through Emacs (agent-collab.el),
+so the CLI's own are off by default: Agent starts subagents, Workflow
+orchestrates them, SendMessage and ListAgents talk to them."
+  :type '(repeat string))
+
 (defconst agent-claude--modes
   '((ask . "default") (edits . "acceptEdits") (auto . "auto")
     (full . "bypassPermissions") (plan . "plan"))
@@ -62,6 +69,8 @@ Model, reasoning effort and permission mode come from the session settings."
      ;; decides whether it is enabled.
      (list "--allow-dangerously-skip-permissions"
            "--permission-mode" (agent-claude--mode session))
+     (when agent-claude-disallowed-tools
+       (list "--disallowedTools" (string-join agent-claude-disallowed-tools ",")))
      (when-let* ((model (agent-session-setting session :model)))
        (unless (equal model "default") (list "--model" model)))
      (when-let* ((effort (agent-session-setting session :effort)))

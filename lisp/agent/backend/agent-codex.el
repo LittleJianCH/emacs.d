@@ -50,6 +50,13 @@ The value is (APPROVAL-POLICY SANDBOX-POLICY-TYPE SANDBOX-NAME REVIEWER)."
 For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
   :type '(repeat string))
 
+(defcustom agent-codex-native-subagents nil
+  "Non-nil lets Codex start its own subagents (its multi-agent tools).
+Off by default: subagents go through Emacs (agent-collab.el).  The model
+catalog switches multi-agent on for most models, which agents.enabled
+overrides and the multi_agent feature flag does not."
+  :type 'boolean)
+
 (defun agent-codex--toml-string (string)
   "Return STRING as a TOML string literal."
   (concat "\""
@@ -95,6 +102,8 @@ For example (\"-c\" \"model_reasoning_effort=\\\"high\\\"\")."
                                      (format "{name=%s,enabled=false}"
                                              (agent-codex--toml-string name)))
                                    superseded ","))))
+   (unless agent-codex-native-subagents
+     (list "-c" "agents.enabled=false"))
    agent-codex-extra-args))
 
 ;;; JSON-RPC
@@ -535,6 +544,12 @@ when the user declines, are left out."
 
 ;;; Message handling
 
+(defun agent-codex--foreign-thread-p (session params)
+  "Non-nil if PARAMS of a notification name a thread other than SESSION's."
+  (let ((thread (plist-get params :threadId))
+        (own (agent-codex--state session :thread)))
+    (and thread own (not (equal thread own)))))
+
 (cl-defmethod agent-session-backend-handle ((_ (eql codex)) session message)
   (let ((id (plist-get message :id))
         (method (plist-get message :method))
@@ -566,6 +581,10 @@ when the user declines, are left out."
         (agent-session-write session (list :jsonrpc "2.0" :id id
                                            :error (list :code -32601
                                                         :message (format "Emacs 不支持 %s" method)))))))
+     ;; Notifications of other threads on this connection, such as Codex's
+     ;; own subagents, would end this session's turn and mix into its
+     ;; transcript.
+     ((agent-codex--foreign-thread-p session params))
      ;; Notifications
      (t
       (pcase method
