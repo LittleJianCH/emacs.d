@@ -698,21 +698,8 @@ when the user declines, are left out."
 
 ;;; Usage and quota
 
-(defun agent-codex--refresh-quota ()
-  "Ask a running Codex for the account's rate limits, once per host."
-  (let (hosts)
-    (dolist (buffer (agent-session-buffers nil 'codex))
-      (let* ((session (buffer-local-value 'agent-session--current buffer))
-             (host (file-remote-p (agent-session-root session) 'host)))
-        (when (and (process-live-p (agent-session-process session))
-                   (not (member host hosts)))
-          (push host hosts)
-          (agent-codex--request
-           session "account/rateLimits/read" nil
-           (lambda (result) (agent-codex--rate-limits session (plist-get result :rateLimits)))
-           #'ignore))))))
-
-(add-hook 'agent-usage-refresh-functions #'agent-codex--refresh-quota)
+;; emx polls the account's rate limits through its own app-server.
+(setf (alist-get 'codex agent-usage-pollers) (lambda () (list agent-codex-executable)))
 
 (defun agent-codex--token-usage (session params)
   "Note the usage of the model call reported by thread/tokenUsage/updated.
@@ -748,7 +735,9 @@ Updates are sparse: what is missing keeps its known value."
                                for window = (plist-get snapshot key)
                                when window
                                collect (let ((minutes (plist-get window :windowDurationMins)))
-                                         (list :id (format "%s" (or minutes key))
+                                         (list :id (if minutes
+                                                       (format "%s" minutes)
+                                                     (substring (symbol-name key) 1))
                                                :label (agent-usage-window-label minutes)
                                                :minutes minutes
                                                :used (/ (or (plist-get window :usedPercent) 0)

@@ -18,20 +18,22 @@
     (file-name-directory (or load-file-name buffer-file-name))))
   "Configuration root used by the startup checks.")
 
+(defvar agent-backend-test--usage nil
+  "What the usage functions sent the usage service, newest first.")
+
 (defmacro agent-backend-test--with-usage-files (&rest body)
-  "Run BODY with fresh usage files and clean module state."
+  "Run BODY capturing what is sent to the usage service."
   (declare (indent 0) (debug t))
-  `(let* ((agent-usage-file (make-temp-file "agent-backend-usage-" nil ".eld"))
-          (agent-usage-quota-file
-           (make-temp-file "agent-backend-quota-" nil ".eld"))
-          (agent-usage--records nil)
-          (agent-usage--loaded nil)
-          (agent-usage--quotas 'unloaded)
-          (agent-usage-change-functions nil))
-     (unwind-protect
-         (progn ,@body)
-       (ignore-errors (delete-file agent-usage-file))
-       (ignore-errors (delete-file agent-usage-quota-file)))))
+  `(let ((agent-backend-test--usage nil)
+         (agent-usage-change-functions nil))
+     (cl-letf (((symbol-function 'agent-usage--notify)
+                (lambda (method params) (push (cons method params) agent-backend-test--usage))))
+       ,@body)))
+
+(defun agent-backend-test--sent (method)
+  "Params of the messages METHOD sent to the usage service, newest first."
+  (cl-loop for (name . params) in agent-backend-test--usage
+           when (equal name method) collect params))
 
 (defun agent-backend-test--dsh-session ()
   "Make a local dsh test session."
@@ -122,23 +124,23 @@
         (agent-dsh--notification session "turn/end" (list :reason "completed"))
         (should-not (plist-get (agent-session-state session) :usage-pending))
         (should (equal (mapcar #'car (reverse requests)) '("balance")))
-        (setq agent-usage--loaded nil)
-        (let ((records (agent-usage-records)))
+        (let ((records (mapcar (lambda (params) (plist-get params :record))
+                               (agent-backend-test--sent "record"))))
           (should (= (length records) 1))
           (let ((record (car records)))
             (should (equal (plist-get record :model)
                            "deepseek-official/deepseek-flash"))
             (should (equal (list (plist-get record :input)
-                                 (plist-get record :cache-read)
-                                 (plist-get record :cache-write)
+                                 (plist-get record :cache_read)
+                                 (plist-get record :cache_write)
                                  (plist-get record :output))
                            '(100 30 10 20)))
             (should (equal (plist-get record :turns) 1))
-            (should (eq (plist-get record :agent) 'dsh))
+            (should (equal (plist-get record :agent) "dsh"))
             (should (equal (plist-get record :session) "h1"))))
         ;; The balance reply became the session's quota.
-        (should (equal (plist-get (cdr (assoc '(dsh) (agent-usage-quotas)))
-                                  :balance)
+        (should (equal (append (plist-get (car (agent-backend-test--sent "quota")) :balance)
+                               nil)
                        '((:amount 12.3 :currency "CNY"))))))))
 
 (ert-deftest agent-backend-test-dsh-usage-model-fallback ()
@@ -153,8 +155,8 @@ A cancelled turn still records what it used."
                                                      :outputTokens 2
                                                      :totalTokens 7)))
         (agent-dsh--notification session "turn/end" (list :reason "cancelled")))
-      (setq agent-usage--loaded nil)
-      (let ((records (agent-usage-records)))
+      (let ((records (mapcar (lambda (params) (plist-get params :record))
+                             (agent-backend-test--sent "record"))))
         (should (= (length records) 1))
         (should (equal (plist-get (car records) :model)
                        "deepseek-official/deepseek-chat"))))))

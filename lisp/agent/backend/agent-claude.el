@@ -928,6 +928,9 @@ usage is recorded, under the session's model."
                  :turns (if (eq (assoc name deltas) main) 1 0)
                  delta))))))
 
+;; emx polls the account's rate limits with the CLI's /usage.
+(setf (alist-get 'claude agent-usage-pollers) (lambda () (list agent-claude-executable)))
+
 (defconst agent-claude--window-labels
   '(("five_hour" . "5h") ("seven_day" . "周")
     ("seven_day_opus" . "周·Opus") ("seven_day_sonnet" . "周·Sonnet"))

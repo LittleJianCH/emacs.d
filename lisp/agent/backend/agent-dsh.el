@@ -541,18 +541,10 @@ with string totals."
     (when balances
       (agent-usage-set-quota session :balance balances))))
 
-(defun agent-dsh--refresh-quota ()
-  "Ask a running dsh bridge for the balance, once per host."
-  (let (hosts)
-    (dolist (buffer (agent-session-buffers nil 'dsh))
-      (let* ((session (buffer-local-value 'agent-session--current buffer))
-             (host (file-remote-p (agent-session-root session) 'host)))
-        (when (and (process-live-p (agent-session-process session))
-                   (not (member host hosts)))
-          (push host hosts)
-          (agent-dsh--request-balance session))))))
-
-(add-hook 'agent-usage-refresh-functions #'agent-dsh--refresh-quota)
+;; emx polls the balance through a bridge of its own: its balance request
+;; needs no session.
+(setf (alist-get 'dsh agent-usage-pollers)
+      (lambda () (agent-dsh--command (expand-file-name "~/"))))
 
 (defun agent-dsh--request-balance (session)
   "Ask the bridge for the DeepSeek account balance of SESSION.

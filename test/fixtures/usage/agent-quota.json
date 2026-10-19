@@ -1,0 +1,89 @@
+[
+ {
+  "agent": "claude",
+  "host": null,
+  "time": 1792555140,
+  "windows": [
+   {
+    "id": "five_hour",
+    "label": "5h",
+    "minutes": 300,
+    "used": 0.4,
+    "resets": 1792558800,
+    "history": [
+     [
+      1792554600,
+      0.38
+     ],
+     [
+      1792555140,
+      0.4
+     ]
+    ]
+   },
+   {
+    "id": "seven_day",
+    "label": "周",
+    "minutes": 10080,
+    "used": 0.2,
+    "resets": 1792900800,
+    "history": [
+     [
+      1792296000,
+      0.0
+     ],
+     [
+      1792468800,
+      0.0
+     ],
+     [
+      1792555140,
+      0.2
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "agent": "codex",
+  "host": "dev",
+  "time": 1792555140,
+  "plan": "pro",
+  "credits": "unlimited",
+  "windows": [
+   {
+    "id": "10080",
+    "label": "周",
+    "minutes": 10080,
+    "used": 0.4,
+    "resets": 1792900800,
+    "history": [
+     [
+      1792382400,
+      0.05
+     ],
+     [
+      1792468800,
+      0.1
+     ],
+     [
+      1792555140,
+      0.4
+     ]
+    ]
+   }
+  ]
+ },
+ {
+  "agent": "dsh",
+  "host": null,
+  "time": 1792555200,
+  "balance": [
+   {
+    "amount": 9.03,
+    "currency": "CNY"
+   }
+  ],
+  "windows": []
+ }
+]

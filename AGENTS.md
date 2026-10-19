@@ -39,7 +39,8 @@ lisp/agent/              shared agent support (see below)
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
-bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
+bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server), usage service
+bin/emx-usage.js         `emx serve`: usage ledger, quotas, reports, forecasts, quota polls
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
 test/agent-backend-test.el  ERT suite for backend module startup and selection
@@ -53,7 +54,8 @@ test/init-ui-test.el        ERT suite for the themes, status line and side panel
 test/init-term-test.el      ERT suite for the terminal module
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
-test/agent-usage-test.el    ERT suite for usage records, quotas and the usage page
+test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
+test/emx-usage-test.js      node --test suite for `emx serve` (fixtures in test/fixtures/usage/)
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -176,26 +178,30 @@ confirmations and questions also wait in its parent's footer, and the parent's
   `doc/subagents.md`.
 - `agent-usage.el` — the tokens the agents started from this Emacs used, and what
   their accounts have left (no prices: the accounts are mostly coding-plan
-  subscriptions). Backends report each turn with `agent-usage-record` (Claude: deltas
-  of the CLI's running `modelUsage` totals; a CLI started with `--resume` may carry on
-  with totals restored from an older save, so a process's first result must prove
-  where it started (`agent-usage-totals`), else only that turn's own usage is
-  recorded; Codex and dsh: each model call's usage summed per turn with
-  `agent-usage-add-call` / `agent-usage-end-turn`, counted only inside a turn so
-  replayed usage isn't); records are appended to `var/agent-usage.eld`, so other
-  clients of the same accounts aren't counted. Quotas come with the agents' own
-  traffic, never polled: Claude's `rate_limit_event` (5-hour and weekly windows),
-  Codex's `account/rateLimits/*`, and dsh's balance, which the bridge's `balance`
-  request fetches inside dsh with its own credentials. The latest per agent and host
-  is kept in `var/agent-quota.eld` and shown in the echo area while idle
-  (`agent-usage-echo-mode`, drawn into ` *Minibuf-0*`). Each window keeps the readings
-  of its period (`:history`); `agent-usage-forecast` projects it from the last day's
-  pace (a seventh of the window), so idle days don't make the rest look plentiful,
-  and `agent-usage-agent-forecast` gives an agent's tightest window: meant for pricing
-  subagent profiles by what their accounts have left. `C-c a u` opens the usage
-  page (modeled on magpie's): allowances with pace, the period's totals and timeline,
-  and usage by harness, model and project; RET on a row filters to it.
-  `M-x agent-usage-clear` deletes the ledger after a `yes-or-no-p`; keep it unbound.
+  subscriptions). The bookkeeping and arithmetic run outside Emacs, in `emx serve`
+  (`bin/emx-usage.js`, protocol at its top): a service this module starts and
+  restarts, the only writer of `var/agent-usage.jsonl` and `var/agent-quota.json`. It
+  sums, buckets and forecasts on request (`report`), and polls the agents' quotas
+  every `agent-usage-poll-interval` (Claude's `/usage`, Codex's
+  `account/rateLimits/read`, the dsh bridge's `balance`; backends register the
+  commands in `agent-usage-pollers`), skipping sources reported lately; opening the
+  page polls them all, sending a message the stale ones. Emacs only turns agent
+  events into records and readings and draws: Claude's running `modelUsage` totals
+  become deltas (a CLI started with `--resume` may carry on with totals restored from
+  an older save, so a process's first result must prove where it started,
+  `agent-usage-totals`), Codex's and dsh's calls are summed per turn
+  (`agent-usage-add-call` / `agent-usage-end-turn`, only inside a turn so replayed
+  usage isn't); `agent-usage-record` and `agent-usage-set-quota` send them on. Only
+  sessions started from Emacs are counted. The echo line (`agent-usage-echo-mode`,
+  drawn into ` *Minibuf-0*`) shows the 5-hour and weekly windows and balances from
+  the quotas emx pushes. The forecast projects each window from the last day's
+  readings (a seventh of the window; nothing until readings cover half of that), so
+  idle days don't make the rest look plentiful; it is meant for pricing subagent
+  profiles too, which should ask emx (an `agent-ui-defmethod` deferring on an emx
+  request). `C-c a u` opens the usage page (modeled on magpie's), drawn from one emx
+  report; RET on a row filters to it. `M-x agent-usage-clear` deletes the ledger after
+  a `yes-or-no-p`; keep it unbound. After editing `bin/emx-usage.js`, run
+  `M-x agent-usage-restart-service`.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
   An `elisp` block runs the agent's Lisp at point on every redraw (resize, theme change,
@@ -254,8 +260,9 @@ emacs --batch --init-directory=. -l init.el --eval '
 
 No output means a clean compile. It must stay warning-free, including with evil disabled (declare evil functions
 with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macro).
-`node --check bin/emx` for the bridge, `node --check lisp/agent/backend/dsh/emacs-bridge.mjs`
-for the dsh plugin.
+`node --check bin/emx` and `node --check bin/emx-usage.js` for the bridge, `node --test
+test/emx-usage-test.js` for the usage service, `node --check
+lisp/agent/backend/dsh/emacs-bridge.mjs` for the dsh plugin.
 
 Add or update a regression test for every bug fix and UI behavior change. Tests that
 need the Claude/Codex backends should exercise their pure functions (as the sync and

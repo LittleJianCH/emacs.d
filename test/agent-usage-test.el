@@ -2,8 +2,10 @@
 
 ;;; Commentary:
 
-;; Tests usage records, quota merging and the echo-area line.  Every test
-;; uses fresh temporary files, so the real var/ files are never touched.
+;; Tests what Emacs sends the usage service (records, quota readings),
+;; the echo-area line, and, against a real `emx serve' on the fixtures of
+;; test/fixtures/usage/, the usage page.  The sums and forecasts themselves
+;; are tested in test/emx-usage-test.js.
 ;; Run:
 ;;   emacs --batch --init-directory=. --eval '(setq my/use-evil nil)'
 ;;     -l init.el -l test/agent-usage-test.el -f ert-run-tests-batch-and-exit
@@ -21,20 +23,21 @@
 ;; quota test compiles the package into the throwaway cache, which is slow.
 (require 'tramp-rpc nil t)
 
+(defvar agent-usage-test--sent nil
+  "Messages sent to the usage service in a test, newest first: (METHOD . PARAMS).")
+
 (defmacro agent-usage-test--with-files (&rest body)
-  "Run BODY with fresh usage files and clean module state."
+  "Run BODY capturing what is sent to the usage service, with clean state."
   (declare (indent 0) (debug t))
-  `(let* ((agent-usage-file (make-temp-file "agent-usage-test-" nil ".eld"))
-          (agent-usage-quota-file
-           (make-temp-file "agent-quota-test-" nil ".eld"))
-          (agent-usage--records nil)
-          (agent-usage--loaded nil)
-          (agent-usage--quotas 'unloaded)
-          (agent-usage-change-functions nil))
-     (unwind-protect
-         (progn ,@body)
-       (ignore-errors (delete-file agent-usage-file))
-       (ignore-errors (delete-file agent-usage-quota-file)))))
+  `(let ((agent-usage-test--sent nil)
+         (agent-usage--snapshot nil)
+         (agent-usage-change-functions nil))
+     (cl-letf (((symbol-function 'agent-usage--notify)
+                (lambda (method params) (push (cons method params) agent-usage-test--sent)))
+               ((symbol-function 'agent-usage--request)
+                (lambda (method params _callback)
+                  (push (cons method params) agent-usage-test--sent))))
+       ,@body)))
 
 (defun agent-usage-test--session (&optional agent)
   "Make a local test session for AGENT, claude by default."
@@ -45,12 +48,18 @@
    :info (list :handle "h1" :model "claude-opus-5-5")))
 
 (defun agent-usage-test--records ()
-  "Read the test usage records back from the file, newest first."
-  (setq agent-usage--loaded nil)
-  (agent-usage-records))
+  "The records sent in this test, newest first, with Lisp-style keys."
+  (cl-loop for (method . params) in agent-usage-test--sent
+           when (equal method "record")
+           collect (cl-loop for (key value) on (plist-get params :record) by #'cddr
+                            append (pcase key
+                                     (:cache_read (list :cache-read value))
+                                     (:cache_write (list :cache-write value))
+                                     (:agent (list :agent (intern value)))
+                                     (_ (list key value))))))
 
 (defun agent-usage-test--records-of (model)
-  "Records of MODEL in the test file, newest first."
+  "Records of MODEL sent in this test, newest first."
   (seq-filter (lambda (record) (equal (plist-get record :model) model))
               (agent-usage-test--records)))
 
@@ -59,8 +68,13 @@
   (and (numberp a) (numberp b) (< (abs (- a b)) 1e-9)))
 
 (defun agent-usage-test--quota (agent &optional host)
-  "The quota of AGENT on HOST, as stored by `agent-usage-set-quota'."
-  (cdr (assoc (cons agent host) (agent-usage-quotas))))
+  "The latest quota reading sent for AGENT on HOST, windows as a list."
+  (cl-loop for (method . params) in agent-usage-test--sent
+           when (and (equal method "quota")
+                     (equal (plist-get params :agent) (symbol-name agent))
+                     (equal (plist-get params :host) (or host :null)))
+           return (plist-put (copy-sequence params) :windows
+                             (append (plist-get params :windows) nil))))
 
 (ert-deftest agent-usage-test-totals-delta ()
   "Running totals become per-model deltas; a new process proves its start."
@@ -274,79 +288,6 @@
                          '(750 200 50 100)))
           (should (equal (plist-get codex :turns) 1)))))))
 
-(ert-deftest agent-usage-test-quota-merge ()
-  "Quotas merge windows by id, keep balances and persist per host."
-  ;; Window ids are strings made afresh by each report: they must be
-  ;; compared with `equal', or every sparse update adds a duplicate.
-  (agent-usage-test--with-files
-    (let* ((session (agent-usage-test--session 'claude))
-           (later (+ (float-time) 3600))
-           (later-2 (+ (float-time) 86400))
-           (balance '((:amount 12.3 :currency "CNY"))))
-      (agent-usage-set-quota
-       session
-       :windows (list (list :id "five_hour" :label "5h"
-                            :used 0.6 :resets later)
-                      (list :id "seven_day" :label "周"
-                            :used 0.13 :resets later-2))
-       :balance balance)
-      ;; A sparse update changes one window and keeps the other.
-      (agent-usage-set-quota
-       session
-       :windows (list (list :id "seven_day" :label "周"
-                            :used 0.4 :resets later-2)))
-      (let* ((quota (agent-usage-test--quota 'claude))
-             (windows (plist-get quota :windows)))
-        (should (agent-usage-test--approx
-                 (plist-get (seq-find (lambda (window)
-                                        (equal (plist-get window :id)
-                                               "five_hour"))
-                                      windows)
-                            :used)
-                 0.6))
-        (should (agent-usage-test--approx
-                 (plist-get (seq-find (lambda (window)
-                                        (equal (plist-get window :id)
-                                               "seven_day"))
-                                      windows)
-                            :used)
-                 0.4)))
-      ;; Omitting the balance or passing nil keeps the known one.
-      (agent-usage-set-quota session :plan "max")
-      (should (equal (plist-get (agent-usage-test--quota 'claude) :balance)
-                     balance))
-      (agent-usage-set-quota session :plan "pro" :balance nil)
-      (should (equal (plist-get (agent-usage-test--quota 'claude) :balance)
-                     balance))
-      (should (equal (plist-get (agent-usage-test--quota 'claude) :plan)
-                     "pro"))
-      ;; The quota file is written and read back.
-      (let ((saved (copy-sequence (agent-usage-quotas))))
-        (setq agent-usage--quotas 'unloaded)
-        (should (equal (agent-usage-quotas) saved)))
-      ;; A remote project's quota is filed under its host.
-      (let ((remote (agent-session--make
-                     :agent 'claude :backend 'claude
-                     :root "/rpc:host1:/x/"
-                     :info (list :handle "h2" :model "claude-opus-5-5"))))
-        (agent-usage-set-quota
-         remote
-         :windows (list (list :id "five_hour" :label "5h"
-                              :used 0.2 :resets later)))
-        (should (agent-usage-test--quota 'claude "host1"))
-        (let ((window (car (plist-get (agent-usage-test--quota 'claude "host1")
-                                      :windows))))
-          (should (equal (list (plist-get window :id) (plist-get window :used)
-                               (plist-get window :resets))
-                         (list "five_hour" 0.2 later))))
-        ;; The local quota is still there under its own key.
-        (should (agent-usage-test--quota 'claude)))
-      ;; A sparse update must leave exactly the two windows, not a stale
-      ;; copy of the one it updated.  This fails while the bug above is there.
-      (should (= (length (plist-get (agent-usage-test--quota 'claude)
-                                    :windows))
-                 2)))))
-
 (ert-deftest agent-usage-test-claude-rate-limit ()
   "Claude's unified windows become labelled quota windows."
   (agent-usage-test--with-files
@@ -397,40 +338,29 @@
 (ert-deftest agent-usage-test-echo-text ()
   "The echo line shows windows, balances, reset windows and low faces."
   (agent-usage-test--with-files
-    ;; Newest registration first, as `agent-session-define-agent' pushes.
-    (let ((agent-session-agents '((dsh :title "DeepSeek")
-                                  (codex :title "Codex")
-                                  (claude :title "Claude")))
-          (future (+ (float-time) 3600))
-          (later (+ (float-time) 86400))
-          (past (- (float-time) 60)))
-      (let ((claude (agent-usage-test--session 'claude))
-            (codex (agent-usage-test--session 'codex))
-            (dsh (agent-usage-test--session 'dsh)))
-        (agent-usage-set-quota
-         claude
-         :windows (list (list :id "five_hour" :label "5h"
-                              :used 0.6 :resets future)
-                        (list :id "seven_day" :label "周"
-                              :used 0.85 :resets later)))
-        (agent-usage-set-quota
-         codex
-         :windows (list (list :id "five_hour" :label "5h"
-                              :used 0.3 :resets past)))
-        (agent-usage-set-quota
-         dsh :balance '((:amount 12.3 :currency "CNY")))
-        ;; A remote host on the same account reports the same windows: it is
-        ;; left out; one on another account is shown after this machine's.
-        (let ((same (agent-usage-test--session 'claude))
-              (other (agent-usage-test--session 'claude)))
-          (setf (agent-session-root same) "/rpc:dev:/x/"
-                (agent-session-root other) "/rpc:box:/x/")
-          (agent-usage-set-quota
-           same :windows (list (list :id "five_hour" :label "5h" :used 0.6 :resets future)
-                               (list :id "seven_day" :label "周" :used 0.85 :resets later)))
-          (agent-usage-set-quota
-           other :windows (list (list :id "five_hour" :label "5h" :used 0.1
-                                      :resets (+ future 60))))))
+    (let* ((agent-session-agents '((dsh :title "DeepSeek")
+                                   (codex :title "Codex")
+                                   (claude :title "Claude")))
+           (future (+ (float-time) 3600))
+           (later (+ (float-time) 86400))
+           (past (- (float-time) 60))
+           (claude-windows (list (list :id "five_hour" :label "5h" :used 0.6 :resets future)
+                                 (list :id "seven_day" :label "周" :used 0.85
+                                       :resets later))))
+      ;; As emx pushes it: in display order, a remote host on an account
+      ;; already listed marked as a duplicate.
+      (setq agent-usage--snapshot
+            (list (list :agent "claude" :host nil :time past :windows claude-windows)
+                  (list :agent "codex" :host nil :time past
+                        :windows (list (list :id "five_hour" :label "5h" :used 0.3
+                                             :resets past)))
+                  (list :agent "dsh" :host nil :time past
+                        :balance (list (list :amount 12.3 :currency "CNY")))
+                  (list :agent "claude" :host "dev" :time past :duplicate t
+                        :windows claude-windows)
+                  (list :agent "claude" :host "box" :time past
+                        :windows (list (list :id "five_hour" :label "5h" :used 0.1
+                                             :resets (+ future 60))))))
       (let ((text (agent-usage-echo-text)))
         (should text)
         (should (string-match-p "5h 40%" text))
@@ -445,6 +375,30 @@
           (should (eq (get-text-property pos 'face text)
                       'agent-usage-low)))))))
 
+(ert-deftest agent-usage-test-set-quota ()
+  "A quota reading goes to emx as JSON: windows in a vector, host or null."
+  (agent-usage-test--with-files
+    (let ((session (agent-usage-test--session 'codex))
+          (remote (agent-usage-test--session 'codex)))
+      (setf (agent-session-root remote) "/rpc:host1:/x/")
+      (agent-usage-set-quota session :windows (list (list :id "10080" :label "周"
+                                                          :minutes 10080 :used 0.1
+                                                          :resets 100))
+                             :credits 'unlimited :plan nil)
+      (agent-usage-set-quota remote :balance '((:amount 1.5 :currency "CNY")))
+      (let ((local (cdar (last agent-usage-test--sent)))
+            (host (cdar agent-usage-test--sent)))
+        (should (equal (plist-get local :host) :null))
+        (should (vectorp (plist-get local :windows)))
+        (should (equal (plist-get local :credits) "unlimited"))
+        ;; A nil value isn't sent: emx keeps the known one.
+        (should-not (plist-member local :plan))
+        (should (equal (plist-get host :host) "host1"))
+        (should-not (plist-member host :windows))
+        ;; Both serialize.
+        (should (json-serialize local))
+        (should (json-serialize host))))))
+
 (ert-deftest agent-usage-test-record-drops-empty ()
   "A record with no tokens writes nothing and returns nil."
   (agent-usage-test--with-files
@@ -453,95 +407,7 @@
       (should-not (agent-usage-record
                    session :model "m" :input 0 :cache-read nil
                    :cache-write 0 :output nil))
-      (should (equal (with-temp-buffer
-                       (insert-file-contents agent-usage-file)
-                       (buffer-string))
-                     "")))))
-
-;;; Forecast
-
-(ert-deftest agent-usage-test-forecast ()
-  "The pace follows the recent trend, not the average since the window began."
-  (let* ((now 1800000000.0)
-         (day 86400)
-         (weekly (lambda (used resets history)
-                   (list :id "seven_day" :minutes 10080 :used used :resets resets
-                         :history history))))
-    ;; Idle over the weekend, 20% today, four days left: right on pace,
-    ;; though by the average since the window began it looked plentiful.
-    (let ((forecast (agent-usage-forecast
-                     (funcall weekly 0.2 (+ now (* 4 day))
-                              `((,(- now (* 3 day)) . 0.0) (,(- now day) . 0.0) (,now . 0.2)))
-                     now)))
-      (should (< (abs (- (plist-get forecast :rate) 0.2)) 1e-9))
-      (should (< (abs (- (plist-get forecast :projected) 1.0)) 1e-9))
-      (should-not (plist-get forecast :exhausts)))
-    ;; 30% in the last day with 60% left: out in two days, before the reset.
-    (let ((forecast (agent-usage-forecast
-                     (funcall weekly 0.4 (+ now (* 4 day))
-                              `((,(- now (* 2 day)) . 0.05) (,(- now day) . 0.1) (,now . 0.4)))
-                     now)))
-      (should (< (abs (- (plist-get forecast :projected) 1.6)) 1e-9))
-      (should (< (abs (- (plist-get forecast :exhausts) (+ now (* 2 day)))) 1e-3)))
-    ;; Readings of a few minutes only: the average since the window began.
-    (let ((forecast (agent-usage-forecast
-                     (funcall weekly 0.12 (+ now (* 4 day))
-                              `((,(- now 600) . 0.1) (,now . 0.12)))
-                     now)))
-      (should (< (abs (- (plist-get forecast :rate) 0.04)) 1e-9))
-      (should (= (plist-get forecast :since) (- now (* 3 day)))))
-    ;; A window past its reset has no forecast.
-    (should-not (agent-usage-forecast (funcall weekly 0.5 (- now 1) nil) now))))
-
-(ert-deftest agent-usage-test-window-history ()
-  "Readings accumulate over a period and start again when it resets."
-  (agent-usage-test--with-files
-    (let ((session (agent-usage-test--session 'claude))
-          (resets (+ (float-time) 86400)))
-      (agent-usage-set-quota session :windows (list (list :id "seven_day" :used 0.1
-                                                          :resets resets)))
-      (agent-usage-set-quota session :windows (list (list :id "seven_day" :used 0.2
-                                                          :resets (+ resets 30))))
-      (let ((window (car (plist-get (agent-usage-test--quota 'claude) :windows))))
-        (should (equal (mapcar #'cdr (plist-get window :history)) '(0.1 0.2))))
-      ;; Another window's update keeps this one's readings.
-      (agent-usage-set-quota session :windows (list (list :id "five_hour" :used 0.3
-                                                          :resets resets)))
-      (let ((window (cl-find "seven_day" (plist-get (agent-usage-test--quota 'claude) :windows)
-                             :key (lambda (w) (plist-get w :id)) :test #'equal)))
-        (should (= (length (plist-get window :history)) 2)))
-      ;; A new period.
-      (agent-usage-set-quota session :windows (list (list :id "seven_day" :used 0.01
-                                                          :resets (+ resets (* 7 86400)))))
-      (let ((window (cl-find "seven_day" (plist-get (agent-usage-test--quota 'claude) :windows)
-                             :key (lambda (w) (plist-get w :id)) :test #'equal)))
-        (should (equal (mapcar #'cdr (plist-get window :history)) '(0.01)))))))
-
-;;; Robustness
-
-(ert-deftest agent-usage-test-truncated-line ()
-  "A line cut short doesn't hide the records after it; appends after it
-start a line of their own."
-  (agent-usage-test--with-files
-    (with-temp-file agent-usage-file
-      (insert "(:time 1 :turns 1 :input 2\n(:time 2 :turns 1 :input 3)\n(:time 3 :input 4"))
-    (agent-usage-record (agent-usage-test--session) :model "m" :input 5)
-    (should (equal (mapcar (lambda (record) (plist-get record :input))
-                           (agent-usage-test--records))
-                   '(5 3)))))
-
-(ert-deftest agent-usage-test-write-failure ()
-  "A ledger that can't be written doesn't stop the turn from ending."
-  (agent-usage-test--with-files
-    (let ((session (agent-usage-test--session 'codex)))
-      (setq agent-usage--loaded t)
-      (agent-usage-add-call session "gpt" '(:input 10 :output 5))
-      (cl-letf (((symbol-function 'write-region)
-                 (lambda (&rest _) (signal 'file-error '("No space left")))))
-        (agent-usage-end-turn session))
-      (should-not (plist-get (agent-session-state session) :usage-pending))
-      ;; Still counted in this Emacs.
-      (should (= (plist-get (car agent-usage--records) :input) 10)))))
+      (should-not agent-usage-test--sent))))
 
 (ert-deftest agent-usage-test-flush-on-exit ()
   "Usage of a turn whose process died, or whose buffer was killed, is kept."
@@ -558,93 +424,201 @@ start a line of their own."
       (should (= (length (agent-usage-test--records)) 2)))))
 
 (ert-deftest agent-usage-test-codex-unlimited-credits ()
-  "Unlimited credits replace a known balance; a snapshot without any keeps it."
+  "Unlimited credits are sent as such; a snapshot without any sends none."
   (agent-usage-test--with-files
     (let ((session (agent-usage-test--session 'codex)))
       (agent-codex--rate-limits session '(:credits (:unlimited nil :balance "42")))
       (should (= (plist-get (agent-usage-test--quota 'codex) :credits) 42))
       (agent-codex--rate-limits session '(:planType "pro"))
-      (should (= (plist-get (agent-usage-test--quota 'codex) :credits) 42))
+      (should-not (plist-member (agent-usage-test--quota 'codex) :credits))
       (agent-codex--rate-limits session '(:credits (:unlimited t :balance nil)))
-      (should (eq (plist-get (agent-usage-test--quota 'codex) :credits) 'unlimited)))))
+      (should (equal (plist-get (agent-usage-test--quota 'codex) :credits) "unlimited")))))
 
 ;;; Clearing
 
 (ert-deftest agent-usage-test-clear ()
-  "Clearing asks first; declined, nothing goes."
+  "Clearing asks first; declined, nothing is sent."
   (agent-usage-test--with-files
-    (agent-usage-record (agent-usage-test--session) :model "m" :input 5)
     (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
       (should-error (agent-usage-clear) :type 'user-error))
-    (should (= (length (agent-usage-test--records)) 1))
-    (let ((delete-by-moving-to-trash nil))
-      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
-        (agent-usage-clear)))
-    (should-not (file-exists-p agent-usage-file))
-    (should-not (agent-usage-records))
-    ;; Recording starts a new ledger.
-    (agent-usage-record (agent-usage-test--session) :model "m" :input 1)
-    (should (= (length (agent-usage-test--records)) 1))))
+    (should-not agent-usage-test--sent)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (agent-usage-clear))
+    (should (equal (caar agent-usage-test--sent) "clear"))))
 
-;;; Summaries and the usage page
+;;; The usage page, against a real emx
 
-(defun agent-usage-test--sample-records ()
-  "Records of two agents in two projects, this hour."
-  (let ((now (float-time)))
-    (list (list :time now :agent 'claude :root "~/a/" :model "claude-opus-5-5"
-                :turns 1 :input 10 :cache-read 1000 :cache-write 0 :output 90)
-          (list :time now :agent 'codex :root "~/b/" :model "gpt-6.1-sol"
-                :turns 1 :child t :input 100 :cache-read 0 :cache-write 0 :output 1900)
-          (list :time (- now (* 40 86400)) :agent 'codex :root "~/b/" :model "gpt-6.1-sol"
-                :turns 1 :input 5 :output 5))))
+(defconst agent-usage-test--fixtures
+  (expand-file-name "fixtures/usage/" (file-name-directory (or load-file-name buffer-file-name)))
+  "Ledger and quota files the page test serves.")
 
-(ert-deftest agent-usage-test-summarize ()
-  "Groups sum their records, the most tokens first and the total last."
-  (let* ((records (butlast (agent-usage-test--sample-records)))
-         (groups (agent-usage-summarize records :agent))
-         (total (cdr (assq t groups))))
-    (should (equal (mapcar #'car groups) '(codex claude t)))
-    (should (= (plist-get total :turns) 2))
-    (should (= (plist-get total :child-turns) 1))
-    (should (= (agent-usage-tokens total) 3100))
-    ;; Without the cache, Claude's cache reads don't count.
-    (should (= (agent-usage-tokens total t) 2100))))
+(defun agent-usage-test--wait (predicate)
+  "Wait up to 10 s for PREDICATE to hold, reading the service's output."
+  (let ((end (+ (float-time) 10)))
+    (while (and (not (funcall predicate)) (< (float-time) end))
+      (accept-process-output nil 0.05))
+    (funcall predicate)))
 
 (ert-deftest agent-usage-test-page ()
-  "The page shows the period's groups, and RET on a row filters to it."
-  (agent-usage-test--with-files
-    (setq agent-usage--records (agent-usage-test--sample-records)
-          agent-usage--loaded t
-          agent-usage--quotas nil)
-    (let ((agent-session-agents '((claude :title "Claude") (codex :title "Codex"))))
+  "emx serves a report of the fixtures, and the page draws and filters it."
+  (let* ((dir (make-temp-file "agent-usage-test-" t))
+         (agent-usage-file (expand-file-name "agent-usage.jsonl" dir))
+         (agent-usage-quota-file (expand-file-name "agent-quota.json" dir))
+         (agent-usage-poll-interval 0)
+         (agent-usage-pollers nil)
+         (agent-usage--service nil)
+         (agent-usage--snapshot nil)
+         (agent-usage--callbacks (make-hash-table))
+         (agent-usage-change-functions nil)
+         (agent-session-agents '((dsh :title "DeepSeek") (codex :title "Codex")
+                                 (claude :title "Claude")))
+         (process-environment (cons "TZ=Asia/Shanghai" process-environment))
+         report)
+    (copy-file (expand-file-name "agent-usage.jsonl" agent-usage-test--fixtures)
+               agent-usage-file)
+    (copy-file (expand-file-name "agent-quota.json" agent-usage-test--fixtures)
+               agent-usage-quota-file)
+    (unwind-protect
+        (progn
+          (agent-usage--start)
+          (should (agent-usage-test--wait (lambda () agent-usage--snapshot)))
+          ;; The echo line from the pushed quotas: the remote Codex on its own
+          ;; account is shown after this machine's agents.
+          (should (string-match-p "Claude .*DeepSeek 余额 ¥9.03 .*Codex@dev"
+                                  (agent-usage-echo-text)))
+          ;; The fixtures' "now": 2026-10-21 12:00 in Shanghai.
+          (agent-usage--request "report" (list :range "week" :filter (make-hash-table)
+                                               :withoutCache :false :now 1792555200)
+                                (lambda (result) (setq report result)))
+          (should (agent-usage-test--wait (lambda () report)))
+          (should (= (plist-get (plist-get report :total) :tokens) 3710))
+          (with-temp-buffer
+            (agent-usage-mode)
+            (setq agent-usage--report report)
+            (cl-letf (((symbol-function 'agent-usage--width) (lambda () 100))
+                      ((symbol-function 'agent-usage--fetch) #'ignore))
+              (agent-usage--render)
+              (let ((page (buffer-string)))
+                (should (string-match-p "3.7k" page))
+                (should (string-match-p "Harness" page))
+                (should (string-match-p "gpt-6.1-sol" page))
+                (should (string-match-p "子 agent 1 轮" page))
+                (should (string-match-p "Codex@dev" page))
+                (should (string-match-p "统计中" page)))
+              ;; The rows of the timeline, the peak's label included, line
+              ;; up their columns: they are all as wide.
+              (save-excursion
+                (goto-char (point-min))
+                (search-forward "每日趋势")
+                (forward-line 1)
+                (let (widths)
+                  (dotimes (_ 5)
+                    (push (string-width (buffer-substring (point) (line-end-position))) widths)
+                    (forward-line 1))
+                  (should (= (length (delete-dups widths)) 1))))
+              ;; RET on a row filters to it and asks for that report.
+              (goto-char (point-min))
+              (search-forward "Harness")
+              (re-search-forward "^  Claude")
+              (agent-usage-select)
+              (should (equal agent-usage--filter '(:agent "claude")))
+              (agent-usage-unfilter)
+              (should-not agent-usage--filter))))
+      (when (process-live-p agent-usage--service)
+        (delete-process agent-usage--service))
+      (delete-directory dir t))))
+
+;;; Service and migration
+
+(ert-deftest agent-usage-test-migrate ()
+  "The Lisp files of before become emx's JSON files, once; the old are kept."
+  (let* ((dir (make-temp-file "agent-usage-migrate-" t))
+         (agent-usage-file (expand-file-name "agent-usage.jsonl" dir))
+         (agent-usage-quota-file (expand-file-name "agent-quota.json" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "agent-usage.eld" dir)
+            (insert "(:time 1.5 :agent claude :root \"~/a/\" :session \"h\" :child t :turns 1 :model \"m\" :input 2 :cache-read 3 :cache-write 4 :output 5 :cost 0.1)\n"
+                    "(:time 2 :agent codex :input 1\n"
+                    "(:time 3 :agent dsh :turns 0 :input 7)\n"))
+          (with-temp-file (expand-file-name "agent-quota.eld" dir)
+            (prin1 '(((claude) :time 9 :windows ((:id "five_hour" :label "5h" :minutes 300 :used 0.5
+                                                      :resets 100 :history ((1 . 0.1) (2 . 0.5)))))
+                     ((codex . "dev") :time 8 :credits unlimited :plan "pro" :windows nil))
+                   (current-buffer)))
+          (agent-usage--migrate)
+          (let ((records (with-temp-buffer
+                           (insert-file-contents agent-usage-file)
+                           (mapcar (lambda (line) (json-parse-string line :object-type 'plist))
+                                   (split-string (buffer-string) "\n" t))))
+                (quotas (json-parse-string (with-temp-buffer
+                                             (insert-file-contents agent-usage-quota-file)
+                                             (buffer-string))
+                                           :object-type 'plist :array-type 'list
+                                           :null-object nil)))
+            (should (= (length records) 2))
+            (should (equal (plist-get (car records) :agent) "claude"))
+            (should (equal (list (plist-get (car records) :cache_read)
+                                 (plist-get (car records) :cache_write)
+                                 (plist-get (car records) :child))
+                           '(3 4 t)))
+            (should-not (plist-member (car records) :cost))
+            (should (equal (plist-get (cadr records) :model) :null))
+            (should (equal (plist-get (car (plist-get (car quotas) :windows)) :history)
+                           '((1 0.1) (2 0.5))))
+            (should (equal (plist-get (cadr quotas) :host) "dev"))
+            (should (equal (plist-get (cadr quotas) :credits) "unlimited")))
+          (should (file-exists-p (expand-file-name "agent-usage.eld.bak" dir)))
+          (should-not (file-exists-p (expand-file-name "agent-usage.eld" dir)))
+          ;; Done once: a second run changes nothing.
+          (let ((before (file-attribute-modification-time (file-attributes agent-usage-file))))
+            (agent-usage--migrate)
+            (should (equal before (file-attribute-modification-time
+                                   (file-attributes agent-usage-file))))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-usage-test-gave-up ()
+  "Once the service gave up, nothing but a restart starts it again."
+  (let ((noninteractive nil)
+        (agent-usage--service nil)
+        (agent-usage--gave-up nil)
+        (agent-usage--exits nil)
+        (starts 0))
+    (cl-letf (((symbol-function 'agent-usage--start)
+               (lambda () (cl-incf starts) (error "No node"))))
+      (should-not (agent-usage--service))
+      (should agent-usage--gave-up)
+      (should-not (agent-usage--service))
+      (should (= starts 1))
+      (agent-usage-restart-service)
+      (should (= starts 2)))))
+
+(ert-deftest agent-usage-test-fetch-order ()
+  "A report arriving after a newer one was asked for is dropped; a group
+of no model filters with null."
+  (let (asked)
+    (cl-letf (((symbol-function 'agent-usage--request)
+               (lambda (method params callback) (push (list method params callback) asked)))
+              ((symbol-function 'agent-usage--redraw) #'ignore))
       (with-temp-buffer
         (agent-usage-mode)
-        (cl-letf (((symbol-function 'agent-usage--width) (lambda () 100)))
-          (agent-usage--render)
-          (should (string-match-p "Harness" (buffer-string)))
-          ;; The rows of the timeline, the peak's label included, line up
-          ;; their columns: they are all as wide.
-          (save-excursion
-            (goto-char (point-min))
-            (search-forward "每日趋势")
-            (forward-line 1)
-            (let (widths)
-              (dotimes (_ 5)
-                (push (string-width (buffer-substring (point) (line-end-position))) widths)
-                (forward-line 1))
-              (should (= (length (delete-dups widths)) 1))))
-          (should-not (string-match-p "[$¥]" (buffer-string)))
-          ;; The 40-day-old record is outside the week, inside "all".
-          (should-not (string-match-p "2 轮" (buffer-string)))
-          (goto-char (point-min))
-          (search-forward "  Claude")
-          (agent-usage-select)
-          (should (equal agent-usage--filter '(:agent claude)))
-          (should-not (string-match-p "gpt-6.1-sol" (buffer-string)))
-          (agent-usage-unfilter)
-          (should (string-match-p "gpt-6.1-sol" (buffer-string)))
-          (agent-usage-set-range 'all)
-          (should (string-match-p "2 轮 · 子 agent 1 轮" (buffer-string))))))))
+        (agent-usage--fetch)
+        (setq agent-usage--filter (list :model nil))
+        (agent-usage--fetch)
+        (should (equal (plist-get (nth 1 (car asked)) :filter) '(:model :null)))
+        (should (json-serialize (nth 1 (car asked))))
+        ;; The newer answer first, then the older one: the newer stays.
+        (funcall (nth 2 (car asked)) '(:range "week" :total (:tokens 2)))
+        (funcall (nth 2 (cadr asked)) '(:range "week" :total (:tokens 1)))
+        (should (equal (plist-get (plist-get agent-usage--report :total) :tokens) 2))))))
+
+(ert-deftest agent-usage-test-codex-window-ids ()
+  "A Codex window without a duration is named like emx names it."
+  (agent-usage-test--with-files
+    (agent-codex--rate-limits (agent-usage-test--session 'codex)
+                              '(:primary (:usedPercent 20 :resetsAt 100)))
+    (should (equal (plist-get (car (plist-get (agent-usage-test--quota 'codex) :windows)) :id)
+                   "primary"))))
 
 (ert-deftest agent-usage-test-echo-refresh ()
   "The quota line is drawn into the idle echo-area buffer, and cleared."
@@ -655,9 +629,9 @@ start a line of their own."
            (agent-session-agents '((dsh :title "DeepSeek"))))
       (unwind-protect
           (progn
-            (setq agent-usage--quotas
-                  (list (cons '(dsh) (list :time (float-time)
-                                           :balance '((:amount 9.18 :currency "CNY"))))))
+            (setq agent-usage--snapshot
+                  (list (list :agent "dsh" :time (float-time)
+                              :balance '((:amount 9.18 :currency "CNY")))))
             (let ((agent-usage-echo-mode t)) (agent-usage-echo-refresh))
             (should (string-match-p "DeepSeek 余额 ¥9\\.18"
                                     (with-current-buffer buffer (buffer-string))))
