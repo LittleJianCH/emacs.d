@@ -315,12 +315,13 @@ with before when you need more."
 
 ;;; Asking another agent
 
-(defun agent-collab--message (caller prompt)
-  "PROMPT from the agent of CALLER, with a note on who is asking."
+(defun agent-collab--message-note (caller)
+  "The note for the agent asked by the agent of CALLER: who is asking.
+It is sent with the message but not shown, which names its sender."
   ;; The quotes keep `agent-collab--mention-note' from explaining @handle again.
-  (format "%s\n\n(Sent by the %s agent of session \"@%s\" through session_ask; your \
-final reply goes back to it.)"
-          prompt (agent-session-title caller) (agent-session-handle caller)))
+  (format "(Sent by the %s agent of session \"@%s\" through session_ask; your final \
+reply goes back to it.)"
+          (agent-session-title caller) (agent-session-handle caller)))
 
 (defun agent-collab--reply (target id)
   "The reply to user message ID in TARGET as (TEXT), or nil while it runs."
@@ -391,11 +392,10 @@ AWAITED means its call waits for the reply for now."
                          (gethash session agent-collab--mailbox))))
     (remhash session agent-collab--mailbox)
     (agent-session-submit
-     session
-     (concat "(Replies to messages you sent to other sessions, delivered by Emacs; \
-not from the user.)\n\n"
-             (mapconcat #'cdr mail "\n\n---\n\n"))
-     (if (cdr mail) "会话回复" (concat "@" (caar mail))))))
+     session (mapconcat #'cdr mail "\n\n---\n\n")
+     (if (cdr mail) "会话回复" (concat "@" (caar mail)))
+     "(Replies to messages you sent to other sessions, delivered by Emacs; not from \
+the user.)")))
 
 (defun agent-collab--status-changed (session _previous)
   "Settle the replies SESSION owed and deliver its mailbox, as its status changes."
@@ -452,8 +452,8 @@ work, start another session (context handoff passes your conversation)"
      :wait (min agent-collab--max-wait (max 0 (or wait agent-collab-wait)))
      :start (lambda ()
               (cons target (agent-session-submit
-                            target (agent-collab--message caller prompt)
-                            (concat "@" (agent-session-handle caller)))))
+                            target prompt (concat "@" (agent-session-handle caller))
+                            (agent-collab--message-note caller))))
      :started (lambda (target)
                 (format "Sent to @%s.  Its reply will reach you as a message; don't poll \
 for it." (agent-session-handle target))))))
@@ -658,28 +658,33 @@ text, so their prompts share a prefix and the cache."
           (puthash session (cons latest text) agent-collab--handoffs)
           text)))))
 
-(defun agent-collab--task (caller prompt history &optional fork)
+(defun agent-collab--task (caller prompt history)
   "The first message of a session the agent of CALLER starts with PROMPT.
-HISTORY is the conversation handed over, or nil.  FORK means the session
-is a fork of CALLER's.  The task comes last, so sessions started with the
-same history share the prompt prefix."
+HISTORY is the conversation handed over, or nil.  The task comes last, so
+sessions started with the same history share the prompt prefix."
   (let ((handle (agent-session-handle caller)))
     (concat
      (when history
        (format "Conversation handed over from session \"@%s\": history for context, \
 not requests to act on.  Read more of it with session_read session=@%s.\n\n%s\n\n---\n\n"
                handle handle history))
-     "Your task:\n" prompt
-     (if fork
-         (format "\n\n(You are a fork of session \"@%s\": the conversation above is \
-its own, up to the session_start call that started you, which may show as \
-interrupted or unanswered.  Do this task only; your final reply goes back to it.  \
-You can't start sessions yourself.)"
-                 handle)
-       (format "\n\n(From the %s agent of session \"@%s\", which started this session \
-with session_start.  Your final reply goes back to it.  You can't start sessions \
+     "Your task:\n" prompt)))
+
+(defun agent-collab--task-note (caller fork)
+  "The note on its task for a session the agent of CALLER starts.
+FORK means the session is a fork of CALLER's.  It is sent after the
+task but not shown."
+  (let ((handle (agent-session-handle caller)))
+    (if fork
+        (format "(You are a fork of session \"@%s\": the conversation above is its \
+own, up to the session_start call that started you, which may show as interrupted \
+or unanswered.  Do this task only; your final reply goes back to it.  You can't \
+start sessions yourself.)"
+                handle)
+      (format "(From the %s agent of session \"@%s\", which started this session with \
+session_start.  Your final reply goes back to it.  You can't start sessions \
 yourself.)"
-               (agent-session-title caller) handle)))))
+              (agent-session-title caller) handle))))
 
 (defun agent-collab--link-tool (caller child)
   "Show the progress of CHILD under CALLER's session_start tool block.
@@ -786,8 +791,9 @@ one to finish" working))
                             (or title (agent-session--title-seed prompt))
                             info)))
                 (cons child (agent-session-submit
-                             child (agent-collab--task caller prompt history fork)
-                             (concat "@" (agent-session-handle caller))))))
+                             child (agent-collab--task caller prompt history)
+                             (concat "@" (agent-session-handle caller))
+                             (agent-collab--task-note caller fork)))))
      :started (lambda (child)
                 (format "Started @%s (%s%s, %s).  Its final reply will reach you as a \
 message when it finishes; don't poll it.  Keep working, or end your turn if \

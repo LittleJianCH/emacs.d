@@ -1938,10 +1938,11 @@ sent them."
           (agent-collab-confirm nil))
       ,@body)))
 
-(defun agent-session-test--first-message (session)
-  "Text of the first user message in SESSION's transcript."
+(defun agent-session-test--first-message (session &optional key)
+  "Text of the first user message in SESSION's transcript.
+With KEY, that property of its block instead, such as :hidden."
   (seq-some (pcase-lambda (`(,_ . ,block))
-              (and (eq (plist-get block :type) 'user) (plist-get block :text)))
+              (and (eq (plist-get block :type) 'user) (plist-get block (or key :text))))
             (agent-session--blocks-in-order session)))
 
 (ert-deftest agent-session-test-session-start ()
@@ -1970,10 +1971,11 @@ profile, its mode capped by the caller's, the task last in its message."
        (should (equal (agent-session-display-title child) "实现 X"))
        (should (equal (agent-session-setting child :model) "big"))
        (should (eq (agent-session-setting child :mode) 'edits))
-       (let ((message (agent-session-test--first-message child)))
-         (should (string-prefix-p "Your task:\n实现 X\n\n(From the Echo agent of session \"@test-echo\""
-                                  message))
-         (should (string-suffix-p "You can't start sessions yourself.)" message)))
+       ;; The note on who sent it goes to the agent, not the transcript.
+       (should (equal (agent-session-test--first-message child) "Your task:\n实现 X"))
+       (let ((note (agent-session-test--first-message child :hidden)))
+         (should (string-prefix-p "(From the Echo agent of session \"@test-echo\"" note))
+         (should (string-suffix-p "You can't start sessions yourself.)" note)))
        (with-current-buffer (agent-session-buffer child)
          (should (string-search "▍ @test-echo\n" (agent-session-test--transcript))))
        ;; Its tools are exactly its parent's (forks keep the prompt cache).
@@ -2033,7 +2035,7 @@ turns that fit and the first; sessions started in one turn share it."
 with session_read.)\n\n## Turn 6 (in progress)\nUser:\n问题5 x+\n\nAssistant:\n收到：问题5" first))
        (should-not (string-search "收到：问题0" first))
        (should-not (string-search "问题3" first))
-       (should (string-match-p "---\n\nYour task:\n接着做\n\n(From the Echo agent" first))
+       (should (string-suffix-p "---\n\nYour task:\n接着做" first))
        (should (<= (length first) 2200))
        ;; A second session from the same turn gets the same history.
        (funcall start)
@@ -2133,7 +2135,11 @@ one message, naming who sent them."
        (should (equal (agent-session-handle session) "test-echo"))
        (should (equal (plist-get mail :origin) "@worker"))
        (should (string-prefix-p "(Replies to messages you sent to other sessions, delivered \
-by Emacs; not from the user.)" (plist-get mail :text)))
+by Emacs; not from the user.)" (plist-get mail :hidden)))
+       ;; Only the agent's echo of what it received shows the note.
+       (let ((transcript (agent-session-test--transcript)))
+         (should (< (string-search "● Echo" transcript)
+                    (string-search "delivered by Emacs" transcript))))
        (should (string-search "Reply from \"@worker\" (Echo2):\n\n收到：Your task:\n任务一"
                               (plist-get mail :text)))
        (should (string-search "See what it did with session_read session=@worker."
@@ -2246,9 +2252,9 @@ for the user, and then the reply later as a message."
          (should (equal (agent-session-setting child :effort) "high"))
          (should (eq (agent-session-setting child :mode) 'edits))
          (should (equal (plist-get (agent-session-info child) :fork-from) "source-1"))
-         (should (string-prefix-p "Your task:\n继续查这个 bug\n\n(You are a fork of session \
-\"@test-echo\""
-                                  (agent-session-test--first-message child))))))))
+         (should (equal (agent-session-test--first-message child) "Your task:\n继续查这个 bug"))
+         (should (string-prefix-p "(You are a fork of session \"@test-echo\""
+                                  (agent-session-test--first-message child :hidden))))))))
 
 (ert-deftest agent-session-test-fork-backends ()
   "Each backend starts a fork from its source's conversation."
@@ -2363,6 +2369,22 @@ named after the child; answering either settles both."
        (agent-session-kill-quietly (agent-session-buffer child))
        (accept-process-output nil 0.05)
        (should (string-search "↳ 子会话已关闭" (agent-session-test--transcript)))))))
+
+(ert-deftest agent-session-test-hidden-note ()
+  "A note for the agent goes with a message but isn't shown, even when the
+message waited in the queue, which keeps its sender."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         sent)
+     (cl-letf (((symbol-function 'agent-session-backend-send)
+                (lambda (_ _ text) (push text sent))))
+       (agent-session-set-status session 'running)
+       (agent-session-submit session "查一下" "@other" "(Note for the agent.)")
+       (should-not sent)
+       (agent-session-set-status session 'idle)
+       (should (equal sent '("查一下\n\n(Note for the agent.)")))
+       (should (string-search "▍ @other\n查一下" (agent-session-test--transcript)))
+       (should-not (string-search "Note for the agent" (agent-session-test--transcript)))))))
 
 (ert-deftest agent-session-test-agent-message-fold ()
   "A long message from another session's agent shows its first lines until

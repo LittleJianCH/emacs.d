@@ -881,8 +881,11 @@ When the turn is folded, a one-line summary of the process follows below
          (text (plist-get block :text))
          (head (and (plist-get block :origin) (agent-session--message-head text)))
          (collapsed (and head (agent-session--collapsed-p block))))
+    ;; Another session's agent wrote it: colored like an agent, not the user.
     (concat (propertize (concat "▍ " (or (plist-get block :origin) "你"))
-                        'face 'agent-session-user)
+                        'face (if (plist-get block :origin)
+                                  'agent-session-assistant
+                                'agent-session-user))
             (cond ((plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim))
                   ((plist-get block :steer) (propertize "  ↪ 引导" 'face 'agent-session-dim))
                   (t ""))
@@ -1725,12 +1728,16 @@ Send queued messages when idle."
       (agent-session--fold-turns session (and finished (agent-session--elapsed finished)))))
   (agent-session--refresh session)
   (when (and (eq status 'idle) (agent-session-queue session))
-    (let ((next (pop (agent-session-queue session))))
+    (let* ((next (pop (agent-session-queue session)))
+           (queued (agent-session--block session (car next)))
+           (origin (plist-get queued :origin))
+           (hidden (plist-get queued :hidden)))
       ;; Shown at the then-end when queued; move it to the end of the
       ;; transcript when actually sent so the order matches reality.
       (agent-session--remove-block session (car next))
-      (agent-session--new-block session (car next) (list :type 'user :text (cdr next)))
-      (agent-session--deliver session (cdr next)))))
+      (agent-session--new-block session (car next) (list :type 'user :text (cdr next)
+                                                         :origin origin :hidden hidden))
+      (agent-session--deliver session (agent-session--with-hidden (cdr next) hidden)))))
 
 ;;; Mode line: agent / model / reasoning effort / permission mode / usage / status
 
@@ -2107,12 +2114,17 @@ send; the transcript keeps showing what the user wrote.")
   (agent-session-backend-send (agent-session-backend session) session
                               (agent-session--outgoing session text)))
 
-(defun agent-session-submit (session text &optional origin)
+(defun agent-session--with-hidden (text hidden)
+  "TEXT as sent to the agent, followed by HIDDEN, the part not shown."
+  (if hidden (concat text "\n\n" hidden) text))
+
+(defun agent-session-submit (session text &optional origin hidden)
   "Send TEXT as the user: show it in the transcript; queue it if busy.
 ORIGIN names the sender when it isn't the user, such as the @handle of
 another session; the transcript shows it instead of 你, and the session
-takes neither its title nor its name from it.  Return the id of the
-message's block in the transcript."
+takes neither its title nor its name from it.  HIDDEN is a note for the
+agent sent after TEXT but not shown.  Return the id of the message's
+block in the transcript."
   (unless origin
     (unless (plist-get (agent-session-info session) :title)
       (setf (agent-session-info session)
@@ -2121,13 +2133,13 @@ message's block in the transcript."
   (let ((id (format "user-%s" (random)))
         (busy (memq (agent-session-status session) '(running starting))))
     (agent-session--new-block session id (list :type 'user :text text :queued busy
-                                               :origin origin))
+                                               :origin origin :hidden hidden))
     (if busy
         (progn
           (setf (agent-session-queue session)
                 (append (agent-session-queue session) (list (cons id text))))
           (agent-session--refresh session))
-      (agent-session--deliver session text))
+      (agent-session--deliver session (agent-session--with-hidden text hidden)))
     id))
 
 (defun agent-session-send (session text)
