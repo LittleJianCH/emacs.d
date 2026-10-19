@@ -167,6 +167,28 @@ check(echoes == ['{"echo":"whole"}'], 'whole line delivered, cut line dropped: %
 q.kill(); q.wait(); time.sleep(1.5)
 check(not alive(kid), 'flood agent stopped')
 
+# 7c: stopping the agent stops what it started too, even what ignores SIGTERM
+kid = 't' + uuid.uuid4().hex[:8]
+marker = 'keeper-test-tool-' + kid
+tool = r'''
+import subprocess, sys, time
+subprocess.Popen(['sh', '-c', 'trap "" TERM; exec sleep 300 # %s' % sys.argv[1]])
+print('{"started":1}', flush=True)
+for line in sys.stdin:
+    pass
+'''
+p = subprocess.Popen([sys.executable, K, 'start', kid, '--', sys.executable, '-c', tool, marker],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+frames(p, until=lambda l: 'started' in l)
+def tool_alive():
+    return subprocess.run(['pgrep', '-f', marker], capture_output=True).returncode == 0
+check(tool_alive(), 'agent started a tool')
+p.kill(); p.wait()
+deadline = time.time() + 15
+while (tool_alive() or alive(kid)) and time.time() < deadline:
+    time.sleep(0.5)
+check(not tool_alive() and not alive(kid), 'tool ignoring SIGTERM stopped with the agent')
+
 # 8: an agent that can't start is reported as an exit, with the reason
 kid = 't' + uuid.uuid4().hex[:8]
 p = subprocess.Popen([sys.executable, K, 'start', kid, '--', 'no-such-agent-program'],

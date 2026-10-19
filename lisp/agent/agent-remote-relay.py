@@ -31,14 +31,19 @@ state = {'sock': None, 'out': None, 'ready': False, 'init': None, 'initialized':
 LOST = 'Emacs is out of reach: the connection to its host was lost; retry once it is back'
 
 
+emit_lock = threading.Lock()
+
+
 def emit(line):
-    """Write LINE (bytes ending in a newline) to the agent."""
+    """Write LINE (bytes ending in a newline) to the agent, whole: several
+threads write, and a pipe interleaves writes longer than PIPE_BUF."""
     view = memoryview(line)
-    try:
-        while view:
-            view = view[os.write(1, view):]
-    except OSError:
-        os._exit(0)
+    with emit_lock:
+        try:
+            while view:
+                view = view[os.write(1, view):]
+        except OSError:
+            os._exit(0)
 
 
 def error_line(raw_id):
@@ -112,6 +117,9 @@ def downstream(sock):
             except ValueError:
                 message = None
             with lock:
+                if state['sock'] is not sock:
+                    # Lost meanwhile: its requests have been failed already.
+                    return
                 if isinstance(message, dict) and 'method' not in message and 'id' in message:
                     key = json.dumps(message['id'])
                     if state['replay'] == key and state['sock'] is sock:

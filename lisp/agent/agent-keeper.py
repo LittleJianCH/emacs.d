@@ -113,13 +113,20 @@ class Keeper:
             self.sel.register(self.child.stdin, selectors.EVENT_WRITE, self.write_child)
         self.to_child += line
 
+    def signal_group(self, sig):
+        """Send SIG to the agent's process group (it leads one: what it starts,
+such as a tool's shell, goes with it, as tramp-rpc's server would do it);
+return whether the group is still there."""
+        try:
+            os.killpg(self.child.pid, sig)
+            return True
+        except OSError:
+            return False
+
     def stop(self):
         if self.stop_at is None and self.code is None:
             self.stop_at = time.monotonic()
-            try:
-                self.child.terminate()
-            except OSError:
-                pass
+            self.signal_group(signal.SIGTERM)
 
     def finish(self):
         for path in (self.sock_path, self.out_path, self.err_path):
@@ -215,7 +222,7 @@ connection."""
             state['header'] = False
             words = line.split()
             if words[:1] == [b'kill']:
-                if self.code is not None:
+                if self.code is not None and self.stop_at is None:
                     # The agent has exited and Emacs got its exit: done.
                     self.finish()
                 self.stop()
@@ -286,16 +293,17 @@ connection."""
                 self.child.stdout.close()
             if self.code is not None:
                 self.update_client()
-            if self.code is None and self.stop_at is not None and now - self.stop_at > STOP_GRACE:
-                try:
-                    self.child.kill()
-                except OSError:
-                    pass
+            stopping = self.stop_at is not None
+            if stopping and now - self.stop_at > STOP_GRACE:
+                # Whatever of the group outlived SIGTERM, the agent included.
+                stopping = self.signal_group(signal.SIGKILL)
+            elif stopping:
+                stopping = self.signal_group(0)
             if self.client is None and now - self.alone_since > IDLE:
-                if self.code is not None:
+                if self.code is not None and self.stop_at is None:
                     self.finish()
                 self.stop()
-            if self.stop_at is not None and self.code is not None and self.client is None:
+            if self.stop_at is not None and self.code is not None and self.client is None and not stopping:
                 self.finish()
 
 
