@@ -1925,6 +1925,121 @@ sent them."
                                                             :session "@test-echo2"))))
        (kill-buffer list-buffer)))))
 
+(defmacro agent-session-test--with-profiles (&rest body)
+  "Run BODY in a fake session, with test profiles and no confirmations."
+  `(agent-session-test--with-session
+    (let ((agent-collab-profiles
+           '((worker :agent test-echo2 :model "big" :mode full :cost low
+                     :description "Test worker.")
+             (gone :agent no-such-agent :description "Not enabled.")))
+          (agent-collab-confirm nil))
+      ,@body)))
+
+(defun agent-session-test--first-message (session)
+  "Text of the first user message in SESSION's transcript."
+  (seq-some (pcase-lambda (`(,_ . ,block))
+              (and (eq (plist-get block :type) 'user) (plist-get block :text)))
+            (agent-session--blocks-in-order session)))
+
+(ert-deftest agent-session-test-session-start ()
+  "An agent starts a session from a profile: under its own, named after the
+profile, its mode capped by the caller's, the task last in its message."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current))
+     (agent-session-configure session :mode 'edits)
+     ;; The tool lists the enabled profiles.
+     (let ((description (plist-get (seq-find (lambda (m) (equal (plist-get m :name) "session_start"))
+                                             (agent-session-test--call "describe" buffer))
+                                   :description)))
+       (should (string-search "- worker: Echo2 big, low cost.  Test worker." description))
+       (should-not (string-search "gone" description)))
+     (should-error (agent-session-test--call "session_start" buffer :profile "gone" :prompt "x"))
+     (should-error (agent-session-test--call "session_start" buffer :prompt "x"))
+     (should-error (agent-session-test--call "session_start" buffer :profile "worker"
+                                             :prompt "x" :context "fork"))
+     ;; By default it returns at once.
+     (let ((started (agent-session-test--poll
+                     (agent-session-test--call "session_start" buffer :profile "worker"
+                                               :prompt "实现 X" :title "实现 X"))))
+       (should (string-match-p "\\`Started @worker (Echo2 big, fresh)" started)))
+     (let ((child (agent-session-find "@worker")))
+       (should (eq (agent-session-parent child) session))
+       (should (equal (agent-session-display-title child) "实现 X"))
+       (should (equal (agent-session-setting child :model) "big"))
+       (should (eq (agent-session-setting child :mode) 'edits))
+       (let ((message (agent-session-test--first-message child)))
+         (should (string-prefix-p "Your task:\n实现 X\n\n(From the Echo agent of session \"@test-echo\""
+                                  message))
+         (should (string-suffix-p "You can't start sessions yourself.)" message)))
+       (with-current-buffer (agent-session-buffer child)
+         (should (string-search "▍ @test-echo\n" (agent-session-test--transcript))))
+       ;; Its tools are exactly its parent's (forks keep the prompt cache).
+       (should (equal (json-serialize (agent-session-test--call "describe"
+                                                                (agent-session-buffer child)))
+                      (json-serialize (agent-session-test--call "describe" buffer))))
+       ;; It can't start sessions itself.
+       (should-error (agent-session-test--call "session_start" (agent-session-buffer child)
+                                               :profile "worker" :prompt "y")))
+     ;; With wait, the final reply.
+     (let ((reply (agent-session-test--poll
+                   (agent-session-test--call "session_start" buffer :profile "worker"
+                                             :prompt "实现 Y" :wait 30))))
+       (should (string-match-p "\\`Reply from @worker-2 (Echo2):\n\n收到：Your task:\n实现 Y" reply)))
+     ;; Only so many at work at once.
+     (let ((agent-collab-max-active 2))
+       (dolist (child (agent-session-children session))
+         (agent-session-set-status child 'running))
+       (should-error (agent-session-test--call "session_start" buffer :profile "worker"
+                                               :prompt "z"))))))
+
+(ert-deftest agent-session-test-session-start-confirm ()
+  "A profile may ask the user first; declining starts nothing."
+  (agent-session-test--with-profiles
+   (let* ((agent-collab-profiles '((pricey :agent test-echo2 :confirm t :cost high)))
+          (pending (agent-session-test--call "session_start" buffer :profile "pricey"
+                                             :prompt "大任务")))
+     (should (eq (car (agent-session-test--poll pending)) :agent-ui-pending))
+     (should (string-match-p "启动子会话 pricey" (agent-session-test--footer)))
+     (should-not (agent-session-find "@pricey"))
+     (agent-session-deny)
+     (should-error (agent-session-test--poll pending))
+     (should-not (agent-session-find "@pricey"))
+     (let ((pending (agent-session-test--call "session_start" buffer :profile "pricey"
+                                              :prompt "大任务")))
+       (agent-session-approve)
+       (should (string-prefix-p "Started @pricey" (agent-session-test--poll pending)))))))
+
+(ert-deftest agent-session-test-session-start-handoff ()
+  "A handoff carries the caller's conversation before the task, the latest
+turns that fit and the first; sessions started in one turn share it."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current))
+     (dotimes (i 6) (agent-session-test--type (format "问题%d %s" i (make-string 300 ?x))))
+     (let* ((agent-collab-handoff-limit 1500)
+            (start (lambda ()
+                     (agent-session-test--poll
+                      (agent-session-test--call "session_start" buffer :profile "worker"
+                                                :context "handoff" :prompt "接着做"))))
+            (first (progn (funcall start)
+                          (agent-session-test--first-message (agent-session-find "@worker")))))
+       (should (string-prefix-p "Conversation handed over from session \"@test-echo\"" first))
+       ;; The first message without its reply, the latest turn whole.
+       (should (string-match-p "## Turn 1\nUser:\n问题0 x+\n\n(Turns 2-5 left out; read them \
+with session_read.)\n\n## Turn 6\nUser:\n问题5 x+\n\nAssistant:\n收到：问题5" first))
+       (should-not (string-search "收到：问题0" first))
+       (should-not (string-search "问题3" first))
+       (should (string-match-p "---\n\nYour task:\n接着做\n\n(From the Echo agent" first))
+       (should (<= (length first) 2200))
+       ;; A second session from the same turn gets the same history.
+       (funcall start)
+       (should (equal (agent-session-test--first-message (agent-session-find "@worker-2"))
+                      first))
+       ;; After another turn, the history moves on.
+       (agent-session-test--type "问题6")
+       (funcall start)
+       (should (string-search "问题6" (agent-session-test--first-message
+                                       (agent-session-find "@worker-3"))))))))
+
 (ert-deftest agent-session-test-rpc-deferred ()
   (let* ((polls 0)
          (agent-ui--methods

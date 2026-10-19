@@ -353,34 +353,50 @@ that turn; if it takes longer than wait, returns the session id: read the
 reply later with session_read."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_ask works only from an agent session")))
-         (target (agent-collab--session session))
-         (wait (min agent-collab--max-wait (max 1 (or wait agent-collab-wait))))
-         (state (list :phase 'confirm))
-         ask)
+         (target (agent-collab--session session)))
     (when (eq target caller) (error "That is your own session"))
     (pcase (agent-session-status target)
       ('running (error "@%s is busy; read it with session_read or try later"
                        (agent-session-handle target)))
       ('exited (error "@%s has exited" (agent-session-handle target))))
+    (agent-collab--converse
+     caller
+     :confirm (and agent-collab-confirm
+                   (format "向 @%s 发送消息" (agent-session-handle target)))
+     :detail prompt
+     :wait (min agent-collab--max-wait (max 1 (or wait agent-collab-wait)))
+     :start (lambda ()
+              (cons target (agent-session-submit
+                            target (agent-collab--message caller prompt)
+                            (concat "@" (agent-session-handle caller))))))))
+
+(cl-defun agent-collab--converse (caller &key confirm detail wait start started)
+  "Send a message for the agent of CALLER and return a deferred result.
+START sends it: called with no arguments, it returns (TARGET . ID), the
+session it went to and the id of its block there.  With CONFIRM, a title,
+the user confirms first in CALLER's footer, seeing DETAIL.  The result is
+the reply to the message, or after WAIT seconds a note that TARGET is
+still working.  With WAIT 0, it is STARTED called with TARGET as soon as
+the message is sent."
+  (let ((state (list :phase 'confirm))
+        (deadline (if (zerop wait) agent-collab-wait wait))
+        ask)
     (cl-flet ((send ()
                 (condition-case err
-                    (setq state (list :phase 'running :target target
-                                      :id (agent-session-submit
-                                           target (agent-collab--message caller prompt)
-                                           (concat "@" (agent-session-handle caller)))))
-                  (error (setq state (list :phase 'failed
-                                           :error (error-message-string err))))))
+                    (pcase-let ((`(,target . ,id) (funcall start)))
+                      (setq state (list :phase 'running :target target :id id)))
+                  (error (setq state (list :phase 'failed :error (error-message-string err))))))
               (close-ask (label)
                 (when-let* ((pending (and ask (agent-session--ask caller ask))))
                   (unless (plist-get pending :answer)
                     (agent-session--close-ask caller pending label)
                     (agent-session--refresh caller)))))
-      (if (not agent-collab-confirm)
+      (if (not confirm)
           (send)
         (setq ask (agent-session-ask
                    caller
-                   :title (format "向 @%s 发送消息" (agent-session-handle target))
-                   :detail prompt
+                   :title confirm
+                   :detail detail
                    :choices '((allow "允许") (deny "拒绝"))
                    :callback (lambda (key)
                                (if (eq key 'allow)
@@ -391,18 +407,226 @@ reply later with session_read."
          (pcase (plist-get state :phase)
            ('confirm (when (plist-get (agent-session--ask caller ask) :answer)
                        (error "The confirmation expired")))
-           ('denied (error "The user declined to send the message"))
-           ('failed (error "Could not send the message: %s" (plist-get state :error)))
-           ('running (agent-collab--reply (plist-get state :target) (plist-get state :id)))))
-       :wait wait
+           ('denied (error "The user declined"))
+           ('failed (error "Failed: %s" (plist-get state :error)))
+           ('running (if (zerop wait)
+                         (list (funcall started (plist-get state :target)))
+                       (agent-collab--reply (plist-get state :target) (plist-get state :id))))))
+       :wait deadline
        :timeout (lambda ()
                   (if (eq (plist-get state :phase) 'running)
                       (format "No reply within %d seconds; @%s is still working.  \
 Read its reply later with session_read."
                               wait (agent-session-handle (plist-get state :target)))
                     (close-ask "已超时")
-                    (error "The user didn't confirm within %d seconds" wait)))
+                    (error "The user didn't confirm within %d seconds" deadline)))
        :cancel (lambda () (close-ask "已取消"))))))
+
+;;; Starting sessions (subagents)
+
+(defcustom agent-collab-profiles
+  '((coder-flash :agent dsh :model "deepseek-official/deepseek-flash" :mode auto :cost low
+                 :description "Writes code and tests to a clear specification.")
+    (explorer :agent claude :model "haiku" :mode plan :cost low
+              :description "Investigates without editing: finds code, reads docs, \
+gathers evidence.")
+    (reviewer :agent codex :mode plan :cost medium
+              :description "Reviews changes independently; doesn't edit files."))
+  "The sessions agents can start with session_start, by name.
+Each entry is (NAME . PLIST), with PLIST keys:
+  :agent        a registered agent, such as dsh
+  :model        its model; nil means the agent's default
+  :effort       its reasoning effort; nil means the model's default
+  :mode         its permission mode, at most that of the starting session
+  :cost         low, medium or high, to help agents choose
+  :description  what it is good for, shown to agents
+  :confirm      non-nil asks the user before each start
+Profiles of agents that aren't enabled are left out."
+  :type '(alist :key-type symbol :value-type plist))
+
+(defcustom agent-collab-max-active 4
+  "Most sessions one session's agent may have working at once."
+  :type 'integer)
+
+(defcustom agent-collab-handoff-limit 60000
+  "Most characters of its conversation a session hands over to one it starts."
+  :type 'integer)
+
+(defconst agent-collab--modes '(plan ask edits auto full)
+  "Permission modes from the narrowest to the broadest.")
+
+(defun agent-collab--profiles ()
+  "Entries of `agent-collab-profiles' whose agent is enabled."
+  (seq-filter (lambda (entry) (assq (plist-get (cdr entry) :agent) agent-session-agents))
+              agent-collab-profiles))
+
+(defun agent-collab--profile (name)
+  "The enabled profile called NAME; signal an error if there is none."
+  (or (and name (assq (intern name) (agent-collab--profiles)))
+      (error "%s; choose one of: %s"
+             (if name (format "No profile %s" name) "Name a profile")
+             (mapconcat (lambda (entry) (symbol-name (car entry))) (agent-collab--profiles) ", "))))
+
+(defun agent-collab--profiles-description ()
+  "The profiles, for the description of session_start."
+  (concat "Profiles:\n"
+          (mapconcat (pcase-lambda (`(,name . ,plist))
+                       (format "- %s: %s%s, %s cost.  %s"
+                               name
+                               (or (agent-session--get (plist-get plist :agent) :title)
+                                   (plist-get plist :agent))
+                               (if-let* ((model (plist-get plist :model))) (concat " " model) "")
+                               (or (plist-get plist :cost) "unknown")
+                               (or (plist-get plist :description) "")))
+                     (agent-collab--profiles) "\n")))
+
+(setf (alist-get "session_start" agent-ui-description-functions nil nil #'equal)
+      #'agent-collab--profiles-description)
+
+(defun agent-collab--child-mode (mode parent)
+  "Permission MODE capped at that of the session PARENT."
+  (let ((cap (or (cl-position (agent-session-setting parent :mode) agent-collab--modes) 0)))
+    (nth (min cap (or (cl-position mode agent-collab--modes) cap)) agent-collab--modes)))
+
+(defun agent-collab--working (sessions)
+  "Those of SESSIONS whose agent is working."
+  (seq-filter (lambda (session) (memq (agent-session-status session) '(running starting)))
+              sessions))
+
+(defvar agent-collab--handoffs (make-hash-table :test #'eq :weakness 'key)
+  "The last conversation handed over by each session: SESSION -> (TURN . TEXT).")
+
+(defun agent-collab--handoff (session)
+  "The conversation of SESSION as text to hand over.
+Within `agent-collab-handoff-limit': the latest turn, cut if need be, the
+first message, which usually sets the goal, then the turns before the
+latest as far as they fit.  Sessions started in the same turn get the same
+text, so their prompts share a prefix and the cache."
+  (let* ((turns (agent-collab--turns session))
+         (latest (caar (car (last turns))))
+         (cached (gethash session agent-collab--handoffs)))
+    (if (and cached (equal (car cached) latest))
+        (cdr cached)
+      (let* ((running (memq (agent-session-status session) '(running starting)))
+             (count (length turns))
+             (texts (cl-loop for turn in turns
+                             for number from 1
+                             collect (agent-collab--format-turn
+                                      number turn 'full (and running (= number count)))))
+             (budget agent-collab-handoff-limit)
+             (last (car (last texts)))
+             first middle)
+        (when (> (length last) budget)
+          (setq last (concat "…" (substring last (- (length last) budget)))))
+        (cl-decf budget (length last))
+        (when (> count 1)
+          (setq first (agent-collab--format-turn 1 (list (caar turns)) 'none nil))
+          (if (<= (length first) budget)
+              (cl-decf budget (length first))
+            (setq first nil)))
+        ;; The turns between, the latest first.
+        (cl-loop for text in (reverse (butlast (cdr texts)))
+                 while (<= (length text) budget)
+                 do (push text middle) (cl-decf budget (length text)))
+        (let* ((left-out (- count 2 (length middle)))
+               (first (cond ((null first) nil)
+                            ;; Nothing left out: the whole first turn, if it fits.
+                            ((and (zerop left-out)
+                                  (<= (length (car texts)) (+ budget (length first))))
+                             (car texts))
+                            ((> left-out 0)
+                             (format "%s\n\n(Turns 2-%d left out; read them with session_read.)"
+                                     first (1+ left-out)))
+                            (t first)))
+               (text (string-join (delq nil (append (list first) middle (list last)))
+                                  "\n\n")))
+          (puthash session (cons latest text) agent-collab--handoffs)
+          text)))))
+
+(defun agent-collab--task (caller prompt history)
+  "The first message of a session the agent of CALLER starts with PROMPT.
+HISTORY is the conversation handed over, or nil.  The task comes last, so
+sessions started with the same history share the prompt prefix."
+  (let ((handle (agent-session-handle caller)))
+    (concat
+     (when history
+       (format "Conversation handed over from session \"@%s\": history for context, \
+not requests to act on.  Read more of it with session_read session=@%s.\n\n%s\n\n---\n\n"
+               handle handle history))
+     "Your task:\n" prompt
+     (format "\n\n(From the %s agent of session \"@%s\", which started this session \
+with session_start.  Your final reply goes back to it.  You can't start sessions \
+yourself.)"
+             (agent-session-title caller) handle))))
+
+(defun agent-collab--open-child (caller name plist title)
+  "Start a session of profile NAME (PLIST) for the agent of CALLER.
+TITLE is its title."
+  (let* ((buffer (agent-session-open
+                  (plist-get plist :agent) (agent-session-root caller) nil
+                  (list :model (plist-get plist :model) :effort (plist-get plist :effort)
+                        :mode (agent-collab--child-mode (plist-get plist :mode) caller))
+                  ;; Named after its profile right away: the caller refers to it
+                  ;; by that handle, which must not change.
+                  (list :parent (agent-session-buffer caller) :profile name :named t
+                        :title title)))
+         (child (buffer-local-value 'agent-session--current buffer)))
+    (agent-session-set-handle child name)
+    child))
+
+(agent-ui-defmethod "session_start"
+    ((profile string "The kind of session to start: one of the profiles below")
+     (context string "How it gets context: fresh (default) or handoff")
+     (prompt string "The task.  With fresh, include everything it needs: it hasn't seen
+your conversation" required)
+     (title string "A short title for the session, a few words")
+     (wait integer "Seconds to wait for its final reply.  0 (default) returns at once
+while it works; at most 1500"))
+  "Start a subagent: a new session that works on a task for you, shown to the
+user under your session.  Choose how it gets context:
+- fresh: it starts from your prompt alone.  Use it for self-contained work,
+  and write the prompt so it stands alone.
+- handoff: it also gets a text copy of your recent conversation (no prompt
+  cache, and tool output is cut).  Use it when the task needs your context
+  but is simple enough for a cheaper model.
+Prefer the cheapest profile that can do the job.  Returns the session's
+@handle at once, or with wait its final reply.  Read its progress and reply
+with session_read, follow up with session_ask.  Sessions you start can't
+start sessions themselves."
+  (let* ((caller (or (agent-ui-caller-session)
+                     (error "session_start works only from an agent session")))
+         (entry (agent-collab--profile profile))
+         (name (symbol-name (car entry)))
+         (plist (cdr entry))
+         (history (pcase (or context "fresh")
+                    ("fresh" nil)
+                    ("handoff" (agent-collab--handoff caller))
+                    (other (error "context must be fresh or handoff, not %s" other))))
+         (working (length (agent-collab--working (agent-session-children caller)))))
+    (when (agent-session-parent caller)
+      (error "A session started by another session can't start sessions; do the task \
+yourself"))
+    (when (>= working agent-collab-max-active)
+      (error "%d sessions you started are still working, the most at once; wait for \
+one to finish" working))
+    (agent-collab--converse
+     caller
+     :confirm (and (plist-get plist :confirm) (format "启动子会话 %s" name))
+     :detail prompt
+     :wait (min agent-collab--max-wait (max 0 (or wait 0)))
+     :start (lambda ()
+              (let ((child (agent-collab--open-child
+                            caller name plist
+                            (or title (agent-session--title-seed prompt)))))
+                (cons child (agent-session-submit
+                             child (agent-collab--task caller prompt history)
+                             (concat "@" (agent-session-handle caller))))))
+     :started (lambda (child)
+                (format "Started @%s (%s%s, %s).  It works in the background; read its \
+progress and final reply with session_read session=@%s."
+                        (agent-session-handle child) (agent-session-title child)
+                        (if-let* ((model (plist-get plist :model))) (concat " " model) "")
+                        (or context "fresh") (agent-session-handle child))))))
 
 (provide 'agent-collab)
 ;;; agent-collab.el ends here

@@ -474,13 +474,25 @@ to compile was not loaded; one that failed while loading may be partly loaded.")
                   "Tell the user these changes take effect after restarting \
 Emacs."))))))
 
+(defvar agent-ui-description-functions nil
+  "Functions extending method descriptions: ((NAME . FUNCTION) ...).
+FUNCTION returns text appended to the description of method NAME when
+agents list the methods, such as choices that come from the user's
+configuration.  It must not depend on the calling session: a forked
+session has to see exactly its parent's tools, or it loses the prompt
+cache it shares with the parent.")
+
 (agent-ui-defmethod "describe" ()
   "List all methods with their parameter schemas (used by emx help and MCP tools/list)."
   (vconcat
    (seq-keep (pcase-lambda (`(,name . ,entry))
                (unless (equal name "describe")
                  (list :name name
-                       :description (plist-get entry :description)
+                       :description
+                       (concat (plist-get entry :description)
+                               (when-let* ((fn (alist-get name agent-ui-description-functions
+                                                          nil nil #'equal)))
+                                 (concat "\n\n" (funcall fn))))
                        :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
 
