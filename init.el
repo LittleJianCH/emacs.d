@@ -43,12 +43,13 @@
 (require 'init-completion)  ; vertico / consult / corfu
 (require 'init-dev)         ; projects, git, eglot, tree-sitter
 (require 'init-remote)      ; remote editing: tramp-rpc
+(require 'init-term)        ; terminals: ghostel, C-c t
 
 (dolist (lang my/languages)
   (require (intern (format "lang-%s" lang))))
 
 (require 'init-agent)       ; agent terminal sessions, agent -> Emacs bridge
-(require 'init-telega)      ; Telegram client, C-c t
+(require 'init-telega)      ; Telegram client, C-c T
 
 ;; Restore normal GC settings once startup finishes.
 (add-hook 'emacs-startup-hook

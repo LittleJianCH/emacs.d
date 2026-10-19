@@ -28,7 +28,7 @@
 
 (use-package telega
   :ensure t
-  :bind-keymap ("C-c t" . telega-prefix-map)
+  :bind-keymap ("C-c T" . telega-prefix-map)
   :custom
   ;; Login database, downloads and the telega-server binary live here.
   (telega-directory (my/var "telega/"))
