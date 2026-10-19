@@ -132,7 +132,9 @@ var/                     runtime state (history, backups, pasted images...); git
   and `session_ask` (sends a prompt to an idle session the user opened, confirmed by
   the user when `agent-collab-confirm` is set, and waits for its reply).
   `session_start` starts a subagent: a child session of a profile in
-  `agent-collab-profiles` (agent, model, effort, mode, cost), linked to the caller
+  `agent-collab-profiles` (agent, model, effort, mode, cost; profiles of agents whose
+  program isn't installed here, per `agent-session-define-agent`'s `:executable`, are
+  only named, for remote projects whose host has it), linked to the caller
   (`:parent` in its info, listed under it), given the prompt alone (`fresh`), the
   caller's conversation as text too (`handoff`), or, for a session of the caller's
   own agent and settings, a copy of its conversation that shares its prompt cache

@@ -1077,7 +1077,7 @@ Ask the user in SESSION, then reply to the CLI."
 (cl-defmethod agent-session-backend-fork-p ((_ (eql claude)))
   t)
 
-(agent-session-define-agent claude :title "Claude")
+(agent-session-define-agent claude :title "Claude" :executable agent-claude-executable)
 
 (provide 'agent-claude)
 ;;; agent-claude.el ends here

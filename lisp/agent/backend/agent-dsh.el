@@ -599,7 +599,7 @@ what `agent-session-deny' picks."
 (cl-defmethod agent-session-backend-fork-p ((_ (eql dsh)))
   t)
 
-(agent-session-define-agent dsh :title "DeepSeek")
+(agent-session-define-agent dsh :title "DeepSeek" :executable agent-dsh-executable)
 
 (provide 'agent-dsh)
 ;;; agent-dsh.el ends here

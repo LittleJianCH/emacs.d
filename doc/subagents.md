@@ -104,7 +104,13 @@ carries the permission mode, cost and confirmation the user set.
 `explorer` (Claude haiku, plan), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
 (Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
 (Claude Fable, plan, confirmed by the user each time: a fork only reaches the
-parent's own model); the tool description lists the enabled ones. An agent
+parent's own model); the tool description lists those whose agent is enabled and whose
+program is installed on this machine, so agents don't keep choosing one that
+can't start. Enabled profiles whose program is missing here are only named, as
+usable in a remote project whose host has it: the description can't depend on
+the caller. A child that fails to start is closed (only that one, found by a
+token in its info: others may open while it waits for the host) and the error
+returned. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start

@@ -55,6 +55,9 @@
 
 (agent-session-define-agent test-echo :title "Echo")
 (agent-session-define-agent test-echo2 :title "Echo2" :backend test-echo)
+(defvar agent-session-test--missing-program "agent-session-test-no-such-program")
+(agent-session-define-agent test-missing :title "Missing" :backend test-echo
+  :executable agent-session-test--missing-program)
 
 (defmacro agent-session-test--with-session (&rest body)
   "Run BODY in a new fake session buffer."
@@ -2027,7 +2030,8 @@ sent them."
     (let ((agent-collab-profiles
            '((worker :agent test-echo2 :model "big" :mode full :cost low
                      :description "Test worker.")
-             (gone :agent no-such-agent :description "Not enabled.")))
+             (gone :agent no-such-agent :description "Not enabled.")
+             (absent :agent test-missing :description "Not installed.")))
           (agent-collab-confirm nil)
           ;; Tests look at children after they replied.
           (agent-collab-close-finished nil))
@@ -2053,7 +2057,11 @@ profile, its mode capped by the caller's, the task last in its message."
        (should (string-search "Profiles, by cost from minimal through low, medium and high \
 to premium:\n- worker: Echo2 big, low cost.  Test worker." description))
        (should (string-search "When to start a session:" description))
-       (should-not (string-search "gone" description)))
+       (should-not (string-search "gone" description))
+       ;; Not installed here: only named, for remote projects.
+       (should-not (string-search "- absent" description))
+       (should (string-search "Not installed on this machine, so only for a remote \
+project whose host has them: absent." description)))
      (should-error (agent-session-test--call "session_start" buffer :profile "gone" :prompt "x"))
      (should-error (agent-session-test--call "session_start" buffer :prompt "x"))
      (should-error (agent-session-test--call "session_start" buffer :profile "worker"
@@ -2312,6 +2320,31 @@ screen; the reply lists what its tools did."
                      ("r" :type text :text "好了")))
                   "What it did:\n- ✎ Edit a.el\n\n"))
    (should (equal (agent-collab--tool-summary '(("u" :type user :text "x"))) ""))))
+
+(ert-deftest agent-session-test-subagent-start-failed ()
+  "A session that fails to start, such as for a program missing on the
+host, reports the error and leaves no dead session behind."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current)
+         (before (agent-session-buffers)))
+     (cl-letf (((symbol-function 'agent-session-backend-start)
+                (lambda (&rest _)
+                  ;; Another session opens while this one waits for the host.
+                  (cl-letf (((symbol-function 'agent-session-backend-start) #'ignore))
+                    (push (agent-session-open 'test-echo2 default-directory) before))
+                  (signal 'file-missing '("Searching for program" "No such file" "claude")))))
+       (should (string-search
+                "Searching for program"
+                (cadr (should-error
+                       (agent-session-test--poll
+                        (agent-session-test--call "session_start" buffer :profile "worker"
+                                                  :prompt "x")))))))
+     (should-not (agent-session-children session))
+     ;; The other session stays.
+     (should (seq-set-equal-p (agent-session-buffers) before))
+     ;; A program variable without a program means not installed.
+     (let ((agent-session-test--missing-program nil))
+       (should-not (agent-session-agent-available-p 'test-missing))))))
 
 (ert-deftest agent-session-test-subagent-wait ()
   "A caller waiting for a child gets its reply, or a note once the child waits

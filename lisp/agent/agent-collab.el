@@ -601,7 +601,8 @@ Each entry is (NAME . PLIST), with PLIST keys:
   :cost         minimal, low, medium, high or premium, to help agents choose
   :description  what it is good for, shown to agents
   :confirm      non-nil asks the user before each start
-Profiles of agents that aren't enabled are left out."
+Profiles of agents that aren't enabled are left out; those whose program
+isn't installed here are only named, for remote projects."
   :type '(alist :key-type symbol :value-type plist))
 
 (defcustom agent-collab-max-active 4
@@ -635,7 +636,9 @@ sessions (see agent-ui.el)."
   "Permission modes from the narrowest to the broadest.")
 
 (defun agent-collab--profiles ()
-  "Entries of `agent-collab-profiles' whose agent is enabled."
+  "Entries of `agent-collab-profiles' whose agent is enabled.
+Their program may still be missing here: a remote project's host can
+have it."
   (seq-filter (lambda (entry) (assq (plist-get (cdr entry) :agent) agent-session-agents))
               agent-collab-profiles))
 
@@ -647,20 +650,34 @@ sessions (see agent-ui.el)."
              (mapconcat (lambda (entry) (symbol-name (car entry))) (agent-collab--profiles) ", "))))
 
 (defun agent-collab--profiles-description ()
-  "The guidance and profiles, for the description of session_start."
-  (concat (when (and agent-collab-start-guidance
-                     (not (string-empty-p agent-collab-start-guidance)))
-            (concat agent-collab-start-guidance "\n\n"))
-          "Profiles, by cost from minimal through low, medium and high to premium:\n"
-          (mapconcat (pcase-lambda (`(,name . ,plist))
-                       (format "- %s: %s%s, %s cost.  %s"
-                               name
-                               (or (agent-session--get (plist-get plist :agent) :title)
-                                   (plist-get plist :agent))
-                               (if-let* ((model (plist-get plist :model))) (concat " " model) "")
-                               (or (plist-get plist :cost) "unknown")
-                               (or (plist-get plist :description) "")))
-                     (agent-collab--profiles) "\n")))
+  "The guidance and profiles, for the description of session_start.
+Profiles whose program isn't installed here are only named: a remote
+project's host may have it, but the description can't depend on the
+caller.  Installing or removing an agent changes the tools agents see,
+which refreshes them in live sessions."
+  (let* ((installed (seq-group-by (lambda (entry)
+                                    (and (agent-session-agent-available-p
+                                          (plist-get (cdr entry) :agent))
+                                         t))
+                                  (agent-collab--profiles)))
+         (missing (alist-get nil installed)))
+    (concat (when (and agent-collab-start-guidance
+                       (not (string-empty-p agent-collab-start-guidance)))
+              (concat agent-collab-start-guidance "\n\n"))
+            "Profiles, by cost from minimal through low, medium and high to premium:\n"
+            (mapconcat (pcase-lambda (`(,name . ,plist))
+                         (format "- %s: %s%s, %s cost.  %s"
+                                 name
+                                 (or (agent-session--get (plist-get plist :agent) :title)
+                                     (plist-get plist :agent))
+                                 (if-let* ((model (plist-get plist :model))) (concat " " model) "")
+                                 (or (plist-get plist :cost) "unknown")
+                                 (or (plist-get plist :description) "")))
+                       (alist-get t installed) "\n")
+            (when missing
+              (format "\nNot installed on this machine, so only for a remote project \
+whose host has them: %s."
+                      (mapconcat (lambda (entry) (symbol-name (car entry))) missing ", "))))))
 
 (setf (alist-get "session_start" agent-ui-description-functions nil nil #'equal)
       #'agent-collab--profiles-description)
@@ -772,15 +789,27 @@ doesn't say which block it is."
 (defun agent-collab--open-child (caller name plist title &optional info)
   "Start a session of profile NAME (PLIST) for the agent of CALLER.
 TITLE is its title; INFO is more of its info, such as :fork-from."
-  (let* ((buffer (agent-session-open
-                  (plist-get plist :agent) (agent-session-root caller) nil
-                  (list :model (plist-get plist :model) :effort (plist-get plist :effort)
-                        :mode (agent-collab--child-mode (plist-get plist :mode) caller))
-                  ;; Named after its profile right away: the caller refers to it
-                  ;; by that handle, which must not change.
-                  (append (list :parent (agent-session-buffer caller) :profile name
-                                :named t :title title)
-                          info)))
+  (let* ((token (list 'start))
+         (buffer (condition-case err
+                     (agent-session-open
+                      (plist-get plist :agent) (agent-session-root caller) nil
+                      (list :model (plist-get plist :model) :effort (plist-get plist :effort)
+                            :mode (agent-collab--child-mode (plist-get plist :mode) caller))
+                      ;; Named after its profile right away: the caller refers to it
+                      ;; by that handle, which must not change.
+                      (append (list :parent (agent-session-buffer caller) :profile name
+                                    :named t :title title :start token)
+                              info))
+                   ;; Such as a program missing on a remote project's host: don't
+                   ;; leave a dead session under the caller.  Only this one: others
+                   ;; may have opened while it waited for the host.
+                   (error (dolist (other (agent-session-buffers))
+                            (when (eq token (plist-get (agent-session-info
+                                                        (buffer-local-value
+                                                         'agent-session--current other))
+                                                       :start))
+                              (agent-session-kill-quietly other)))
+                          (signal (car err) (cdr err)))))
          (child (buffer-local-value 'agent-session--current buffer)))
     (agent-session-set-handle child name)
     (agent-collab--link-tool caller child)

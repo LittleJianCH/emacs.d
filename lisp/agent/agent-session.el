@@ -107,6 +107,15 @@ PLIST supports :backend :title :key.")
   "Return property PROP of the registered AGENT."
   (plist-get (alist-get agent agent-session-agents) prop))
 
+(defun agent-session-agent-available-p (agent)
+  "Non-nil if the program of AGENT is installed on this machine.
+An agent that names no program counts as available."
+  (let ((variable (agent-session--get agent :executable)))
+    (or (null variable)
+        (let ((program (and (boundp variable) (symbol-value variable))))
+          (and (stringp program) (not (string-empty-p program))
+               (executable-find program))))))
+
 (defun agent-session-display-title (session)
   "Title of SESSION: the one carried over on resume, else the first message."
   (or (plist-get (agent-session-info session) :title) "新会话"))
@@ -3063,7 +3072,8 @@ With an active region, include its line range."
 (defmacro agent-session-define-agent (name &rest plist)
   "Register agent NAME and define the command agent-session-NAME.
 PLIST: :backend the backend symbol (default NAME), :title the display
-name, :key the key that starts it in `agent-session-command-map'."
+name, :key the key that starts it in `agent-session-command-map',
+:executable the variable naming the program it runs."
   (declare (indent 1))
   (let ((command (intern (format "agent-session-%s" name)))
         (key (plist-get plist :key)))
@@ -3071,7 +3081,8 @@ name, :key the key that starts it in `agent-session-command-map'."
        (setf (alist-get ',name agent-session-agents)
              (list :backend ',(or (plist-get plist :backend) name)
                    :title ,(or (plist-get plist :title) (capitalize (symbol-name name)))
-                   :key ,key))
+                   :key ,key
+                   :executable ',(plist-get plist :executable)))
        (defun ,command (&optional new)
          ,(format "Open a %s session for the current project.
 With a prefix arg, create a new one." name)

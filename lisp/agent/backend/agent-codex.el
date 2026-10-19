@@ -688,7 +688,7 @@ when the user declines, are left out."
 (cl-defmethod agent-session-backend-fork-p ((_ (eql codex)))
   t)
 
-(agent-session-define-agent codex :title "Codex")
+(agent-session-define-agent codex :title "Codex" :executable agent-codex-executable)
 
 (provide 'agent-codex)
 ;;; agent-codex.el ends here
