@@ -734,7 +734,7 @@ Also mark that the context needs reloading."
                (size (file-attribute-size (file-attributes file)))
                (run (lambda (turns stop)
                       (with-temp-buffer
-                        (insert agent-claude--history-script)
+                        (insert agent-claude--python-lib agent-claude--history-script)
                         (should (zerop (call-process-region
                                         (point-min) (point-max) "python3" t t nil
                                         "-" file (number-to-string turns)
@@ -808,6 +808,41 @@ meanwhile; the button above them loads the earlier ones."
              (let ((text (agent-session-test--transcript)))
                (should (string-search "回答一" text))
                (should (< (string-search "回答一" text) (string-search "提问二（改）" text))))))
+       (agent-claude--unwatch session)
+       (delete-file file)))))
+
+(ert-deftest agent-session-test-claude-follow ()
+  "A remote transcript is followed by a script on the host: it passes on
+only what other clients write, and where it has read up to."
+  (skip-unless (executable-find "python3"))
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (file (make-temp-file "agent-follow-" nil ".jsonl"))
+          (line (lambda (entry) (concat (json-encode entry) "\n")))
+          (own (funcall line '((type . "user") (entrypoint . "sdk-cli") (uuid . "u0")
+                               (message . ((content . "Emacs 里发的"))))))
+          (desktop (funcall line '((type . "user") (entrypoint . "claude-desktop") (uuid . "u1")
+                                   (toolUseResult . "不显示的记录")
+                                   (message . ((content . "桌面端发的")))))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-claude--transcript) (lambda (_) file)))
+           (with-temp-file file (insert "{\"type\":\"system\"}\n"))
+           (agent-claude--set session :sync-offset 0)
+           (agent-claude--follow session)
+           (should (process-live-p (agent-claude--state session :watch)))
+           (write-region (concat own desktop) nil file t 'silent)
+           (with-timeout (10 (error "Nothing followed"))
+             (while (not (string-search "桌面端发的" (agent-session-test--transcript)))
+               (accept-process-output nil 0.05)))
+           (should-not (string-search "Emacs 里发的" (agent-session-test--transcript)))
+           (should (string-search "以下来自 Claude Desktop" (agent-session-test--transcript)))
+           (should (agent-claude--state session :external))
+           (should (= (agent-claude--state session :sync-offset)
+                      (file-attribute-size (file-attributes file))))
+           (let ((process (agent-claude--state session :watch)))
+             (agent-claude--unwatch session)
+             (should-not (process-live-p process))))
+       (agent-claude--unwatch session)
        (delete-file file)))))
 
 ;; Images: paste clipboard images or insert files; on send Claude uses base64 and
@@ -1483,6 +1518,11 @@ detached
            (with-temp-file skill (insert "v2"))
            (agent-session-skills-dir session)
            (should (equal (with-temp-buffer (insert-file-contents target) (buffer-string)) "v2"))
+           ;; Once up to date, the host is not checked again until the skills
+           ;; change: each check is a round trip for a remote project.
+           (cl-letf (((symbol-function 'file-exists-p)
+                      (lambda (_) (error "Checked the host again"))))
+             (should (agent-session-skills-dir session)))
            ;; Claude adds the directory and turns the superseded skill off.
            (let ((command (agent-claude--command session)))
              (should (equal (file-truename (cadr (member "--add-dir" command)))

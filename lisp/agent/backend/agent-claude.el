@@ -285,11 +285,9 @@ unfinished last line (no trailing newline) is left for the next read."
   "Turns of a resumed session shown at first; earlier ones load on request."
   :type 'integer)
 
-(defconst agent-claude--history-script "\
-import json, os, sys
+(defconst agent-claude--python-lib "\
+import json, os, select, sys, time
 
-path = os.path.expanduser(sys.argv[1])
-turns, stop = int(sys.argv[2]), int(sys.argv[3])
 KEEP = {'text': ('text',), 'tool_use': ('id', 'name', 'input'),
         'tool_result': ('tool_use_id', 'is_error', 'content')}
 
@@ -341,7 +339,14 @@ def load(line):
     except ValueError:
         return None
     return e if isinstance(e, dict) else None
+"
+  "Python shared by the transcript scripts.
+Its project() keeps only the fields of an entry that
+`agent-claude--render-entry' uses.")
 
+(defconst agent-claude--history-script "\
+path = os.path.expanduser(sys.argv[1])
+turns, stop = int(sys.argv[2]), int(sys.argv[3])
 starts, end = [], 0
 try:
     f = open(path, 'rb')
@@ -375,20 +380,72 @@ else:
 "
   "Prints the last turns of a transcript: ARGV is FILE TURNS STOP.
 STOP is the byte offset to read up to, -1 for the end.  The first line
-is {start, end}, the byte range read, then come the entries, with only
-the fields `agent-claude--render-entry' uses.")
+is {start, end}, the byte range read, then come the entries.")
+
+(defconst agent-claude--follow-script "\
+path, offset, own = os.path.expanduser(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+while True:
+    # Ends when Emacs closes the pipe or goes away.
+    if select.select([0], [], [], 0.5)[0] and not os.read(0, 1024):
+        break
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        continue
+    if offset < 0 or size < offset:
+        offset = size
+    if size > offset:
+        with open(path, 'rb') as f:
+            f.seek(offset)
+            data = f.read(size - offset)
+        # An unfinished last line is read next time.
+        for line in data.split(b'\\n')[:-1]:
+            offset += len(line) + 1
+            e = load(line)
+            source = e and e.get('entrypoint')
+            o = source and source != own and project(e)
+            if o:
+                o['entrypoint'] = source
+                emit(o)
+        emit({'synced': offset})
+        sys.stdout.flush()
+"
+  "Follows a transcript: ARGV is FILE OFFSET OWN-ENTRYPOINT.
+Polls FILE from byte OFFSET (-1 for its end) and prints the entries
+written by other clients, then {synced} with the offset read up to.")
+
+(defun agent-claude--python (session name script args &rest props)
+  "Run python3 on SCRIPT with ARGS in SESSION's root and return the process.
+For a remote project it runs on the host.  The script goes through stdin,
+which stays open; PROPS are passed to `make-process'."
+  (let* ((default-directory (agent-session-root session))
+         (code (concat agent-claude--python-lib script))
+         (process (apply #'make-process
+                         :name name
+                         :command (append (list "python3" "-c"
+                                                "import sys; exec(sys.stdin.buffer.read(int(sys.argv.pop(1))))"
+                                                (number-to-string (string-bytes code)))
+                                          args)
+                         :connection-type 'pipe
+                         :coding 'utf-8-unix
+                         :noquery t
+                         :file-handler (and (file-remote-p default-directory) t)
+                         props)))
+    (process-send-string process code)
+    process))
+
+(defun agent-claude--parse-line (line)
+  "Parse JSON LINE as a plist, or return nil."
+  (ignore-errors
+    (json-parse-string line :object-type 'plist :null-object nil :false-object nil)))
 
 (defun agent-claude--parse-history ()
   "Parse the output of `agent-claude--history-script' in this buffer.
 Return (ENTRIES START END), or nil if it is incomplete."
-  (let* ((parse (lambda (line)
-                  (ignore-errors
-                    (json-parse-string line :object-type 'plist
-                                       :null-object nil :false-object nil))))
-         (lines (split-string (buffer-string) "\n" t))
-         (header (funcall parse (car lines))))
+  (let* ((lines (split-string (buffer-string) "\n" t))
+         (header (agent-claude--parse-line (car lines))))
     (when (natnump (plist-get header :end))
-      (list (delq nil (mapcar parse (cdr lines)))
+      (list (delq nil (mapcar #'agent-claude--parse-line (cdr lines)))
             (plist-get header :start) (plist-get header :end)))))
 
 (defun agent-claude--read-history (session stop callback)
@@ -396,47 +453,38 @@ Return (ENTRIES START END), or nil if it is incomplete."
 STOP nil reads to the end.  Read in the background, then call CALLBACK
 with (ENTRIES START END) as from `agent-claude--parse-history', or with
 nil after showing why it failed."
-  (let* ((file (agent-claude--transcript session))
-         (default-directory (agent-session-root session))
-         (remote (file-remote-p default-directory)))
-    (if (and (not remote) (not (executable-find "python3")))
+  (let ((file (agent-claude--transcript session)))
+    (if (and (not (file-remote-p (agent-session-root session)))
+             (not (executable-find "python3")))
         ;; Without python3 read it all here, as before.
         (funcall callback (if (file-exists-p file)
                               (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file 0)))
                                 (list entries 0 end))
                             (list nil 0 0)))
-      (let* ((output (generate-new-buffer " *claude-history*"))
-             (stderr (generate-new-buffer " *claude-history-stderr*"))
-             (process
-              (make-process
-               :name "claude-history"
-               :command (list "python3" "-" (file-local-name file)
-                              (number-to-string agent-claude-history-turns)
-                              (number-to-string (or stop -1)))
-               :buffer output
-               :stderr stderr
-               :connection-type 'pipe
-               :coding 'utf-8-unix
-               :noquery t
-               :file-handler (and remote t)
-               :sentinel
-               (lambda (process _event)
-                 (unless (process-live-p process)
-                   (let ((result (and (eq (process-status process) 'exit)
-                                      (zerop (process-exit-status process))
-                                      (with-current-buffer output
-                                        (agent-claude--parse-history)))))
-                     (unless result
-                       (agent-session-notice
-                        session (format "载入历史记录失败：%s"
-                                        (string-trim (with-current-buffer stderr (buffer-string))))
-                        'agent-session-error))
-                     (kill-buffer output)
-                     (kill-buffer stderr)
-                     (when (buffer-live-p (agent-session-buffer session))
-                       (funcall callback result))))))))
-        (process-send-string process agent-claude--history-script)
-        (process-send-eof process)))))
+      (let ((output (generate-new-buffer " *claude-history*"))
+            (stderr (generate-new-buffer " *claude-history-stderr*")))
+        (agent-claude--python
+         session "claude-history" agent-claude--history-script
+         (list (file-local-name file) (number-to-string agent-claude-history-turns)
+               (number-to-string (or stop -1)))
+         :buffer output
+         :stderr stderr
+         :sentinel
+         (lambda (process _event)
+           (unless (process-live-p process)
+             (let ((result (and (eq (process-status process) 'exit)
+                                (zerop (process-exit-status process))
+                                (with-current-buffer output
+                                  (agent-claude--parse-history)))))
+               (unless result
+                 (agent-session-notice
+                  session (format "载入历史记录失败：%s"
+                                  (string-trim (with-current-buffer stderr (buffer-string))))
+                  'agent-session-error))
+               (kill-buffer output)
+               (kill-buffer stderr)
+               (when (buffer-live-p (agent-session-buffer session))
+                 (funcall callback result))))))))))
 
 (defun agent-claude--block-after (session id)
   "Return the ID of the block right after block ID in SESSION, or nil."
@@ -489,12 +537,12 @@ turns are added above those shown."
              (agent-session--fold-turns session)))
          (agent-claude--history-line session)
          (unless stop
-           ;; Sync from where the history ends: what was written meanwhile
-           ;; by other clients is shown now.
-           (agent-claude--set session :sync-offset
-                              (or end (file-attribute-size
-                                       (file-attributes (agent-claude--transcript session)))))
-           (agent-claude--sync session)))))))
+           ;; Watch from where the history ends, showing what other clients
+           ;; wrote meanwhile.  Following a remote transcript starts there.
+           (agent-claude--set session :sync-offset end)
+           (agent-claude--watch session)
+           (unless (file-remote-p (agent-session-root session))
+             (agent-claude--sync session))))))))
 
 ;;; Syncing with other clients (same session open in Claude Desktop, a terminal...)
 ;;
@@ -528,16 +576,39 @@ round trip for a remote project.")
                                          (when (buffer-live-p (agent-session-buffer session))
                                            (agent-claude--sync session)))))))
 
+(defun agent-claude--follow (session)
+  "Follow SESSION's remote transcript with a script on its host.
+It passes on only what other clients write, so Emacs makes no round
+trips for the lines its own CLI writes, nor to set up a file watch."
+  (let ((pending ""))
+    (agent-claude--set
+     session :watch
+     (agent-claude--python
+      session "claude-follow" agent-claude--follow-script
+      (list (file-local-name (agent-claude--transcript session))
+            (number-to-string (or (agent-claude--state session :sync-offset) -1))
+            agent-claude--own-entrypoint)
+      :filter (lambda (_process output)
+                (setq pending (concat pending output))
+                (let ((lines (split-string pending "\n")))
+                  (setq pending (car (last lines)))
+                  (when (buffer-live-p (agent-session-buffer session))
+                    (agent-claude--show-synced
+                     session (delq nil (mapcar #'agent-claude--parse-line (butlast lines)))))))
+      :sentinel #'ignore))))
+
 (defun agent-claude--watch (session)
   "Start watching SESSION's transcript file.
-Do nothing if it is already watched or the file doesn't exist yet."
+Do nothing if it is already watched or the file doesn't exist yet.  A
+loading history starts the watch itself once it knows where it ends."
   (let ((file (and (not (agent-claude--state session :watch))
+                   (not (agent-claude--state session :history-busy))
                    (agent-claude--transcript session))))
-    (when (and file (file-exists-p file)
-               (require 'filenotify nil t))
-      ;; While the history loads, it sets where syncing starts.
-      (unless (or (agent-claude--state session :sync-offset)
-                  (agent-claude--state session :history-busy))
+    (cond
+     ((null file))
+     ((file-remote-p file) (agent-claude--follow session))
+     ((and (file-exists-p file) (require 'filenotify nil t))
+      (unless (agent-claude--state session :sync-offset)
         (agent-claude--set session :sync-offset (file-attribute-size (file-attributes file))))
       (agent-claude--set session :watch
                          (ignore-errors
@@ -546,42 +617,55 @@ Do nothing if it is already watched or the file doesn't exist yet."
                             (lambda (event)
                               (when (and (eq (nth 1 event) 'changed)
                                          (buffer-live-p (agent-session-buffer session)))
-                                (agent-claude--sync-soon session)))))))))
+                                (agent-claude--sync-soon session))))))))))
 
 (defun agent-claude--unwatch (session)
   "Stop watching SESSION's transcript file."
   (when-let* ((watch (agent-claude--state session :watch)))
-    (file-notify-rm-watch watch)
+    (if (processp watch)
+        (delete-process watch)
+      (file-notify-rm-watch watch))
     (agent-claude--set session :watch nil)))
+
+(defun agent-claude--show-synced (session entries)
+  "Show the ENTRIES of SESSION's transcript written by other clients.
+An entry with :synced, from `agent-claude--follow-script', is the
+offset read up to."
+  (dolist (entry entries)
+    (let ((source (plist-get entry :entrypoint)))
+      (cond
+       ((plist-get entry :synced)
+        (agent-claude--set session :sync-offset (plist-get entry :synced)))
+       ((and source (not (equal source agent-claude--own-entrypoint)))
+        (unless (equal source (agent-claude--state session :sync-source))
+          (agent-claude--set session :sync-source source)
+          (agent-session-notice session (format "以下来自 %s"
+                                                (agent-claude--source-name source))))
+        (agent-claude--render-entry session entry)
+        ;; Another client advanced the conversation; our context is now stale.
+        (when (member (plist-get entry :type) '("user" "assistant"))
+          (agent-claude--set session :external t)))))))
 
 (defun agent-claude--sync (session)
   "Display messages newly written to SESSION's transcript by other clients."
   (let ((file (agent-claude--transcript session))
         (offset (agent-claude--state session :sync-offset)))
     (when (and file offset)
-      ;; No file-exists-p first: for a remote project that is one more round trip.
       (pcase-let ((`(,entries . ,end) (or (ignore-error file-error
                                             (agent-claude--read-entries file offset))
                                           (cons nil offset))))
         (agent-claude--set session :sync-offset end)
-        (dolist (entry entries)
-          (let ((source (plist-get entry :entrypoint)))
-            (when (and source (not (equal source agent-claude--own-entrypoint)))
-              (unless (equal source (agent-claude--state session :sync-source))
-                (agent-claude--set session :sync-source source)
-                (agent-session-notice session (format "以下来自 %s"
-                                                      (agent-claude--source-name source))))
-              (agent-claude--render-entry session entry)
-              ;; Another client advanced the conversation; our context is now stale.
-              (when (member (plist-get entry :type) '("user" "assistant"))
-                (agent-claude--set session :external t)))))))))
+        (agent-claude--show-synced session entries)))))
 
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
-  (when (and (agent-claude--state session :resume)
-             (zerop (hash-table-count (agent-session-blocks session))))
-    (agent-claude--show-history session))
+  ;; Load the history after starting the CLI: for a remote project both go
+  ;; through one connection, and starting the CLI behind the history's
+  ;; output kept Emacs waiting for a second.
+  (let ((replay (and (agent-claude--state session :resume)
+                     (zerop (hash-table-count (agent-session-blocks session))))))
+    (agent-session-start-process session (agent-claude--command session))
+    (when replay (agent-claude--show-history session)))
   (agent-claude--watch session)
-  (agent-session-start-process session (agent-claude--command session))
   (agent-claude--control
    session (list :subtype "initialize")
    (lambda (response)

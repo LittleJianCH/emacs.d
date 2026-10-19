@@ -76,8 +76,10 @@ var/                     runtime state (history, backups, pasted images...); git
   prints only the last `agent-claude-history-turns` turns with the fields shown; a
   line above them loads earlier turns, inserted with `agent-session-call-before-block`.
   The same file is watched to show messages written by other clients (Claude Desktop,
-  terminal), and the CLI is restarted with `--resume` before the next send so its
-  context catches up.
+  terminal); for a remote project a python3 script on the host follows it instead
+  (`agent-claude--follow-script`) and passes on only those messages, so neither the
+  watch nor the CLI's own writes cost round trips. The CLI is restarted with
+  `--resume` before the next send so its context catches up.
 - `backend/agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
