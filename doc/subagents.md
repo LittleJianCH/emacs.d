@@ -115,10 +115,15 @@ others may open while it waits for the host) and the error returned. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start
-a session at all: investigations to explorer, specified code to the coders, a
-review before committing, independent pieces at once; doing it yourself when
-explaining would take longer than the work. Without it agents rarely
-delegated even when a profile fitted.
+a session at all: investigations to explorer, specified code and long runs to
+the coders, reasoning on the caller's context to a fork, a review before
+committing, independent pieces at once; doing it yourself when explaining
+would take longer than the work; telling the user the profile and why.
+Without it agents rarely delegated even when a profile fitted. With only "fork
+when it needs your context", an agent forked an hour of builds and
+measurements: needing context rarely means needing it unwritten, since the
+caller can write the spec and the scripts, then hand the execution to a cheap
+profile. It also decided several tasks at once instead of each on its own.
 Costs come in five tiers, minimal, low, medium, high and premium, so the most
 expensive models stand apart: DeepSeek flash is minimal, Haiku low, Codex's
 gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.

@@ -611,18 +611,23 @@ the starting session runs on, are left out."
 
 (defcustom agent-collab-start-guidance
   "When to start a session: hand off work whose result you need but whose \
-steps you don't.
+steps you don't.  Decide for each piece on its own, not once for all.
 - Investigations that read many files, logs or docs to answer one \
 question: explorer, and keep working while it reads.
-- Code you can specify in a few paragraphs (files, behavior, how to \
-verify): coder-flash, or coder when it needs judgment.
+- Code or runs you can specify in a few paragraphs (files, behavior, \
+commands, how to verify): coder-flash, or coder when it needs judgment.  \
+Needing your context doesn't mean fork: write it down as the spec \
+yourself (prepare the scripts, check the inputs), then hand off the long \
+execution, such as builds, measurements and test runs.
+- Reasoning on your context at your level, such as diagnosis or design: \
+fork; expert when you are stuck.
 - A change that isn't trivial, before you commit it: reviewer.
 - Independent pieces at once, one session each; never two sessions \
 editing the same files.
 Do it yourself when explaining the background would take longer than the \
-work, or when it needs the user; fork when it needs both your context and \
-your level.  A session's reply is a report, not proof: check its work \
-before you rely on it."
+work, or when it needs the user.  When you start a session, tell the user \
+its profile and why.  A session's reply is a report, not proof: check its \
+work before you rely on it."
   "Advice to agents on when to start sessions, shown with session_start.
 It is part of every agent's tools, so changing it refreshes them in live
 sessions (see agent-ui.el)."
@@ -827,9 +832,10 @@ while it works; at most 1500"))
 back, shown to the user under your session.  Choose how it gets context:
 - fork: a clone of you (your agent and model) that inherits your whole
   conversation through the prompt cache, so its input is cheap; its output
-  costs what yours does.  Prefer it when the task is hard enough to need
-  your own level of reasoning.  Omit profile.  Claude, Codex and DeepSeek
-  sessions can fork.
+  costs what yours does.  Prefer it when the task needs your own level of
+  reasoning on your context; when the context can be written down as a
+  spec, a cheaper profile given that spec usually does better.  Omit
+  profile.  Claude, Codex and DeepSeek sessions can fork.
 - handoff: a cheaper profile gets a text copy of your recent conversation
   (no prompt cache, and tool output is cut).  Use it when the task needs
   your context but a cheaper model can do it.
