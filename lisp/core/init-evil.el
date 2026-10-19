@@ -8,6 +8,7 @@
 ;;   SPC s  search buffer   SPC /  search project   SPC p  project commands
 ;;   SPC g  magit           SPC a  agent commands (same as C-c a)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
+;;   SPC t  terminal (same as C-c t, init-term.el)
 ;; C-j / C-k move point and the text together, a line at a time, so point
 ;; stays where it is on the screen.
 ;; Insert state uses Emacs editing keys; Escape returns to normal state.

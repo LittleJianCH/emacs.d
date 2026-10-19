@@ -31,6 +31,7 @@ lisp/core/               base layer
   init-completion.el     vertico / orderless / consult / corfu / cape
   init-dev.el            project, magit, eglot, tree-sitter
   init-remote.el         remote editing (tramp-rpc)
+  init-term.el           terminals (ghostel, native module downloaded prebuilt)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
   backend/              individual backends, enabled via `my/agents' in init.el
@@ -47,6 +48,7 @@ test/agent-session-link-test.el   ERT suite for clickable links in transcripts
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
 test/init-ui-test.el        ERT suite for the themes, status line and side panels
+test/init-term-test.el      ERT suite for the terminal module
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 var/                     runtime state (history, backups, pasted images...); git-ignored
@@ -151,7 +153,8 @@ evil off first (it is on by default and its normal state would eat typed keys):
 emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el \
-      -l test/init-ui-test.el -l test/agent-review-test.el \
+      -l test/init-ui-test.el -l test/init-term-test.el \
+      -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
       -f ert-run-tests-batch-and-exit
