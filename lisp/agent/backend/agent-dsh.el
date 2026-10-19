@@ -25,6 +25,7 @@
 (require 'subr-x)
 (require 'agent-session)
 (require 'agent-remote)
+(require 'agent-usage)
 
 (defgroup agent-dsh nil
   "DeepSeek Harness backend."
@@ -145,14 +146,19 @@ A remote agent reaches emx through the relay of agent-remote.el."
   "Set backend state KEY of SESSION to VALUE."
   (setf (agent-session-state session) (plist-put (agent-session-state session) key value)))
 
-(defun agent-dsh--request (session method params &optional callback)
-  "Send a JSON-RPC request; call CALLBACK with the result when it arrives."
+(defun agent-dsh--request (session method params &optional callback error-callback)
+  "Send a JSON-RPC request; call CALLBACK with the result when it arrives.
+Call ERROR-CALLBACK with the RPC error; without one, display a notice."
   (let ((id (1+ (or (agent-dsh--state session :next-id) 0))))
     (agent-dsh--set session :next-id id)
     (when callback
       (unless (agent-dsh--state session :callbacks)
         (agent-dsh--set session :callbacks (make-hash-table)))
       (puthash id callback (agent-dsh--state session :callbacks)))
+    (when error-callback
+      (unless (agent-dsh--state session :error-callbacks)
+        (agent-dsh--set session :error-callbacks (make-hash-table)))
+      (puthash id error-callback (agent-dsh--state session :error-callbacks)))
     (agent-session-write session (list :jsonrpc "2.0" :id id :method method
                                        :params (or params (make-hash-table))))))
 
@@ -219,6 +225,7 @@ A remote agent reaches emx through the relay of agent-remote.el."
          (agent-session-notice
           session (format "dsh 版本为 %s，桥接插件按 %s 编写，若有异常可能需要适配"
                           version agent-dsh-tested-version))))
+     (agent-dsh--request-balance session)
      (agent-session-set-status session 'idle))))
 
 ;;; Past sessions: a short-lived bridge answers sessions/list
@@ -516,6 +523,44 @@ what `agent-session-deny' picks."
                             questions
                             (if (eq answers 'cancel) (make-list (length questions) nil) answers))))))))))
 
+;;; Usage and quota
+
+(defun agent-dsh--balance-result (session result)
+  "Note the DeepSeek account balance of SESSION from RESULT.
+RESULT is the bridge's balance reply: balances are the endpoint's entries,
+with string totals."
+  (let ((balances
+         (seq-keep
+          (lambda (info)
+            (when-let* ((total (plist-get info :total)))
+              (list :amount (string-to-number (if (stringp total)
+                                                 total
+                                               (number-to-string total)))
+                    :currency (plist-get info :currency))))
+          (append (plist-get result :balances) nil))))
+    (when balances
+      (agent-usage-set-quota session :balance balances))))
+
+(defun agent-dsh--refresh-quota ()
+  "Ask a running dsh bridge for the balance, once per host."
+  (let (hosts)
+    (dolist (buffer (agent-session-buffers nil 'dsh))
+      (let* ((session (buffer-local-value 'agent-session--current buffer))
+             (host (file-remote-p (agent-session-root session) 'host)))
+        (when (and (process-live-p (agent-session-process session))
+                   (not (member host hosts)))
+          (push host hosts)
+          (agent-dsh--request-balance session))))))
+
+(add-hook 'agent-usage-refresh-functions #'agent-dsh--refresh-quota)
+
+(defun agent-dsh--request-balance (session)
+  "Ask the bridge for the DeepSeek account balance of SESSION.
+A failure is ignored: the balance is extra, not worth a notice."
+  (agent-dsh--request session "balance" nil
+                      (lambda (result) (agent-dsh--balance-result session result))
+                      #'ignore))
+
 ;;; Message handling
 
 (defun agent-dsh--notification (session method params)
@@ -562,11 +607,25 @@ what `agent-session-deny' picks."
     ;; Failed turns are already reported through "error".
     ("turn/end"
      (when (equal (plist-get params :reason) "max-tokens")
-       (agent-session-notice session "输出达到 token 上限" 'agent-session-error)))
+       (agent-session-notice session "输出达到 token 上限" 'agent-session-error))
+     (agent-usage-end-turn session)
+     (agent-dsh--request-balance session))
     ("config" (agent-dsh--apply-config session (plist-get params :config)))
     ("usage"
-     (agent-session-set-info session :tokens
-                             (plist-get (plist-get params :usage) :totalTokens)))
+     (let* ((usage (plist-get params :usage))
+            (model (or (plist-get params :model)
+                       (plist-get (agent-session-info session) :model)
+                       "dsh")))
+       (agent-session-set-info session :tokens (plist-get usage :totalTokens))
+       ;; One chunk per model call, not cumulative; usage replayed outside a
+       ;; turn, such as a resumed session's, is not this turn's.
+       (when (eq (agent-session-status session) 'running)
+         (agent-usage-add-call
+          session model
+          (list :input (or (plist-get usage :inputTokens) 0)
+                :cache-read (or (plist-get usage :cacheReadTokens) 0)
+                :cache-write (or (plist-get usage :cacheWriteTokens) 0)
+                :output (or (plist-get usage :outputTokens) 0))))))
     ("error"
      (agent-session-notice session (format "出错：%s" (plist-get params :message))
                            'agent-session-error))))
@@ -578,13 +637,18 @@ what `agent-session-deny' picks."
     (cond
      ;; Response to one of our requests
      ((and id (not method))
-      (if-let* ((err (plist-get message :error)))
-          (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
-                                'agent-session-error)
-        (when-let* ((callbacks (agent-dsh--state session :callbacks))
-                    (callback (gethash id callbacks)))
-          (remhash id callbacks)
-          (funcall callback (plist-get message :result)))))
+      (let* ((callbacks (agent-dsh--state session :callbacks))
+             (errors (agent-dsh--state session :error-callbacks))
+             (callback (and callbacks (gethash id callbacks)))
+             (error-callback (and errors (gethash id errors))))
+        (when callbacks (remhash id callbacks))
+        (when errors (remhash id errors))
+        (if-let* ((err (plist-get message :error)))
+            (if error-callback
+                (funcall error-callback err)
+              (agent-session-notice session (format "请求失败：%s" (plist-get err :message))
+                                    'agent-session-error))
+          (when callback (funcall callback (plist-get message :result))))))
      ;; Request from the bridge
      (id
       (pcase method

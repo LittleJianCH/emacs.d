@@ -180,12 +180,13 @@ confirmations and questions also wait in its parent's footer, and the parent's
   of the CLI's running `modelUsage` totals; a CLI started with `--resume` may carry on
   with totals restored from an older save, so a process's first result must prove
   where it started (`agent-usage-totals`), else only that turn's own usage is
-  recorded; Codex: each model call's usage summed per turn with
+  recorded; Codex and dsh: each model call's usage summed per turn with
   `agent-usage-add-call` / `agent-usage-end-turn`, counted only inside a turn so
   replayed usage isn't); records are appended to `var/agent-usage.eld`, so other
   clients of the same accounts aren't counted. Quotas come with the agents' own
-  traffic, never polled: Claude's `rate_limit_event` (5-hour and weekly windows)
-  and Codex's `account/rateLimits/*`. The latest per agent and host
+  traffic, never polled: Claude's `rate_limit_event` (5-hour and weekly windows),
+  Codex's `account/rateLimits/*`, and dsh's balance, which the bridge's `balance`
+  request fetches inside dsh with its own credentials. The latest per agent and host
   is kept in `var/agent-quota.eld` and shown in the echo area while idle
   (`agent-usage-echo-mode`, drawn into ` *Minibuf-0*`). `C-c a u` opens the usage
   page (modeled on magpie's): allowances with pace, the period's totals and timeline,

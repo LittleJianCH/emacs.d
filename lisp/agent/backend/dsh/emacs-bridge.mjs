@@ -18,6 +18,12 @@
 //   cancel     {}                                        -> {}
 //   flush      {}                                        -> {}
 //   sessions/list {cwds}            -> {sessions: [{id, cwd, title, time}]}  (no initialize needed)
+//   balance    {}                    -> {available, balances: [{currency, total, granted, toppedUp}]}
+//                                    (no initialize needed)
+//
+// balance resolves dsh's own DEEPSEEK_API_KEY credential and asks
+// https://api.deepseek.com/user/balance for the account balance, giving up
+// after 10 seconds. The total fields are the strings the endpoint reports.
 //
 // parent marks a new session that another session's agent started: it is
 // recorded as the session's parentSession, so sessions/list leaves it out.
@@ -57,10 +63,13 @@
 //   discard    {ids}                                       abandoned attempt's blocks
 //   tool       {id, name, arguments}                       tool call committed
 //   tool/done  {id, isError, output}                       tool result
-//   turn/end   {reason, error?}
-//   usage      {usage}
+//   turn/end   {reason, error?}                           once per turn
+//   usage      {usage, model}                              one model call
 //   config     {config}                                    settings changed by dsh
 //   error      {message}
+//
+// usage carries the model of that call, "provider/model", when it is known;
+// its counters are the call's own (inputTokens is uncached input).
 
 import { createRequire } from 'node:module'
 import { readFileSync, realpathSync } from 'node:fs'
@@ -134,6 +143,8 @@ export function apply(ctx) {
   let configuring = Promise.resolve()
   // attemptId -> Map(block index -> {id, kind, text})
   const attempts = new Map()
+  // attemptId -> model of that step, "provider/model"
+  const attemptModels = new Map()
 
   const write = (message) => {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n')
@@ -145,6 +156,14 @@ export function apply(ctx) {
     write({ id, method, params })
   })
 
+  /** Model of the step being assembled, "provider/model", if known. */
+  const selectedModel = () => {
+    // assembled is the selection captured for the current step; current is
+    // what the next step will use when assembly hasn't happened yet.
+    const selected = selection.assembled ?? selection.current
+    return selected === undefined ? undefined : `${selected.provider}/${selected.model}`
+  }
+
   const owns = (agent) => handle !== null && agent === handle.agent
   const ownsSession = (session) => handle !== null && session === handle.agent.session
 
@@ -154,6 +173,7 @@ export function apply(ctx) {
     switch (frame.type) {
       case 'start':
         attempts.set(frame.attemptId, new Map())
+        attemptModels.set(frame.attemptId, selectedModel())
         break
       case 'chunk': {
         const blocks = attempts.get(frame.attemptId)
@@ -178,13 +198,14 @@ export function apply(ctx) {
             notify('text/done', { id: block.id, text: block.text })
           }
         } else if (chunk.type === 'usage') {
-          notify('usage', { usage: chunk.usage })
+          notify('usage', { usage: chunk.usage, model: attemptModels.get(frame.attemptId) })
         }
         break
       }
       case 'end': {
         const blocks = attempts.get(frame.attemptId)
         attempts.delete(frame.attemptId)
+        attemptModels.delete(frame.attemptId)
         if (blocks === undefined) break
         if (frame.outcome.kind === 'abandoned') {
           notify('discard', { ids: [...blocks.values()].map((block) => block.id) })
@@ -557,6 +578,50 @@ export function apply(ctx) {
         }
       }))
       return { sessions: sessions.filter((session) => session.title !== null).sort((a, b) => b.time - a.time) }
+    },
+    async balance() {
+      // A request may arrive while the tree is still loading: credentials
+      // must be live before the provider is looked up.
+      const loader = ctx.get('loader')
+      if (loader !== undefined) await loader.await().catch(() => {})
+      const credentials = ctx.get('credentials')
+      if (credentials === undefined) throw new Error('no credentials service')
+      const ref = 'DEEPSEEK_API_KEY'
+      // Resolve per request so a changed key reaches the next balance call.
+      const hit = await credentials.resolve(ref).catch(() => undefined)
+      if (hit === undefined || !hit.value) throw new Error(`no ${ref}`)
+      let response
+      try {
+        response = await fetch('https://api.deepseek.com/user/balance', {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${hit.value}` },
+          signal: AbortSignal.timeout(10_000),
+        })
+      } catch (error) {
+        // The message must never carry the key, so don't repeat the error.
+        if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+          throw new Error('DeepSeek balance request timed out')
+        }
+        throw new Error('DeepSeek balance request failed')
+      }
+      if (!response.ok) {
+        throw new Error(`DeepSeek balance request failed: HTTP ${response.status}`)
+      }
+      let data
+      try {
+        data = await response.json()
+      } catch {
+        throw new Error('DeepSeek balance response is not JSON')
+      }
+      return {
+        available: data?.is_available === true,
+        balances: (Array.isArray(data?.balance_infos) ? data.balance_infos : []).map((info) => ({
+          currency: info?.currency ?? null,
+          total: info?.total_balance ?? null,
+          granted: info?.granted_balance ?? null,
+          toppedUp: info?.topped_up_balance ?? null,
+        })),
+      }
     },
     cancel() {
       handle?.agent.cancel({ kind: 'user' })
