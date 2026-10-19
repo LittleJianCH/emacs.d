@@ -350,21 +350,38 @@ they can't be copied, the agent starts without them."
       (error (message "没能把 skill 复制给 agent：%s" (error-message-string err))
              nil))))
 
+(defvar agent-session--skills-copied (make-hash-table :test #'equal)
+  "Skill directories brought up to date: BASE -> hash of the skills copied.
+Checking each file on a remote host costs round trips at every session
+start, so a host is checked again only when the skills change (or after
+a restart of Emacs).")
+
 (defun agent-session--copy-skills (base)
   "Copy the skills of `agent-session-skills' under BASE; return its local name."
-  (pcase-dolist (`(,name ,directory . ,_) agent-session-skills)
-    (dolist (file (directory-files-recursively directory ""))
-      (let ((target (expand-file-name (file-relative-name file directory)
-                                      (expand-file-name (concat ".claude/skills/" name) base))))
-        (unless (and (file-exists-p target)
-                     (equal (with-temp-buffer
-                              (insert-file-contents-literally file)
-                              (buffer-string))
-                            (with-temp-buffer
-                              (insert-file-contents-literally target)
-                              (buffer-string))))
-          (make-directory (file-name-directory target) t)
-          (copy-file file target t)))))
+  (let* ((files (mapcan (pcase-lambda (`(,name ,directory . ,_))
+                          (mapcar (lambda (file)
+                                    (cons file (expand-file-name
+                                                (file-relative-name file directory)
+                                                (expand-file-name (concat ".claude/skills/" name)
+                                                                  base))))
+                                  (directory-files-recursively directory "")))
+                        (copy-sequence agent-session-skills)))
+         (contents (mapcar (lambda (pair)
+                             (with-temp-buffer
+                               (insert-file-contents-literally (car pair))
+                               (buffer-string)))
+                           files))
+         (hash (secure-hash 'sha1 (prin1-to-string (cons files contents)))))
+    (unless (equal (gethash base agent-session--skills-copied) hash)
+      (cl-loop for (file . target) in files
+               for content in contents
+               unless (and (file-exists-p target)
+                           (equal content (with-temp-buffer
+                                            (insert-file-contents-literally target)
+                                            (buffer-string))))
+               do (make-directory (file-name-directory target) t)
+               (copy-file file target t))
+      (puthash base hash agent-session--skills-copied)))
   (file-local-name base))
 
 ;;; Git worktrees: a project's sessions may run in its other worktrees
