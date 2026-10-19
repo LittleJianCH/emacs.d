@@ -528,10 +528,28 @@ preserved."
   "Block data (a plist) for ID in SESSION, or nil if there is none."
   (gethash id (agent-session-blocks session)))
 
+(defvar agent-session--insert-at nil
+  "Marker where new blocks go instead of the transcript end.
+Bound by `agent-session-call-before-block'.")
+
+(defun agent-session-call-before-block (session id function)
+  "Call FUNCTION with new blocks of SESSION inserted before block ID.
+Blocks created by FUNCTION keep their order.  With ID nil they are
+appended as usual.  Used to load history above what is already shown."
+  (if-let* ((start (plist-get (agent-session--block session id) :start)))
+      ;; Block ID's start sits where the new blocks go: let it advance past
+      ;; them for the duration, so that block doesn't swallow them.
+      (let ((agent-session--insert-at (copy-marker start t)))
+        (set-marker-insertion-type start t)
+        (unwind-protect (funcall function)
+          (set-marker-insertion-type start nil)
+          (set-marker agent-session--insert-at nil)))
+    (funcall function)))
+
 (defun agent-session--new-block (session id data)
   "Create block ID at the end of the transcript, rendered from DATA."
   (agent-session--with-buffer session
-    (let ((tail (agent-session-tail session)))
+    (let ((tail (or agent-session--insert-at (agent-session-tail session))))
       (goto-char tail)
       (let ((start (copy-marker (point)))
             (end (copy-marker (point))))

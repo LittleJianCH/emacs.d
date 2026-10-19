@@ -688,6 +688,128 @@ Also mark that the context needs reloading."
                       (file-attribute-size (file-attributes file)))))
        (delete-file file)))))
 
+;; A long session's transcript is tens of megabytes: a resumed session shows
+;; the latest turns, read by a script in the background, and earlier ones on
+;; request.
+(defun agent-session-test--claude-transcript (file)
+  "Write a transcript with two turns to FILE; return the offset of the second."
+  (let* ((line (lambda (entry) (concat (json-encode entry) "\n")))
+         (first (concat
+                 (funcall line '((type . "system") (subtype . "init")))
+                 (funcall line '((type . "user") (uuid . "u1") (message . ((content . "提问一")))))
+                 (funcall line '((type . "assistant") (uuid . "a1")
+                                 (message . ((content . [((type . "thinking") (thinking . "想了很久"))
+                                                         ((type . "tool_use") (id . "t1") (name . "Bash")
+                                                          (input . ((command . "ls"))))])))))
+                 (funcall line '((type . "user") (uuid . "r1") (toolUseResult . "大块记录")
+                                 (message . ((content . [((type . "tool_result") (tool_use_id . "t1")
+                                                          (content . "a.txt"))])))))
+                 (funcall line '((type . "user") (uuid . "m1") (isMeta . t)
+                                 (message . ((content . "元信息")))))
+                 (funcall line '((type . "assistant") (uuid . "s1") (isSidechain . t)
+                                 (message . ((content . [((type . "text") (text . "子任务"))])))))
+                 (funcall line '((type . "api-request") (body . "请求体")))
+                 (funcall line '((type . "assistant") (uuid . "a2")
+                                 (message . ((content . [((type . "text") (text . "回答一"))])))))))
+         (second (concat
+                  (funcall line '((type . "user") (uuid . "u2")
+                                  (message . ((content . [((type . "text") (text . "提问二"))])))))
+                  (funcall line '((type . "attachment") (uuid . "q1")
+                                  (attachment . ((type . "queued_command") (prompt . "插话")))))
+                  (funcall line '((type . "assistant") (uuid . "a3")
+                                  (message . ((content . [((type . "text") (text . "回答二"))]))))))))
+    (with-temp-file file
+      (set-buffer-multibyte nil)
+      (insert (encode-coding-string (concat first second) 'utf-8)
+              ;; Still being written
+              "{\"type\":\"assistant\""))
+    (string-bytes first)))
+
+(ert-deftest agent-session-test-claude-history-script ()
+  "The history script picks the last turns and only the fields shown."
+  (skip-unless (executable-find "python3"))
+  (let ((file (make-temp-file "agent-history-" nil ".jsonl")))
+    (unwind-protect
+        (let* ((second (agent-session-test--claude-transcript file))
+               (size (file-attribute-size (file-attributes file)))
+               (run (lambda (turns stop)
+                      (with-temp-buffer
+                        (insert agent-claude--history-script)
+                        (should (zerop (call-process-region
+                                        (point-min) (point-max) "python3" t t nil
+                                        "-" file (number-to-string turns)
+                                        (number-to-string stop))))
+                        (agent-claude--parse-history)))))
+          (pcase-let ((`(,entries ,start ,end) (funcall run 1 -1)))
+            (should (= start second))
+            ;; The unfinished last line is left for syncing
+            (should (= end (- size (length "{\"type\":\"assistant\""))))
+            (should (equal (mapcar (lambda (e) (plist-get e :uuid)) entries) '("u2" "q1" "a3"))))
+          (pcase-let ((`(,entries ,start ,end) (funcall run 1 second)))
+            (should (= start 0))
+            (should (= end second))
+            ;; Bookkeeping and subagents are left out; so is what isn't shown
+            (should (equal (mapcar (lambda (e) (plist-get e :uuid)) entries)
+                           '("u1" "a1" "r1" "m1" "a2")))
+            (let ((text (format "%S" entries)))
+              (dolist (gone '("想了很久" "大块记录" "子任务" "请求体"))
+                (should-not (string-search gone text))))
+            ;; Parts not shown stay as stubs, keeping the indices of the others
+            (should (equal (mapcar (lambda (p) (plist-get p :type))
+                                   (plist-get (plist-get (nth 1 entries) :message) :content))
+                           '("thinking" "tool_use"))))
+          (should (equal (funcall run 5 -1)
+                         (list (car (funcall run 2 -1)) 0 (nth 2 (funcall run 1 -1))))))
+      (delete-file file))))
+
+(ert-deftest agent-session-test-claude-history-load ()
+  "Resuming loads the last turns in the background, above messages shown
+meanwhile; the button above them loads the earlier ones."
+  (skip-unless (executable-find "python3"))
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (file (make-temp-file "agent-history-" nil ".jsonl"))
+          (agent-claude-history-turns 1)
+          (wait (lambda ()
+                  (with-timeout (10 (error "History did not load"))
+                    (while (agent-claude--state session :history-busy)
+                      (accept-process-output nil 0.05))))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-claude--transcript) (lambda (_) file)))
+           (let ((second (agent-session-test--claude-transcript file)))
+             (agent-claude--show-history session)
+             (should (string-search "正在载入历史记录" (agent-session-test--transcript)))
+             ;; Shown while the history loads
+             (agent-session-notice session "实时消息")
+             (funcall wait)
+             (let ((text (agent-session-test--transcript)))
+               (should (string-search "载入更早的 1 个回合" text))
+               (should-not (string-search "提问一" text))
+               (should (< (string-search "提问二" text) (string-search "插话" text)
+                          (string-search "回答二" text) (string-search "以上为历史记录" text)
+                          (string-search "实时消息" text))))
+             (should (= (agent-claude--state session :history-start) second))
+             (should (= (agent-claude--state session :sync-offset)
+                        (- (file-attribute-size (file-attributes file))
+                           (length "{\"type\":\"assistant\""))))
+             ;; Load the earlier turn
+             (goto-char (point-min))
+             (should (search-forward "载入更早" nil t))
+             (push-button (match-beginning 0))
+             (funcall wait)
+             (let ((text (agent-session-test--transcript)))
+               (should-not (string-search "载入更早" text))
+               (should (= 1 (how-many "以上为历史记录" (point-min) (point-max))))
+               (should (< (string-search "提问一" text) (string-search "回答一" text)
+                          (string-search "提问二" text) (string-search "实时消息" text))))
+             (should (eq (plist-get (agent-session--block session "t1") :status) 'ok))
+             ;; Redrawing the block the earlier turns went before keeps them apart
+             (agent-session--update session "u2" :text "提问二（改）")
+             (let ((text (agent-session-test--transcript)))
+               (should (string-search "回答一" text))
+               (should (< (string-search "回答一" text) (string-search "提问二（改）" text))))))
+       (delete-file file)))))
+
 ;; Images: paste clipboard images or insert files; on send Claude uses base64 and
 ;; Codex uses local paths.
 (ert-deftest agent-session-test-images ()

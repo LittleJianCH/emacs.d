@@ -273,15 +273,228 @@ unfinished last line (no trailing newline) is left for the next read."
                                                (plist-get part :input))))))
           (plist-get message :content)))))))
 
-(defun agent-claude--replay (session)
-  "Render the history of a resumed session into SESSION."
-  (let ((file (agent-claude--transcript session)))
-    (when (and file (file-exists-p file))
-      (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file 0)))
-        (dolist (entry entries)
-          (agent-claude--render-entry session entry))
-        (agent-claude--set session :sync-offset end)))
-    (agent-session-notice session "—— 以上为历史记录 ——")))
+;;; Resumed sessions: the latest turns, earlier ones on request
+;;
+;; A long session's transcript runs to tens of megabytes, mostly bookkeeping
+;; the display doesn't use (API requests, thinking, full tool results), and
+;; for a remote project it is on the host.  Reading it in Emacs froze it for
+;; seconds.  A python3 script reads it in the background instead, where the
+;; file is, and prints only the last turns and the fields shown.
+
+(defcustom agent-claude-history-turns 20
+  "Turns of a resumed session shown at first; earlier ones load on request."
+  :type 'integer)
+
+(defconst agent-claude--history-script "\
+import json, os, sys
+
+path = os.path.expanduser(sys.argv[1])
+turns, stop = int(sys.argv[2]), int(sys.argv[3])
+KEEP = {'text': ('text',), 'tool_use': ('id', 'name', 'input'),
+        'tool_result': ('tool_use_id', 'is_error', 'content')}
+
+def prompt(e):
+    # Same test as agent-claude--user-text.
+    if e.get('type') != 'user' or e.get('isMeta') or e.get('isSidechain'):
+        return False
+    c = (e.get('message') or {}).get('content')
+    if isinstance(c, list):
+        if not c or not all(isinstance(p, dict) and p.get('type') in ('text', 'image')
+                            for p in c):
+            return False
+        c = '\\n'.join('[' if p['type'] == 'image' else p.get('text') or '' for p in c)
+    return isinstance(c, str) and not c.lstrip().startswith('<')
+
+def part(p):
+    # Parts not shown stay as stubs, so the indices of the others are kept.
+    t = p.get('type') if isinstance(p, dict) else None
+    return dict({'type': t}, **{k: p[k] for k in KEEP.get(t, ()) if k in p})
+
+def project(e):
+    t = e.get('type')
+    if e.get('isSidechain'):
+        return None
+    if t == 'attachment':
+        a = e.get('attachment') or {}
+        if a.get('type') != 'queued_command':
+            return None
+        return {'type': t, 'uuid': e.get('uuid'),
+                'attachment': {'type': a['type'], 'prompt': a.get('prompt')}}
+    if t not in ('user', 'assistant'):
+        return None
+    c = (e.get('message') or {}).get('content')
+    if isinstance(c, list):
+        c = [part(p) for p in c]
+    return {'type': t, 'uuid': e.get('uuid'), 'isMeta': e.get('isMeta'),
+            'message': {'content': c}}
+
+def emit(o):
+    try:
+        data = json.dumps(o, ensure_ascii=False).encode('utf-8')
+    except UnicodeEncodeError:
+        data = json.dumps(o).encode()
+    sys.stdout.buffer.write(data + b'\\n')
+
+def load(line):
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    return e if isinstance(e, dict) else None
+
+starts, end = [], 0
+try:
+    f = open(path, 'rb')
+except OSError:
+    f = None
+if f is None:
+    emit({'start': 0, 'end': 0})
+else:
+    with f:
+        # An unfinished last line is left for syncing.
+        for line in f:
+            if not line.endswith(b'\\n') or 0 <= stop < end + len(line):
+                break
+            if b'\"user\"' in line:
+                e = load(line)
+                if e and prompt(e):
+                    starts.append(end)
+            end += len(line)
+        start = starts[-turns] if len(starts) > turns else 0
+        emit({'start': start, 'end': end})
+        f.seek(start)
+        pos = start
+        for line in f:
+            if pos >= end:
+                break
+            pos += len(line)
+            e = load(line)
+            o = e and project(e)
+            if o:
+                emit(o)
+"
+  "Prints the last turns of a transcript: ARGV is FILE TURNS STOP.
+STOP is the byte offset to read up to, -1 for the end.  The first line
+is {start, end}, the byte range read, then come the entries, with only
+the fields `agent-claude--render-entry' uses.")
+
+(defun agent-claude--parse-history ()
+  "Parse the output of `agent-claude--history-script' in this buffer.
+Return (ENTRIES START END), or nil if it is incomplete."
+  (let* ((parse (lambda (line)
+                  (ignore-errors
+                    (json-parse-string line :object-type 'plist
+                                       :null-object nil :false-object nil))))
+         (lines (split-string (buffer-string) "\n" t))
+         (header (funcall parse (car lines))))
+    (when (natnump (plist-get header :end))
+      (list (delq nil (mapcar parse (cdr lines)))
+            (plist-get header :start) (plist-get header :end)))))
+
+(defun agent-claude--read-history (session stop callback)
+  "Read the latest turns of SESSION's transcript before byte STOP.
+STOP nil reads to the end.  Read in the background, then call CALLBACK
+with (ENTRIES START END) as from `agent-claude--parse-history', or with
+nil after showing why it failed."
+  (let* ((file (agent-claude--transcript session))
+         (default-directory (agent-session-root session))
+         (remote (file-remote-p default-directory)))
+    (if (and (not remote) (not (executable-find "python3")))
+        ;; Without python3 read it all here, as before.
+        (funcall callback (if (file-exists-p file)
+                              (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file 0)))
+                                (list entries 0 end))
+                            (list nil 0 0)))
+      (let* ((output (generate-new-buffer " *claude-history*"))
+             (stderr (generate-new-buffer " *claude-history-stderr*"))
+             (process
+              (make-process
+               :name "claude-history"
+               :command (list "python3" "-" (file-local-name file)
+                              (number-to-string agent-claude-history-turns)
+                              (number-to-string (or stop -1)))
+               :buffer output
+               :stderr stderr
+               :connection-type 'pipe
+               :coding 'utf-8-unix
+               :noquery t
+               :file-handler (and remote t)
+               :sentinel
+               (lambda (process _event)
+                 (unless (process-live-p process)
+                   (let ((result (and (eq (process-status process) 'exit)
+                                      (zerop (process-exit-status process))
+                                      (with-current-buffer output
+                                        (agent-claude--parse-history)))))
+                     (unless result
+                       (agent-session-notice
+                        session (format "载入历史记录失败：%s"
+                                        (string-trim (with-current-buffer stderr (buffer-string))))
+                        'agent-session-error))
+                     (kill-buffer output)
+                     (kill-buffer stderr)
+                     (when (buffer-live-p (agent-session-buffer session))
+                       (funcall callback result))))))))
+        (process-send-string process agent-claude--history-script)
+        (process-send-eof process)))))
+
+(defun agent-claude--block-after (session id)
+  "Return the ID of the block right after block ID in SESSION, or nil."
+  (when-let* ((block (agent-session--block session id)))
+    (let ((pos (1+ (plist-get block :end))) found)
+      (maphash (lambda (key other) (when (= (plist-get other :start) pos) (setq found key)))
+               (agent-session-blocks session))
+      found)))
+
+(defun agent-claude--history-line (session)
+  "Redraw the line above the history of SESSION.
+It says history is loading, offers the earlier turns, or goes away once
+everything is shown."
+  (let ((start (agent-claude--state session :history-start)))
+    (cond ((agent-claude--state session :history-busy)
+           (agent-session--update session "history" :type 'notice :face nil
+                                  :text "正在载入历史记录…"))
+          ((and start (> start 0))
+           (agent-session--update
+            session "history" :type 'notice :face 'agent-session-run-button
+            :text (make-text-button
+                   (format "▲ 载入更早的 %d 个回合" agent-claude-history-turns) nil
+                   'follow-link t 'help-echo "载入更早的历史记录"
+                   'action (lambda (_) (agent-claude--show-history
+                                        session (agent-claude--state session :history-start))))))
+          (t (agent-session--remove-block session "history")))))
+
+(defun agent-claude--show-history (session &optional stop)
+  "Show the latest turns of SESSION's transcript before byte STOP.
+Without STOP this is the replay of a resumed session; with it, earlier
+turns are added above those shown."
+  (unless (agent-claude--state session :history-busy)
+    (agent-claude--set session :history-busy t)
+    (agent-claude--history-line session)
+    (agent-claude--read-history
+     session stop
+     (lambda (result)
+       (agent-claude--set session :history-busy nil)
+       (pcase-let ((`(,entries ,start ,end) result))
+         (when result
+           (agent-session-call-before-block
+            session (agent-claude--block-after session "history")
+            (lambda ()
+              (dolist (entry entries)
+                (agent-claude--render-entry session entry))
+              (unless stop (agent-session-notice session "—— 以上为历史记录 ——"))))
+           (agent-claude--set session :history-start start)
+           ;; A running turn is folded when it ends, with the others.
+           (unless (eq (agent-session-status session) 'running)
+             (agent-session--fold-turns session)))
+         (agent-claude--history-line session)
+         (unless stop
+           ;; Sync from where the history ends: what was written meanwhile
+           ;; by other clients is shown now.
+           (agent-claude--set session :sync-offset
+                              (or end (file-attribute-size
+                                       (file-attributes (agent-claude--transcript session)))))
+           (agent-claude--sync session)))))))
 
 ;;; Syncing with other clients (same session open in Claude Desktop, a terminal...)
 ;;
@@ -300,14 +513,31 @@ unfinished last line (no trailing newline) is left for the next read."
     ("cli" "终端中的 Claude Code")
     (_ (or entrypoint "其他客户端"))))
 
+(defconst agent-claude--sync-delay 0.5
+  "Seconds to gather transcript changes before reading them.
+The CLI writes a line per message, often several at once; each read is a
+round trip for a remote project.")
+
+(defun agent-claude--sync-soon (session)
+  "Sync SESSION after `agent-claude--sync-delay', once for a burst of writes."
+  (unless (timerp (agent-claude--state session :sync-timer))
+    (agent-claude--set session :sync-timer
+                       (run-with-timer agent-claude--sync-delay nil
+                                       (lambda ()
+                                         (agent-claude--set session :sync-timer nil)
+                                         (when (buffer-live-p (agent-session-buffer session))
+                                           (agent-claude--sync session)))))))
+
 (defun agent-claude--watch (session)
   "Start watching SESSION's transcript file.
 Do nothing if it is already watched or the file doesn't exist yet."
-  (let ((file (agent-claude--transcript session)))
+  (let ((file (and (not (agent-claude--state session :watch))
+                   (agent-claude--transcript session))))
     (when (and file (file-exists-p file)
-               (not (agent-claude--state session :watch))
                (require 'filenotify nil t))
-      (unless (agent-claude--state session :sync-offset)
+      ;; While the history loads, it sets where syncing starts.
+      (unless (or (agent-claude--state session :sync-offset)
+                  (agent-claude--state session :history-busy))
         (agent-claude--set session :sync-offset (file-attribute-size (file-attributes file))))
       (agent-claude--set session :watch
                          (ignore-errors
@@ -316,7 +546,7 @@ Do nothing if it is already watched or the file doesn't exist yet."
                             (lambda (event)
                               (when (and (eq (nth 1 event) 'changed)
                                          (buffer-live-p (agent-session-buffer session)))
-                                (agent-claude--sync session)))))))))
+                                (agent-claude--sync-soon session)))))))))
 
 (defun agent-claude--unwatch (session)
   "Stop watching SESSION's transcript file."
@@ -328,8 +558,11 @@ Do nothing if it is already watched or the file doesn't exist yet."
   "Display messages newly written to SESSION's transcript by other clients."
   (let ((file (agent-claude--transcript session))
         (offset (agent-claude--state session :sync-offset)))
-    (when (and file offset (file-exists-p file))
-      (pcase-let ((`(,entries . ,end) (agent-claude--read-entries file offset)))
+    (when (and file offset)
+      ;; No file-exists-p first: for a remote project that is one more round trip.
+      (pcase-let ((`(,entries . ,end) (or (ignore-error file-error
+                                            (agent-claude--read-entries file offset))
+                                          (cons nil offset))))
         (agent-claude--set session :sync-offset end)
         (dolist (entry entries)
           (let ((source (plist-get entry :entrypoint)))
@@ -346,7 +579,7 @@ Do nothing if it is already watched or the file doesn't exist yet."
 (cl-defmethod agent-session-backend-start ((_ (eql claude)) session)
   (when (and (agent-claude--state session :resume)
              (zerop (hash-table-count (agent-session-blocks session))))
-    (agent-claude--replay session))
+    (agent-claude--show-history session))
   (agent-claude--watch session)
   (agent-session-start-process session (agent-claude--command session))
   (agent-claude--control
