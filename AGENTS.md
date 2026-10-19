@@ -69,10 +69,15 @@ var/                     runtime state (history, backups, pasted images...); git
 - `backend/agent-claude.el` — Claude Code backend: `claude -p --input-format stream-json
   --output-format stream-json --permission-prompt-tool stdio ...`. Permissions arrive
   as `control_request`/`can_use_tool`; model and permission mode switch live via control
-  requests; effort needs a restart with `--resume`. History and replay read
-  `~/.claude/projects/<encoded-root>/<session-id>.jsonl`; the same file is watched to
-  show messages written by other clients (Claude Desktop, terminal), and the CLI is
-  restarted with `--resume` before the next send so its context catches up.
+  requests; effort needs a restart with `--resume`. History reads
+  `~/.claude/projects/<encoded-root>/<session-id>.jsonl`. Replay never reads that file
+  in Emacs (it reaches tens of MB): a python3 script (`agent-claude--history-script`)
+  runs in the background where the file lives, on the host for a remote project, and
+  prints only the last `agent-claude-history-turns` turns with the fields shown; a
+  line above them loads earlier turns, inserted with `agent-session-call-before-block`.
+  The same file is watched to show messages written by other clients (Claude Desktop,
+  terminal), and the CLI is restarted with `--resume` before the next send so its
+  context catches up.
 - `backend/agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
