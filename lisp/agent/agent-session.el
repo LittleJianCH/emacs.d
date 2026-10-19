@@ -673,6 +673,10 @@ comes in frames (see agent-keeper.py)."
                (when (and (buffer-live-p buffer) (eq process (agent-session-process session)))
                  (if (and keeper (not (plist-get keeper :exit)))
                      (agent-session--disconnected session keeper)
+                   ;; The keeper holds the agent's last output until told
+                   ;; Emacs has it.
+                   (when (numberp (plist-get keeper :exit))
+                     (agent-session--keeper-kill session keeper))
                    (agent-session-set-status session 'exited)
                    (agent-session-notice
                     session (pcase (plist-get keeper :exit)

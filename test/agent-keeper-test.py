@@ -106,7 +106,15 @@ import base64
 check(e and e[0].split()[1] == '7' and b'bye from agent' in base64.b64decode(e[0].split()[2]), 'exit frame %s' % e)
 q.wait(timeout=5)
 time.sleep(0.5)
-check(not glob.glob(os.path.join(DIR, kid + '*')), 'cleaned after exit delivered')
+# The connection may have dropped as the exit frame went: it can be had again.
+check(alive(kid), 'exit kept until Emacs says it has it')
+q = attach(kid, off)
+out3 = frames(q, timeout=5); q.wait(timeout=5)
+_, pay3 = parse(out3)
+check(pay3 == pay2 and [l for l in out3 if l.startswith('E ')] == e, 'same output and exit again')
+subprocess.run([sys.executable, K, 'kill', kid], timeout=10)
+time.sleep(0.5)
+check(not glob.glob(os.path.join(DIR, kid + '*')), 'cleaned once Emacs has the exit')
 
 # 5: unknown id
 q = attach('tnone', 0); out = frames(q, timeout=3); q.wait()
@@ -132,4 +140,41 @@ time.sleep(0.5)
 check(p.poll() is not None and alive(kid), 'old client dropped, agent alive')
 q.kill(); q.wait(); time.sleep(1.5)
 check(not alive(kid), 'killing the new client stops it')
+
+# 7b: a connection lost amid output and mid-line detaches; the cut line is dropped
+kid = 't' + uuid.uuid4().hex[:8]
+flood = r'''
+import sys, threading, time
+def flood():
+    for i in range(200000):
+        sys.stdout.write('{"tick":%d,"pad":"%s"}\n' % (i, 'x' * 100))
+threading.Thread(target=flood, daemon=True).start()
+for line in sys.stdin:
+    print('{"echo":%s}' % line.strip(), flush=True)
+'''
+p = subprocess.Popen([sys.executable, K, 'start', kid, '--', sys.executable, '-c', flood],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+time.sleep(1)                 # output piles up unread
+p.stdin.write(b'"whole"\n"cut-off'); p.stdin.flush()
+time.sleep(0.3)
+p.stdin.close(); p.stdout.close(); p.wait(timeout=5)
+time.sleep(1.5)
+check(alive(kid), 'detach amid pending output keeps the agent')
+q = attach(kid, 0)
+out = frames(q, until=lambda l: 'echo' in l, timeout=20)
+echoes = [l.split(' ', 1)[1] for l in out if 'echo' in l]
+check(echoes == ['{"echo":"whole"}'], 'whole line delivered, cut line dropped: %s' % echoes)
+q.kill(); q.wait(); time.sleep(1.5)
+check(not alive(kid), 'flood agent stopped')
+
+# 8: an agent that can't start is reported as an exit, with the reason
+kid = 't' + uuid.uuid4().hex[:8]
+p = subprocess.Popen([sys.executable, K, 'start', kid, '--', 'no-such-agent-program'],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+out = frames(p, timeout=5)
+p.wait(timeout=5)
+e = [l for l in out if l.startswith('E ')]
+check(e and e[0].split()[1] == '127' and b'no-such-agent-program' in base64.b64decode(e[0].split()[2]),
+      'start failure reported with its reason')
+check(not glob.glob(os.path.join(DIR, kid + '*')), 'no files left after a failed start')
 print('all passed')

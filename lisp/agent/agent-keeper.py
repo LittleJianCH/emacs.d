@@ -7,7 +7,8 @@ can come and go:
 
   python3 -c KEEPER start ID -- COMMAND...   start COMMAND under keeper ID, attach
   python3 -c KEEPER attach ID OFFSET         attach again, from output byte OFFSET
-  python3 -c KEEPER kill ID                  stop the agent of keeper ID
+  python3 -c KEEPER kill ID                  stop the agent of keeper ID; after
+                                             its exit, end the keeper
 
 The client passes its stdin to the agent and prints the agent's output,
 one frame per line:
@@ -24,7 +25,11 @@ ending, a broken stdout or SIGTERM, which tramp-rpc's server sends the
 processes it started as the connection closes.  A client that disappears
 without detaching has been killed on purpose (Emacs deletes a remote process
 with SIGKILL), so the keeper stops the agent.  So does a keeper no client has
-attached to for IDLE seconds.
+attached to for IDLE seconds.  The client passes on whole lines only.
+
+After the agent exits the keeper keeps its output until `kill' says Emacs got
+the exit frame (or IDLE passes): a connection lost just as the frame was sent
+must not lose it.
 """
 
 import base64
@@ -36,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 DIR = os.path.expanduser('~/.cache/emacs-agent/keeper')
 IDLE = 24 * 3600
@@ -136,11 +142,17 @@ class Keeper:
     def accept(self, _mask):
         conn, _ = self.listener.accept()
         conn.setblocking(False)
-        state = {'sock': conn, 'header': True, 'inbuf': bytearray(),
-                 'outbuf': bytearray(), 'pos': 0, 'detached': False, 'done': False}
+        state = {'sock': conn, 'header': True, 'inbuf': bytearray(), 'outbuf': bytearray(),
+                 'pos': 0, 'detached': False, 'done': False, 'closed': False}
         self.sel.register(conn, selectors.EVENT_READ, lambda mask: self.client_io(state, mask))
 
     def close(self, state):
+        if state['closed']:
+            return
+        # What the client sent before it went may say it detached: read it
+        # before taking its going as a kill.
+        self.receive(state, drain=True)
+        state['closed'] = True
         self.sel.unregister(state['sock'])
         state['sock'].close()
         if state is self.client:
@@ -149,7 +161,41 @@ class Keeper:
             if not state['detached'] and not state['done']:
                 self.stop()
 
+    def receive(self, state, drain=False):
+        """Read and handle what the client sent; return False once it is gone.
+With DRAIN, read all that is buffered and handle only what concerns a closing
+connection."""
+        while True:
+            try:
+                data = state['sock'].recv(CHUNK)
+            except BlockingIOError:
+                return True
+            except OSError:
+                data = b''
+            if not data:
+                if not drain:
+                    self.close(state)
+                return False
+            state['inbuf'] += data
+            while not state['closed']:
+                newline = state['inbuf'].find(b'\n')
+                if newline < 0:
+                    break
+                line = bytes(state['inbuf'][:newline + 1])
+                del state['inbuf'][:newline + 1]
+                if not drain:
+                    self.client_line(state, line)
+                elif line == b'\0detach\n':
+                    state['detached'] = True
+                elif not state['header'] and not line.startswith(b'\0') and state is self.client:
+                    self.send_child(line)
+            if not drain:
+                return not state['closed']
+
     def client_io(self, state, mask):
+        if state['closed']:
+            # Closed by an earlier event of the same select.
+            return
         if mask & selectors.EVENT_WRITE:
             try:
                 n = state['sock'].send(state['outbuf'])
@@ -159,36 +205,26 @@ class Keeper:
             except OSError:
                 return self.close(state)
             self.update_client()
-            if self.client is not state:
+            if state['closed']:
                 return
         if mask & selectors.EVENT_READ:
-            try:
-                data = state['sock'].recv(CHUNK)
-            except BlockingIOError:
-                return
-            except OSError:
-                data = b''
-            if not data:
-                return self.close(state)
-            state['inbuf'] += data
-            while True:
-                newline = state['inbuf'].find(b'\n')
-                if newline < 0:
-                    break
-                line = bytes(state['inbuf'][:newline + 1])
-                del state['inbuf'][:newline + 1]
-                self.client_line(state, line)
-                if state['sock'].fileno() < 0:
-                    return
+            self.receive(state)
 
     def client_line(self, state, line):
         if state['header']:
             state['header'] = False
             words = line.split()
             if words[:1] == [b'kill']:
+                if self.code is not None:
+                    # The agent has exited and Emacs got its exit: done.
+                    self.finish()
                 self.stop()
                 return self.close(state)
-            state['pos'] = min(int(words[1]), self.complete)
+            try:
+                state['pos'] = min(int(words[1]), self.complete)
+            except (IndexError, ValueError):
+                state['detached'] = True
+                return self.close(state)
             if self.client:
                 # A newer client replaces the old one, which must not stop the agent.
                 self.client['detached'] = True
@@ -232,8 +268,9 @@ class Keeper:
         events = selectors.EVENT_READ | (selectors.EVENT_WRITE if out else 0)
         self.sel.modify(state['sock'], events, self.sel.get_key(state['sock']).data)
         if state['done'] and not out:
+            # Sent, but Emacs may not get it if the connection drops now: keep
+            # the spool until Emacs says it has (`kill'), for a reattach.
             self.close(state)
-            self.finish()
 
     def run(self):
         while True:
@@ -263,16 +300,20 @@ class Keeper:
 
 
 def daemonize(kid, command):
-    """Start the keeper of COMMAND in the background."""
+    """Start the keeper of COMMAND in the background.
+Return None once it runs the agent, else why it couldn't."""
     os.makedirs(DIR, mode=0o700, exist_ok=True)
     sock_path = paths(kid)[0]
+    log_path = os.path.join(DIR, kid + '.log')
     old = os.umask(0o077)
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(sock_path)
     os.umask(old)
     listener.listen()
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:
+        os.close(ready_r)
         try:
             os.setsid()
             os.umask(0o077)
@@ -281,20 +322,43 @@ def daemonize(kid, command):
             null = os.open(os.devnull, os.O_RDWR)
             for fd in (0, 1):
                 os.dup2(null, fd)
-            log = os.open(os.path.join(DIR, kid + '.log'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            log = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             os.dup2(log, 2)
             signal.signal(signal.SIGHUP, signal.SIG_IGN)
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-            Keeper(kid, listener, command).run()
+            try:
+                keeper = Keeper(kid, listener, command)
+            except Exception:
+                write_all(ready_w, traceback.format_exc().encode())
+                for path in paths(kid) + [log_path]:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                raise SystemExit
+            os.write(ready_w, b'\0')
+            os.close(ready_w)
+            keeper.run()
         except SystemExit:
             try:
-                os.unlink(os.path.join(DIR, kid + '.log'))
+                os.unlink(log_path)
             except OSError:
                 pass
+        except Exception:
+            traceback.print_exc()
         finally:
             os._exit(0)
+    os.close(ready_w)
     os.waitpid(pid, 0)
     listener.close()
+    status = b''
+    while True:
+        data = os.read(ready_r, CHUNK)
+        if not data:
+            break
+        status += data
+    os.close(ready_r)
+    return None if status == b'\0' else (status or b'the keeper did not start\n')
 
 
 def client(kid, header):
@@ -327,12 +391,19 @@ def client(kid, header):
     signal.signal(signal.SIGTERM, leave)
 
     def up():
+        # Whole lines only: a line cut off by a lost connection is dropped,
+        # and the detach that follows starts a line of its own.
+        pending = b''
         try:
             while True:
                 data = os.read(0, CHUNK)
                 if not data:
                     break
-                send(data)
+                pending += data
+                end = pending.rfind(b'\n') + 1
+                if end:
+                    send(pending[:end])
+                    pending = pending[end:]
         except OSError:
             pass
         leave()
@@ -343,10 +414,16 @@ def client(kid, header):
         if not data:
             break
         try:
-            os.write(1, data)
+            write_all(1, data)
         except OSError:
             leave()
     os._exit(0)
+
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def main(argv):
@@ -354,7 +431,11 @@ def main(argv):
     if not kid.replace('-', '').isalnum():
         sys.exit('bad keeper id')
     if mode == 'start':
-        daemonize(kid, argv[argv.index('--') + 1:])
+        failure = daemonize(kid, argv[argv.index('--') + 1:])
+        if failure:
+            # Reported like an exit of the agent, with the reason as its stderr.
+            write_all(1, b'E 127 %s\n' % base64.b64encode(failure[-ERR_TAIL:]))
+            sys.exit(127)
         client(kid, b'attach 0\n')
     elif mode == 'attach':
         client(kid, b'attach %d\n' % int(argv[2]))

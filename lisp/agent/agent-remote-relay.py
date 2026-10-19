@@ -15,6 +15,7 @@ passing on anything else.
 import glob
 import json
 import os
+import queue
 import socket
 import sys
 import threading
@@ -22,16 +23,20 @@ import time
 
 path, name = sys.argv[1], sys.argv[2]
 pattern = glob.escape(path.rsplit('-', 1)[0]) + '-*.sock'
+# Guards STATE.  Nothing blocks while holding it: lines for emx go to the
+# connection's writer thread through a queue.
 lock = threading.Lock()
-state = {'sock': None, 'ready': False, 'init': None, 'initialized': None,
+state = {'sock': None, 'out': None, 'ready': False, 'init': None, 'initialized': None,
          'replay': None, 'pending': {}, 'queue': []}
 LOST = 'Emacs is out of reach: the connection to its host was lost; retry once it is back'
 
 
 def emit(line):
     """Write LINE (bytes ending in a newline) to the agent."""
+    view = memoryview(line)
     try:
-        os.write(1, line)
+        while view:
+            view = view[os.write(1, view):]
     except OSError:
         os._exit(0)
 
@@ -68,22 +73,24 @@ def lost(sock):
     with lock:
         if state['sock'] is not sock:
             return
-        state['sock'] = None
-        state['ready'] = False
-        state['replay'] = None
-        for raw_id in state['pending'].values():
-            emit(error_line(raw_id))
-        state['pending'].clear()
-        state['queue'].clear()
+        owed = list(state['pending'].values())
+        state['out'].put(None)
+        state.update(sock=None, out=None, ready=False, replay=None, pending={}, queue=[])
     sock.close()
+    for raw_id in owed:
+        emit(error_line(raw_id))
 
 
-def send(sock, data):
-    try:
-        sock.sendall(data)
-        return True
-    except OSError:
-        return False
+def writer(sock, out):
+    """Send the lines put in OUT to emx on SOCK, until None."""
+    while True:
+        line = out.get()
+        if line is None:
+            return
+        try:
+            sock.sendall(line)
+        except OSError:
+            return lost(sock)
 
 
 def downstream(sock):
@@ -107,20 +114,19 @@ def downstream(sock):
             with lock:
                 if isinstance(message, dict) and 'method' not in message and 'id' in message:
                     key = json.dumps(message['id'])
-                    if state['replay'] == key:
+                    if state['replay'] == key and state['sock'] is sock:
                         # The new emx answered the replayed handshake: finish
-                        # it, tell the agent to list the tools again, then
-                        # pass on what waited.
-                        state['replay'] = None
-                        state['ready'] = True
-                        ok = state['initialized'] is None or send(sock, state['initialized'])
+                        # it, pass on what waited, and tell the agent to list
+                        # the tools again.
+                        if state['initialized'] is not None:
+                            state['out'].put(state['initialized'])
                         for queued in state['queue']:
-                            ok = ok and send(sock, queued)
-                        state['queue'].clear()
-                        emit(b'{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n')
-                        continue
-                    state['pending'].pop(key, None)
-                emit(line)
+                            state['out'].put(queued)
+                        state.update(replay=None, ready=True, queue=[])
+                        line = b'{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'
+                    else:
+                        state['pending'].pop(key, None)
+            emit(line)
 
 
 def attach():
@@ -128,13 +134,15 @@ def attach():
     sock = connect()
     if not sock:
         return False
+    out = queue.Queue()
     with lock:
-        state['sock'] = sock
+        state.update(sock=sock, out=out)
         if state['init'] is None:
             state['ready'] = True
         else:
             state['replay'] = json.dumps(json.loads(state['init'])['id'])
-            send(sock, state['init'])
+            out.put(state['init'])
+    threading.Thread(target=writer, args=(sock, out), daemon=True).start()
     threading.Thread(target=downstream, args=(sock,), daemon=True).start()
     return True
 
@@ -167,24 +175,25 @@ def upstream():
             except ValueError:
                 message = None
             request = isinstance(message, dict) and 'method' in message and 'id' in message
+            failed = False
             with lock:
                 if isinstance(message, dict):
                     if message.get('method') == 'initialize':
                         state['init'] = line
                     elif message.get('method') == 'notifications/initialized':
                         state['initialized'] = line
-                sock = state['sock']
-                if sock is None:
+                if state['sock'] is None:
+                    failed = request
+                else:
                     if request:
-                        emit(error_line(json.dumps(message['id']).encode()))
-                    continue
-                if request:
-                    state['pending'][json.dumps(message['id'])] = json.dumps(message['id']).encode()
-                if not state['ready']:
-                    state['queue'].append(line)
-                    continue
-            if not send(sock, line):
-                lost(sock)
+                        raw_id = json.dumps(message['id']).encode()
+                        state['pending'][raw_id.decode()] = raw_id
+                    if state['ready']:
+                        state['out'].put(line)
+                    else:
+                        state['queue'].append(line)
+            if failed:
+                emit(error_line(json.dumps(message['id']).encode()))
 
 
 attach()
