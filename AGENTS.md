@@ -131,7 +131,7 @@ var/                     runtime state (history, backups, pasted images...); git
   (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users
   mention sessions with it. Methods `sessions`, `session_read` (latest turns, paged)
   and `session_ask` (sends a prompt to an idle session the user opened, confirmed by
-  the user when `agent-collab-confirm` is set, and waits for its reply).
+  the user when `agent-collab-confirm` is set; the reply comes by mailbox).
   `session_start` starts a subagent: a child session of a profile in
   `agent-collab-profiles` (agent, model, effort, mode, cost; profiles of agents whose
   program isn't installed here, per `agent-session-define-agent`'s `:executable`, are
@@ -146,8 +146,9 @@ var/                     runtime state (history, backups, pasted images...); git
   exceeds the caller's, and `session_stop` closes it. Children live with their buffer
   and their parent (Claude `--no-session-persistence`, Codex ephemeral threads, dsh
   `parentSession`), and close once their reply is delivered
-  (`agent-collab-close-finished`) unless on screen or failed. A reply nobody waits for any more (wait 0, a timeout) goes to the
-  asker's mailbox, sent to its agent in one message once it is idle. A child's
+  (`agent-collab-close-finished`) unless on screen or failed. Neither call waits for the reply, which would hold up the asker's
+  whole turn and the user's messages: it goes to the asker's mailbox, sent to its
+  agent in one message once it is idle. A child's
 confirmations and questions also wait in its parent's footer, and the parent's
 `session_start` tool block shows the child's progress. The CLIs' own
   subagents are off (`agent-claude-disallowed-tools`, `agent-codex-native-subagents`,

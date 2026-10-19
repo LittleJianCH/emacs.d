@@ -1990,7 +1990,9 @@ leave the session running with the message stuck; the next send retries."
      (should (eq (car (agent-session-test--poll pending)) :agent-ui-pending))
      (should (string-match-p "向 @test-echo2 发送消息" (agent-session-test--footer)))
      (agent-session-approve)
-     (let ((reply (agent-session-test--poll pending)))
+     ;; It returns once sent; the reply comes by mailbox.
+     (should (string-prefix-p "Sent to @test-echo2." (agent-session-test--poll pending)))
+     (let ((reply (plist-get (cdr (agent-session-test--last-user session)) :text)))
        (should (string-match-p "\\`Reply from \"@test-echo2\" (Echo2):\n\n收到：帮我看看这个 diff" reply))
        (should (string-match-p "Sent by the Echo agent of session \"@test-echo\" through session_ask"
                                reply))
@@ -2008,11 +2010,10 @@ leave the session running with the message stuck; the next send retries."
      (should (= (length (agent-session-buffers)) 2))
      ;; Follow-ups go to the same session.
      (let ((agent-collab-confirm nil))
-       (should (string-match-p
-                "收到：再看看"
-                (agent-session-test--poll
-                 (agent-session-test--call "session_ask" buffer :prompt "再看看"
-                                           :session "@test-echo2")))))
+       (agent-session-test--poll
+        (agent-session-test--call "session_ask" buffer :prompt "再看看" :session "@test-echo2"))
+       (should (string-match-p "收到：再看看"
+                               (plist-get (cdr (agent-session-test--last-user session)) :text))))
      ;; Declined: the agent gets an error.
      (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第三次"
                                               :session "@test-echo2")))
@@ -2020,7 +2021,7 @@ leave the session running with the message stuck; the next send retries."
        (should-error (agent-session-test--poll pending) :type 'error))
      ;; Timed out before the user answered: the request closes.
      (let ((pending (agent-session-test--call "session_ask" buffer :prompt "第四次"
-                                              :session "@test-echo2" :wait 1)))
+                                              :session "@test-echo2")))
        (plist-put (gethash (cadr pending) agent-ui--deferred) :deadline 0)
        (should-error (agent-session-test--poll pending))
        (should-not (agent-session--pending-asks session))))))
@@ -2139,11 +2140,11 @@ to premium:\n- worker: Echo2 big, low cost.  Test worker." description))
        ;; It can't start sessions itself.
        (should-error (agent-session-test--call "session_start" (agent-session-buffer child)
                                                :profile "worker" :prompt "y")))
-     ;; With wait, the final reply.
-     (let ((reply (agent-session-test--poll
-                   (agent-session-test--call "session_start" buffer :profile "worker"
-                                             :prompt "实现 Y" :wait 30))))
-       (should (string-match-p "\\`Reply from \"@worker-2\" (Echo2):\n\n收到：Your task:\n实现 Y" reply)))
+     ;; Its final reply comes by mailbox.
+     (agent-session-test--poll
+      (agent-session-test--call "session_start" buffer :profile "worker" :prompt "实现 Y"))
+     (should (string-match-p "\\`Reply from \"@worker-2\" (Echo2):\n\n收到：Your task:\n实现 Y"
+                             (plist-get (cdr (agent-session-test--last-user session)) :text)))
      ;; Named after its task when the caller says.
      (should (string-prefix-p
               "Started @cgu-measure "
@@ -2402,29 +2403,26 @@ host, reports the error and leaves no dead session behind."
      (let ((agent-session-test--missing-program nil))
        (should-not (agent-session-agent-available-p 'test-missing))))))
 
-(ert-deftest agent-session-test-subagent-wait ()
-  "A caller waiting for a child gets its reply, or a note once the child waits
-for the user, and then the reply later as a message."
+(ert-deftest agent-session-test-subagent-no-wait ()
+  "Asking never waits in the call, which would hold up the caller's turn and
+the user's messages: it returns once sent, and the reply comes by mailbox,
+even one that waited for the user first."
   (agent-session-test--with-profiles
    (let ((session agent-session--current))
+     (dolist (name '("session_start" "session_ask"))
+       (let ((method (seq-find (lambda (m) (equal (plist-get m :name) name))
+                               (agent-session-test--call "describe" buffer))))
+         (should-not (plist-member (plist-get (plist-get method :inputSchema) :properties)
+                                   :wait))))
      (agent-session-set-status session 'running)
-     (let ((reply (agent-session-test--poll
-                   (agent-session-test--call "session_start" buffer :profile "worker"
-                                             :prompt "等我" :wait 30))))
-       (should (string-prefix-p "Reply from \"@worker\" (Echo2)" reply)))
-     ;; Answered through the wait: nothing more comes.
-     (agent-session-set-status session 'idle)
-     (should-not (plist-get (cdr (agent-session-test--last-user session)) :origin))
-     (agent-session-set-status session 'running)
-     (let* ((pending (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
-                       (agent-session-test--call "session_start" buffer :profile "worker"
-                                                 :prompt "要确认" :wait 30)))
-            (child (agent-session-find "@worker-2")))
-       (should (eq (car (agent-session-test--poll pending)) :agent-ui-pending))
+     (let* ((started (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
+                       (agent-session-test--poll
+                        (agent-session-test--call "session_start" buffer :profile "worker"
+                                                  :prompt "要确认"))))
+            (child (agent-session-find "@worker")))
+       (should (string-prefix-p "Started @worker" started))
        (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
                           :callback #'ignore)
-       (should (string-match-p "waiting for the user to confirm"
-                               (agent-session-test--poll pending)))
        (agent-session-text child "r1" "确认后做完了")
        (agent-session-set-status child 'idle)
        (agent-session-set-status session 'idle)
@@ -2455,7 +2453,7 @@ for the user, and then the reply later as a message."
                              (agent-session-test--poll
                               (agent-session-test--call "session_ask" buffer
                                                         :session (concat "@" (agent-session-handle peer))
-                                                        :prompt "看看" :wait 0))))
+                                                        :prompt "看看"))))
      (agent-session-set-status session 'idle)
      (should (string-search "收到：看看"
                             (plist-get (cdr (agent-session-test--last-user session)) :text))))))

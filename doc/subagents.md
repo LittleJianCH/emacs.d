@@ -91,8 +91,8 @@ between, newest first, noting what was left out.
 | --- | --- | --- |
 | `sessions` | lists open sessions with parent and children | anyone |
 | `session_read` | latest turns of a session, paged | anyone |
-| `session_ask` | asks an idle session and waits; later replies go to the mailbox | between sessions the user opened |
-| `session_start` | starts a child: `profile`, `context`, `prompt`, `title`, `wait` | sessions the user opened |
+| `session_ask` | asks an idle session; the reply goes to the mailbox | between sessions the user opened |
+| `session_start` | starts a child: `profile`, `context`, `prompt`, `handle`, `title` | sessions the user opened |
 | `session_stop` | stops and closes a child | its parent |
 
 ### Profiles
@@ -117,8 +117,7 @@ host) and the error returned.
 
 The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is
-named after its profile. `wait` other than 0 holds up the caller's whole turn,
-the user's messages included, so the description says to prefer 0. An agent
+named after its profile. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start
@@ -185,16 +184,18 @@ another child already is.
 
 ### Results
 
-`session_start` returns at once by default (`wait` 0); its child's final reply
-then reaches the parent through the mailbox. With `wait` N (at most 1500
-seconds, under Claude's 30-minute MCP idle limit) the call returns the reply,
-or returns early on timeout or when the child waits for the user; the reply
-then goes to the mailbox. `session_ask` behaves the same between the user's
-sessions.
+`session_start` returns once the child is started, and its final reply reaches
+the parent through the mailbox; `session_ask` does the same between the user's
+sessions. Neither waits for the reply. Both once took a `wait`, from before
+there was a mailbox, but a call that waits holds up the caller's whole turn:
+the user's messages queue behind it, and an agent that waited twenty minutes
+for a review left the user unanswered. An agent that needs the reply before
+going on ends its turn; the reply starts the next one. Only a confirmation the
+user has to give is waited for (`agent-collab-confirm-timeout`).
 
-The mailbox lives in Emacs memory: children don't outlive Emacs. Each awaited
+The mailbox lives in Emacs memory: children don't outlive Emacs. Each asked-for
 reply is tracked with its target, message and asker. When the target goes
-idle, exits or is closed and no call waits for it, the clipped reply goes to
+idle, exits or is closed, the clipped reply goes to
 the asker's mailbox; when the asker is idle, everything in it is sent as one
 message, with a hidden note that Emacs delivered it and the user didn't write
 it.
@@ -246,7 +247,7 @@ inherited conversation.
 | 1 | CLIs' own subagents off; Codex ignores other threads' notifications | done |
 | 2 | parent/child links, nested session list, message origins | done |
 | 3 | `session_start` fresh and handoff, profiles, caps | done |
-| 4 | children not saved, closed with the parent, mailbox, `wait`, `session_stop` | done |
+| 4 | children not saved, closed with the parent, mailbox, `session_stop` | done |
 | 5 | approvals and questions mirrored to the parent; child status in the parent's tool block; folded agent messages | done |
 | 6 | fork on all three backends | done |
 | 7 | children close once their reply is delivered; agent notes hidden from the transcript | done |
