@@ -588,11 +588,13 @@ execution, such as builds, measurements and test runs.
 - Reasoning on your context at your level, such as diagnosis or design: \
 fork; expert when you are stuck.
 - A change that isn't trivial, before you commit it: reviewer.
-- Independent pieces at once, one session each; never two sessions \
-editing the same files.
-Do it yourself when explaining the background would take longer than the \
-work, or when it needs the user.  When you start a session, tell the user \
-its profile and why.  A session's reply is a report, not proof: check its \
+- Independent pieces at once, one session each, while you do another: \
+code, its tests and its docs are often three.  Never two sessions editing \
+the same files.
+Keep the piece you need next, and work that needs the user.  For the \
+others, write a spec when that is quick; when explaining would take \
+longer than the work, fork rather than doing every piece yourself in turn.  \
+When you start a session, tell the user its profile and why.  A session's reply is a report, not proof: check its \
 work before you rely on it."
   "Advice to agents on when to start sessions, shown with session_start.
 It is part of every agent's tools, so changing it refreshes them in live

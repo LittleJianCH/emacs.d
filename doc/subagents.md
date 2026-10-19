@@ -110,10 +110,11 @@ an agent on this machine sees the agents installed here and one in a `/rpc:dev:`
 project those of that project on dev (per project, since tramp-rpc applies its
 direnv). A remote project's programs are looked up in one round trip (`command
 -v`) as a session opens there, so installing an agent shows once a session opens
-there again; the timer never makes round trips, and an unreachable host isn't
-asked again for 5 minutes. A child that fails to start anyway is closed (only
-that one, found by a token in its info: others may open while it waits for the
-host) and the error returned.
+there again; the timer never makes round trips. A failed lookup keeps the last
+result and isn't retried for 5 minutes, also when sessions open there; places
+whose lookup failed still get stamp updates. A child that fails to start anyway is closed (only that one,
+found by a token in its info: others may open while it waits for the host) and
+the error returned.
 
 The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is
@@ -130,6 +131,10 @@ when it needs your context", an agent forked an hour of builds and
 measurements: needing context rarely means needing it unwritten, since the
 caller can write the spec and the scripts, then hand the execution to a cheap
 profile. It also decided several tasks at once instead of each on its own.
+And agents tended to do every piece themselves in turn when a spec seemed like
+too much work; the guidance now says to run independent pieces (code, its
+tests, its docs) in parallel, and to fork when explaining would take longer
+than the work.
 Costs come in five tiers, minimal, low, medium, high and premium, so the most
 expensive models stand apart: DeepSeek flash is minimal, Haiku low, Codex's
 gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
@@ -170,10 +175,10 @@ gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 | Codex | `ephemeral: true` | none |
 | dsh | `parentSession` hides it from `sessions/list` | the log stays on disk |
 
-A child is named after its profile at once (`@coder-flash`, `@coder-flash-2`):
-the parent refers to it by that name. Closing a parent closes its children,
-asking first while one works. At most `agent-collab-max-active` children of a
-session work at once.
+A child without a `handle` is named after its profile at once (`@coder-flash`,
+`@coder-flash-2`): the parent refers to it by that name. Closing a parent closes
+its children, asking first while one works. At most `agent-collab-max-active`
+children of a session work at once.
 
 A child closes once its final reply has reached its parent's mailbox
 (`agent-collab-close-finished`), unless the user has it on screen or it failed.
@@ -218,8 +223,8 @@ expand them; the user's own messages stay whole.
 
 `session_start` with `context: "fork"` and no profile starts a child of the
 caller's own agent and settings (`agent-session-backend-fork-p` says which
-backends can), named `@<parent>-fork`. Each backend forks in Emacs, the child
-in its own process like any other child:
+backends can), named `@<parent>-fork` when the caller gives no `handle`. Each
+backend forks in Emacs, the child in its own process like any other child:
 
 - Claude: `--resume <parent> --fork-session --no-session-persistence` and the
   parent's other flags.
