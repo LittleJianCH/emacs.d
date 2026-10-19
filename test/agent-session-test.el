@@ -2217,6 +2217,94 @@ for the user, and then the reply later as a message."
      (should (string-search "收到：看看"
                             (plist-get (cdr (agent-session-test--last-user session)) :text))))))
 
+(ert-deftest agent-session-test-subagent-ask-mirror ()
+  "A child's confirmations and questions also wait in its parent's footer,
+named after the child; answering either settles both."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (child-buffer (agent-session-open 'test-echo2 default-directory nil nil
+                                            (list :parent buffer)))
+          (child (buffer-local-value 'agent-session--current child-buffer))
+          (answers nil))
+     ;; Approved in the parent.
+     (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
+                        :callback (lambda (key) (push key answers)))
+     (should (string-search "@test-echo2：运行 make" (agent-session-test--footer)))
+     (agent-session-approve)
+     (should (equal answers '(allow)))
+     (should-not (agent-session--pending-asks child))
+     (should-not (agent-session--pending-asks session))
+     ;; Denied in the child: the copy closes.
+     (agent-session-ask child :title "删除文件" :choices '((allow "允许") (deny "拒绝"))
+                        :callback (lambda (key) (push key answers)))
+     (should (agent-session--pending-asks session))
+     (with-current-buffer child-buffer (agent-session-deny))
+     (should (equal answers '(deny allow)))
+     (should-not (agent-session--pending-asks session))
+     ;; Questions answered in the parent reach the child.
+     (agent-session-ask-questions child :questions '((:question "用哪个库？" :options (("a") ("b"))))
+                                  :callback (lambda (result) (push result answers)))
+     (let ((prompts (agent-session-test--answering '("b") (agent-session-answer-questions))))
+       (should (string-match-p "\\[@test-echo2\\] 用哪个库？" (car prompts))))
+     (should (equal (car answers) '((:selected ("b")))))
+     (should-not (agent-session--pending-asks child))
+     ;; Closing the child closes what it left in the parent.
+     (agent-session-ask child :title "推送" :choices '((allow "允许")) :callback #'ignore)
+     (should (agent-session--pending-asks session))
+     (agent-session-kill-quietly child-buffer)
+     (should-not (agent-session--pending-asks session)))))
+
+(ert-deftest agent-session-test-subagent-tool-line ()
+  "The parent's session_start call shows how its child is doing."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current))
+     (agent-session-set-status session 'running)
+     (agent-session-tool session "call-1" :kind 'mcp :title "emacs · session_start"
+                         :status 'running)
+     (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
+       (agent-session-test--poll
+        (agent-session-test--call "session_start" buffer :profile "worker" :prompt "x")))
+     (let ((child (agent-session-find "@worker")))
+       (should (eq (plist-get (agent-session--block session "call-1") :subagent)
+                   (agent-session-buffer child)))
+       (agent-session-tool session "call-1" :status 'done)
+       (should (string-match-p "↳ @worker  ● 工作中" (agent-session-test--transcript)))
+       (agent-session-tool child "c1" :kind 'edit :title "calc.py" :status 'running)
+       (agent-session-set-info child :tokens 12300)
+       (should (string-match-p "↳ @worker  ● 工作中 [0-9]+s  ✎ calc.py  12.3k"
+                               (agent-session-test--transcript)))
+       (agent-session-ask child :title "写文件" :choices '((allow "允许")) :callback #'ignore)
+       (should (string-search "↳ @worker  ● 等待确认" (agent-session-test--transcript)))
+       (agent-session-kill-quietly (agent-session-buffer child))
+       (accept-process-output nil 0.05)
+       (should (string-search "↳ 子会话已关闭" (agent-session-test--transcript)))))))
+
+(ert-deftest agent-session-test-agent-message-fold ()
+  "A long message from another session's agent shows its first lines until
+expanded; the user's own messages stay whole."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          ;; hold: the fake agent doesn't echo it back.
+          (long (concat "hold\n" (mapconcat (lambda (i) (format "第 %d 行" i))
+                                            (number-sequence 2 10) "\n")))
+          (id (agent-session-submit session long "@other")))
+     (should (string-search "第 4 行\n  ▸ 还有 6 行，展开" (agent-session-test--transcript)))
+     (should-not (string-search "第 5 行" (agent-session-test--transcript)))
+     (should (string-search "▸ 还有 6 行，展开" (agent-session-test--transcript)))
+     (agent-session--update session id :collapsed nil)
+     (should (string-search "第 10 行" (agent-session-test--transcript)))
+     (should (string-search "▾ 收起" (agent-session-test--transcript)))
+     ;; Short ones and the user's own aren't folded.
+     (agent-session-submit session "两行\n就够了" "@other")
+     (agent-session-submit session (concat long "\n自己写的"))
+     (should (string-search "自己写的" (agent-session-test--transcript)))
+     (let ((transcript (agent-session-test--transcript)))
+       (with-temp-buffer
+         (insert transcript)
+         (should (= 0 (how-many "▸ 还有" (point-min) (point-max))))
+         (should (= 1 (how-many "▾ 收起" (point-min) (point-max))))))
+     (agent-session-set-status session 'idle))))
+
 (ert-deftest agent-session-test-rpc-deferred ()
   (let* ((polls 0)
          (agent-ui--methods

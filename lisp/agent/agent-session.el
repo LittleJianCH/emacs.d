@@ -805,6 +805,45 @@ Keep all characters and their positions so code-block offsets stay valid."
 (define-button-type 'agent-session-choice
   'face 'agent-session-button 'follow-link t)
 
+(define-button-type 'agent-session-subagent
+  'face 'agent-session-tool 'follow-link t 'help-echo "打开这个子会话"
+  'action (lambda (button)
+            (let ((buffer (button-get button 'agent-session-subagent)))
+              (when (buffer-live-p buffer)
+                (select-window (agent-session-display buffer))))))
+
+(defun agent-session--subagent-line (buffer)
+  "One line on the progress of the session in BUFFER, started by a tool call.
+Its status, latest tool and tokens; clicking its name opens it."
+  (let ((child (and (buffer-live-p buffer) (buffer-local-value 'agent-session--current buffer))))
+    (concat
+     "    "
+     (if (null child)
+         (propertize "↳ 子会话已关闭" 'face 'agent-session-dim)
+       (let ((tool (seq-find (pcase-lambda (`(,_ . ,block)) (eq (plist-get block :type) 'tool))
+                             (reverse (agent-session--blocks-in-order child))))
+             (tokens (plist-get (agent-session-info child) :tokens)))
+         (concat
+          (make-text-button (concat "↳ @" (agent-session-handle child)) nil
+                            'type 'agent-session-subagent 'agent-session-subagent buffer)
+          "  " (agent-session-status-label child)
+          (when tool
+            (propertize (format "  %s %s"
+                                (alist-get (plist-get (cdr tool) :kind) agent-session--tool-icons "•")
+                                (truncate-string-to-width (or (plist-get (cdr tool) :title) "")
+                                                          40 nil nil "…"))
+                        'face 'agent-session-dim))
+          (when tokens
+            (propertize (format "  %.1fk" (/ tokens 1000.0)) 'face 'agent-session-dim)))))
+     "\n")))
+
+(defun agent-session--refresh-subagent-line (child)
+  "Redraw the line on CHILD's progress in the session that started it."
+  (when-let* ((parent (agent-session-parent child))
+              (id (plist-get (agent-session-info child) :parent-tool))
+              ((agent-session--block parent id)))
+    (agent-session--update parent id)))
+
 (defun agent-session--indent (text)
   "Indent each line of TEXT by two spaces (via line-prefix, text unchanged)."
   (propertize text 'line-prefix "  " 'wrap-prefix "  "))
@@ -813,19 +852,47 @@ Keep all characters and their positions so code-block offsets stay valid."
   'face nil 'follow-link t 'action #'agent-session--toggle-fold
   'help-echo "展开 / 收起这一回合的过程")
 
+(defcustom agent-session-message-head-lines 4
+  "Lines shown of a folded message from another session's agent."
+  :type 'integer)
+
+(defun agent-session--message-head (text)
+  "The start of TEXT shown when it is folded, or nil if it is short enough.
+At most `agent-session-message-head-lines' lines and 600 characters."
+  (let ((lines (split-string text "\n")))
+    (when (or (> (length lines) agent-session-message-head-lines) (> (length text) 600))
+      (truncate-string-to-width
+       (string-join (seq-take lines agent-session-message-head-lines) "\n")
+       600 nil nil "…"))))
+
 (defun agent-session--format-user (id block)
   "Format a user message.
 When the turn is folded, a one-line summary of the process follows below
 \(click to expand)."
-  (let ((fold (plist-get block :fold)))
+  (let* ((fold (plist-get block :fold))
+         (text (plist-get block :text))
+         (head (and (plist-get block :origin) (agent-session--message-head text)))
+         (collapsed (and head (agent-session--collapsed-p block))))
     (concat (propertize (concat "▍ " (or (plist-get block :origin) "你"))
                         'face 'agent-session-user)
             (cond ((plist-get block :queued) (propertize "  排队中" 'face 'agent-session-dim))
                   ((plist-get block :steer) (propertize "  ↪ 引导" 'face 'agent-session-dim))
                   (t ""))
             "\n"
-            (agent-session--indent (plist-get block :text))
+            (agent-session--indent (if collapsed head text))
             "\n"
+            ;; A long message from another session's agent folds to its head.
+            (when head
+              (concat "  "
+                      (make-text-button
+                       (let ((more (- (length (split-string text "\n"))
+                                      (length (split-string head "\n")))))
+                         (cond ((not collapsed) "▾ 收起")
+                               ((> more 0) (format "▸ 还有 %d 行，展开" more))
+                               (t "▸ 展开全文")))
+                       nil 'type 'agent-session-toggle 'agent-session-block id
+                       'face 'agent-session-dim)
+                      "\n"))
             (when (consp fold)
               (concat "  "
                       (make-text-button
@@ -1113,6 +1180,8 @@ The output is shown below the code block."
 If the user toggled it, follow that choice; thinking is folded by default;
 tool calls are folded by default but expanded when they have a diff or failed."
   (cond ((plist-member block :collapsed) (plist-get block :collapsed))
+        ;; Messages from other sessions' agents are folded; the user's aren't.
+        ((eq (plist-get block :type) 'user) (and (plist-get block :origin) t))
         ((eq (plist-get block :kind) 'thinking) t)
         (t (not (or (plist-get block :diff) (eq (plist-get block :status) 'error))))))
 
@@ -1145,6 +1214,8 @@ Clicking the header line folds it; when expanded, the diff or output is shown."
          (make-text-button header nil 'type 'agent-session-toggle 'agent-session-block id)
        header)
      "\n"
+     (when-let* ((child (plist-get block :subagent)))
+       (agent-session--subagent-line child))
      (when (and has-body (not collapsed))
        (concat
         (agent-session--indent
@@ -1332,21 +1403,61 @@ the request.  DIFF is already shown by the tool block, so it isn't repeated."
                               :callback callback :tool tool :answer nil))))
     (when (and tool (agent-session--block session tool))
       (agent-session--update session tool :note "等待确认"))
+    (agent-session--mirror-ask session id)
     (agent-session--refresh session)
     (message "%s 需要确认：%s（C-c C-y 允许，C-c C-n 拒绝）"
              (agent-session-title session) title)
     id))
+
+(defun agent-session--mirror-ask (session id)
+  "Repeat request ID of SESSION in the session whose agent started SESSION.
+The user can answer it in either: answering one answers the other, and
+closing one closes the other."
+  (when-let* ((parent (agent-session-parent session))
+              (ask (agent-session--ask session id))
+              ((not (plist-get ask :origin))))
+    (let* ((handle (concat "@" (agent-session-handle session)))
+           (copy-id
+            (if-let* ((questions (plist-get ask :questions)))
+                (agent-session-ask-questions
+                 parent
+                 :questions (cons (let ((first (car questions)))
+                                    (plist-put (copy-sequence first) :header
+                                               (if-let* ((header (plist-get first :header)))
+                                                   (concat handle " · " header)
+                                                 handle)))
+                                  (cdr questions))
+                 :callback (lambda (answers)
+                             (agent-session--resolve-questions session id answers)))
+              (agent-session-ask
+               parent
+               :title (concat handle "：" (plist-get ask :title))
+               :detail (or (plist-get ask :detail)
+                           (when-let* ((tool (plist-get ask :tool))
+                                       (block (agent-session--block session tool)))
+                             (plist-get block :title)))
+               :choices (plist-get ask :choices)
+               :callback (lambda (key) (agent-session--answer session id key))))))
+      (plist-put (agent-session--ask parent copy-id) :origin (cons session id))
+      (plist-put ask :copies (cons (cons parent copy-id) (plist-get ask :copies))))))
 
 (defun agent-session--ask (session id)
   "The confirmation request ID in SESSION."
   (seq-find (lambda (ask) (equal (plist-get ask :id) id)) (agent-session-asks session)))
 
 (defun agent-session--close-ask (session ask label)
-  "Mark confirmation request ASK as handled; note result LABEL on its tool."
+  "Mark confirmation request ASK as handled; note result LABEL on its tool.
+Its copies in other sessions close with it."
   (plist-put ask :answer label)
   (when-let* ((tool (plist-get ask :tool))
               ((agent-session--block session tool)))
-    (agent-session--update session tool :note label)))
+    (agent-session--update session tool :note label))
+  (pcase-dolist (`(,other . ,id) (plist-get ask :copies))
+    (when-let* (((buffer-live-p (agent-session-buffer other)))
+                (copy (agent-session--ask other id))
+                ((not (plist-get copy :answer))))
+      (agent-session--close-ask other copy label)
+      (agent-session--refresh other))))
 
 (defun agent-session--answer (session id key)
   "Answer confirmation request ID with KEY."
@@ -1384,6 +1495,7 @@ When the user declines to answer, CALLBACK is called with `cancel'."
                               :callback callback :tool tool :answer nil))))
     (when (and tool (agent-session--block session tool))
       (agent-session--update session tool :note "等待回答"))
+    (agent-session--mirror-ask session id)
     (agent-session--refresh session)
     (message "%s 有问题等你回答：%s（C-c C-y 回答，C-c C-n 不回答）"
              (agent-session-title session) (plist-get (car questions) :question))
@@ -1492,6 +1604,18 @@ leaves the question unanswered."
           (plist-put ask :answers (append (plist-get ask :answers) (list answer)))
           (agent-session--refresh session))))
     (let ((answers (plist-get ask :answers)))
+      (agent-session--close-ask session ask (agent-session--answer-summary ask answers))
+      (funcall (plist-get ask :callback) answers)
+      (agent-session--refresh session))))
+
+(defun agent-session--resolve-questions (session id answers)
+  "Settle question request ID of SESSION with ANSWERS given elsewhere.
+ANSWERS `cancel' declines them."
+  (when-let* ((ask (agent-session--ask session id))
+              ((not (plist-get ask :answer))))
+    (if (eq answers 'cancel)
+        (agent-session--decline-questions session ask)
+      (plist-put ask :answers answers)
       (agent-session--close-ask session ask (agent-session--answer-summary ask answers))
       (funcall (plist-get ask :callback) answers)
       (agent-session--refresh session))))
@@ -1710,7 +1834,9 @@ Stop the timer when no session is running."
                              (agent-session-buffers))))
     (if running
         (dolist (buffer running)
-          (agent-session--render-footer (buffer-local-value 'agent-session--current buffer))
+          (let ((session (buffer-local-value 'agent-session--current buffer)))
+            (agent-session--render-footer session)
+            (agent-session--refresh-subagent-line session))
           (with-current-buffer buffer (force-mode-line-update)))
       (cancel-timer agent-session--clock)
       (setq agent-session--clock nil))))
@@ -1721,6 +1847,7 @@ Stop the timer when no session is running."
     (agent-session--render-footer session)
     (with-current-buffer (agent-session-buffer session)
       (force-mode-line-update))
+    (agent-session--refresh-subagent-line session)
     (when (and (eq (agent-session-status session) 'running) (not agent-session--clock))
       (setq agent-session--clock (run-with-timer 5 5 #'agent-session--tick)))
     (when agent-session--list-refresh-function
@@ -2779,6 +2906,18 @@ agent's latest settings; INFO is the initial info plist."
                   ;; Sessions its agent started go with it.
                   (dolist (child (agent-session-children session))
                     (agent-session-kill-quietly (agent-session-buffer child)))
+                  ;; So do its requests, and their copies in its parent.
+                  (dolist (ask (agent-session-asks session))
+                    (unless (plist-get ask :answer)
+                      (agent-session--close-ask session ask "会话已关闭")))
+                  ;; Its parent's line on it says it closed, once it has.
+                  (when-let* ((parent (agent-session-parent session))
+                              (tool (plist-get (agent-session-info session) :parent-tool)))
+                    (run-at-time 0 nil
+                                 (lambda ()
+                                   (when (and (buffer-live-p (agent-session-buffer parent))
+                                              (agent-session--block parent tool))
+                                     (agent-session--update parent tool)))))
                   (agent-session-backend-stop (agent-session-backend session) session)
                   ;; The buffer isn't deleted yet; refresh the session list later.
                   (when agent-session--list-refresh-function

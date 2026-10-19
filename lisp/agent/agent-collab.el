@@ -674,6 +674,21 @@ with session_start.  Your final reply goes back to it.  You can't start sessions
 yourself.)"
              (agent-session-title caller) handle))))
 
+(defun agent-collab--link-tool (caller child)
+  "Show the progress of CHILD under CALLER's session_start tool block.
+That is the oldest running session_start call not linked yet; the call
+doesn't say which block it is."
+  (when-let* ((entry (seq-find (pcase-lambda (`(,_ . ,block))
+                                 (and (eq (plist-get block :type) 'tool)
+                                      (eq (plist-get block :status) 'running)
+                                      (not (plist-get block :subagent))
+                                      (string-suffix-p "session_start"
+                                                       (or (plist-get block :title) ""))))
+                               (agent-session--blocks-in-order caller))))
+    (setf (agent-session-info child)
+          (plist-put (agent-session-info child) :parent-tool (car entry)))
+    (agent-session--update caller (car entry) :subagent (agent-session-buffer child))))
+
 (defun agent-collab--open-child (caller name plist title)
   "Start a session of profile NAME (PLIST) for the agent of CALLER.
 TITLE is its title."
@@ -687,6 +702,7 @@ TITLE is its title."
                         :title title)))
          (child (buffer-local-value 'agent-session--current buffer)))
     (agent-session-set-handle child name)
+    (agent-collab--link-tool caller child)
     child))
 
 (agent-ui-defmethod "session_start"
