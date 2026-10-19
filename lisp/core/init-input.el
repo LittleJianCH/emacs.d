@@ -111,6 +111,27 @@
     (dolist (hook '(evil-insert-state-entry-hook evil-replace-state-entry-hook))
       (add-hook hook #'my/sis--enter-insert))))
 
+(defun my/sis--english-source (&optional enabled-sources)
+  "Return the English keyboard layout enabled in macOS.
+ENABLED-SOURCES is the output of reading AppleEnabledInputSources;
+it is read from the system when nil.  Machines enable either the ABC
+or the U.S. layout, and sis can only switch to an enabled one."
+  (let ((text (or enabled-sources
+                  (with-output-to-string
+                    (call-process "defaults" nil standard-output nil "read"
+                                  "com.apple.HIToolbox"
+                                  "AppleEnabledInputSources"))))
+        (start 0)
+        source)
+    (while (and (not source)
+                (string-match "\"KeyboardLayout ID\" = \\([0-9]+\\);"
+                              text start))
+      (setq start (match-end 0)
+            source (pcase (match-string 1 text)
+                     ("252" "com.apple.keylayout.ABC")
+                     ("0" "com.apple.keylayout.US"))))
+    (or source "com.apple.keylayout.US")))
+
 (defun my/sis-enable-agent-prefixes ()
   "Keep input-source switching active in agent conversation buffers."
   ;; sis normally excludes buffers named *...*, including our editable UI.
@@ -127,7 +148,7 @@
             sis-prefix-override-buffer-disable-predicates)
   :config
   (setq sis-prefix-override-keys '("C-c" "C-x" "C-h" "M-g" "M-s"))
-  (sis-ism-lazyman-config "com.apple.keylayout.US"
+  (sis-ism-lazyman-config (my/sis--english-source)
                          "com.apple.inputmethod.SCIM.Shuangpin" 'macism)
   (advice-add 'sis--restore-from-buffer :around #'my/sis--restore-buffer)
   (advice-add 'sis--respect-evil :after #'my/sis--setup-evil)

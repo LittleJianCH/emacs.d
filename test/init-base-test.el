@@ -75,6 +75,20 @@ Scrolling needs a real display: run it in the running Emacs."
     (should-not truncate-lines)
     (should visual-line-mode)))
 
+(ert-deftest init-base-sis-english-source ()
+  "The English source is whichever layout this Mac has enabled."
+  (should (equal (my/sis--english-source
+                  "({\"KeyboardLayout ID\" = 252;\n\"KeyboardLayout Name\" = ABC;},
+{\"Input Mode\" = \"com.apple.inputmethod.SCIM.Shuangpin\";})")
+                 "com.apple.keylayout.ABC"))
+  (should (equal (my/sis--english-source
+                  "({\"KeyboardLayout ID\" = 0;\n\"KeyboardLayout Name\" = \"U.S.\";})")
+                 "com.apple.keylayout.US"))
+  (should (equal (my/sis--english-source
+                  "({\"KeyboardLayout ID\" = 19;},{\"KeyboardLayout ID\" = 252;})")
+                 "com.apple.keylayout.ABC"))
+  (should (equal (my/sis--english-source "()") "com.apple.keylayout.US")))
+
 (ert-deftest init-base-sis-agent-prefixes ()
   "Keep prefix switching available in editable star-named conversations."
   (skip-unless (require 'sis nil t))
