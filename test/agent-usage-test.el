@@ -334,10 +334,11 @@
          :windows (list (list :id "five_hour" :label "5h"
                               :used 0.2 :resets later)))
         (should (agent-usage-test--quota 'claude "host1"))
-        (should (equal (plist-get (agent-usage-test--quota 'claude "host1")
-                                  :windows)
-                       (list (list :id "five_hour" :label "5h"
-                                   :used 0.2 :resets later))))
+        (let ((window (car (plist-get (agent-usage-test--quota 'claude "host1")
+                                      :windows))))
+          (should (equal (list (plist-get window :id) (plist-get window :used)
+                               (plist-get window :resets))
+                         (list "five_hour" 0.2 later))))
         ;; The local quota is still there under its own key.
         (should (agent-usage-test--quota 'claude)))
       ;; A sparse update must leave exactly the two windows, not a stale
@@ -456,6 +457,65 @@
                        (insert-file-contents agent-usage-file)
                        (buffer-string))
                      "")))))
+
+;;; Forecast
+
+(ert-deftest agent-usage-test-forecast ()
+  "The pace follows the recent trend, not the average since the window began."
+  (let* ((now 1800000000.0)
+         (day 86400)
+         (weekly (lambda (used resets history)
+                   (list :id "seven_day" :minutes 10080 :used used :resets resets
+                         :history history))))
+    ;; Idle over the weekend, 20% today, four days left: right on pace,
+    ;; though by the average since the window began it looked plentiful.
+    (let ((forecast (agent-usage-forecast
+                     (funcall weekly 0.2 (+ now (* 4 day))
+                              `((,(- now (* 3 day)) . 0.0) (,(- now day) . 0.0) (,now . 0.2)))
+                     now)))
+      (should (< (abs (- (plist-get forecast :rate) 0.2)) 1e-9))
+      (should (< (abs (- (plist-get forecast :projected) 1.0)) 1e-9))
+      (should-not (plist-get forecast :exhausts)))
+    ;; 30% in the last day with 60% left: out in two days, before the reset.
+    (let ((forecast (agent-usage-forecast
+                     (funcall weekly 0.4 (+ now (* 4 day))
+                              `((,(- now (* 2 day)) . 0.05) (,(- now day) . 0.1) (,now . 0.4)))
+                     now)))
+      (should (< (abs (- (plist-get forecast :projected) 1.6)) 1e-9))
+      (should (< (abs (- (plist-get forecast :exhausts) (+ now (* 2 day)))) 1e-3)))
+    ;; Readings of a few minutes only: the average since the window began.
+    (let ((forecast (agent-usage-forecast
+                     (funcall weekly 0.12 (+ now (* 4 day))
+                              `((,(- now 600) . 0.1) (,now . 0.12)))
+                     now)))
+      (should (< (abs (- (plist-get forecast :rate) 0.04)) 1e-9))
+      (should (= (plist-get forecast :since) (- now (* 3 day)))))
+    ;; A window past its reset has no forecast.
+    (should-not (agent-usage-forecast (funcall weekly 0.5 (- now 1) nil) now))))
+
+(ert-deftest agent-usage-test-window-history ()
+  "Readings accumulate over a period and start again when it resets."
+  (agent-usage-test--with-files
+    (let ((session (agent-usage-test--session 'claude))
+          (resets (+ (float-time) 86400)))
+      (agent-usage-set-quota session :windows (list (list :id "seven_day" :used 0.1
+                                                          :resets resets)))
+      (agent-usage-set-quota session :windows (list (list :id "seven_day" :used 0.2
+                                                          :resets (+ resets 30))))
+      (let ((window (car (plist-get (agent-usage-test--quota 'claude) :windows))))
+        (should (equal (mapcar #'cdr (plist-get window :history)) '(0.1 0.2))))
+      ;; Another window's update keeps this one's readings.
+      (agent-usage-set-quota session :windows (list (list :id "five_hour" :used 0.3
+                                                          :resets resets)))
+      (let ((window (cl-find "seven_day" (plist-get (agent-usage-test--quota 'claude) :windows)
+                             :key (lambda (w) (plist-get w :id)) :test #'equal)))
+        (should (= (length (plist-get window :history)) 2)))
+      ;; A new period.
+      (agent-usage-set-quota session :windows (list (list :id "seven_day" :used 0.01
+                                                          :resets (+ resets (* 7 86400)))))
+      (let ((window (cl-find "seven_day" (plist-get (agent-usage-test--quota 'claude) :windows)
+                             :key (lambda (w) (plist-get w :id)) :test #'equal)))
+        (should (equal (mapcar #'cdr (plist-get window :history)) '(0.01)))))))
 
 ;;; Robustness
 

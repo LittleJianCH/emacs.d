@@ -362,12 +362,37 @@ PLIST has :time, :windows, a list of (:id ID :label LABEL :used FRACTION
         (print-level nil))
     (write-region (prin1-to-string agent-usage--quotas) nil agent-usage-quota-file nil 'silent)))
 
+(defconst agent-usage--history-size 300
+  "Most readings a window keeps in its :history.")
+
+(defun agent-usage--same-period-p (a b)
+  "Non-nil if windows A and B are readings of one period: same reset time.
+A few minutes apart still count: some agents round the reset time."
+  (let ((ra (plist-get a :resets))
+        (rb (plist-get b :resets)))
+    (and ra rb (< (abs (- ra rb)) 600))))
+
 (defun agent-usage--merge-windows (old new)
-  "Windows OLD updated by NEW, matched by :id, in NEW's order then OLD's."
-  (append new (cl-remove-if (lambda (window)
-                              (cl-find (plist-get window :id) new
-                                       :key (lambda (w) (plist-get w :id)) :test #'equal))
-                            old)))
+  "Windows OLD updated by NEW, matched by :id, in NEW's order then OLD's.
+Each window keeps the readings of its current period as :history,
+\((TIME . USED) ...), oldest first: the trend of its use."
+  (let ((now (float-time)))
+    (append
+     (mapcar
+      (lambda (window)
+        (let* ((previous (cl-find (plist-get window :id) old
+                                  :key (lambda (w) (plist-get w :id)) :test #'equal))
+               (history (and previous (agent-usage--same-period-p previous window)
+                             (plist-get previous :history)))
+               (history (append history (list (cons now (or (plist-get window :used) 0))))))
+          (append (cl-loop for (key value) on window by #'cddr
+                           unless (eq key :history) append (list key value))
+                  (list :history (last history agent-usage--history-size)))))
+      new)
+     (cl-remove-if (lambda (window)
+                     (cl-find (plist-get window :id) new
+                              :key (lambda (w) (plist-get w :id)) :test #'equal))
+                   old))))
 
 (defun agent-usage-set-quota (session &rest props)
   "Note what the account of SESSION's agent has left.
@@ -659,16 +684,67 @@ Not the selected window's: the page is also redrawn from elsewhere."
 
 ;;;; Allowances
 
+(defun agent-usage--used-at (history time)
+  "Use in HISTORY ((TIME . USED) ...) at TIME: the last reading by then."
+  (cl-loop with used = nil
+           for (at . value) in history
+           while (<= at time) do (setq used value)
+           finally return used))
+
+(defun agent-usage-forecast (window &optional now)
+  "Where rate-limit WINDOW is heading at its recent pace, or nil.
+Return a plist: :rate, the fraction used per day lately; :projected, the
+fraction used when the window resets at that rate (above 1 means it runs
+out first); :exhausts, the time it runs out, if before the reset; :since,
+the start of the readings the rate comes from.
+
+The rate is that of the last day for a weekly window (the last hour for
+a 5-hour one; a seventh of the window in general, at least an hour), so
+idle days early in the week don't make the rest look plentiful.  Until
+the readings cover half of that, it is the average since the window
+began.  NOW defaults to the current time."
+  (let* ((now (or now (float-time)))
+         (used (or (plist-get window :used) 0))
+         (resets (plist-get window :resets))
+         (minutes (plist-get window :minutes))
+         (history (plist-get window :history)))
+    (when (and resets minutes (< now resets))
+      (let* ((length (* 60.0 minutes))
+             (start (- resets length))
+             (lookback (max 3600.0 (/ length 7)))
+             (from (- now lookback))
+             (first (car history))
+             (base (cond ((agent-usage--used-at history from)
+                          (cons from (agent-usage--used-at history from)))
+                         ((and first (<= (car first) (- now (/ lookback 2))))
+                          first)
+                         ((< start now) (cons start 0.0))))
+             (rate (and base (> now (car base))
+                        (/ (max 0.0 (- used (cdr base))) (- now (car base)))))
+             (projected (and rate (+ used (* rate (- resets now))))))
+        (when rate
+          (list :rate (* rate 86400)
+                :projected projected
+                :exhausts (and (> projected 1) (> rate 0)
+                               (+ now (/ (max 0.0 (- 1 used)) rate)))
+                :since (car base)))))))
+
+(defun agent-usage-agent-forecast (agent &optional host)
+  "Forecast of AGENT's tightest window on HOST, the one heading highest.
+Return the window's forecast (see `agent-usage-forecast') with :window
+added, or nil when no window has one."
+  (let ((quota (cdr (assoc (cons agent host) (agent-usage-quotas)))))
+    (car (cl-sort (delq nil (mapcar (lambda (window)
+                                      (when-let* ((forecast (agent-usage-forecast window)))
+                                        (append forecast (list :window window))))
+                                    (plist-get quota :windows)))
+                  #'> :key (lambda (forecast) (plist-get forecast :projected))))))
+
 (defun agent-usage--pace (window)
-  "How far WINDOW's use is ahead of an even pace, in percent, or nil.
-Positive: at this rate it runs out before it resets."
-  (when-let* ((minutes (plist-get window :minutes))
-              (resets (plist-get window :resets))
-              (start (- resets (* 60 minutes)))
-              (now (float-time))
-              ((< start now resets)))
-    (round (* 100 (- (or (plist-get window :used) 0)
-                     (/ (- now start) (* 60.0 minutes)))))))
+  "How far past the window's limit its recent pace leads, in percent.
+Positive: at this rate it runs out before it resets.  Nil if unknown."
+  (when-let* ((forecast (agent-usage-forecast window)))
+    (round (* 100 (- (plist-get forecast :projected) 1)))))
 
 (defun agent-usage--insert-window (window)
   "Insert the line of rate-limit WINDOW."
@@ -688,17 +764,24 @@ Positive: at this rate it runs out before it resets."
                           'face 'agent-session-dim
                           'help-echo (format-time-string "%m-%d %H:%M 重置" resets))))
     (when pace
-      (insert (propertize " · " 'face 'agent-session-dim)
-              (propertize (cond ((> pace 0) (format "超速 %d%%" pace))
-                                ((< pace 0) (format "有余 %d%%" (- pace)))
-                                (t "匀速"))
-                          'face (if (> pace 0) 'agent-usage-low 'agent-session-dim)
-                          'help-echo
-                          (concat "已用比例减去窗口已过时间的比例。"
-                                  (if (> pace 0)
-                                      (format "比匀速多用了 %d%%：照这个速度会在重置前用完" pace)
-                                    (format "比匀速少用了 %d%%：照这个速度能撑到重置" (- pace)))))))
+      (let ((forecast (agent-usage-forecast window)))
+        (insert (propertize " · " 'face 'agent-session-dim)
+                (propertize (cond ((> pace 2) (format "超速 %d%%" pace))
+                                  ((< pace -2) (format "有余 %d%%" (- pace)))
+                                  (t "匀速"))
+                            'face (if (> pace 2) 'agent-usage-low 'agent-session-dim)
+                            'help-echo (agent-usage--forecast-help forecast)))))
     (insert "\n")))
+
+(defun agent-usage--forecast-help (forecast)
+  "Tooltip explaining FORECAST."
+  (concat (format "%s以来每天用 %d%%，照这个速度到重置时会用到 %d%%"
+                  (format-time-string "%m-%d %H:%M " (plist-get forecast :since))
+                  (round (* 100 (plist-get forecast :rate)))
+                  (round (* 100 (plist-get forecast :projected))))
+          (if-let* ((exhausts (plist-get forecast :exhausts)))
+              (format "，约 %s后用完" (agent-usage--duration (- exhausts (float-time))))
+            "")))
 
 (defun agent-usage--age (time)
   "How long ago TIME was, as text."

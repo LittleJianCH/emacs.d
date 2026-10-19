@@ -188,7 +188,11 @@ confirmations and questions also wait in its parent's footer, and the parent's
   Codex's `account/rateLimits/*`, and dsh's balance, which the bridge's `balance`
   request fetches inside dsh with its own credentials. The latest per agent and host
   is kept in `var/agent-quota.eld` and shown in the echo area while idle
-  (`agent-usage-echo-mode`, drawn into ` *Minibuf-0*`). `C-c a u` opens the usage
+  (`agent-usage-echo-mode`, drawn into ` *Minibuf-0*`). Each window keeps the readings
+  of its period (`:history`); `agent-usage-forecast` projects it from the last day's
+  pace (a seventh of the window), so idle days don't make the rest look plentiful,
+  and `agent-usage-agent-forecast` gives an agent's tightest window: meant for pricing
+  subagent profiles by what their accounts have left. `C-c a u` opens the usage
   page (modeled on magpie's): allowances with pace, the period's totals and timeline,
   and usage by harness, model and project; RET on a row filters to it.
   `M-x agent-usage-clear` deletes the ledger after a `yes-or-no-p`; keep it unbound.
