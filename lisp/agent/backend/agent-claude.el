@@ -700,6 +700,12 @@ offset read up to."
   (agent-claude--unwatch session)
   (cl-call-next-method))
 
+(cl-defmethod agent-session-backend-reattached ((_ (eql claude)) session)
+  ;; The follow script on the host went down with the connection.  It
+  ;; resumes from the offset it last reported and skips our CLI's entries.
+  (agent-claude--unwatch session)
+  (agent-claude--watch session))
+
 (cl-defmethod agent-session-backend-models ((_ (eql claude)) session)
   (mapcar (lambda (model)
             (list :id (plist-get model :value)

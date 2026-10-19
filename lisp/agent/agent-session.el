@@ -33,6 +33,7 @@
 (defvar treesit-auto-install-grammar)
 (declare-function evil-insert-state "evil-states")
 (declare-function agent-session-table-render "agent-session-table" (text))
+(declare-function tramp-connectable-p "tramp" (vec-or-filename))
 (require 'transient)
 
 (defgroup agent-session nil
@@ -85,7 +86,7 @@
   root           ; project root directory
   buffer
   process
-  (status 'starting)   ; starting / idle / running / exited
+  (status 'starting)   ; starting / idle / running / disconnected / exited
   info           ; info plist shown in the header line: :model :tokens :cost ...
   state          ; backend-private state plist
   (blocks (make-hash-table :test #'equal))
@@ -319,7 +320,12 @@ They are killed with it (see `agent-session-open')."
   (when-let* ((process (agent-session-process session)))
     ;; Detach first, so the old process's sentinel ignores this exit.
     (setf (agent-session-process session) nil)
-    (when (process-live-p process) (delete-process process))))
+    (when (process-live-p process) (delete-process process))
+    ;; Deleting a kept agent's client (SIGKILL through tramp-rpc) stops
+    ;; the agent too, but a disconnected session has no client; and a
+    ;; client killed some other way would only detach.
+    (when-let* ((keeper (process-get process 'agent-session-keeper)))
+      (agent-session--keeper-kill session keeper))))
 
 (cl-defgeneric agent-session-backend-models (backend session)
   "Available models.
@@ -591,11 +597,44 @@ listing its worktrees would take more round trips to the host."
                                              (agent-session--parse-worktrees output)))))))
         (error (funcall callback (list (list root))))))))
 
+(defcustom agent-session-keep-remote t
+  "Whether a remote agent outlives the connection to its host.
+It then runs under a keeper there (agent-keeper.py) instead of under
+tramp-rpc's server: when the connection drops, the session shows as
+disconnected and attaches again once the connection is back, getting
+the output it missed."
+  :type 'boolean)
+
+(defconst agent-session--keeper-file
+  (expand-file-name "agent-keeper.py" (file-name-directory (or load-file-name buffer-file-name)))
+  "The keeper script, run on the host of a remote agent.")
+
+(defun agent-session--keeper-command (&rest args)
+  "Command line on the host running the keeper with ARGS."
+  (append (list "python3" "-c" (with-temp-buffer
+                                  (insert-file-contents agent-session--keeper-file)
+                                  (buffer-string)))
+          args))
+
 (defun agent-session-start-process (session command)
   "Start the background process of SESSION with COMMAND.
 Each JSON line is handed to the backend.  For a remote project the
 process runs on its host through the file handler (tramp-rpc), where
-the project, its toolchain and the agent's own history live."
+the project, its toolchain and the agent's own history live; with
+`agent-session-keep-remote', under a keeper that outlives the connection."
+  (if (and agent-session-keep-remote (file-remote-p (agent-session-root session)))
+      (let ((id (format "%s-%s" (agent-session-agent session)
+                        (substring (md5 (format "%s%s%s" (random) (float-time) (emacs-pid))) 0 12))))
+        (agent-session--spawn
+         session (apply #'agent-session--keeper-command "start" id "--" command)
+         ;; Shared by the processes attached to this agent in turn.
+         (list :id id :offset 0 :exit nil :status nil)))
+    (agent-session--spawn session command nil)))
+
+(defun agent-session--spawn (session command keeper)
+  "Start the process of SESSION running COMMAND.
+KEEPER, a plist, is the keeper of a kept remote agent, whose output
+comes in frames (see agent-keeper.py)."
   (let* ((buffer (agent-session-buffer session))
          (default-directory (agent-session-root session))
          (remote (file-remote-p default-directory))
@@ -605,6 +644,7 @@ the project, its toolchain and the agent's own history live."
          (process-environment (if remote
                                   process-environment
                                 (agent-session-environment session)))
+         (stderr (get-buffer-create (format " *%s stderr*" (buffer-name buffer))))
          (pending "")
          (process
           (make-process
@@ -614,27 +654,149 @@ the project, its toolchain and the agent's own history live."
            :coding 'utf-8-unix
            :noquery t
            :file-handler (and remote t)
-           :stderr (get-buffer-create (format " *%s stderr*" (buffer-name buffer)))
+           :stderr stderr
            :filter
            (lambda (_process output)
              (setq pending (concat pending output))
              (let ((lines (split-string pending "\n")))
                (setq pending (car (last lines)))
                (dolist (line (butlast lines))
-                 (unless (string-blank-p line)
-                   (agent-session--dispatch session line)))))
+                 (if keeper
+                     (agent-session--keeper-line session keeper stderr line)
+                   (unless (string-blank-p line)
+                     (agent-session--dispatch session line))))))
            :sentinel
            (lambda (process _event)
              (unless (process-live-p process)
                ;; A process that was replaced or stopped on purpose isn't an
                ;; unexpected exit.
                (when (and (buffer-live-p buffer) (eq process (agent-session-process session)))
-                 (agent-session-set-status session 'exited)
-                 (agent-session-notice
-                  session (format "进程已退出（%s，退出码 %s）"
-                                  (process-status process) (process-exit-status process))
-                  'agent-session-error)))))))
+                 (if (and keeper (not (plist-get keeper :exit)))
+                     (agent-session--disconnected session keeper)
+                   (agent-session-set-status session 'exited)
+                   (agent-session-notice
+                    session (pcase (plist-get keeper :exit)
+                              ('gone "agent 已不在主机上")
+                              ('nil (format "进程已退出（%s，退出码 %s）"
+                                            (process-status process) (process-exit-status process)))
+                              (code (format "进程已退出（退出码 %s）" code)))
+                    'agent-session-error))))))))
+    (when keeper (process-put process 'agent-session-keeper keeper))
     (setf (agent-session-process session) process)))
+
+(defun agent-session--keeper-line (session keeper stderr line)
+  "Handle frame LINE from the keeper KEEPER of SESSION.
+The agent's stderr at its exit goes into buffer STDERR."
+  (cond
+   ((string-match "\\`\\([0-9]+\\) " line)
+    (setf (plist-get keeper :offset) (string-to-number (match-string 1 line)))
+    (let ((line (substring line (match-end 0))))
+      (unless (string-blank-p line)
+        (agent-session--dispatch session line))))
+   ((string-match "\\`E \\([0-9]+\\) ?\\(.*\\)" line)
+    (setf (plist-get keeper :exit) (string-to-number (match-string 1 line)))
+    (let ((tail (match-string 2 line)))
+      (when (buffer-live-p stderr)
+        (with-current-buffer stderr
+          (goto-char (point-max))
+          (insert (decode-coding-string (base64-decode-string tail) 'utf-8))))))
+   ((equal line "G")
+    (setf (plist-get keeper :exit) 'gone))))
+
+(defun agent-session--keeper (session)
+  "The keeper plist of SESSION's agent, or nil if it has none."
+  (when-let* ((process (agent-session-process session)))
+    (process-get process 'agent-session-keeper)))
+
+(defvar agent-session--reattach-timer nil
+  "Timer attaching disconnected sessions again, while there are any.")
+
+(defun agent-session--disconnected (session keeper)
+  "Mark SESSION as cut off from its agent, which KEEPER keeps running."
+  (setf (plist-get keeper :status) (agent-session-status session))
+  (agent-session-set-status session 'disconnected)
+  (agent-session-notice session "与主机的连接断开了，agent 仍在主机上运行；连接恢复后会自动接上"
+                        'agent-session-dim)
+  (unless (timerp agent-session--reattach-timer)
+    (setq agent-session--reattach-timer
+          (run-at-time 10 10 #'agent-session--reattach-all))))
+
+(defun agent-session--host-connected-p (root)
+  "Whether the connection to the host of remote ROOT is up.
+Never opens one.  (Bound around a remote `make-process' instead,
+`non-essential' would quietly start the process on this machine.)"
+  (let ((non-essential t))
+    (tramp-connectable-p root)))
+
+(defun agent-session--reattach-all ()
+  "Attach the disconnected sessions whose host is connected again.
+Runs on a timer, so it never opens a connection."
+  (let ((waiting nil))
+    (dolist (buffer (agent-session-buffers))
+      (let ((session (buffer-local-value 'agent-session--current buffer)))
+        (when (eq (agent-session-status session) 'disconnected)
+          (when (agent-session--host-connected-p (agent-session-root session))
+            (ignore-errors (agent-session-reattach session)))
+          (when (eq (agent-session-status session) 'disconnected)
+            (setq waiting t)))))
+    (unless waiting
+      (cancel-timer agent-session--reattach-timer)
+      (setq agent-session--reattach-timer nil))))
+
+(cl-defgeneric agent-session-backend-reattached (backend session)
+  "SESSION has been attached again to its agent, kept running on its host.
+Restart what else of the session went down with the connection."
+  (ignore backend session))
+
+(defvar agent-session-reattach-functions nil
+  "Functions called with a session attached again to its kept agent.")
+
+(defun agent-session-reattach (session)
+  "Attach SESSION again to its agent, kept running on the host.
+Signal an error if the host can't be reached."
+  (when-let* ((keeper (and (eq (agent-session-status session) 'disconnected)
+                           (agent-session--keeper session))))
+    (agent-session--spawn session
+                          (agent-session--keeper-command
+                           "attach" (plist-get keeper :id)
+                           (number-to-string (plist-get keeper :offset)))
+                          keeper)
+    (agent-session-set-status session (or (plist-get keeper :status) 'idle))
+    (agent-session-notice session "已重新接上主机上的 agent" 'agent-session-dim)
+    (agent-session-backend-reattached (agent-session-backend session) session)
+    (run-hook-with-args 'agent-session-reattach-functions session)))
+
+(defun agent-session-ensure-attached (session)
+  "Attach SESSION again if it is disconnected, or signal a user error."
+  (when (eq (agent-session-status session) 'disconnected)
+    (condition-case err
+        (agent-session-reattach session)
+      (error (user-error "与主机的连接还没恢复：%s" (error-message-string err))))
+    (when (eq (agent-session-status session) 'disconnected)
+      (user-error "与主机的连接还没恢复"))))
+
+(defun agent-session--keeper-kill (session keeper)
+  "Stop the agent of SESSION that KEEPER keeps on the host.
+Does nothing if the host is out of reach: the keeper then stops the
+agent itself after a day without a client."
+  (let ((default-directory (agent-session-root session)))
+    (when (agent-session--host-connected-p default-directory)
+      (ignore-errors
+        (make-process :name "agent-keeper-kill"
+                      :command (agent-session--keeper-command "kill" (plist-get keeper :id))
+                      :connection-type 'pipe :noquery t :file-handler t
+                      :sentinel #'ignore)))))
+
+(defun agent-session--stop-kept-agents ()
+  "Stop the kept remote agents as Emacs exits, as other agents stop with it.
+Deleting the attached process stops its agent; a client that just loses
+Emacs would leave it running."
+  (dolist (buffer (agent-session-buffers))
+    (let ((session (buffer-local-value 'agent-session--current buffer)))
+      (when (agent-session--keeper session)
+        (ignore-errors (agent-session-backend-stop (agent-session-backend session) session))))))
+
+(add-hook 'kill-emacs-hook #'agent-session--stop-kept-agents)
 
 (defvar agent-session-raw-message nil
   "Raw JSON line of the message being handled.
@@ -666,6 +828,7 @@ Errors are recorded in the session without interrupting the process."
 
 (defun agent-session-write (session object)
   "Serialize OBJECT as one JSON line and write it to the background process."
+  (agent-session-ensure-attached session)
   (let ((process (agent-session-process session)))
     (unless (process-live-p process) (user-error "agent 进程未运行"))
     (process-send-string process (concat (json-serialize object :null-object :null :false-object :false)
@@ -1880,6 +2043,7 @@ Send queued messages when idle."
              ('idle (if (plist-get (agent-session-info session) :unread)
                         (propertize "● 完成" 'face 'agent-session-ok)
                       (propertize "○ 空闲" 'face 'agent-session-dim)))
+             ('disconnected (propertize "◌ 已断开" 'face 'warning))
              ('exited (propertize "○ 已退出" 'face 'agent-session-error))))))
 
 (defun agent-session--model-label (session)
@@ -2258,6 +2422,7 @@ Local /commands run in Emacs; everything else goes to the agent."
   (let ((text (string-trim text)))
     (unless (string-empty-p text)
       (when (eq (agent-session-status session) 'exited) (user-error "agent 进程已退出"))
+      (agent-session-ensure-attached session)
       (unless (agent-session--run-local-command session text)
         (agent-session-submit session text)))))
 

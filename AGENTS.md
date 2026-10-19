@@ -114,6 +114,17 @@ var/                     runtime state (history, backups, pasted images...); git
   never blocks the editor, and are confined to this checkout outside `.git` (a guardrail
   against editing the wrong host, not a sandbox: `eval` is unrestricted). Writing a
   `.el` file tells the agent to call `reload` once its edits are done.
+  A remote agent outlives the connection (`agent-session-keep-remote`): it runs under
+  `agent-keeper.py`, a daemon on the host, behind a client that tramp-rpc starts.
+  tramp-rpc's server SIGTERMs the processes it started when the connection closes,
+  which only detaches the client; `delete-process` sends SIGKILL, which stops the
+  agent. The client's output is framed with byte offsets, so a session that lost its
+  client shows as `disconnected` and `agent-session-reattach` replays exactly what it
+  missed (on a timer once the host is connected again, never opening a connection;
+  or on the next send). The MCP relay (`agent-remote-relay.py`) stays up as well,
+  failing requests while there is no bridge, and replays the MCP handshake to the new
+  emx that a reattach brings back. Host-side tests: `python3 test/agent-keeper-test.py`
+  and `python3 test/agent-remote-relay-test.py`.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — methods agents can call, defined with `agent-ui-defmethod`; emx's

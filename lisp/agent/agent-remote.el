@@ -14,6 +14,9 @@
 ;; The relay's first line names the agent's session buffer; Emacs then starts
 ;; an emx for that session and pipes the bytes both ways.  The forward lives in
 ;; the ControlMaster, so a new master (after a reconnect) gets a new bridge.
+;; An agent kept running across the reconnect (see `agent-session-keep-remote')
+;; keeps its relay, which connects to the new bridge once a reattach has made
+;; it (agent-remote-relay.py).
 
 ;;; Code:
 
@@ -22,35 +25,10 @@
 
 (declare-function tramp-rpc--controlmaster-socket-path "tramp-rpc-transport")
 
-(defconst agent-remote--relay "\
-import os, socket, sys, threading
-s = socket.socket(socket.AF_UNIX)
-s.connect(sys.argv[1])
-s.sendall((sys.argv[2] + '\\n').encode())
-def up():
-    try:
-        while True:
-            d = os.read(0, 65536)
-            if not d:
-                s.shutdown(socket.SHUT_WR)
-                break
-            s.sendall(d)
-    except OSError:
-        pass
-threading.Thread(target=up, daemon=True).start()
-try:
-    while True:
-        d = s.recv(65536)
-        if not d:
-            break
-        os.write(1, d)
-except OSError:
-    pass
-"
-  "Python program on the host relaying stdio to the bridge socket.
-Arguments: the socket path and the session buffer name.  Emacs may close the
-connection while the agent still writes (an unknown session, emx exiting):
-the relay then exits quietly instead of printing a broken pipe traceback.")
+(defconst agent-remote--relay-file
+  (expand-file-name "agent-remote-relay.py" (file-name-directory (or load-file-name buffer-file-name)))
+  "Python program on the host relaying the agent's stdio to the bridge socket.
+Arguments: the socket path and the session buffer name.")
 
 (defvar agent-remote--bridges (make-hash-table :test 'equal)
   "Bridges by remote prefix (\"/rpc:dev:\").
@@ -130,9 +108,21 @@ For inputs the agent opens itself, such as pasted images."
 
 (defun agent-remote-mcp-command (session)
   "Command line on the host that connects SESSION's agent to emx."
-  (list "python3" "-c" agent-remote--relay
+  (list "python3" "-c" (with-temp-buffer
+                          (insert-file-contents agent-remote--relay-file)
+                          (buffer-string))
         (agent-remote-bridge (agent-session-root session))
         (buffer-name (agent-session-buffer session))))
+
+(defun agent-remote--reattached (session)
+  "Bring back the bridge for the relay of SESSION, attached again.
+The old bridge went with the connection."
+  (let ((root (agent-session-root session)))
+    (when (file-remote-p root)
+      (with-demoted-errors "无法恢复 emx 通道：%S"
+        (agent-remote-bridge root)))))
+
+(add-hook 'agent-session-reattach-functions #'agent-remote--reattached)
 
 ;;; Local end: one emx per connection
 

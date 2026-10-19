@@ -1784,7 +1784,7 @@ leave the session running with the message stuck; the next send retries."
                        (let* ((output "")
                               (process (make-process
                                         :name "agent-remote-test-relay"
-                                        :command (list "python3" "-c" agent-remote--relay socket name)
+                                        :command (list "python3" agent-remote--relay-file socket name)
                                         :connection-type 'pipe :noquery t
                                         :filter (lambda (_p s) (setq output (concat output s))))))
                          ;; Like an agent: send a request and wait for the
@@ -1800,15 +1800,54 @@ leave the session running with the message stuck; the next send retries."
                          output)))
              (should (equal (relay (buffer-name) "{\"ping\":1}\n") "{\"ping\":1}\n"))
              ;; A connection naming no session is dropped, possibly while the
-             ;; relay still writes; it exits quietly.
-             (should (equal (relay "*no such session*" "x\n") ""))
-             (should (eql status 0))
+             ;; relay still writes.  The relay stays, for a bridge to come
+             ;; back, and quietly fails requests meanwhile.
+             (should (string-match-p
+                      "\\`{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{.*out of reach.*}}\n\\'"
+                      (relay "*no such session*" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\"}\n")))
+             (should-not status)
              ;; The emx of a remote agent offers the config_* methods.
              (cl-letf (((symbol-function 'agent-session-emx-command)
                         (lambda () '("sh" "-c" "read _; echo \"$EMX_REMOTE_AGENT\""))))
                (should (equal (relay (buffer-name) "{}\n") "1\n")))))
        (delete-process server)
        (delete-directory dir t)))))
+
+(ert-deftest agent-session-test-keeper-frames ()
+  "A kept agent's lines reach the backend and advance the offset; losing the
+client without an exit frame leaves the session disconnected, not exited."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (agent-session--reattach-timer nil)
+         (dispatched nil))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-session--dispatch)
+                    (lambda (_session line) (push line dispatched))))
+           (cl-flet ((run (output keeper)
+                       (let ((process (agent-session--spawn session (list "printf" output) keeper)))
+                         (while (process-live-p process) (accept-process-output process 0.05))
+                         (accept-process-output nil 0.05)
+                         (agent-session-status session))))
+             (let ((keeper (list :id "k" :offset 0 :exit nil :status nil)))
+               (should (eq (run "12 {\"a\":1}\n25 {\"b\":2}\n" keeper) 'disconnected))
+               (should (equal (reverse dispatched) '("{\"a\":1}" "{\"b\":2}")))
+               (should (= (plist-get keeper :offset) 25))
+               (should (timerp agent-session--reattach-timer))
+               ;; The status to come back to once attached again.
+               (should (eq (plist-get keeper :status) 'idle))
+               ;; An exit frame: the agent has exited, its stderr is kept.
+               (agent-session-set-status session 'idle)
+               (should (eq (run (format "E 3 %s\n" (base64-encode-string "boom")) keeper) 'exited))
+               (should (string-match-p "boom" (with-current-buffer
+                                                  (format " *%s stderr*" (buffer-name))
+                                                (buffer-string))))
+               (should (string-match-p "退出码 3" (agent-session-test--transcript))))
+             ;; Attaching to a keeper that is gone.
+             (agent-session-set-status session 'disconnected)
+             (should (eq (run "G\n" (list :id "k" :offset 25 :exit nil :status nil)) 'exited))
+             (should (string-match-p "agent 已不在主机上" (agent-session-test--transcript)))))
+       (when (timerp agent-session--reattach-timer)
+         (cancel-timer agent-session--reattach-timer))))))
 
 (ert-deftest agent-session-test-file-written-by-emx ()
   "emx writes a file only without unsaved edits, then its buffer is reverted."

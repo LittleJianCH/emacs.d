@@ -2154,6 +2154,7 @@ session that made the review, with the selected code, when sent."
     (let* ((session (agent-review--session-buffer (buffer-local-value 'agent-review--review source)))
            (agent (buffer-local-value 'agent-session--current session)))
       (when (eq (agent-session-status agent) 'exited) (user-error "agent 进程已退出"))
+      (agent-session-ensure-attached agent)
       (let* ((review (buffer-local-value 'agent-review--review source))
              (comment (agent-review-annotate-lines review (plist-get note :lines) text)))
         ;; Deliver first: if that fails, the draft is still here to send again.

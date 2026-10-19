@@ -329,7 +329,7 @@ reply goes back to it.)"
       (error "\"@%s\" was closed before it replied" (agent-session-handle target)))
      ((null block) (error "The user withdrew the message"))
      ((or (plist-get block :queued)
-          (memq (agent-session-status target) '(running starting)))
+          (memq (agent-session-status target) '(running starting disconnected)))
       nil)
      (t
       (let* ((turn (seq-find (lambda (turn) (equal (caar turn) id))
@@ -480,6 +480,8 @@ work, start another session (context handoff passes your conversation)"
     (pcase (agent-session-status target)
       ('running (error "@%s is busy; read it with session_read or try later"
                        (agent-session-handle target)))
+      ('disconnected (error "@%s has lost the connection to its host; try later"
+                            (agent-session-handle target)))
       ('exited (error "@%s has exited" (agent-session-handle target))))
     (agent-collab--converse
      caller
