@@ -2441,13 +2441,26 @@ even one that waited for the user first."
                                                   :prompt "要确认"))))
             (child (agent-session-find "@worker")))
        (should (string-prefix-p "Started @worker" started))
-       (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
-                          :callback #'ignore)
+       (let (answer)
+         (agent-session-ask child :title "运行 make" :choices '((allow "允许") (deny "拒绝"))
+                            :callback (lambda (key) (setq answer key)))
+         ;; The parent is idle meanwhile, so the user's messages go through.
+         (agent-session-set-status session 'idle)
+         (should (eq (agent-session-status session) 'idle))
+         (with-current-buffer (agent-session-buffer child)
+           (agent-session-approve))
+         (should (eq answer 'allow)))
        (agent-session-text child "r1" "确认后做完了")
        (agent-session-set-status child 'idle)
-       (agent-session-set-status session 'idle)
        (should (string-search "确认后做完了"
-                              (plist-get (cdr (agent-session-test--last-user session)) :text)))))))
+                              (plist-get (cdr (agent-session-test--last-user session)) :text))))
+     ;; A call pending through a reload, made when calls waited, still gets
+     ;; its reply itself, and only once.
+     (let* ((child (agent-session-find "@worker"))
+            (entry (agent-collab--track child "old-id" session t)))
+       (agent-collab--settle entry)
+       (should (memq entry agent-collab--pending))
+       (setq agent-collab--pending (delq entry agent-collab--pending))))))
 
 (ert-deftest agent-session-test-subagent-limits ()
   "Children take no messages and send none; a parent may stop its own."
@@ -2467,7 +2480,7 @@ even one that waited for the user first."
        (should (equal (agent-session-test--call "session_stop" buffer :session "@worker")
                       "Stopped and closed @worker."))
        (should-not (buffer-live-p (agent-session-buffer child))))
-     ;; Between the user's sessions, wait 0 sends and the reply comes as a message.
+     ;; Between the user's sessions the reply comes as a message too.
      (agent-session-set-status session 'running)
      (should (string-match-p "will reach you as a message"
                              (agent-session-test--poll

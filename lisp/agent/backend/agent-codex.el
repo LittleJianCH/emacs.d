@@ -71,7 +71,7 @@ overrides and the multi_agent feature flag does not."
   "Return the command line that starts SESSION."
   (append
    (list agent-codex-executable "app-server"
-         ;; session_ask waits for another agent; the default is 60 seconds.
+         ;; A call may wait for the user to confirm it; the default is 60 seconds.
          "-c" "mcp_servers.emacs.tool_timeout_sec=1800")
    (if (file-remote-p (agent-session-root session))
        ;; On the host the MCP server is the relay to this Emacs's emx, which

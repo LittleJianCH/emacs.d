@@ -124,7 +124,7 @@ A remote agent reaches emx through the relay of agent-remote.el."
     (vector
      (append
       (list :name "emacs" :command (car emx) :args (vconcat (cdr emx))
-            ;; session_ask waits for another agent; the default is 60 seconds.
+            ;; A call may wait for the user to confirm it; the default is 60 seconds.
             :timeoutMs 1800000)
       ;; dsh scrubs secrets from the environment it passes MCP servers; give
       ;; emx its variables explicitly.  The relay needs none.

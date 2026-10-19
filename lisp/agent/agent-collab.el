@@ -395,20 +395,24 @@ ID is the message's block in TARGET; its reply goes to the asker's mailbox.")
 (defvar agent-collab--mailbox (make-hash-table :test #'eq :weakness 'key)
   "Replies waiting for their asker to be idle: SESSION -> ((HANDLE . TEXT) ...).")
 
-(defun agent-collab--track (target id asker)
-  "Note that ASKER wants the reply to message ID in TARGET; return the entry."
-  (let ((entry (list :target target :id id :asker asker)))
+(defun agent-collab--track (target id asker &optional awaited)
+  "Note that ASKER wants the reply to message ID in TARGET; return the entry.
+AWAITED comes from a call made before calls stopped waiting for replies,
+pending through a reload: that call still returns the reply itself."
+  (let ((entry (append (list :target target :id id :asker asker)
+                       (and awaited (list :awaited t)))))
     (push entry agent-collab--pending)
     entry))
 
 (defun agent-collab--settle (entry)
   "Post the reply of ENTRY to its asker's mailbox once there is one."
   (let* ((target (plist-get entry :target))
-         (reply (condition-case err
-                    (agent-collab--reply target (plist-get entry :id))
-                  (error (list (format "\"@%s\" ended without replying: %s"
-                                       (agent-session-handle target)
-                                       (error-message-string err)))))))
+         (reply (and (not (plist-get entry :awaited))
+                     (condition-case err
+                         (agent-collab--reply target (plist-get entry :id))
+                       (error (list (format "\"@%s\" ended without replying: %s"
+                                            (agent-session-handle target)
+                                            (error-message-string err))))))))
     (when reply
       (setq agent-collab--pending (delq entry agent-collab--pending))
       (let ((asker (plist-get entry :asker)))

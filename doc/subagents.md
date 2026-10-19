@@ -34,7 +34,7 @@ host above several harnesses, such as T3 Code or this Emacs, can.
 | Only the final text comes back, clipped | all | `agent-collab-text-limit` |
 | Background results wake the parent; it never polls | Claude Code, opencode, pi-subagent-manager, T3 | the mailbox |
 | Several results wake it once | pi-subagent-manager, T3 | one message per idle transition |
-| Approvals go to the user, never to an agent; a waiting parent returns when a child waits for the user | T3, Claude Code, opencode | yes |
+| Approvals go to the user, never to an agent; a parent is never held up while a child waits for the user | T3, Claude Code, opencode | yes |
 | A child's permissions only narrow | T3 | mode capped by the parent's |
 | Depth 1, a concurrency cap | Codex V1, dsh, opencode | yes |
 | Forks keep the tool list, put the task after the history, refuse at call time | Claude Code fork, dsh `subagent_fork` | the rules below |
