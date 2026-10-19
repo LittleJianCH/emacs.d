@@ -346,9 +346,43 @@ reply goes back to it.)"
                       (if (eq (agent-session-status target) 'exited) ", which then exited" "")
                       (if reply (agent-collab--clip (plist-get (cdr reply) :text)) "(no reply)")
                       (if (agent-session-child-p target)
-                          (format "See what it did with session_read session=@%s." handle)
+                          (concat (agent-collab--tool-summary turn)
+                                  "It takes no follow-ups; for more work, start another \
+session.")
                         (format "Follow up with session_ask session=@%s; see what it did \
 with session_read." handle)))))))))
+
+(defun agent-collab--tool-summary (turn)
+  "What the tool calls of TURN did, a line each, or \"\" if it made none."
+  (let ((lines (seq-keep (pcase-lambda (`(,_ . ,block))
+                           (and (eq (plist-get block :type) 'tool)
+                                (agent-collab--tool-line block)))
+                         (cdr turn))))
+    (if (null lines)
+        ""
+      (concat "What it did:\n"
+              (string-join (seq-take lines 12) "\n")
+              (if (> (length lines) 12) (format "\n- … %d more" (- (length lines) 12)) "")
+              "\n\n"))))
+
+;;; Closing children
+
+(defcustom agent-collab-close-finished t
+  "Non-nil closes a session started with session_start once its final
+reply has reached its parent, unless it is on screen or failed."
+  :type 'boolean)
+
+(defun agent-collab--finish (target asker)
+  "Close TARGET if it is a child of ASKER that finished and has replied.
+One that failed or is on screen stays open for the user to look at."
+  (when (and agent-collab-close-finished
+             (eq (agent-session-parent target) asker)
+             (eq (agent-session-status target) 'idle))
+    (let ((buffer (agent-session-buffer target)))
+      ;; Not while its status is still being set.
+      (run-at-time 0 nil (lambda ()
+                           (unless (get-buffer-window buffer t)
+                             (agent-session-kill-quietly buffer)))))))
 
 ;;; Mailbox: replies that come after their asker stopped waiting
 
@@ -383,7 +417,8 @@ AWAITED means its call waits for the reply for now."
             (puthash asker (append (gethash asker agent-collab--mailbox)
                                    (list (cons (agent-session-handle target) (car reply))))
                      agent-collab--mailbox)
-            (agent-collab--deliver asker)))))))
+            (agent-collab--deliver asker)
+            (agent-collab--finish target asker)))))))
 
 (defun agent-collab--deliver (session)
   "Send SESSION's mailbox to its agent, in one message, if it is idle."
@@ -503,6 +538,7 @@ its reply will reach you as a message." (agent-session-handle target))))
                            (when-let* ((done (agent-collab--reply target
                                                                   (plist-get state :id))))
                              (setq agent-collab--pending (delq entry agent-collab--pending))
+                             (agent-collab--finish target caller)
                              done)
                          (error (setq agent-collab--pending (delq entry agent-collab--pending))
                                 (signal (car err) (cdr err)))))))))
@@ -699,7 +735,8 @@ doesn't say which block it is."
                                (agent-session--blocks-in-order caller))))
     (setf (agent-session-info child)
           (plist-put (agent-session-info child) :parent-tool (car entry)))
-    (agent-session--update caller (car entry) :subagent (agent-session-buffer child))))
+    (agent-session--update caller (car entry) :subagent (agent-session-buffer child)
+                           :subagent-handle (agent-session-handle child))))
 
 (defun agent-collab--open-child (caller name plist title &optional info)
   "Start a session of profile NAME (PLIST) for the agent of CALLER.
@@ -749,8 +786,8 @@ back, shown to the user under your session.  Choose how it gets context:
 Prefer the cheapest profile that can do the job.  By default (wait 0) it
 returns the session's @handle at once, and its final reply reaches you as a
 message when it finishes: don't poll it.  A session you start does one
-task, takes no follow-ups and closes with yours; for more work start
-another.  Stop one with session_stop."
+task, takes no follow-ups and closes once its reply reaches you; for more
+work start another.  Stop one with session_stop."
   (let* ((caller (or (agent-ui-caller-session)
                      (error "session_start works only from an agent session")))
          (context (or context "fresh"))

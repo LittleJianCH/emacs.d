@@ -820,14 +820,16 @@ Keep all characters and their positions so code-block offsets stay valid."
               (when (buffer-live-p buffer)
                 (select-window (agent-session-display buffer))))))
 
-(defun agent-session--subagent-line (buffer)
+(defun agent-session--subagent-line (buffer &optional handle)
   "One line on the progress of the session in BUFFER, started by a tool call.
-Its status, latest tool and tokens; clicking its name opens it."
+Its status, latest tool and tokens; clicking its name opens it.  HANDLE is
+its handle, for when it was closed."
   (let ((child (and (buffer-live-p buffer) (buffer-local-value 'agent-session--current buffer))))
     (concat
      "    "
      (if (null child)
-         (propertize "↳ 子会话已关闭" 'face 'agent-session-dim)
+         (propertize (if handle (format "↳ @%s 已关闭" handle) "↳ 子会话已关闭")
+                     'face 'agent-session-dim)
        (let ((tool (seq-find (pcase-lambda (`(,_ . ,block)) (eq (plist-get block :type) 'tool))
                              (reverse (agent-session--blocks-in-order child))))
              (tokens (plist-get (agent-session-info child) :tokens)))
@@ -1226,7 +1228,7 @@ Clicking the header line folds it; when expanded, the diff or output is shown."
        header)
      "\n"
      (when-let* ((child (plist-get block :subagent)))
-       (agent-session--subagent-line child))
+       (agent-session--subagent-line child (plist-get block :subagent-handle)))
      (when (and has-body (not collapsed))
        (concat
         (agent-session--indent

@@ -1935,7 +1935,9 @@ sent them."
            '((worker :agent test-echo2 :model "big" :mode full :cost low
                      :description "Test worker.")
              (gone :agent no-such-agent :description "Not enabled.")))
-          (agent-collab-confirm nil))
+          (agent-collab-confirm nil)
+          ;; Tests look at children after they replied.
+          (agent-collab-close-finished nil))
       ,@body)))
 
 (defun agent-session-test--first-message (session &optional key)
@@ -2142,7 +2144,7 @@ by Emacs; not from the user.)" (plist-get mail :hidden)))
                     (string-search "delivered by Emacs" transcript))))
        (should (string-search "Reply from \"@worker\" (Echo2):\n\n收到：Your task:\n任务一"
                               (plist-get mail :text)))
-       (should (string-search "See what it did with session_read session=@worker."
+       (should (string-search "It takes no follow-ups; for more work, start another session."
                               (plist-get mail :text)))
        ;; The handles in it aren't mentions to explain.
        (should (equal (agent-session--outgoing session (plist-get mail :text))
@@ -2167,6 +2169,54 @@ by Emacs; not from the user.)" (plist-get mail :hidden)))
        (agent-session-set-status session 'idle))
      (should (string-search "\"@worker-4\" ended without replying: \"@worker-4\" was closed before \
 it replied" (plist-get (cdr (agent-session-test--last-user session)) :text))))))
+
+(ert-deftest agent-session-test-subagent-close-finished ()
+  "A child closes once its reply has reached its parent, unless it is on
+screen; the reply lists what its tools did."
+  (agent-session-test--with-profiles
+   (let ((session agent-session--current)
+         (agent-collab-close-finished t))
+     (agent-session-set-status session 'running)
+     (agent-session-test--poll
+      (agent-session-test--call "session_start" buffer :profile "worker" :prompt "任务一"))
+     (let ((child-buffer (agent-session-buffer (agent-session-find "@worker"))))
+       (accept-process-output nil 0.05)
+       (should-not (buffer-live-p child-buffer))
+       (should (equal (agent-session--subagent-line child-buffer "worker")
+                      "    ↳ @worker 已关闭\n")))
+     ;; Closed after its reply reached the mailbox, which still delivers it.
+     (agent-session-set-status session 'idle)
+     (should (string-search "收到：Your task:\n任务一"
+                            (plist-get (cdr (agent-session-test--last-user session)) :text)))
+     ;; On screen, it stays open after replying.
+     (agent-session-set-status session 'running)
+     (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
+       (agent-session-test--poll
+        (agent-session-test--call "session_start" buffer :profile "worker" :prompt "任务二")))
+     (let ((child (agent-session-find "@worker")))
+       (save-window-excursion
+         (switch-to-buffer (agent-session-buffer child))
+         (agent-session-text child "r1" "做完了")
+         (agent-session-set-status child 'idle)
+         (accept-process-output nil 0.05)
+         (should (buffer-live-p (agent-session-buffer child))))
+       ;; A failed one stays open too.
+       (agent-session-set-status session 'idle)
+       (agent-session-set-status session 'running)
+       (cl-letf (((symbol-function 'agent-session-backend-send) #'ignore))
+         (agent-session-test--poll
+          (agent-session-test--call "session_start" buffer :profile "worker" :prompt "任务三")))
+       (let ((failed (agent-session-find "@worker-2")))
+         (agent-session-set-status failed 'exited)
+         (accept-process-output nil 0.05)
+         (should (buffer-live-p (agent-session-buffer failed))))))
+   ;; The reply lists what the child's tools did.
+   (should (equal (agent-collab--tool-summary
+                   '(("u" :type user :text "x")
+                     ("t1" :type tool :kind edit :title "Edit a.el" :status done)
+                     ("r" :type text :text "好了")))
+                  "What it did:\n- ✎ Edit a.el\n\n"))
+   (should (equal (agent-collab--tool-summary '(("u" :type user :text "x"))) ""))))
 
 (ert-deftest agent-session-test-subagent-wait ()
   "A caller waiting for a child gets its reply, or a note once the child waits
@@ -2368,7 +2418,7 @@ named after the child; answering either settles both."
        (should (string-search "↳ @worker  ● 等待确认" (agent-session-test--transcript)))
        (agent-session-kill-quietly (agent-session-buffer child))
        (accept-process-output nil 0.05)
-       (should (string-search "↳ 子会话已关闭" (agent-session-test--transcript)))))))
+       (should (string-search "↳ @worker 已关闭" (agent-session-test--transcript)))))))
 
 (ert-deftest agent-session-test-hidden-note ()
   "A note for the agent goes with a message but isn't shown, even when the
