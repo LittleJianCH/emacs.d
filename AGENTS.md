@@ -36,11 +36,12 @@ lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in in
 lisp/agent/              shared agent support (see below)
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       backend implementation and registration
-    dsh/                DeepSeek Harness bridge plugin and profile patch
+    dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
+doc/subagents.md         design of subagents and agent collaboration, with measurements
 test/agent-backend-test.el  ERT suite for backend module startup and selection
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
@@ -123,9 +124,29 @@ var/                     runtime state (history, backups, pasted images...); git
   (`@cfi-meaning`) named from its topic by a cheap model of its agent
   (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users
   mention sessions with it. Methods `sessions`, `session_read` (latest turns, paged)
-  and `session_ask` (sends a prompt to an idle open session, confirmed by the user when
-  `agent-collab-confirm` is set, and waits for its reply). Agents never start sessions
-  themselves.
+  and `session_ask` (sends a prompt to an idle session the user opened, confirmed by
+  the user when `agent-collab-confirm` is set, and waits for its reply).
+  `session_start` starts a subagent: a child session of a profile in
+  `agent-collab-profiles` (agent, model, effort, mode, cost), linked to the caller
+  (`:parent` in its info, listed under it), given the prompt alone (`fresh`), the
+  caller's conversation as text too (`handoff`), or, for a session of the caller's
+  own agent and settings, a copy of its conversation that shares its prompt cache
+  (`fork`: `--fork-session`, ephemeral `thread/fork`, the dsh bridge's `forkFrom`).
+  A child does one task and reports:
+  it can't start sessions, takes no `session_ask` and sends none, its mode never
+  exceeds the caller's, and `session_stop` closes it. Children live with their buffer
+  and their parent (Claude `--no-session-persistence`, Codex ephemeral threads, dsh
+  `parentSession`), and close once their reply is delivered
+  (`agent-collab-close-finished`) unless on screen or failed. A reply nobody waits for any more (wait 0, a timeout) goes to the
+  asker's mailbox, sent to its agent in one message once it is idle. A child's
+confirmations and questions also wait in its parent's footer, and the parent's
+`session_start` tool block shows the child's progress. The CLIs' own
+  subagents are off (`agent-claude-disallowed-tools`, `agent-codex-native-subagents`,
+  `agent-dsh-native-subagents` with `backend/dsh/no-subagents.yml`). An agent's tools
+  and their descriptions must depend on the configuration only, never on the calling
+  session (see `agent-ui-description-functions`): a forked session has to see exactly
+  its parent's tools to share its prompt cache. Design and measurements:
+  `doc/subagents.md`.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
   An `elisp` block runs the agent's Lisp at point on every redraw (resize, theme change,
