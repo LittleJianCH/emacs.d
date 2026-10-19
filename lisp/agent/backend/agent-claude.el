@@ -595,7 +595,9 @@ trips for the lines its own CLI writes, nor to set up a file watch."
                   (when (buffer-live-p (agent-session-buffer session))
                     (agent-claude--show-synced
                      session (delq nil (mapcar #'agent-claude--parse-line (butlast lines)))))))
-      :sentinel #'ignore))))
+      :sentinel #'ignore))
+    ;; Remote file-notify descriptors are processes too.
+    (process-put (agent-claude--state session :watch) 'agent-claude-follow t)))
 
 (defun agent-claude--watch (session)
   "Start watching SESSION's transcript file.
@@ -622,7 +624,7 @@ loading history starts the watch itself once it knows where it ends."
 (defun agent-claude--unwatch (session)
   "Stop watching SESSION's transcript file."
   (when-let* ((watch (agent-claude--state session :watch)))
-    (if (processp watch)
+    (if (and (processp watch) (process-get watch 'agent-claude-follow))
         (delete-process watch)
       (file-notify-rm-watch watch))
     (agent-claude--set session :watch nil)))

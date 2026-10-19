@@ -841,7 +841,18 @@ only what other clients write, and where it has read up to."
                       (file-attribute-size (file-attributes file))))
            (let ((process (agent-claude--state session :watch)))
              (agent-claude--unwatch session)
-             (should-not (process-live-p process))))
+             (should-not (process-live-p process)))
+           ;; Remote file-notify descriptors are processes too: they are
+           ;; removed as watches, not killed.
+           (let ((descriptor (make-pipe-process :name "fake-watch" :noquery t))
+                 removed)
+             (agent-claude--set session :watch descriptor)
+             (cl-letf (((symbol-function 'file-notify-rm-watch)
+                        (lambda (watch) (setq removed watch))))
+               (agent-claude--unwatch session))
+             (should (eq removed descriptor))
+             (should (process-live-p descriptor))
+             (delete-process descriptor)))
        (agent-claude--unwatch session)
        (delete-file file)))))
 
