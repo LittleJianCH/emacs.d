@@ -116,6 +116,8 @@ so its presence marks a complete upload."
               (list "--patch" (concat (file-name-directory patch)
                                       agent-dsh--no-subagents-patch))))))
 
+(declare-function agent-ui-read-only-methods "agent-ui" (&optional place))
+
 (defun agent-dsh--mcp-servers (session)
   "MCP servers mounted for the agent of SESSION: the emx bridge back to Emacs.
 A remote agent reaches emx through the relay of agent-remote.el."
@@ -126,7 +128,11 @@ A remote agent reaches emx through the relay of agent-remote.el."
      (append
       (list :name "emacs" :command (car emx) :args (vconcat (cdr emx))
             ;; A call may wait for the user to confirm it; the default is 60 seconds.
-            :timeoutMs 1800000)
+            :timeoutMs 1800000
+            ;; The bridge asks about the other tools' calls: dsh doesn't.
+            :readOnly (vconcat (and (fboundp 'agent-ui-read-only-methods)
+                                    (agent-ui-read-only-methods
+                                     (agent-session-place (agent-session-root session))))))
       ;; dsh scrubs secrets from the environment it passes MCP servers; give
       ;; emx its variables explicitly.  The relay needs none.
       (unless (file-remote-p (agent-session-root session))

@@ -161,5 +161,21 @@ A cancelled turn still records what it used."
         (should (equal (plist-get (car records) :model)
                        "deepseek-official/deepseek-chat"))))))
 
+(ert-deftest agent-backend-test-dsh-read-only-mcp ()
+  "dsh's bridge learns the read-only emx tools; the others need approval."
+  (require 'agent-ui)
+  (let* ((session (agent-backend-test--dsh-session))
+         (server (aref (cl-letf (((symbol-function 'agent-session-emx-command)
+                                  (lambda () '("emx" "mcp")))
+                                 ((symbol-function 'agent-session-environment)
+                                  (lambda (_) nil)))
+                         (agent-dsh--mcp-servers session))
+                       0))
+         (read-only (append (plist-get server :readOnly) nil)))
+    (should (equal read-only (agent-ui-read-only-methods)))
+    (should (member "read_buffer" read-only))
+    (dolist (name '("eval" "open" "reload" "render"))
+      (should-not (member name read-only)))))
+
 (provide 'agent-backend-test)
 ;;; agent-backend-test.el ends here

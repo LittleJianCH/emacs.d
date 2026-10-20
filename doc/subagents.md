@@ -299,8 +299,14 @@ in its default MCP auto mode, and Claude maps it to the tool's read-only
 and concurrency properties. No Claude `--allowedTools` or Codex per-tool
 `approval_mode="approve"` is injected. The installed dsh 0.2.0-rc.2 client
 discards the annotation, but emitting it only for one backend would make
-the policy misleading. Existing backend policy still applies; this change
-does not add automatic grants or claim that every backend prompts today.
+the policy misleading.
+
+dsh itself asks about a tool call only when a hook or a sandbox escalation
+does, so its MCP calls, `eval` included, ran unchecked in every preset. The
+bridge now asks about every MCP call except the read-only methods, which
+Emacs passes it (`readOnly` per server), unless the preset is Full access
+or Auto: Auto's reviewer judges each call first, and in the installed
+version asks the user when it denies one.
 
 The same tools and descriptions are available to parents and children.
 Internal classification changes do not alter the published tool signature.

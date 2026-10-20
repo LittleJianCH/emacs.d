@@ -35,7 +35,11 @@
 //
 // images are absolute file paths. A prompt naming a dsh slash command runs
 // the command instead of starting a turn. mcpServers are stdio servers
-// [{name, command, args, env, timeoutMs?}] mounted for this agent only. commands is
+// [{name, command, args, env, timeoutMs?, readOnly?}] mounted for this agent
+// only; readOnly names the server's tools that only read. dsh itself asks
+// about an MCP call only when a hook does, so the bridge asks about every
+// other MCP call (an approval request) unless the preset is Full access, or
+// Auto, whose reviewer judges each call first. commands is
 // [{name, description, hint?}]. history (resumed sessions only) replays the
 // transcript as a list of {method, params} in the notification vocabulary
 // below, plus `user` {id, text, images}.
@@ -256,6 +260,20 @@ export function apply(ctx) {
     if (owns(agent)) notify('error', { message: errorMessage(error) })
   })
 
+  // Tool names of read-only MCP tools, as dsh registers them.
+  const readOnlyMcp = new Set()
+
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (exec.agent === undefined || !owns(exec.agent) || !exec.name.startsWith('mcp__')) {
+      return next()
+    }
+    const preset = ctx.permissionPresets.current(exec.agent.session)
+    if (preset === 'auto' || preset === 'danger-full-access' || readOnlyMcp.has(exec.name)) {
+      return next()
+    }
+    return { kind: 'ask' }
+  })
+
   ctx.on('approval/request', (req, next) => {
     if (!owns(req.agent)) return next()
     return request('approval', { callId: req.callId, toolName: req.toolName, reason: req.reason })
@@ -398,6 +416,7 @@ export function apply(ctx) {
       const setup = async (agentCtx) => {
         installModelSelection(agentCtx, selection)
         for (const server of params.mcpServers ?? []) {
+          for (const tool of server.readOnly ?? []) readOnlyMcp.add(`mcp__${server.name}__${tool}`)
           try {
             await agentCtx.plugin(McpClient, McpClient.Config({
               transport: 'stdio',

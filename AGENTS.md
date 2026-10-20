@@ -97,8 +97,11 @@ var/                     runtime state (history, backups, pasted images...); git
   `emacs.yml`); plan mode is dsh's own, and its `exit_plan_mode` review arrives as a
   `question`. History and replay go through the bridge too (`sessions/list`, resume
   returns the transcript); dsh's session logs are zstd-compressed, don't parse them in
-  Elisp. emx is mounted per agent with dsh's MCP client. For a remote project dsh runs
-  on the host like the other backends: the plugin files are copied to
+  Elisp. emx is mounted per agent with dsh's MCP client. dsh asks about an MCP
+  call only when a hook does, so the bridge asks about every emx call except the
+  read-only methods (`:read-only` in `agent-ui-defmethod`), unless the preset is
+  Full access, or Auto, whose reviewer judges each call first. For a remote
+  project dsh runs on the host like the other backends: the plugin files are copied to
   `~/.cache/emacs-agent/dsh/<content hash>/` there, emx goes through the relay of
   `agent-remote.el`, and the host needs dsh, python3 and its own dsh credentials. The
   bridge reports dsh's version and the session notes one other than
