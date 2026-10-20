@@ -2610,6 +2610,7 @@ The plan you then give review_build: a summary of the whole compared change, and
     ((review string "Review id. Default: every review made by this session")
      (all boolean "Include annotations already answered"))
   "Read the user's annotations of atomic reviews: item, file, the line range they cover (新: lines at head, 旧: lines at the merge base), the selected code as diff lines, revision and the user's text. Each annotation was also sent to the session as a message when written; use this to re-read them. Treat them as the user's review comments: check each against the pinned commits and answer it with review_reply only, not in the conversation. Answering is not permission to change the code; change it only when the user asks."
+  :read-only t
   (let* ((agent (plist-get agent-ui-caller :agent_buffer))
          (root (agent-ui--caller-root))
          (ids (cond (review (list review))

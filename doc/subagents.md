@@ -283,3 +283,27 @@ inherited conversation.
 - Amp: [models and subagents](https://ampcode.com/docs/models-and-subagents)
 - T3 Code: [pingdotgg/t3code](https://github.com/pingdotgg/t3code) —
   `docs/orchestration-v2/`, `packages/provider-core/src/server/handoffBudget.ts`
+
+### Internal read-only classification
+
+`agent-ui-defmethod` accepts `:read-only t` for audited read operations.
+The classification is internal policy input, not an approval or an MCP
+annotation. `agent-ui-read-only-methods` returns the audited method names
+for a place, including remote emx's `config_read`. `eval`, reload, writes
+and executable canvas operations are not classified as read-only.
+Diagnostics only reads an already open buffer (including symlink aliases);
+it does not visit a file and run its hooks.
+
+We deliberately do not emit `readOnlyHint`: Codex uses it to skip approval
+in its default MCP auto mode, and Claude maps it to the tool's read-only
+and concurrency properties. No Claude `--allowedTools` or Codex per-tool
+`approval_mode="approve"` is injected. The installed dsh 0.2.0-rc.2 client
+discards the annotation, but emitting it only for one backend would make
+the policy misleading. Existing backend policy still applies; this change
+does not add automatic grants or claim that every backend prompts today.
+
+The same tools and descriptions are available to parents and children.
+Internal classification changes do not alter the published tool signature.
+Parent-side approval delegation requires a separate, explicit decision for
+each pending request; being classified as read-only is not sufficient to
+approve one.

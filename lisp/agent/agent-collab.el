@@ -272,6 +272,7 @@ TOOLS is none, summary or full; RUNNING means the turn isn't over."
 @handle, which the user also uses to mention it), agent, title, project,
 status, number of turns, whether it is your own, the session that started
 it (parent) and the sessions it started (children)."
+  :read-only t
   (let ((caller (agent-ui-caller-session)))
     (list :sessions (vconcat (mapcar (lambda (buffer)
                                        (agent-collab--describe
@@ -289,6 +290,7 @@ call; full: with their output or diff"))
   "Read the latest turns of an agent session.  A turn is a user message and
 everything the agent did for it.  Start with few turns and page backwards
 with before when you need more."
+  :read-only t
   (let* ((target (agent-collab--session session))
          (tools (pcase (or tools "summary")
                   ("none" 'none) ("summary" 'summary) ("full" 'full)

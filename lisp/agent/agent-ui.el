@@ -42,17 +42,23 @@ emx fills it in from the environment of the agent session it runs in;
 methods can read it directly.")
 
 (defvar agent-ui--methods nil
-  "Registered methods: ((NAME . (:function F :description D :params SPEC)) ...).")
+  "Registered methods, with function, description, params and read-only metadata.")
 
 (defmacro agent-ui-defmethod (name params docstring &rest body)
   "Define NAME (a string) as a method callable by agents.
 Each entry of PARAMS is (SYMBOL TYPE DESCRIPTION [required]), where TYPE is a
 JSON Schema type symbol: string, integer, boolean, array (an array of objects)
-or object.  BODY can use variables named after the parameters directly; its
+or object.  BODY may start with :read-only t for an audited read operation.
+BODY can use variables named after the parameters directly; its
 return value (plist / vector / string / number) is serialized as JSON."
   (declare (indent 2) (doc-string 3))
-  (let ((fn (intern (format "agent-ui--method-%s" name)))
+  (let ((read-only (when (eq (car body) :read-only)
+                     (pop body)
+                     (pop body)))
+        (fn (intern (format "agent-ui--method-%s" name)))
         (vars (mapcar #'car params)))
+    (unless (memq read-only '(nil t))
+      (error "%s: :read-only must be a literal boolean" name))
     `(progn
        (defun ,fn (params)
          ,docstring
@@ -62,7 +68,8 @@ return value (plist / vector / string / number) is serialized as JSON."
            (ignore params ,@vars)
            ,@body))
        (setf (alist-get ,name agent-ui--methods nil nil #'equal)
-             (list :function #',fn :description ,docstring :params ',params))
+             (list :function #',fn :description ,docstring :params ',params
+                   :read-only ,read-only))
        ,name)))
 
 (defun agent-ui--coerce (params spec)
@@ -267,6 +274,7 @@ files on its host."
 (agent-ui-defmethod "context" ()
   "Return what the user is looking at: the file in the main window, cursor line and column,
 selected text, project root, and every visible window."
+  :read-only t
   (let* ((window (agent-ui--main-window))
          (buffer (window-buffer window)))
     (with-current-buffer buffer
@@ -287,6 +295,7 @@ selected text, project root, and every visible window."
 
 (agent-ui-defmethod "buffers" ()
   "List open buffers: name, file, whether there are unsaved changes, and major mode."
+  :read-only t
   (vconcat
    (seq-keep (lambda (buffer)
                (let ((name (buffer-name buffer)))
@@ -303,6 +312,7 @@ selected text, project root, and every visible window."
      (start_line integer "First line (inclusive), default 1")
      (end_line integer "Last line (inclusive), default end of buffer"))
   "Read buffer text: unsaved changes, compilation output, REPLs and other non-file content."
+  :read-only t
   (with-current-buffer (or (get-buffer name) (error "No buffer named %s" name))
     (save-excursion
       (save-restriction
@@ -327,9 +337,13 @@ selected text, project root, and every visible window."
 
 (agent-ui-defmethod "diagnostics"
     ((path string "File path; defaults to the user's current file"))
-  "Return flymake / LSP diagnostics for a file (line, column, severity, message)."
+  "Return existing flymake / LSP diagnostics from an open file buffer.
+The result has line, column, severity and message; this does not open files
+or start a diagnostic process."
+  :read-only t
   (let ((buffer (if path
-                    (find-file-noselect (agent-ui--abs path))
+                    (or (find-buffer-visiting (agent-ui--abs path))
+                        (error "File is not open: %s; use open first (diagnostics only reads open buffers)" path))
                   (window-buffer (agent-ui--main-window)))))
     (with-current-buffer buffer
       (vconcat
@@ -498,6 +512,15 @@ PLACE is from `agent-session-place', nil for this machine."
                                  (concat "\n\n" (funcall fn place))))
                        :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
+
+(defun agent-ui-read-only-methods (&optional place)
+  "Audited read-only MCP method names at PLACE, sorted and caller-independent.
+The remote emx also offers config_read, implemented outside Emacs."
+  (sort (append (seq-keep (pcase-lambda (`(,name . ,entry))
+                           (and (plist-get entry :read-only) name))
+                         agent-ui--methods)
+                (when place (list "config_read")))
+        #'string<))
 
 (agent-ui-defmethod "describe" ()
   "List all methods with their parameter schemas (used by emx help and MCP tools/list)."

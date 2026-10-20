@@ -1471,6 +1471,55 @@ detached
                                 (agent-session-buffers))))
       (delete-directory root t))))
 
+(ert-deftest agent-session-test-read-only-metadata ()
+  "Read-only classification stays internal and never grants tool permission."
+  (require 'agent-canvas)
+  (require 'agent-review)
+  (let ((expected '("buffers" "canvas_guide" "context" "diagnostics"
+                    "read_buffer" "review_comments" "session_read" "sessions")))
+    (should (equal (agent-ui-read-only-methods) expected))
+    (should (equal (agent-ui-read-only-methods "/rpc:example:")
+                   (sort (cons "config_read" (copy-sequence expected)) #'string<)))
+    (seq-doseq (method (agent-ui--describe))
+      (should-not (plist-member method :annotations))
+      (should-not (plist-member method :read-only)))
+    ;; Internal policy metadata does not alter tools or a fork's prompt cache.
+    (let* ((agent-ui--methods (copy-tree agent-ui--methods))
+           (signature (agent-ui-tools-signature)))
+      (setf (plist-get (alist-get "context" agent-ui--methods nil nil #'equal) :read-only) nil)
+      (should (equal signature (agent-ui-tools-signature)))
+      (should-not (member "context" (agent-ui-read-only-methods))))))
+
+(ert-deftest agent-session-test-diagnostics-does-not-open-files ()
+  "A read-only query never loads a file or runs its mode/local-variable hooks."
+  (let ((file (make-temp-file "agent-diagnostics-")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'find-file-noselect)
+                   (lambda (&rest _) (ert-fail "Diagnostics opened a file"))))
+          (should-error (agent-ui--method-diagnostics (list :path file)))
+          (with-temp-buffer
+            (setq buffer-file-name file buffer-file-truename (file-truename file))
+            (cl-letf (((symbol-function 'flymake-diagnostics) (lambda (&rest _) nil)))
+              (should (equal (agent-ui--method-diagnostics (list :path file)) [])))))
+      (delete-file file))))
+
+(ert-deftest agent-session-test-diagnostics-symlink ()
+  "Diagnostics recognizes an already visited file through a symlink."
+  (let* ((dir (make-temp-file "agent-diagnostic-link-" t))
+         (file (expand-file-name "actual" dir))
+         (link (expand-file-name "alias" dir)))
+    (unwind-protect
+        (progn
+          (write-region "text" nil file nil 'silent)
+          (make-symbolic-link file link)
+          (with-temp-buffer
+            (setq buffer-file-name file buffer-file-truename (file-truename file))
+            (cl-letf (((symbol-function 'find-file-noselect)
+                       (lambda (&rest _) (ert-fail "Visited a file")))
+                      ((symbol-function 'flymake-diagnostics) (lambda (&rest _) nil)))
+              (should (equal (agent-ui--method-diagnostics (list :path link)) [])))))
+      (delete-directory dir t))))
+
 (ert-deftest agent-session-test-remote-mcp-commands ()
   "Remote agents reach emx through the relay; local ones run emx directly."
   (agent-session-test--with-session

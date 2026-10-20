@@ -1500,6 +1500,7 @@ Pitfalls
     ((example string "Name of an example page: returns its source instead of the guide"))
   "How to write elisp blocks for render: how they run, helpers, patterns, pitfalls, and
 example pages whose source you can read.  Call it before writing an elisp block."
+  :read-only t
   (if (not example)
       (concat agent-canvas--guide
               "\n\nExamples (call canvas_guide with example=NAME for the source; render it with"
