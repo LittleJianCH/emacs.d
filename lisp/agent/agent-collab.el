@@ -584,8 +584,13 @@ message is sent; the reply reaches CALLER's agent through its mailbox."
   '((coder-flash :agent dsh :model "deepseek-official/deepseek-flash" :mode auto :cost minimal
                  :description "Writes code and tests to a clear specification.")
     (explorer :agent claude :model "haiku" :mode plan :cost low
-              :description "Investigates without editing: finds code, reads docs, \
-gathers evidence.")
+              :description "Answers short, quick questions without editing: finds a \
+definition, checks a fact in a few files or docs.  Its price rises fivefold once \
+its context passes 100K tokens, so not for long reading.")
+    (explorer-flash :agent dsh :model "deepseek-official/deepseek-flash" :mode ask
+                    :cost minimal
+                    :description "Investigates without editing when the question is \
+simple but the reading is long: many or large files, logs, docs.")
     (coder :agent codex :model "gpt-6.1-sol" :mode auto :cost medium
            :description "Writes code that needs more judgment than coder-flash: \
 changes across files, debugging, refactoring.")
@@ -617,8 +622,9 @@ starting session runs, are left out."
 (defcustom agent-collab-start-guidance
   "When to start a session: hand off work whose result you need but whose \
 steps you don't.  Decide for each piece on its own, not once for all.
-- Investigations that read many files, logs or docs to answer one \
-question: explorer, and keep working while it reads.
+- Investigations to answer one question, and keep working while it reads: \
+explorer when a few reads will do, explorer-flash when it must read many \
+or large files, logs or docs.
 - Code or runs you can specify in a few paragraphs (files, behavior, \
 commands, how to verify): coder-flash, or coder when it needs judgment.  \
 Needing your context doesn't mean fork: write it down as the spec \

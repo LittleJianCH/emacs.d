@@ -101,7 +101,9 @@ The model picks a profile, not a free harness and model pair: harness and model
 don't combine freely, model lists come from running processes, and a profile
 carries the permission mode, cost and confirmation the user set.
 `agent-collab-profiles` defaults to `coder-flash` (dsh, DeepSeek flash, auto),
-`explorer` (Claude haiku, plan), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
+`explorer` (Claude haiku, plan; short, quick questions), `explorer-flash` (dsh,
+DeepSeek flash, ask: dsh's read-only preset; simple questions that need long
+reading), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
 (Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
 (Claude Fable, plan, confirmed by the user each time: a fork only reaches the
 parent's own model); the tool description lists those whose agent is enabled
@@ -122,9 +124,11 @@ named after its profile. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The description also carries `agent-collab-start-guidance`, on when to start
-a session at all: investigations to explorer, specified code and long runs to
-the coders, reasoning on the caller's context to a fork, a review before
-committing, independent pieces at once; doing it yourself when explaining
+a session at all: quick investigations to explorer, long reading to
+explorer-flash (Haiku's price rises fivefold once a prompt passes 100K tokens,
+and an explorer that reads a few large files gets there), specified code and
+long runs to the coders, reasoning on the caller's context to a fork, a review
+before committing, independent pieces at once; doing it yourself when explaining
 would take longer than the work; telling the user the profile and why.
 Without it agents rarely delegated even when a profile fitted. With only "fork
 when it needs your context", an agent forked an hour of builds and
