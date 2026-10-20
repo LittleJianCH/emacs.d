@@ -2204,6 +2204,23 @@ With KEY, that property of its block instead, such as :hidden."
               (and (eq (plist-get block :type) 'user) (plist-get block (or key :text))))
             (agent-session--blocks-in-order session)))
 
+(ert-deftest agent-session-test-delegation-entry-point ()
+  "Publish the trigger before context choices, even without extra advice."
+  (agent-session-test--with-profiles
+   (let* ((agent-collab-start-guidance nil)
+          (description
+           (plist-get
+            (seq-find (lambda (m) (equal (plist-get m :name) "session_start"))
+                      (agent-session-test--call "describe" buffer))
+            :description))
+          (trigger (string-search "Delegate independent work early" description))
+          (choices (string-search "Choose how it gets context:" description)))
+     (should trigger)
+     (should choices)
+     (should (< trigger choices))
+     (should (string-search "cannot start further sessions" description))
+     (should (string-search "- worker: Echo2 big" description)))))
+
 (ert-deftest agent-session-test-session-start ()
   "An agent starts a session from a profile: under its own, named after the
 profile, its mode capped by the caller's, the task last in its message."

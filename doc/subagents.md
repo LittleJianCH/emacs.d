@@ -123,22 +123,46 @@ knows the task best and needs no model call to do it. Without one the child is
 named after its profile. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
-The description also carries `agent-collab-start-guidance`, on when to start
-a session at all: quick investigations to explorer, long reading to
-explorer-flash (Haiku's price rises fivefold once a prompt passes 100K tokens,
-and an explorer that reads a few large files gets there), specified code and
-long runs to the coders, reasoning on the caller's context to a fork, a review
-before committing, independent pieces at once; doing it yourself when explaining
-would take longer than the work; telling the user the profile and why.
-Without it agents rarely delegated even when a profile fitted. With only "fork
-when it needs your context", an agent forked an hour of builds and
-measurements: needing context rarely means needing it unwritten, since the
-caller can write the spec and the scripts, then hand the execution to a cheap
-profile. It also decided several tasks at once instead of each on its own.
-And agents tended to do every piece themselves in turn when a spec seemed like
-too much work; the guidance now says to run independent pieces (code, its
-tests, its docs) in parallel, and to fork when explaining would take longer
-than the work.
+The shared MCP instructions in `bin/emx` name `session_start` as the entry point
+for delegating independent work early. Its tool description opens with that
+trigger before explaining context modes. `agent-collab-start-guidance` adds the
+details: after brief orientation, delegate a bounded independent task before
+doing it yourself, continue a different part, and reconsider as new work appears.
+Trivial tasks, the immediate blocker on the next step, tightly coupled work and
+work needing user dialogue stay local. Split by outcome and file ownership,
+not automatically into code, tests and docs; the parent must not edit files
+assigned to a child either.
+
+Give a concise brief with the goal, context, scope, constraints, verification
+and expected report. Do not complete the work merely to specify it. Quick
+investigations go to explorer, simple questions with long reading to
+explorer-flash, implementation and long runs to the coders, and reasoning that
+depends heavily on the conversation to a fork. Long runs with known commands
+and inputs do not need a fork just to preserve context. For nontrivial work whose
+context is costly to summarize, fork instead of doing it all locally. Choose the
+least costly profile likely to finish reliably, tell the user why, avoid
+duplicating the child's task, and verify the important claims in its report.
+
+Substantive changes get a separate review before final delivery, even when no
+commit was requested. Use reviewer, or a second pass by a fork when reviewer
+is the caller's own agent and model. Explicitly ask for findings, not edits:
+a fork inherits the caller's permissions and context, so it does not provide
+a fresh perspective or enforce the reviewer's plan mode. Children still do
+only their assigned task and cannot delegate, including for review; this
+exception is explicit in the shared instructions and tool description.
+
+Earlier observations motivated these boundaries: "fork when it needs your
+context" led to an hour of builds and measurements on a fork despite known
+commands being enough for a cheaper profile. Agents also decided several tasks
+at once, or did every piece themselves when writing a spec seemed expensive.
+
+These instructions aim to make delegation timely, not maximize child counts.
+Protocol tests check that the trigger and child exception are exposed; they do
+not establish how often models follow them. Compare new sessions on a trivial
+edit, independent investigations and a substantive change, checking delegation
+timing, duplicate work, result quality, usage and elapsed time. Shared MCP
+instructions are sent at initialization: changing `bin/emx` requires a new MCP
+connection, whereas Lisp tool descriptions use the refresh mechanism below.
 Costs come in five tiers, minimal, low, medium, high and premium, so the most
 expensive models stand apart: DeepSeek flash is minimal, Haiku low, Codex's
 gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.

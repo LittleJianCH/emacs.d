@@ -5,6 +5,23 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+test('initialize exposes delegation and its child exception locally and remotely', () => {
+  for (const remote of ['0', '1']) {
+    const result = spawnSync(process.execPath, [path.join(__dirname, '../bin/emx'), 'mcp'], {
+      env: { ...process.env, EMX_REMOTE_AGENT: remote, EMX_EMACSCLIENT: '/usr/bin/false',
+             EMX_TOOLS_STAMP: '' },
+      input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
+                              params: { protocolVersion: '2025-06-18' } }) + '\n',
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const { instructions } = JSON.parse(result.stdout).result;
+    assert.match(instructions, /independent parts, use session_start/);
+    assert.match(instructions, /subagent assigned one task.*without starting sessions/);
+    assert.equal(instructions.includes('config_read, config_edit and config_write'), remote === '1');
+  }
+});
+
 test('tools/list grants no read-only hint, including remote offline fallback', () => {
   for (const remote of ['0', '1']) {
     const result = spawnSync(process.execPath, [path.join(__dirname, '../bin/emx'), 'mcp'], {

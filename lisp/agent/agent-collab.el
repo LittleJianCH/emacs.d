@@ -596,7 +596,7 @@ simple but the reading is long: many or large files, logs, docs.")
 changes across files, debugging, refactoring.")
     (reviewer :agent codex :model "gpt-6-astra" :mode plan :cost high
               :description "Reviews changes independently and reproduces what it \
-finds; doesn't edit files.  Use it before committing a change that isn't trivial.")
+finds; reports findings without editing files.")
     (generalist :agent claude :model "opus" :mode auto :cost high
                 :description "Does demanding work of any kind.")
     (expert :agent claude :model "fable" :mode plan :cost premium :confirm t
@@ -620,27 +620,35 @@ starting session runs, are left out."
   :type 'integer)
 
 (defcustom agent-collab-start-guidance
-  "When to start a session: hand off work whose result you need but whose \
-steps you don't.  Decide for each piece on its own, not once for all.
-- Investigations to answer one question, and keep working while it reads: \
-explorer when a few reads will do, explorer-flash when it must read many \
-or large files, logs or docs.
-- Code or runs you can specify in a few paragraphs (files, behavior, \
-commands, how to verify): coder-flash, or coder when it needs judgment.  \
-Needing your context doesn't mean fork: write it down as the spec \
-yourself (prepare the scripts, check the inputs), then hand off the long \
-execution, such as builds, measurements and test runs.
-- Reasoning on your context at your level, such as diagnosis or design: \
-fork; expert when you are stuck.
-- A change that isn't trivial, before you commit it: reviewer.
-- Independent pieces at once, one session each, while you do another: \
-code, its tests and its docs are often three.  Never two sessions editing \
-the same files.
-Keep the piece you need next, and work that needs the user.  For the \
-others, write a spec when that is quick; when explaining would take \
-longer than the work, fork rather than doing every piece yourself in turn.  \
-When you start a session, tell the user its profile and why.  A session's reply is a report, not proof: check its \
-work before you rely on it."
+  "When to start a session: after brief orientation on a nontrivial task, \
+identify work that can proceed independently.  Delegate it before doing \
+that work yourself, then continue a different part.  Reconsider when new \
+independent work appears, not just at the start of the user's request.
+- Bounded investigations: explorer for a few reads, explorer-flash for \
+simple questions needing many or large files, logs or docs.
+- Implementation or long runs with a clear goal and verification: \
+coder-flash; coder when the work needs more judgment.
+- Reasoning that depends heavily on your conversation: fork.  Use expert \
+when you are stuck or the user requests it.
+- Substantive changes: get a separate review before final delivery, even \
+if no commit was requested.  Use reviewer, or fork for a second pass if \
+reviewer is your own agent and model.  Ask for findings, not edits: a fork \
+inherits your permissions as well as your context.
+Keep trivial tasks, the immediate blocker on your next step, tightly \
+coupled work and work needing user dialogue local.  \
+Split by independent outcome and file ownership; code, tests and docs \
+are not automatically independent.  Never have two sessions edit the \
+same files, including yourself.
+Give the goal, relevant context, file scope, constraints, verification \
+and expected report.  A concise brief is enough: don't finish the \
+investigation or implementation merely to prepare it.  For long runs, \
+pass known commands and inputs rather than forking just to preserve them.  \
+For nontrivial work whose context is costly to summarize, fork instead \
+of doing it all locally.
+Tell the user the profile and why.  While the child works, do not duplicate \
+its task.  Integrate its report and verify the claims that matter before \
+relying on them.  If you are a child assigned one task, complete it \
+yourself; do not start sessions, including for review."
   "Advice to agents on when to start sessions, shown with session_start.
 It is part of every agent's tools, so changing it refreshes them in live
 sessions (see agent-ui.el)."
@@ -843,22 +851,21 @@ your conversation" required)
 joined by '-', at most 16 characters, such as cgu-measure.  You and the user
 refer to it by it; default: the profile's name")
      (title string "A short title for the session, a few words"))
-  "Start a subagent: a new session that does one task for you and reports
-back, shown to the user under your session.  Choose how it gets context:
-- fork: a clone of you (your agent and model) that inherits your whole
-  conversation through the prompt cache, so its input is cheap; its output
-  costs what yours does.  Prefer it when the task needs your own level of
-  reasoning on your context; when the context can be written down as a
-  spec, a cheaper profile given that spec usually does better.  Omit
-  profile.  Claude, Codex and DeepSeek sessions can fork.
-- handoff: a cheaper profile gets a text copy of your recent conversation
-  (no prompt cache, and tool output is cut).  Use it when the task needs
-  your context but a cheaper model can do it.
-- fresh: a profile starts from your prompt alone.  Use it for
-  self-contained work, and write the prompt so it stands alone.
-Prefer the cheapest profile that can do the job.  Never pick a profile of
-your own agent and model: fork instead, which is the same model with your
-context and prompt cache.  It returns the session's @handle at once, and
+  "Start a subagent to do one bounded task and report back.
+Delegate independent work early on nontrivial tasks, before doing it
+yourself, and continue another part.  Keep trivial or tightly coupled
+work local.  A child assigned one task cannot start further sessions.
+Choose how it gets context:
+- fresh: a profile gets your prompt alone; make it self-contained.
+- handoff: a profile gets a text copy of recent conversation, without
+  prompt cache and with tool output cut.  Include essential facts in the task.
+- fork: your own agent and model inherit the conversation through the
+  prompt cache; output costs what yours does.  Use for reasoning that
+  depends heavily on your context.  Omit profile.
+  Claude, Codex and DeepSeek sessions can fork.
+Choose the least costly profile likely to complete the task reliably.
+For your own agent and model, use fork instead of a profile, including
+for review.  It returns the session's @handle at once, and
 its final reply reaches you as a message when it finishes: don't poll it;
 keep working, or end your turn if you need the reply first.  A session you
 start does one task, takes no follow-ups and closes once its reply reaches
