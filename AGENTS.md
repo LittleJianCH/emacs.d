@@ -43,6 +43,7 @@ bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server), usage
 bin/emx-usage.js         `emx serve`: usage ledger, quotas, reports, forecasts, quota polls
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
+doc/emx-daemon.md        design of moving agents into an emx daemon (in progress)
 test/agent-backend-test.el  ERT suite for backend module startup and selection
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
