@@ -1086,3 +1086,171 @@
                (plist-get (plist-get (car notices) :params) :tools)))
       (agent-emx--publish-tools)
       (should (= 1 (length notices))))))
+
+;;; Codex daemon integration
+
+(ert-deftest agent-emx-test-codex-quota-and-notices ()
+  (agent-emx-test--with-session
+    (let (readings)
+      (cl-letf (((symbol-function 'agent-usage-set-quota)
+                 (lambda (s &rest args) (should (eq s session)) (push args readings))))
+        (agent-emx-test--event
+         session 1 "quota/rate-limits"
+         :rateLimits '(:plan "plus" :windows [(:id "300" :minutes 300 :used 0.25 :resets 2000000000)]
+                             :credits 12.5))
+        (should (equal (plist-get (car readings) :plan) "plus"))
+        (should (equal (plist-get (car readings) :credits) 12.5))
+        (let ((window (car (plist-get (car readings) :windows))))
+          (should (equal (plist-get window :label) (agent-usage-window-label 300)))
+          (should (= (plist-get window :used) 0.25)))
+        (agent-emx-test--event session 2 "quota/rate-limits"
+                              :rateLimits '(:windows [] :credits "unlimited"))
+        (should (eq (plist-get (car readings) :credits) 'unlimited))
+        (agent-emx-test--event session 3 "quota/rate-limits" :rateLimits '(:windows []))
+        (should-not (plist-member (car readings) :credits))))
+    (agent-emx-test--event session 4 "block/add"
+                          :block '(:id "tools" :type "notice" :notice (:kind "codex-tools-changed")))
+    (should (string-match-p "重启 Codex 后继续" (agent-emx-test--transcript session)))
+    (agent-emx-test--event
+     session 5 "block/add"
+     :block '(:id "config" :type "notice"
+                  :notice (:kind "codex-config-read-failed" :args (:message "bad"))))
+    (should (string-match-p "保留原有指令：bad" (agent-emx-test--transcript session)))))
+
+(ert-deftest agent-emx-test-codex-offer-preserves-default ()
+  (require 'agent-codex)
+  (let ((agent-session-agents (copy-tree agent-session-agents))
+        (agent-emx--offered (copy-tree agent-emx--offered))
+        (agent-emx-agents nil))
+    (agent-emx--apply 'codex)
+    (should (eq (agent-session--get 'codex :backend) 'codex))
+    (agent-emx--select-agents 'agent-emx-agents '(codex))
+    (should (eq (agent-session--get 'codex :backend) 'emx))
+    (should (equal (agent-session--get 'codex :emx-agent) "codex"))
+    (agent-emx--select-agents 'agent-emx-agents nil)
+    (should (eq (agent-session--get 'codex :backend) 'codex))))
+
+(ert-deftest agent-emx-test-codex-open-skills-context ()
+  (dolist (skills '(nil "/tmp/emx-skills/"))
+    (agent-emx-test--with-session
+      (setf (agent-session-agent session) 'codex)
+      (agent-emx--set session :emx-id nil)
+      (let (request)
+        (cl-letf (((symbol-function 'agent-session-skills-dir) (lambda (_) skills))
+                  ((symbol-function 'agent-session-superseded-skills) (lambda () '("atomic-review")))
+                  ((symbol-function 'agent-emx--request)
+                   (lambda (_ method params &rest _)
+                     (should (equal method "session/open")) (setq request params))))
+          (agent-emx--attach session (agent-emx--make-connection)))
+        (let ((context (plist-get request :codex)))
+          (should (equal (plist-get context :supersededSkills) ["atomic-review"]))
+          (should (equal (plist-get context :skillsRoot) skills))
+          ;; Missing skills are omitted rather than null (the RPC expects a string).
+          (should (eq (not (null (plist-member context :skillsRoot))) (not (null skills)))))))))
+
+;;; Claude daemon integration
+
+(ert-deftest agent-emx-test-claude-offer-preserves-default ()
+  (require 'agent-claude)
+  (let ((agent-session-agents (copy-tree agent-session-agents))
+        (agent-emx--offered (copy-tree agent-emx--offered))
+        (agent-emx-agents nil))
+    (agent-emx--apply 'claude)
+    (should (eq (agent-session--get 'claude :backend) 'claude))
+    (agent-emx--select-agents 'agent-emx-agents '(claude))
+    (should (eq (agent-session--get 'claude :backend) 'emx))
+    (should (equal (agent-session--get 'claude :emx-agent) "claude"))
+    (agent-emx--select-agents 'agent-emx-agents nil)
+    (should (eq (agent-session--get 'claude :backend) 'claude))))
+
+(ert-deftest agent-emx-test-claude-open-skills-context ()
+  (dolist (skills '(nil "/tmp/emx-claude-skills/"))
+    (agent-emx-test--with-session
+      (setf (agent-session-agent session) 'claude)
+      (agent-emx--set session :emx-id nil)
+      (let (request)
+        (cl-letf (((symbol-function 'agent-session-skills-dir) (lambda (_) skills))
+                  ((symbol-function 'agent-session-superseded-skills) (lambda () '("atomic-review")))
+                  ((symbol-function 'agent-emx--request)
+                   (lambda (_ method params &rest _)
+                     (should (equal method "session/open")) (setq request params))))
+          (agent-emx--attach session (agent-emx--make-connection)))
+        (let ((context (plist-get request :claude)))
+          (should (equal (plist-get context :skillsDir) skills))
+          (should (equal (plist-get context :supersededSkills) ["atomic-review"]))
+          (should (eq (not (null (plist-member context :skillsDir)))
+                      (not (null skills)))))))))
+
+(ert-deftest agent-emx-test-claude-quota-and-notices ()
+  (agent-emx-test--with-session
+    (let (reading)
+      (cl-letf (((symbol-function 'agent-usage-set-quota)
+                 (lambda (_ &rest args) (setq reading args))))
+        (agent-emx-test--event
+         session 1 "quota/rate-limits"
+         :rateLimits '(:windows [(:id "five_hour" :minutes 300 :used 0.2 :resets 1234)
+                                  (:id "seven_day_opus" :minutes 10080 :used 0.5 :resets 5678)]))
+        (should (equal (mapcar (lambda (w) (plist-get w :label))
+                              (plist-get reading :windows))
+                       '("5h" "周·Opus")))))
+    (agent-emx-test--event
+     session 2 "block/add"
+     :block '(:id "child-effort" :type "notice" :notice (:kind "claude-child-effort" :level "error")))
+    (agent-emx-test--event
+     session 3 "block/add"
+     :block '(:id "external" :type "notice"
+                  :notice (:kind "claude-external-source" :args (:source "Claude Desktop"))))
+    (should (string-match-p "子会话不保存记录" (agent-emx-test--transcript session)))
+    (should (string-match-p "以下来自 Claude Desktop" (agent-emx-test--transcript session)))))
+
+(ert-deftest agent-emx-test-codex-approval-details ()
+  (agent-emx-test--with-session
+    (let (captured)
+      (cl-letf (((symbol-function 'agent-session-ask)
+                 (lambda (_ &rest args) (setq captured args) "ui-ask")))
+        (agent-emx--ask session '(:id "command" :type "approval" :description "Run it"
+                                 :view (:title "echo hi" :command "echo hi\necho bye")
+                                 :choices ["allow" "deny"]))
+        (should (equal (plist-get captured :detail) "Run it\necho hi\necho bye"))
+        (agent-emx--ask session '(:id "edit" :type "approval"
+                                 :view (:title "a" :diff "--- a\n+++ a\n-old\n+new")
+                                 :choices ["allow" "always" "deny"]))
+        (should (equal (plist-get captured :diff) "--- a\n+++ a\n-old\n+new"))))))
+
+(ert-deftest agent-emx-test-claude-tool-plan-and-declined ()
+  (agent-emx-test--with-session
+    (agent-emx-test--event
+     session 1 "block/add"
+     :block '(:id "plan" :type "tool" :status "done"
+                  :view (:name "TodoWrite" :kind "plan" :title ""
+                               :items [(:text "step" :status "active")])))
+    (let ((plan (agent-session--block session "plan")))
+      (should (equal (plist-get plan :title) "更新计划"))
+      (should (equal (plist-get plan :output) "▶ step")))
+    (agent-emx-test--event
+     session 2 "block/add"
+     :block '(:id "deny" :type "tool" :status "declined"
+                  :view (:name "Bash" :kind "command" :title "false")))
+    (should (eq (plist-get (agent-session--block session "deny") :status) 'declined))
+    (agent-emx-test--event
+     session 3 "block/add"
+     :block '(:id "desktop" :type "notice"
+                  :notice (:kind "claude-external-source" :args (:source "claude-desktop"))))
+    (agent-emx-test--event
+     session 4 "block/add"
+     :block '(:id "cli" :type "notice"
+                  :notice (:kind "claude-external-source" :args (:source "cli"))))
+    (should (string-match-p "以下来自 Claude Desktop" (agent-emx-test--transcript session)))
+    (should (string-match-p "以下来自 终端中的 Claude Code" (agent-emx-test--transcript session)))))
+
+(ert-deftest agent-emx-test-claude-question-cancel ()
+  (agent-emx-test--with-session
+    (let (sent)
+      (cl-letf (((symbol-function 'agent-emx--rpc)
+                 (lambda (_ method params &rest _)
+                   (setq sent (cons method params)))))
+        (agent-emx-test--event
+         session 1 "ask/add" :ask '(:id "q" :type "question" :questions [(:question "Pick")]))
+        (let ((id (gethash "q" (agent-emx--table session :emx-asks))))
+          (agent-session--resolve-questions session id 'cancel)
+          (should (equal sent '("session/answer" :ask "q"))))))))

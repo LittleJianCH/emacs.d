@@ -3,6 +3,8 @@
 import type { Answer, Ask, Block, Info, Settings, Status } from '../daemon/protocol.ts'
 import { EchoBackend } from './echo.ts'
 import { DshBackend } from './dsh.ts'
+import { ClaudeBackend } from './claude.ts'
+import { CodexBackend } from './codex.ts'
 import type { SessionEvent } from '../daemon/protocol.ts'
 
 export type NewAsk = Ask extends infer A ? A extends Ask ? Omit<A, 'id'> : never : never
@@ -36,9 +38,16 @@ export interface Backend {
   stop(): void | Promise<void>
   alive(): boolean
   resumeId(): string | undefined
+  /** Republish account readings after a fresh snapshot, never token usage. */
+  reattached?(): void
+  /** True when the native transcript has turns older than the loaded blocks. */
+  hasEarlier?(): boolean
+  loadEarlier?(turns: number): Promise<Block[]>
 }
 
 export const backends: Record<string, (host: SessionHost) => Backend> = {
   echo: (host) => new EchoBackend(host),
   dsh: (host) => new DshBackend(host),
+  claude: (host) => new ClaudeBackend(host),
+  codex: (host) => new CodexBackend(host),
 }

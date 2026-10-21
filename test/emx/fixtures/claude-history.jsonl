@@ -1,0 +1,8 @@
+{"type":"user","uuid":"first","entrypoint":"cli","message":{"content":"first prompt"}}
+{"type":"assistant","uuid":"answer","entrypoint":"cli","message":{"content":[{"type":"thinking","thinking":"private thought"},{"type":"text","text":"first answer"},{"type":"tool_use","id":"edit-old","name":"Edit","input":{"file_path":"file.el","old_string":"old\n","new_string":"new\n"}}]}}
+{"type":"user","uuid":"result","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"edit-old","content":[{"type":"text","text":"updated"}]}]}}
+{"type":"user","uuid":"internal","isMeta":true,"message":{"content":"<internal>"}}
+{"type":"assistant","uuid":"sidechain","isSidechain":true,"message":{"content":[{"type":"text","text":"hidden"}]}}
+{"type":"attachment","uuid":"queued","attachment":{"type":"queued_command","prompt":"queued prompt"}}
+{"type":"user","uuid":"image","message":{"content":[{"type":"image","source":{"type":"base64","data":"omitted"}},{"type":"text","text":"image prompt"}]}}
+{"type":"assistant","uuid":"last","message":{"content":[{"type":"text","text":"image answer"}]}}

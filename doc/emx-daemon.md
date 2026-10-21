@@ -1,7 +1,7 @@
 # emx daemon: agents outside Emacs
 
-Status: phases 1 and 2 implemented on `claude/emx-daemon`; later phases
-below remain design. The opt-in dsh path is local only.
+Status: phases 1–4 implemented on `claude/emx-daemon` for local projects,
+behind the opt-in `agent-emx-agents` switch; later phases remain design.
 
 ## Goal
 
@@ -280,6 +280,93 @@ stream into the session events above.
   python3 scripts to streaming Node code for local projects.
 - **Codex**: `codex app-server` JSON-RPC; resume a thread in a new process
   when its tools changed.
+
+### Phase 4a: local Claude sessions
+
+Implemented in `emx/backends/claude.ts` behind `agent-emx-agents` containing
+`claude`; the Lisp backend remains the default. The daemon runs the same
+stream-json command and permission modes, injecting its own MCP socket and
+session id. `session/open.claude` supplies `skillsDir` and
+`supersededSkills`, retained for restarts. Permissions preserve the original
+input and suggestions, including JSON false/null, arrays and empty objects;
+AskUserQuestion adds answers to a copy of that original input. Tool views,
+thinking, text, results, errors and rate-limit windows use existing events.
+Denied tool results retain the `declined` status.
+
+Model and permission mode change through control requests. Effort changes
+restart with `--resume`, immediately when idle or after the active turn;
+non-persistent children report a notice instead. Running `modelUsage`
+totals become deltas using the Lisp baseline-proof rules, so a resumed
+process cannot charge historical totals as the current turn.
+
+History uses two streaming JSONL passes, retaining only the last page's
+turn offsets and display blocks. `session/earlier` calls an optional backend
+history hook beyond the daemon's loaded transcript. The saved byte boundary
+survives daemon persistence. A directory watch coalesces writes for 500 ms,
+shows messages from entrypoints other than `sdk-cli`, and restarts with
+`--resume` before the next send; that restart forgets the usage baseline.
+The watcher also handles transcripts created during the first turn.
+
+`EMX_CLAUDE_CONFIG` is transitional daemon configuration: a JSON object
+with `executable`, `extraArgs`, `disallowedTools` (default `Agent`,
+`Workflow`, `SendMessage`, `ListAgents`) and `historyTurns` (default 20).
+`EMX_CLAUDE_EXECUTABLE` overrides the executable for installations/tests;
+`EMX_CLAUDE_PROJECTS_DIR` isolates transcript fixtures. Fake CLI tests do
+not contact the API. The shared config-file/watcher phase remains later work.
+
+Remote projects and native forks are rejected explicitly. Historical
+session discovery stays on the Lisp side, which already scans Claude's
+project directory; the daemon handles live sessions and transcript paging.
+Claude receives MCP tool-list notifications directly, so it does not need
+Codex's tool-change process restart.
+
+Phase 4a verification (2026-10-20): `tsc -p emx` passes; the combined
+daemon/MCP/usage Node suite passes 104 tests, including 18 fake-Claude
+cases. The AGENTS ERT suite plus daemon UI tests passes 251 tests with one
+environment-dependent scroll test skipped. Evil-on/off byte compilation
+has only the two existing lang-agda slot warnings; the language ERT suite
+passes 23 tests with evil enabled. A single real Haiku turn through an
+isolated daemon and temp project sent `say hi in one word` and streamed
+`Hi` (one delta), then `usage/end` and idle. The usage delta for
+`claude-haiku-5-5` was input 2, cacheRead 0, cacheWrite 19157, output 5.
+No default Emacs server or daemon was used and no config was reloaded.
+
+### Phase 4b: local Codex sessions
+
+Implemented behind `agent-emx-agents` containing `codex`; nil remains the
+Lisp default. `emx/backends/codex.ts` maps app-server items, reasoning,
+commands and streamed output, file diffs, MCP calls, plans, web searches,
+approvals and user questions into the existing blocks and asks. Every
+turn carries model, effort, approval policy, sandbox and reviewer, using
+the Lisp mode mapping. Configuration reads preserve the user's developer
+instructions before appending the Emacs context; failures omit the override
+and show a notice. `session/open.codex` carries `skillsRoot` and
+`supersededSkills`, retained with the session for process restarts.
+
+The MCP subprocess runs this checkout's `node bin/emx mcp` with the daemon
+socket and session id, and a 1,800-second timeout. A changed editor tool
+catalog or permission classification triggers a fresh process and
+`thread/resume` before the next message. Children use ephemeral threads
+and retain their initial tools. `EMX_CODEX_CONFIG` is transitional daemon
+configuration, a JSON object with `executable`, `extraArgs` and
+`nativeSubagents` (default false). `EMX_CODEX_EXECUTABLE` overrides the
+program for installations and fake app-server tests; no credentials are
+passed in either option.
+
+Live token notifications become `usage/call` only inside a turn and when
+the thread total changes; `usage/end` flushes them. History and duplicate
+notifications never count. `quota/rate-limits` carries sparse `plan`,
+`windows` (id, minutes, used fraction, resets) and numeric or `unlimited`
+credits. A fresh attach republishes the cached account reading after
+`history/done`, without replaying token usage. Resume fetches all pages of
+`thread/turns/list`; the common session layer serves the requested last
+turns and `session/earlier`. A crashed app-server resumes its saved id on
+the next send.
+
+Remote roots and `thread/fork` remain explicitly unsupported. Discovering
+past sessions stays in Lisp's `thread/list` implementation; use the Lisp
+registration to browse sessions outside the daemon's own session table.
+Remote transport, native forks and shared discovery belong to later phases.
 
 ## Localization
 

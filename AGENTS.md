@@ -91,9 +91,24 @@ var/                     runtime state (history, backups, pasted images...); git
   (`agent-claude--follow-script`) and passes on only those messages, so neither the
   watch nor the CLI's own writes cost round trips. The CLI is restarted with
   `--resume` before the next send so its context catches up.
+  Local sessions opt into `emx/backends/claude.ts` when `agent-emx-agents`
+  contains `claude`; Lisp stays the default. The daemon's transitional
+  `EMX_CLAUDE_CONFIG` JSON sets executable, extraArgs, disallowedTools
+  (same defaults as Lisp) and historyTurns (20). Tests override the executable
+  and project transcript directory with fake stream-json fixtures. Node streams
+  history pages and follows external clients with a 500 ms directory-watch
+  debounce; a resume after external writes forgets usage totals. Remote roots
+  and forks are unsupported; historical session discovery stays in Lisp.
 - `backend/agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
+  Local sessions opt into `emx/backends/codex.ts` when `agent-emx-agents`
+  contains `codex`; Lisp stays the default. The daemon's transitional
+  `EMX_CODEX_CONFIG` JSON sets executable, extraArgs and nativeSubagents
+  (default false). Tests use `EMX_CODEX_EXECUTABLE` and a fake app-server.
+  Changed editor tools restart saved threads before their next send;
+  ephemeral children retain their process. Usage excludes replayed history.
+  Remote roots and forks are unsupported; external discovery stays in Lisp.
 - `backend/agent-dsh.el` — DeepSeek Harness (`dsh`) backend. The default remains
   Lisp; `agent-emx-agents` containing `dsh` registers new sessions with `:backend emx
   :emx-agent "dsh"` (set before startup or via `customize-set-variable`). Removing

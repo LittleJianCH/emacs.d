@@ -36,7 +36,7 @@ export type ToolKind =
   | 'command' | 'read' | 'edit' | 'search' | 'web' | 'task'
   | 'question' | 'plan' | 'mcp' | 'other'
 
-export type ToolStatus = 'running' | 'done' | 'error'
+export type ToolStatus = 'running' | 'done' | 'error' | 'declined'
 
 /** How a tool call is shown, normalized by the backend adapter. */
 export interface ToolView {
@@ -159,6 +159,8 @@ export interface Usage {
 export interface OpenParams {
   agent: string
   root: string
+  /** Claude's editor-installed skills; retained for effort/external restarts. */
+  claude?: { skillsDir?: string, supersededSkills?: string[] }
   settings?: Settings
   /** A session to resume, in the agent's own terms. */
   resume?: string
@@ -166,6 +168,8 @@ export interface OpenParams {
   fork?: SessionId
   /** The session whose agent starts this one. */
   parent?: SessionId
+  /** Editor-provided skill roots for Codex; persisted for process restarts. */
+  codex?: { skillsRoot?: string, supersededSkills?: string[] }
 }
 
 /**
@@ -287,6 +291,10 @@ export type SessionEvent =
   | { type: 'usage/end' }
   /** Account balance reading; usage accounting remains in Emacs in phase 2. */
   | { type: 'quota', balance: { amount: number, currency: string }[] }
+  /** Sparse Codex account readings; missing credits retain the known value. */
+  | { type: 'quota/rate-limits', rateLimits: { plan?: string,
+      windows: { id: string, minutes: number | null, used: number, resets: number | null }[],
+      credits?: number | 'unlimited' } }
   /** A new block, at the end, or before the block `before`. */
   | { type: 'block/add', block: Block, before?: string, history?: boolean }
   /** Streamed text of a text block, or output of a tool block. */

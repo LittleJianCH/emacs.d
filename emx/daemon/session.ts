@@ -102,7 +102,17 @@ export class Session implements SessionHost {
 
   /** Apply exactly once; log immutable events, independently of block state. */
   emit(input: SessionEvent): void {
-    const event = structuredClone(input)
+    let event = structuredClone(input)
+    if (event.type === 'block/add') {
+      const existing = this.index.get(event.block.id)
+      if (existing) {
+        const fields = Object.fromEntries(Object.entries(event.block)
+          .filter(([key, value]) => key !== 'id' && key !== 'type'
+            && !isDeepStrictEqual((existing as unknown as Record<string, unknown>)[key], value)))
+        if (!Object.keys(fields).length) return
+        event = { type: 'block/update', id: existing.id, fields }
+      }
+    }
     // Summary.info currently includes every info key; transcript events do not.
     const summaryChanged = event.type === 'status' ? this.status !== event.status
       : event.type === 'info' && Object.entries(event.info)
@@ -113,7 +123,6 @@ export class Session implements SessionHost {
       case 'capabilities': this.capabilities = event.capabilities; break
       case 'settings': this.settings = { ...this.settings, ...event.settings }; break
       case 'block/add': {
-        if (this.index.has(event.block.id)) break
         const before = this.blocks.findIndex((block) => block.id === event.before)
         const block = structuredClone(event.block)
         this.blocks.splice(before < 0 ? this.blocks.length : before, 0, block)
@@ -272,7 +281,7 @@ export class Session implements SessionHost {
       && (after.seq === this.seq || (this.log[0]?.seq ?? Infinity) <= after.seq + 1)
     const events = replay ? this.log.filter((event) => event.seq > after!.seq) : []
     const blocks = replay ? [] : this.#lastTurns(this.blocks.length, turns)
-    const earlier = !replay && blocks.length < this.blocks.length
+    const earlier = !replay && (blocks.length < this.blocks.length || !!this.backend.hasEarlier?.())
     const result: AttachResult = { epoch: this.epoch, seq: this.seq, replay: replay ? 'events' : 'fresh',
       status: this.status, info: structuredClone(this.info), settings: { ...this.settings },
       queue: [...this.queue], asks: [...this.asks.values()].map(({ ask }) => structuredClone(ask)),
@@ -282,6 +291,7 @@ export class Session implements SessionHost {
       if (!replay) {
         for (const block of blocks) this.#history(block, result.seq)
         this.#historyDone(earlier, result.seq)
+        this.backend.reattached?.()
       }
     } }
   }
@@ -307,11 +317,19 @@ export class Session implements SessionHost {
     this.notify?.({ type: 'history/done', earlier, session: this.id, seq })
   }
 
-  earlier(before: string, turns = 20): { earlier: boolean } {
-    const end = this.blocks.findIndex((block) => block.id === before)
+  async earlier(before: string, turns = 20): Promise<{ earlier: boolean }> {
+    let end = this.blocks.findIndex((block) => block.id === before)
     if (end < 0) throw new RpcError(ErrorCode.InvalidParams, `Unknown history block: ${before}`)
+    const loaded = this.blocks.slice(0, end).filter((block) => block.type === 'user').length
+    if (loaded < turns && this.backend.hasEarlier?.()) {
+      const beforeFirst = this.blocks[0]?.id
+      for (const block of await this.backend.loadEarlier?.(turns - loaded) ?? []) {
+        this.emit({ type: 'block/add', block, before: beforeFirst, history: true })
+      }
+      end = this.blocks.findIndex((block) => block.id === before)
+    }
     const blocks = this.#lastTurns(end, turns)
-    const earlier = blocks.length < end
+    const earlier = blocks.length < end || !!this.backend.hasEarlier?.()
     for (const block of blocks) this.#history(block, this.seq, before)
     this.#historyDone(earlier, this.seq)
     return { earlier }

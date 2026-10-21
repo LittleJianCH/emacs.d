@@ -19,6 +19,7 @@
 (require 'agent-session)
 (require 'agent-remote)
 (require 'agent-usage)
+(require 'agent-emx)
 
 (defgroup agent-codex nil
   "Codex backend."
@@ -753,6 +754,7 @@ Updates are sparse: what is missing keeps its known value."
   t)
 
 (agent-session-define-agent codex :title "Codex" :executable agent-codex-executable)
+(agent-emx-offer 'codex)
 
 (provide 'agent-codex)
 ;;; agent-codex.el ends here

@@ -17,16 +17,37 @@
   "Sessions owned by the emx daemon."
   :group 'agent-session)
 
+(defvar agent-emx--offered nil
+  "Agents the daemon can run, with their Lisp backends: ((AGENT . BACKEND) ...).")
+
+(defvar agent-emx-agents)
+
+(defun agent-emx--apply (agent)
+  "Register AGENT's backend per `agent-emx-agents' for future sessions."
+  (when-let* ((entry (assq agent agent-session-agents))
+              (lisp (alist-get agent agent-emx--offered)))
+    (let ((daemon (memq agent agent-emx-agents)))
+      (setcdr entry (plist-put (cdr entry) :backend (if daemon 'emx lisp)))
+      (setcdr entry (plist-put (cdr entry) :emx-agent
+                               (and daemon (symbol-name agent)))))))
+
+(defun agent-emx-offer (agent)
+  "Let AGENT's sessions run through the daemon when `agent-emx-agents' says so.
+Call it after registering AGENT with `agent-session-define-agent'."
+  (unless (assq agent agent-emx--offered)
+    (push (cons agent (agent-session--get agent :backend)) agent-emx--offered))
+  (agent-emx--apply agent))
+
 (defun agent-emx--select-agents (symbol value)
   "Set SYMBOL to VALUE and update registrations for future sessions."
   (set-default symbol value)
-  (when-let* ((entry (assq 'dsh agent-session-agents)))
-    (setcdr entry (plist-put (cdr entry) :backend (if (memq 'dsh value) 'emx 'dsh)))
-    (setcdr entry (plist-put (cdr entry) :emx-agent (and (memq 'dsh value) "dsh")))))
+  (dolist (entry agent-emx--offered)
+    (agent-emx--apply (car entry))))
 
 (defcustom agent-emx-agents nil
   "Agents whose new sessions run through the emx daemon.
-Currently supports dsh for local projects.  Nil keeps the Lisp backends.
+Only agents whose backend offers it (`agent-emx-offer') switch, and
+only for local projects.  Nil keeps the Lisp backends.
 Customize this option before opening a session; existing sessions keep
 using the backend they started with."
   :type '(repeat symbol)
@@ -50,6 +71,16 @@ using the backend they started with."
     ("backend-error" . "出错：%s")
     ("max-tokens" . "输出达到 token 上限")
     ("history-end" . "—— 以上为历史记录 ——")
+    ("claude-child-effort" . "子会话不保存记录，不能重启来改推理强度")
+    ("claude-external-source"
+     . (lambda (args)
+         (format "以下来自 %s"
+                 (pcase (plist-get args :source)
+                   ("claude-desktop" "Claude Desktop")
+                   ("cli" "终端中的 Claude Code")
+                   (source (or source "其他客户端"))))))
+    ("codex-tools-changed" . "Emacs 的工具有更新，重启 Codex 后继续")
+    ("codex-config-read-failed" . "读取 Codex 配置失败，未注入 Emacs 环境说明；保留原有指令：%s")
     ("dsh-warning" . "dsh：%s")
     ("dsh-version" . "dsh 版本为 %s，桥接插件按 %s 编写，若有异常可能需要适配")
     ("command-error" . "命令失败：%s")
@@ -437,7 +468,7 @@ command asynchronously so starting a daemon never waits in the editor."
        (let ((view (plist-get block :view)))
          (agent-session-tool session id :kind (intern (plist-get view :kind))
                              :title (pcase (plist-get view :name)
-                                      ("todo_write" "更新计划")
+                                      ((or "todo_write" "TodoWrite") "更新计划")
                                       ("exit_plan_mode" "提交计划")
                                       ("skill" (concat "技能 " (plist-get view :title)))
                                       (_ (plist-get view :title)))
@@ -512,7 +543,11 @@ command asynchronously so starting a daemon never waits in the editor."
            (agent-session-ask
             session :title (or (plist-get (plist-get ask :view) :title)
                                (plist-get ask :description) "需要确认")
-            :detail (plist-get ask :description) :tool (plist-get ask :tool)
+            :detail (string-join (delq nil (list (plist-get ask :description)
+                                                 (plist-get (plist-get ask :view) :command)))
+                                 "\n")
+            :diff (plist-get (plist-get ask :view) :diff)
+            :tool (plist-get ask :tool)
             :choices (mapcar (lambda (choice)
                                (list (intern choice)
                                      (cdr (assoc choice '(("allow" . "允许")
@@ -530,14 +565,14 @@ command asynchronously so starting a daemon never waits in the editor."
           (lambda (answers)
             (agent-emx--rpc
              session "session/answer"
-             (list :ask id :answers
-                   (vconcat
-                    (mapcar (lambda (answer)
-                               (append (list :selected (vconcat (plist-get answer :selected)))
-                                       (when (plist-get answer :custom)
-                                         (list :custom (plist-get answer :custom)))))
-                             (if (eq answers 'cancel)
-                                 (make-list (length (plist-get ask :questions)) nil)
+             (if (eq answers 'cancel)
+                 (list :ask id)
+               (list :ask id :answers
+                     (vconcat
+                      (mapcar (lambda (answer)
+                                 (append (list :selected (vconcat (plist-get answer :selected)))
+                                         (when (plist-get answer :custom)
+                                           (list :custom (plist-get answer :custom)))))
                                answers)))))))))
        table))))
 
@@ -684,6 +719,25 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
         ("usage/end" (agent-usage-end-turn session))
         ("quota"
          (agent-usage-set-quota session :balance (append (plist-get params :balance) nil)))
+        ("quota/rate-limits"
+         (let* ((reading (plist-get params :rateLimits))
+                (windows (mapcar
+                          (lambda (window)
+                            (append window
+                                    (list :label
+                                          (or (cdr (assoc (plist-get window :id)
+                                                          '(("five_hour" . "5h")
+                                                            ("seven_day" . "周")
+                                                            ("seven_day_opus" . "周·Opus")
+                                                            ("seven_day_sonnet" . "周·Sonnet"))))
+                                              (agent-usage-window-label
+                                               (plist-get window :minutes))))))
+                          (append (plist-get reading :windows) nil))))
+           (apply #'agent-usage-set-quota session
+                  :plan (plist-get reading :plan) :windows windows
+                  (when (plist-member reading :credits)
+                    (list :credits (let ((credits (plist-get reading :credits)))
+                                     (if (equal credits "unlimited") 'unlimited credits)))))))
         ("block/add"
          ;; A retried page repeats its received prefix; leave those blocks alone.
          (unless (and history
@@ -839,6 +893,16 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
        (append (list :agent (or (agent-session--get (agent-session-agent session) :emx-agent)
                                (symbol-name (agent-session-agent session)))
                      :root (agent-session-root session) :settings (agent-emx--choices session))
+               (when (eq (agent-session-agent session) 'claude)
+                 (let ((skills (agent-session-skills-dir session)))
+                   (list :claude (append (when skills (list :skillsDir skills))
+                                         (list :supersededSkills
+                                               (vconcat (agent-session-superseded-skills)))))))
+               (when (eq (agent-session-agent session) 'codex)
+                 (let ((skills (agent-session-skills-dir session)))
+                   (list :codex (append (when skills (list :skillsRoot skills))
+                                        (list :supersededSkills
+                                              (vconcat (agent-session-superseded-skills)))))))
                (when (agent-session-child-p session)
                  (list :parent (or (and (agent-session-parent session)
                                         (agent-emx--get (agent-session-parent session) :emx-id))

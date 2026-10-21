@@ -336,11 +336,32 @@ export class DaemonServer {
         const root = string(params.root, 'root')
         const resume = optionalString(params.resume, 'resume')
         const parent = optionalString(params.parent, 'parent')
+        // Claude needs the editor's installed skill replacements on each spawn.
+        let claude: import('./protocol.ts').OpenParams['claude']
+        if (params.claude !== undefined) {
+          const context = object(params.claude)
+          const supersededSkills = context.supersededSkills
+          if (supersededSkills !== undefined && (!Array.isArray(supersededSkills)
+            || !supersededSkills.every((s) => typeof s === 'string'))) invalid('Expected string[]: supersededSkills')
+          claude = { skillsDir: context.skillsDir == null ? undefined : optionalString(context.skillsDir, 'skillsDir'),
+            supersededSkills: supersededSkills as string[] | undefined }
+        }
+        // Codex needs the editor's installed skill replacements on every spawn.
+        let codex: import('./protocol.ts').OpenParams['codex']
+        if (params.codex !== undefined) {
+          const context = object(params.codex)
+          const supersededSkills = context.supersededSkills
+          if (supersededSkills !== undefined && (!Array.isArray(supersededSkills)
+            || !supersededSkills.every((s) => typeof s === 'string'))) invalid('Expected string[]: supersededSkills')
+          codex = { skillsRoot: optionalString(context.skillsRoot, 'skillsRoot'),
+            supersededSkills: supersededSkills as string[] | undefined }
+        }
         // Native conversation forks are a later migration phase.
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
         const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
           settings: settings(params.settings ?? {}),
-          info: parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {} })
+          info: { ...(parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
+            ...(codex ? { codex } : {}), ...(claude ? { claude } : {}) } })
         this.sessions.set(session.id, session)
         return (async () => {
           try {

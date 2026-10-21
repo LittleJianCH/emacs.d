@@ -19,6 +19,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(require 'agent-emx)
 (require 'agent-remote)
 (require 'agent-usage)
 
@@ -1137,6 +1138,7 @@ Ask the user in SESSION, then reply to the CLI."
   t)
 
 (agent-session-define-agent claude :title "Claude" :executable agent-claude-executable)
+(agent-emx-offer 'claude)
 
 (provide 'agent-claude)
 ;;; agent-claude.el ends here

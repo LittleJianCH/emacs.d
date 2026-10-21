@@ -663,7 +663,7 @@ A failure is ignored: the balance is extra, not worth a notice."
   t)
 
 (agent-session-define-agent dsh :title "DeepSeek" :executable agent-dsh-executable)
-(agent-emx--select-agents 'agent-emx-agents agent-emx-agents)
+(agent-emx-offer 'dsh)
 
 (provide 'agent-dsh)
 ;;; agent-dsh.el ends here
