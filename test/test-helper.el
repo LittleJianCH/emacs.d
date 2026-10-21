@@ -20,11 +20,20 @@
 (defconst emx-test--default-state (expand-file-name "var/emx/" emx-test--checkout))
 (defconst emx-test--var (make-temp-file "emx-ert-state-" t))
 
-(defun emx-test--assert-default-state-empty ()
-  "Fail if any test used the checkout's default daemon state directory."
-  (when (file-directory-p emx-test--default-state)
-    (should-not (directory-files emx-test--default-state nil
-                                 directory-files-no-dot-files-regexp))))
+(defun emx-test--state-names ()
+  "Entries of the checkout's default daemon state directory."
+  (and (file-directory-p emx-test--default-state)
+       (directory-files emx-test--default-state nil
+                        directory-files-no-dot-files-regexp)))
+
+(defvar emx-test--state-before (emx-test--state-names)
+  "Entries the default state directory had before the tests.
+The checkout the user's Emacs runs from holds the live daemon's state,
+which keeps changing; only entries the tests would add count.")
+
+(defun emx-test--assert-default-state-unchanged ()
+  "Fail if a test created state in the checkout's default directory."
+  (should-not (seq-difference (emx-test--state-names) emx-test--state-before)))
 
 ;; Load this helper from every suite, including when running one file alone.
 ;; The init files do not start services in batch mode.
@@ -52,9 +61,9 @@
     (setf (ert-test-body test)
           (lambda ()
             (unwind-protect (funcall body)
-              (emx-test--assert-default-state-empty))))))
+              (emx-test--assert-default-state-unchanged))))))
 (advice-add 'ert-set-test :before #'emx-test--check-state)
-(emx-test--assert-default-state-empty)
+(emx-test--assert-default-state-unchanged)
 
 (defun emx-test--cleanup ()
   "Stop the shared test daemon before removing its temporary state."
@@ -64,14 +73,21 @@
 (add-hook 'kill-emacs-hook #'emx-test--cleanup)
 
 (ert-deftest emx-test-helper-rejects-default-state ()
-  "The per-test guard rejects a leaked outbox, log or session index."
-  (let ((emx-test--default-state (make-temp-file "emx-guard-" t)))
+  "The per-test guard rejects a leaked outbox, log or session index.
+State a live daemon already keeps there is left alone."
+  (let* ((emx-test--default-state (make-temp-file "emx-guard-" t))
+         (live (expand-file-name "daemon.log" emx-test--default-state)))
     (unwind-protect
         (progn
-          (emx-test--assert-default-state-empty)
-          (with-temp-file (expand-file-name "sessions.json" emx-test--default-state)
-            (insert "[]"))
-          (should-error (emx-test--assert-default-state-empty) :type 'ert-test-failed))
+          (with-temp-file live (insert "live"))
+          (let ((emx-test--state-before (emx-test--state-names)))
+            (emx-test--assert-default-state-unchanged)
+            (with-temp-file live (insert "still live"))
+            (emx-test--assert-default-state-unchanged)
+            (with-temp-file (expand-file-name "sessions.json" emx-test--default-state)
+              (insert "[]"))
+            (should-error (emx-test--assert-default-state-unchanged)
+                          :type 'ert-test-failed)))
       (delete-directory emx-test--default-state t))))
 
 (provide 'test-helper)
