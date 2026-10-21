@@ -1,4 +1,4 @@
-// emx-usage.js --- `emx serve`: the usage service of agent-usage.el.
+// service.ts --- usage ledger, quota polling, reports and forecasts.
 //
 // Emacs records how many tokens the agent sessions it runs use, and what
 // their accounts have left.  It only passes those events on: this service
@@ -6,23 +6,13 @@
 // request, and polls the agents' CLIs for their quota.  It never calls
 // Emacs.
 //
-// Wire format: newline-delimited JSON-RPC 2.0 on stdin/stdout; logs go to
-// stderr.  The service exits when stdin closes.
-//
-// Requests (Emacs -> emx):
-//   initialize {usageFile, quotaFile, agents: [name...] (display order),
-//               pollInterval (s, 0 = no polling),
-//               pollers: {claude?|codex?|dsh?: {command: [argv...]}}}
-//                                       -> {quotas: SNAPSHOT}
-//   report     {range: today|week|month|all, filter?: {agent?, model?, root?},
-//               withoutCache?, now?}   -> REPORT
-//   refresh    {force?}                -> {}  polls stale sources (all with force)
-//   clear      {}                      -> {}  deletes the ledger
-// Notifications (Emacs -> emx):
-//   record     {record}   append a ledger record
-//   quota      {agent, host, windows?, balance?, plan?, credits?}   merge a reading
-// Notifications (emx -> Emacs):
-//   quotas     {quotas: SNAPSHOT}      after every change of the quotas
+// The daemon owns this module and both files under its var directory.
+// Socket methods usage/report, usage/refresh and usage/clear expose its
+// reports. usage/configure supplies display order, polling interval and
+// the commands registered by Emacs backends; it cannot change file paths.
+// Lisp backends send usage/record and usage/quota notifications. Daemon
+// backends call accounting.ts at the producer boundary, never on replay.
+// usage/quotas pushes snapshots; usage/changed invalidates visible reports.
 //
 // Ledger (usageFile): JSON Lines of {time, agent, root, session, child?,
 // model, turns, input, cache_read, cache_write, output}; input excludes
@@ -51,11 +41,31 @@
 // reset at that rate), exhausts (epoch it runs out first, or null),
 // since (start of the readings the rate comes from)}.
 
-'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const readline = require('node:readline');
-const childProcess = require('node:child_process');
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as readline from 'node:readline';
+import * as childProcess from 'node:child_process';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import type { UsageRecord, QuotaReading, QuotaEntry, UsageWindow, ReportParams } from './types.ts';
+
+type Json = Record<string, any>;
+type Spawn = typeof childProcess.spawn;
+type Fetcher = (command: string[], context: { spawn: Spawn, now: () => number }) => Promise<QuotaReading>;
+interface Options {
+  send?: (message: Json) => void;
+  now?: () => number;
+  spawn?: Spawn;
+  fetchers?: Record<string, Fetcher>;
+  log?: (message: string) => void;
+}
+export interface UsageConfig {
+  usageFile: string;
+  quotaFile: string;
+  agents?: string[];
+  pollInterval?: number;
+  pollers?: Record<string, {command: string[]}>;
+}
+
 
 const DAY = 86400;
 const HISTORY_SIZE = 300;
@@ -64,7 +74,7 @@ const COUNTERS = ['input', 'cache_read', 'cache_write', 'output'];
 
 // ---------------------------------------------------------------- Files
 
-function parseLines(text, records) {
+function parseLines(text: string, records: UsageRecord[]) {
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     try {
@@ -79,14 +89,14 @@ function parseLines(text, records) {
   return records;
 }
 
-function readLedger(file) {
+function readLedger(file: string) {
   return readLedgerFrom(file, 0).records;
 }
 
 // The records of FILE from byte OFFSET on, and the offset to read from
 // next: after the last complete line, so a line being written is read
 // once it is whole.  A file shorter than OFFSET (cleared) is read anew.
-function readLedgerFrom(file, offset) {
+function readLedgerFrom(file: string, offset: number) {
   let size;
   try {
     size = fs.statSync(file).size;
@@ -117,7 +127,7 @@ function readLedgerFrom(file, offset) {
   return { records: parseLines(complete, []), offset: start + end, reset };
 }
 
-function appendLedger(file, record) {
+function appendLedger(file: string, record: Partial<UsageRecord>) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let prefix = '';
   try {
@@ -136,7 +146,7 @@ function appendLedger(file, record) {
   fs.appendFileSync(file, prefix + JSON.stringify(record) + '\n');
 }
 
-function readQuotas(file) {
+function readQuotas(file: string): QuotaEntry[] {
   try {
     const quotas = JSON.parse(fs.readFileSync(file, 'utf8'));
     return Array.isArray(quotas) ? quotas : [];
@@ -145,7 +155,7 @@ function readQuotas(file) {
   }
 }
 
-function writeQuotas(file, quotas) {
+function writeQuotas(file: string, quotas: QuotaEntry[]) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(quotas));
@@ -154,14 +164,14 @@ function writeQuotas(file, quotas) {
 
 // ---------------------------------------------------------------- Quotas
 
-function samePeriod(a, b) {
+function samePeriod(a: UsageWindow, b: UsageWindow) {
   return a.resets != null && b.resets != null && Math.abs(a.resets - b.resets) < 600;
 }
 
 // Windows OLD updated by FRESH, matched by id: the fresh ones first, then
 // the old ones not updated.  Each keeps the readings of its period.
-function mergeWindows(old, fresh, now) {
-  const updated = fresh.map((window) => {
+function mergeWindows(old: UsageWindow[], fresh: UsageWindow[], now: number): UsageWindow[] {
+  const updated: UsageWindow[] = fresh.map((window) => {
     const previous = old.find((w) => w.id === window.id);
     const history = previous && samePeriod(previous, window) ? previous.history || [] : [];
     const { history: _ignored, ...rest } = window;
@@ -172,10 +182,10 @@ function mergeWindows(old, fresh, now) {
 
 // Merge READING {agent, host, windows?, balance?, plan?, credits?} into
 // QUOTAS (in place); a missing or null prop keeps the known value.
-function mergeQuota(quotas, reading, now) {
+function mergeQuota(quotas: QuotaEntry[], reading: QuotaReading, now: number) {
   const host = reading.host ?? null;
   const index = quotas.findIndex((q) => q.agent === reading.agent && (q.host ?? null) === host);
-  const entry = index >= 0 ? { ...quotas[index] } : { agent: reading.agent, host, windows: [] };
+  const entry: QuotaEntry = index >= 0 ? { ...quotas[index] } : { agent: reading.agent, host, windows: [] };
   for (const key of ['windows', 'balance', 'plan', 'credits']) {
     const value = reading[key];
     if (value == null) continue;
@@ -188,25 +198,25 @@ function mergeQuota(quotas, reading, now) {
   return entry;
 }
 
-function account(entry) {
+function account(entry: QuotaReading) {
   if (!entry.windows || !entry.windows.length) return null;
   return JSON.stringify(entry.windows.map((w) => [w.id, w.resets]).sort());
 }
 
 // The entries in display order, remote duplicates marked; MAP turns each
 // window into what is shown (default: without its history).
-function snapshot(quotas, agents, map = ({ history, ...rest }) => rest) {
-  const rank = (q) => (q.host ? 100 : 0) + (agents.includes(q.agent) ? agents.indexOf(q.agent) : 99);
-  const sorted = quotas.map((q, i) => [q, i])
+function snapshot(quotas: QuotaEntry[], agents: string[], map: (window: UsageWindow) => Json = ({ history, ...rest }) => rest) {
+  const rank = (q: QuotaReading) => (q.host ? 100 : 0) + (agents.includes(q.agent) ? agents.indexOf(q.agent) : 99);
+  const sorted = quotas.map((q, i): [QuotaEntry, number] => [q, i])
     .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1])
     .map(([q]) => q);
-  const shown = [];
+  const shown: QuotaReading[] = [];
   return sorted.map((q) => {
     const key = account(q);
     const duplicate = Boolean(q.host && key &&
       shown.some((other) => other.agent === q.agent && account(other) === key));
     if (!duplicate) shown.push(q);
-    const entry = { ...q, windows: (q.windows || []).map(map) };
+    const entry: Json = { ...q, windows: (q.windows || []).map(map) };
     if (duplicate) entry.duplicate = true;
     return entry;
   });
@@ -214,12 +224,12 @@ function snapshot(quotas, agents, map = ({ history, ...rest }) => rest) {
 
 // ---------------------------------------------------------------- Forecast
 
-function lookback(window) {
-  return Math.max(3600, (window.minutes * 60) / 7);
+function lookback(window: UsageWindow) {
+  return Math.max(3600, (window.minutes! * 60) / 7);
 }
 
-function usedAt(history, time) {
-  let used = null;
+function usedAt(history: number[][], time: number) {
+  let used: number | null = null;
   for (const [at, value] of history) {
     if (at > time) break;
     used = value;
@@ -230,7 +240,7 @@ function usedAt(history, time) {
 // Where WINDOW is heading at the pace of its recent readings: the last
 // seventh of the window (a day for a weekly one), so idle days don't make
 // the rest look plentiful.  Null until the readings cover half of that.
-function forecast(window, now) {
+function forecast(window: UsageWindow, now: number) {
   const { resets, minutes } = window;
   if (resets == null || minutes == null || now >= resets) return null;
   const history = window.history || [];
@@ -253,7 +263,7 @@ function forecast(window, now) {
 }
 
 // Seconds until WINDOW's readings allow a forecast, or null.
-function forecastWait(window, now) {
+function forecastWait(window: UsageWindow, now: number) {
   const history = window.history || [];
   if (!history.length || window.minutes == null) return null;
   const due = history[0][0] + lookback(window) / 2;
@@ -262,19 +272,19 @@ function forecastWait(window, now) {
 
 // ---------------------------------------------------------------- Report
 
-function midnightOf(time) {
+function midnightOf(time: number) {
   const date = new Date(time * 1000);
   date.setHours(0, 0, 0, 0);
   return date.getTime() / 1000;
 }
 
-function daysBefore(midnight, days) {
+function daysBefore(midnight: number, days: number) {
   const date = new Date(midnight * 1000);
   date.setDate(date.getDate() - days);
   return date.getTime() / 1000;
 }
 
-function rangeStart(range, now) {
+function rangeStart(range: string, now: number) {
   const midnight = midnightOf(now);
   switch (range) {
     case 'today': return midnight;
@@ -288,7 +298,7 @@ function emptySum() {
   return { input: 0, cache_read: 0, cache_write: 0, output: 0, turns: 0, child_turns: 0 };
 }
 
-function addRecord(sum, record) {
+function addRecord(sum: Json, record: UsageRecord) {
   for (const key of COUNTERS) sum[key] += Number(record[key]) || 0;
   const turns = Number(record.turns) || 0;
   sum.turns += turns;
@@ -296,14 +306,14 @@ function addRecord(sum, record) {
   return sum;
 }
 
-function finish(sum, withoutCache) {
+function finish(sum: Json, withoutCache: boolean) {
   sum.tokens = withoutCache
     ? sum.input + sum.output
     : sum.input + sum.cache_read + sum.cache_write + sum.output;
   return sum;
 }
 
-function buckets(range, records, now) {
+function buckets(range: string, records: UsageRecord[], now: number) {
   const midnight = midnightOf(now);
   switch (range) {
     case 'today': return { start: midnight, step: 3600, count: 24 };
@@ -322,7 +332,7 @@ function buckets(range, records, now) {
   return { start: daysBefore(midnight, 7 * (weeks - 1) + 6), step: 7 * DAY, count: weeks };
 }
 
-function report(records, quotas, agents, params = {}) {
+function report(records: UsageRecord[], quotas: QuotaEntry[], agents: string[], params: ReportParams = {}) {
   const now = params.now ?? Date.now() / 1000;
   const range = params.range || 'week';
   const filter = params.filter || {};
@@ -332,7 +342,7 @@ function report(records, quotas, agents, params = {}) {
     Object.entries(filter).every(([key, value]) => (r[key] ?? null) === (value ?? null)));
 
   const total = finish(selected.reduce(addRecord, emptySum()), withoutCache);
-  const groups = {};
+  const groups: Record<string, any[]> = {};
   for (const key of ['agent', 'model', 'root']) {
     const sums = new Map();
     for (const record of selected) {
@@ -341,7 +351,7 @@ function report(records, quotas, agents, params = {}) {
       addRecord(sums.get(value), record);
     }
     groups[key] = [...sums.entries()]
-      .map(([value, sum]) => ({ key: value, ...finish(sum, withoutCache) }))
+      .map(([value, sum]): Json => ({ key: value, ...finish(sum, withoutCache) }))
       .sort((a, b) => b.tokens - a.tokens);
   }
 
@@ -372,7 +382,7 @@ function report(records, quotas, agents, params = {}) {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // The wall-clock time at epoch milliseconds TIME in ZONE, as if in UTC.
-function wallTime(time, zone) {
+function wallTime(time: number, zone: string) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
     timeZone: zone, hourCycle: 'h23',
     year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
@@ -382,7 +392,7 @@ function wallTime(time, zone) {
 
 // Epoch seconds at which the clocks of time zone ZONE (an IANA name) show
 // a wall-clock time: two of them when it repeats as DST ends.
-function zonedTimes(year, month, day, hour, minute, zone) {
+function zonedTimes(year: number, month: number, day: number, hour: number, minute: number, zone: string) {
   const target = Date.UTC(year, month, day, hour, minute);
   let time = target;
   for (let i = 0; i < 3; i++) {
@@ -396,7 +406,7 @@ function zonedTimes(year, month, day, hour, minute, zone) {
 }
 
 // "Oct 20 at 2:10am (Asia/Shanghai)": the nearest such time after NOW.
-function parseReset(text, now) {
+function parseReset(text: string, now: number) {
   const match = /^([A-Z][a-z]{2}) (\d{1,2})(?:,? at (\d{1,2})(?::(\d{2}))?\s*(am|pm))?(?: \(([^)]+)\))?$/i
     .exec(text.trim());
   if (!match) return null;
@@ -419,7 +429,7 @@ function parseReset(text, now) {
 }
 
 // The windows in the text of Claude Code's /usage.
-function parseClaudeUsage(text, now) {
+function parseClaudeUsage(text: string, now: number) {
   const windows = [];
   for (const line of String(text).split('\n')) {
     const match = /^\s*Current (session|week(?: \(([^)]+)\))?):\s*([0-9.]+)% used(?:\s*·\s*resets (.+?))?\s*$/
@@ -442,7 +452,7 @@ function parseClaudeUsage(text, now) {
   return windows;
 }
 
-function windowLabel(minutes) {
+function windowLabel(minutes: number | null) {
   if (minutes == null) return '限额';
   if (minutes === 10080) return '周';
   if (minutes === 1440) return '日';
@@ -451,7 +461,7 @@ function windowLabel(minutes) {
 }
 
 // Codex's account/rateLimits/read result as a reading.
-function codexReading(rateLimits) {
+function codexReading(rateLimits: Json) {
   const windows = [];
   for (const key of ['primary', 'secondary']) {
     const window = rateLimits[key];
@@ -465,7 +475,7 @@ function codexReading(rateLimits) {
       ...(window.resetsAt != null ? { resets: window.resetsAt } : {}),
     });
   }
-  const reading = { agent: 'codex', host: null, windows };
+  const reading: QuotaReading = { agent: 'codex', host: null, windows };
   const credits = rateLimits.credits;
   if (credits && credits.unlimited) reading.credits = 'unlimited';
   else if (credits && credits.balance != null) reading.credits = Number(credits.balance);
@@ -474,9 +484,9 @@ function codexReading(rateLimits) {
 }
 
 // The poll children still running, killed when the service stops.
-const children = new Set();
+const children = new Set<ChildProcess>();
 
-function start(spawn, command, stdio) {
+function start(spawn: Spawn, command: string[], stdio: SpawnOptions["stdio"]) {
   const child = spawn(command[0], command.slice(1), { stdio });
   children.add(child);
   child.on('close', () => children.delete(child));
@@ -484,7 +494,7 @@ function start(spawn, command, stdio) {
 }
 
 // Stop CHILD: SIGTERM, then SIGKILL if it is still there 5 s later.
-function terminate(child) {
+function terminate(child: ChildProcess) {
   try { child.kill('SIGTERM'); } catch { /* gone */ }
   const timer = setTimeout(() => {
     if (child.exitCode === null && child.signalCode === null) {
@@ -501,11 +511,11 @@ function killChildren() {
 // Run COMMAND and talk JSON-RPC with it: send the messages of STEPS in
 // turn, each after the response to the previous request; resolve with the
 // last response's result.  The child is killed afterwards.
-function converse(spawn, command, steps, timeout = POLL_TIMEOUT) {
-  return new Promise((resolve, reject) => {
+function converse(spawn: Spawn, command: string[], steps: Json[], timeout = POLL_TIMEOUT): Promise<any> {
+  return new Promise<any>((resolve, reject) => {
     const child = start(spawn, command, ['pipe', 'pipe', 'ignore']);
     let done = false;
-    const finishWith = (fn, value) => {
+    const finishWith = (fn: (value: any) => void, value: any) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
@@ -515,17 +525,17 @@ function converse(spawn, command, steps, timeout = POLL_TIMEOUT) {
     const timer = setTimeout(() => finishWith(reject, new Error('timed out')), timeout * 1000);
     child.on('error', (err) => finishWith(reject, err));
     // A child gone before reading what is sent: EPIPE fails this poll only.
-    child.stdin.on('error', (err) => finishWith(reject, err));
+    child.stdin!.on('error', (err) => finishWith(reject, err));
     child.on('close', () => finishWith(reject, new Error('exited early')));
     let step = 0;
     const next = () => {
       while (step < steps.length) {
         const message = steps[step++];
-        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+        child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
         if (message.id != null) return;
       }
     };
-    readline.createInterface({ input: child.stdout }).on('line', (line) => {
+    readline.createInterface({ input: child.stdout! }).on('line', (line) => {
       let message;
       try { message = JSON.parse(line); } catch { return; }
       const expected = [...steps.slice(0, step)].reverse().find((m) => m.id != null);
@@ -539,12 +549,12 @@ function converse(spawn, command, steps, timeout = POLL_TIMEOUT) {
 }
 
 // Run COMMAND to its end; resolve with its stdout.
-function capture(spawn, command, timeout = POLL_TIMEOUT) {
-  return new Promise((resolve, reject) => {
+function capture(spawn: Spawn, command: string[], timeout = POLL_TIMEOUT): Promise<string> {
+  return new Promise<any>((resolve, reject) => {
     const child = start(spawn, command, ['ignore', 'pipe', 'ignore']);
     let out = '';
     const timer = setTimeout(() => { terminate(child); reject(new Error('timed out')); }, timeout * 1000);
-    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stdout!.on('data', (chunk) => { out += chunk; });
     child.on('error', (err) => { clearTimeout(timer); reject(err); });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -554,7 +564,7 @@ function capture(spawn, command, timeout = POLL_TIMEOUT) {
   });
 }
 
-const FETCHERS = {
+const FETCHERS: Record<string, Fetcher> = {
   async claude(command, { spawn, now }) {
     const out = await capture(spawn, [...command, '-p', '/usage', '--output-format', 'json',
                                       '--no-session-persistence']);
@@ -574,8 +584,8 @@ const FETCHERS = {
   async dsh(command, { spawn }) {
     const result = await converse(spawn, command, [{ id: 1, method: 'balance', params: {} }]);
     const balance = (result.balances || [])
-      .filter((b) => b.total != null)
-      .map((b) => ({ amount: Number(b.total), currency: b.currency }));
+      .filter((b: Json) => b.total != null)
+      .map((b: Json) => ({ amount: Number(b.total), currency: b.currency }));
     return { agent: 'dsh', host: null, balance };
   },
 };
@@ -583,14 +593,33 @@ const FETCHERS = {
 // ---------------------------------------------------------------- Service
 
 class UsageService {
+  send: (message: Json) => void;
+  now: () => number;
+  spawn: Spawn;
+  fetchers: Record<string, Fetcher>;
+  log: (message: string) => void;
+  initialized: boolean;
+  busy: Set<string>;
+  failures: Record<string, number>;
+  retryAt: Record<string, number>;
+  timer: NodeJS.Timeout | null;
+  generation = 0;
+  usageFile!: string;
+  quotaFile!: string;
+  agents: string[] = [];
+  pollInterval = 0;
+  pollers: Record<string, {command: string[]}> = {};
+  records: UsageRecord[] = [];
+  offset = 0;
+  quotas: QuotaEntry[] = [];
   // OPTIONS: send (message -> void), now (() -> epoch s), spawn, fetchers,
   // log.
-  constructor(options = {}) {
+  constructor(options: Options = {}) {
     this.send = options.send || (() => {});
     this.now = options.now || (() => Date.now() / 1000);
     this.spawn = options.spawn || childProcess.spawn;
     this.fetchers = { ...FETCHERS, ...(options.fetchers || {}) };
-    this.log = options.log || ((text) => process.stderr.write(`emx serve: ${text}\n`));
+    this.log = options.log || ((text) => process.stderr.write(`emx usage: ${text}\n`));
     this.initialized = false;
     this.busy = new Set();
     this.failures = {};
@@ -598,7 +627,7 @@ class UsageService {
     this.timer = null;
   }
 
-  initialize(params) {
+  initialize(params: UsageConfig) {
     this.usageFile = params.usageFile;
     this.quotaFile = params.quotaFile;
     this.agents = params.agents || [];
@@ -609,15 +638,26 @@ class UsageService {
     this.syncLedger();
     this.quotas = readQuotas(this.quotaFile);
     this.initialized = true;
-    if (this.pollInterval > 0 && Object.keys(this.pollers).length) {
-      this.timer = setInterval(() => this.pollAll(false), Math.min(this.pollInterval, 60) * 1000);
-      this.timer.unref?.();
-      this.pollAll(false);
-    }
+    this.configure(params);
     return { quotas: snapshot(this.quotas, this.agents) };
   }
 
+  configure(params: Partial<Pick<UsageConfig, 'agents' | 'pollInterval' | 'pollers'>>) {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (params.agents) this.agents = params.agents;
+    if (params.pollInterval !== undefined) this.pollInterval = params.pollInterval;
+    if (params.pollers) this.pollers = params.pollers;
+    if (this.pollInterval > 0 && Object.keys(this.pollers).length) {
+      this.timer = setInterval(() => { void this.pollAll(false); }, Math.min(this.pollInterval, 60) * 1000);
+      this.timer.unref();
+      void this.pollAll(false);
+    }
+    return { quotas: snapshot(this.loadQuotas(), this.agents) };
+  }
+
   stop() {
+    this.generation++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     killChildren();
@@ -638,19 +678,20 @@ class UsageService {
     return this.quotas;
   }
 
-  record(params) {
+  record(params: {record: Partial<UsageRecord>}) {
     const record = { ...params.record };
     if (typeof record.time !== 'number') record.time = this.now();
     appendLedger(this.usageFile, record);
+    this.send({method: 'changed', params: {}});
   }
 
-  quota(reading) {
+  quota(reading: QuotaReading) {
     mergeQuota(this.loadQuotas(), reading, this.now());
     writeQuotas(this.quotaFile, this.quotas);
     this.send({ method: 'quotas', params: { quotas: snapshot(this.quotas, this.agents) } });
   }
 
-  report(params) {
+  report(params: ReportParams) {
     this.syncLedger();
     return report(this.records, this.loadQuotas(), this.agents, params);
   }
@@ -659,20 +700,21 @@ class UsageService {
     try { fs.unlinkSync(this.usageFile); } catch { /* none */ }
     this.records = [];
     this.offset = 0;
+    this.send({method: 'changed', params: {}});
     return {};
   }
 
   // The latest reading of SOURCE on this machine.
-  latest(source) {
+  latest(source: string) {
     const entry = this.loadQuotas().find((q) => q.agent === source && !q.host);
     return entry ? entry.time : null;
   }
 
-  pollAll(force) {
+  pollAll(force: boolean) {
     return Promise.all(Object.keys(this.pollers).map((source) => this.poll(source, force)));
   }
 
-  async poll(source, force) {
+  async poll(source: string, force: boolean) {
     if (!(this.pollInterval > 0) || this.busy.has(source) || !this.fetchers[source]) return;
     const now = this.now();
     const latest = this.latest(source);
@@ -680,14 +722,16 @@ class UsageService {
       if (latest != null && now - latest < this.pollInterval) return;
       if (this.retryAt[source] && now < this.retryAt[source]) return;
     }
+    const generation = this.generation;
     this.busy.add(source);
     try {
       const reading = await this.fetchers[source](this.pollers[source].command,
                                                   { spawn: this.spawn, now: this.now });
+      if (generation !== this.generation) return;
       this.failures[source] = 0;
       this.retryAt[source] = 0;
       this.quota(reading);
-    } catch (err) {
+    } catch (err: any) {
       const failures = (this.failures[source] || 0) + 1;
       this.failures[source] = failures;
       this.retryAt[source] = this.now() + Math.min(3600, this.pollInterval * 2 ** failures);
@@ -697,59 +741,16 @@ class UsageService {
     }
   }
 
-  refresh(params) {
+  refresh(params: {force?: boolean}) {
     this.pollAll(Boolean(params.force));
     return {};
   }
 
-  // Handle one JSON-RPC MESSAGE; return the response to write, if any.
-  handle(message) {
-    const { id, method, params = {} } = message;
-    const reply = (result) => (id == null ? null : { jsonrpc: '2.0', id, result });
-    const fail = (text) => (id == null ? null : { jsonrpc: '2.0', id, error: { code: -32603, message: text } });
-    try {
-      if (method === 'initialize') return reply(this.initialize(params));
-      if (!this.initialized) return fail('not initialized');
-      switch (method) {
-        case 'record': this.record(params); return reply({});
-        case 'quota': this.quota(params); return reply({});
-        case 'report': return reply(this.report(params));
-        case 'refresh': return reply(this.refresh(params));
-        case 'clear': return reply(this.clear());
-        default: return id == null ? null : { jsonrpc: '2.0', id, error: { code: -32601, message: `unknown method: ${method}` } };
-      }
-    } catch (err) {
-      this.log(`${method}: ${err.message}`);
-      return fail(err.message);
-    }
-  }
+
 }
 
-// `emx serve`: the service on stdin/stdout.
-function serve() {
-  const write = (message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
-  const service = new UsageService({ send: write });
-  const input = readline.createInterface({ input: process.stdin });
-  input.on('line', (line) => {
-    if (!line.trim()) return;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      service.log(`not JSON: ${line.slice(0, 80)}`);
-      return;
-    }
-    const response = service.handle(message);
-    if (response) process.stdout.write(JSON.stringify(response) + '\n');
-  });
-  input.on('close', () => {
-    service.stop();
-    process.exit(0);
-  });
-}
-
-module.exports = {
-  serve, UsageService, report, forecast, forecastWait, snapshot, mergeQuota, mergeWindows,
+export {
+  UsageService, report, forecast, forecastWait, snapshot, mergeQuota, mergeWindows,
   readLedger, readLedgerFrom, appendLedger, readQuotas, writeQuotas, parseClaudeUsage, parseReset,
-  codexReading, rangeStart, converse, capture,
+  codexReading, rangeStart, converse, capture, windowLabel,
 };

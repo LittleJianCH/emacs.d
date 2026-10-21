@@ -291,6 +291,10 @@ Daemon events keep their distinct false value; only tool arguments use nil."
            (session (gethash (plist-get params :session)
                              (agent-emx--connection-sessions connection))))
       (cond
+       ((equal method "usage/changed")
+        (run-hooks 'agent-usage-change-functions))
+       ((equal method "usage/quotas")
+        (agent-usage--receive-quotas (plist-get params :quotas)))
        ((equal method "replaced")
         (agent-emx--lost connection '(:message "Connection replaced") t)
         (delete-process (agent-emx--connection-process connection)))
@@ -332,6 +336,7 @@ Daemon events keep their distinct false value; only tool arguments use nil."
      (lambda (_)
        (puthash connection signature agent-emx--tools-signatures)
        (setf (agent-emx--connection-ready connection) t)
+       (agent-usage--connected connection)
        (agent-emx--flush-stops connection)
        (let ((waiters (agent-emx--connection-waiters connection)))
          (setf (agent-emx--connection-waiters connection) nil)
@@ -400,16 +405,15 @@ command asynchronously so starting a daemon never waits in the editor."
          (kill-buffer buffer)
          (agent-emx--lost connection (list :message (error-message-string err))))))))
 
-(defun agent-emx--connection (session callback error-callback)
-  "Obtain SESSION's connection; call CALLBACK after hello or ERROR-CALLBACK."
-  (let* ((place (agent-session-place (agent-session-root session)))
-         (var (expand-file-name agent-emx-var-directory))
-         (key (cons place var))
+(defun agent-emx--local-connection (callback error-callback)
+  "Obtain the local daemon connection without waiting interactively.
+Call CALLBACK after hello or ERROR-CALLBACK on failure."
+  (agent-usage--migrate)
+  (let* ((var (expand-file-name agent-emx-var-directory))
+         (key (cons nil var))
          (connection (or (gethash key agent-emx--connections)
-                         (puthash key (agent-emx--make-connection :place place :var var)
+                         (puthash key (agent-emx--make-connection :var var)
                                   agent-emx--connections))))
-    (when place (error "Remote emx daemons are not implemented"))
-    (agent-emx--set session :emx-connection connection)
     (if (and (agent-emx--connection-ready connection)
              (process-live-p (agent-emx--connection-process connection)))
         (funcall callback connection)
@@ -419,6 +423,18 @@ command asynchronously so starting a daemon never waits in the editor."
       (unless (or (process-live-p (agent-emx--connection-process connection))
                   (process-live-p (agent-emx--connection-starter connection)))
         (agent-emx--ensure connection)))
+    connection))
+
+(defun agent-emx--connection (session callback error-callback)
+  "Obtain SESSION's connection; call CALLBACK after hello or ERROR-CALLBACK."
+  (when (agent-session-place (agent-session-root session))
+    (error "Remote emx daemons are not implemented"))
+  (let ((connection (agent-emx--local-connection
+                     (lambda (connection)
+                       (agent-emx--set session :emx-connection connection)
+                       (funcall callback connection))
+                     error-callback)))
+    (agent-emx--set session :emx-connection connection)
     connection))
 
 ;;; Transcript and asks
@@ -709,35 +725,6 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
         ("capabilities"
          (agent-emx--set session :emx-capabilities (plist-get params :capabilities))
          (agent-session--refresh session))
-        ("usage/call"
-         (let ((usage (plist-get params :usage)))
-           (agent-usage-add-call session (plist-get params :model)
-                                 (list :input (plist-get usage :input)
-                                       :cache-read (plist-get usage :cacheRead)
-                                       :cache-write (plist-get usage :cacheWrite)
-                                       :output (plist-get usage :output)))))
-        ("usage/end" (agent-usage-end-turn session))
-        ("quota"
-         (agent-usage-set-quota session :balance (append (plist-get params :balance) nil)))
-        ("quota/rate-limits"
-         (let* ((reading (plist-get params :rateLimits))
-                (windows (mapcar
-                          (lambda (window)
-                            (append window
-                                    (list :label
-                                          (or (cdr (assoc (plist-get window :id)
-                                                          '(("five_hour" . "5h")
-                                                            ("seven_day" . "周")
-                                                            ("seven_day_opus" . "周·Opus")
-                                                            ("seven_day_sonnet" . "周·Sonnet"))))
-                                              (agent-usage-window-label
-                                               (plist-get window :minutes))))))
-                          (append (plist-get reading :windows) nil))))
-           (apply #'agent-usage-set-quota session
-                  :plan (plist-get reading :plan) :windows windows
-                  (when (plist-member reading :credits)
-                    (list :credits (let ((credits (plist-get reading :credits)))
-                                     (if (equal credits "unlimited") 'unlimited credits)))))))
         ("block/add"
          ;; A retried page repeats its received prefix; leave those blocks alone.
          (unless (and history
@@ -893,6 +880,8 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
        (append (list :agent (or (agent-session--get (agent-session-agent session) :emx-agent)
                                (symbol-name (agent-session-agent session)))
                      :root (agent-session-root session) :settings (agent-emx--choices session))
+               (when-let* ((handle (agent-session-handle session)))
+                 (list :handle handle))
                (when (eq (agent-session-agent session) 'claude)
                  (let ((skills (agent-session-skills-dir session)))
                    (list :claude (append (when skills (list :skillsDir skills))
@@ -952,7 +941,10 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
    session
    (lambda ()
      (agent-emx--request (agent-emx--get session :emx-connection) method
-                         (append (list :id (agent-emx--get session :emx-id)) params)
+                         (append (list :id (agent-emx--get session :emx-id))
+                                 (when (and (member method '("session/send" "session/steer"))
+                                            (agent-session-handle session))
+                                   (list :handle (agent-session-handle session))) params)
                          callback (lambda (error) (agent-emx--error session error))))))
 
 (defun agent-emx--choices (session)

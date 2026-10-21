@@ -13,6 +13,9 @@ import { ErrorCode } from './protocol.ts'
 import type { Answer, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
 import { Connection, Reply, RpcError } from './rpc.ts'
 import { Editor } from './editor.ts'
+import { UsageService } from '../usage/service.ts'
+import type { UsageConfig } from '../usage/service.ts'
+import { Accounting } from '../usage/accounting.ts'
 import { Session } from './session.ts'
 import type { Transcript } from './session.ts'
 
@@ -75,6 +78,8 @@ export class DaemonServer {
   readonly version = codeVersion()
   readonly finished: Promise<void>
   client: Connection | undefined
+  readonly usage: UsageService
+  readonly accounting: Accounting
   readonly editor: Editor
   #mcp = new Map<Connection, string>()
   #calls = new Map<Connection, Map<unknown, AbortController>>()
@@ -97,12 +102,21 @@ export class DaemonServer {
     this.editor = new Editor(stateDir(this.varDir))
     this.#idleExit = options.idleExit ?? 900
     this.#log = options.log ?? (() => {})
+    this.usage = new UsageService({ log: (message) => this.#log(message),
+      send: (message) => this.client?.notify('usage/' + message.method, message.params) })
+    this.accounting = new Accounting(this.usage)
     this.finished = new Promise((resolve) => { this.#finish = resolve })
     this.server = createServer((socket) => {
       const connection = new Connection(socket)
       this.#connections.add(connection)
       connection.onRequest = (method, params, id) => this.#request(connection, method, params, id)
       connection.onNotification = (method, params) => {
+        if ((method === 'usage/record' || method === 'usage/quota') && connection === this.client) {
+          try {
+            if (method === 'usage/record') this.usage.record({ record: object(object(params).record) })
+            else this.usage.quota({ ...object(params), agent: string(params.agent, 'agent') })
+          } catch (error) { this.#log(`Usage notification failed: ${error}`) }
+        }
         if (method === 'editor/tools' && connection === this.client) this.#tools(params)
         if (method === 'notifications/cancelled') this.#calls.get(connection)?.get(params.requestId)?.abort(new Error('Cancelled'))
       }
@@ -133,6 +147,10 @@ export class DaemonServer {
         if (error.code !== 'ENOENT') throw error
       })
       await this.editor.restore().catch((error) => this.#log(`Cannot load tools: ${error}`))
+      let usageConfig = {}
+      try { usageConfig = JSON.parse(await readFile(join(dir, 'usage.json'), 'utf8')) } catch { /* First start. */ }
+      this.usage.initialize({ ...usageConfig, usageFile: join(this.varDir, 'agent-usage.jsonl'),
+        quotaFile: join(this.varDir, 'agent-quota.json') })
       await this.#restore()
       await new Promise<void>((resolve, reject) => {
         this.server.once('error', reject)
@@ -174,7 +192,7 @@ export class DaemonServer {
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, editorTools: () => this.editor.tools, onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, editorTools: () => this.editor.tools, onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
   }
 
   async #restore(): Promise<void> {
@@ -327,13 +345,40 @@ export class DaemonServer {
         this.client = connection
         this.editor.connection = connection
         this.#checkIdle()
-        return { daemon: process.pid, version: this.version }
+        return new Reply({ daemon: process.pid, version: this.version }, () => connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas }))
       }
+      case 'usage/configure': {
+        const config: Partial<UsageConfig> = {}
+        if (params.agents !== undefined) {
+          if (!Array.isArray(params.agents) || !params.agents.every((a) => typeof a === 'string')) invalid('Expected string[]: agents')
+          config.agents = params.agents
+        }
+        if (params.pollInterval !== undefined) config.pollInterval = integer(params.pollInterval, 'pollInterval', 0)
+        if (params.pollers !== undefined) {
+          config.pollers = {}
+          for (const [source, value] of Object.entries(object(params.pollers))) {
+            const command = object(value).command
+            if (!Array.isArray(command) || !command.length || !command.every((a) => typeof a === 'string')) invalid('Expected nonempty string[]: command')
+            config.pollers[source] = { command }
+          }
+        }
+        const result = this.usage.configure(config)
+        // Persist commands so quota polls continue without an attached editor.
+        const file = join(stateDir(this.varDir), 'usage.json')
+        writeFileSync(file + '.tmp', JSON.stringify({ agents: this.usage.agents,
+          pollInterval: this.usage.pollInterval, pollers: this.usage.pollers }), { mode: 0o600 })
+        renameSync(file + '.tmp', file)
+        return result
+      }
+      case 'usage/report': return this.usage.report(params)
+      case 'usage/refresh': return this.usage.refresh(params)
+      case 'usage/clear': return this.usage.clear()
       case 'sessions/list': return { sessions: this.#list(optionalString(params.root, 'root')) }
       case 'session/open': {
         const agent = string(params.agent, 'agent')
         if (!Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
         const root = string(params.root, 'root')
+        const handle = optionalString(params.handle, 'handle')
         const resume = optionalString(params.resume, 'resume')
         const parent = optionalString(params.parent, 'parent')
         // Claude needs the editor's installed skill replacements on each spawn.
@@ -360,7 +405,7 @@ export class DaemonServer {
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
         const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
           settings: settings(params.settings ?? {}),
-          info: { ...(parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
+          info: { ...(handle ? { handle } : {}), ...(parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
             ...(codex ? { codex } : {}), ...(claude ? { claude } : {}) } })
         this.sessions.set(session.id, session)
         return (async () => {
@@ -397,11 +442,13 @@ export class DaemonServer {
       case 'session/send': {
         const session = this.#session(params)
         const message = this.#message(params)
+        if (params.handle !== undefined) session.setInfo({ handle: string(params.handle, 'handle') })
         return session.send(message.text, message.images, message.block)
       }
       case 'session/steer': {
         const session = this.#session(params)
         const message = this.#message(params)
+        if (params.handle !== undefined) session.setInfo({ handle: string(params.handle, 'handle') })
         return { accepted: session.steer(message.text, message.images, message.block) }
       }
       case 'session/interrupt': this.#session(params).interrupt(); return {}
@@ -491,8 +538,9 @@ export class DaemonServer {
     for (const session of this.sessions.values()) {
       try { await session.stop() } catch (error) {
         this.#log(`Cannot stop backend for ${session.id}: ${error}`)
-      }
+      } finally { this.accounting.flush(session) }
     }
+    this.usage.stop()
     // end() flushes the daemon/stop response before closing its socket.
     for (const connection of this.#connections) connection.close()
     const force = setTimeout(() => {

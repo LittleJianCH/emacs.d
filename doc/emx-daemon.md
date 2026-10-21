@@ -1,7 +1,8 @@
 # emx daemon: agents outside Emacs
 
-Status: phases 1–4 implemented on `claude/emx-daemon` for local projects,
-behind the opt-in `agent-emx-agents` switch; later phases remain design.
+Status: phases 1–4 and 6 implemented on `claude/emx-daemon` for local projects.
+Agent execution remains opt-in through `agent-emx-agents`; all usage now shares
+the daemon. Collaboration and remote phases remain design.
 
 ## Goal
 
@@ -40,9 +41,8 @@ built for it), changing how sessions look, moving canvas or review UI.
   (22.18 and later), so there is no build step; only erasable syntax (no
   `enum`, `namespace` or parameter properties). `tsc --noEmit` joins the
   checks, with `@types/node` as the only development dependency
-  (`emx/package.json`, `emx/node_modules/` ignored). `bin/emx`,
-  `bin/emx-usage.js` and the dsh plugin stay JavaScript until they move;
-  the plugin runs inside dsh and stays JavaScript.
+  (`emx/package.json`, `emx/node_modules/` ignored). `bin/emx` and the
+  dsh plugin remain JavaScript. Usage is now TypeScript under `emx/usage/`; the plugin runs inside dsh and stays JavaScript.
 - **A daemon on every host.** A remote project's agents run under a daemon
   on that host, which Emacs attaches to like the local one (see Remote
   projects). It replaces the keeper and the MCP relay.
@@ -135,7 +135,10 @@ JSON-RPC 2.0, one JSON object per line, both directions over the socket.
 | `session/earlier` | `{id, turns?}` | `{}` (blocks arrive as events) |
 | `session/stop` | `{id}` | `{}` |
 | `config/reload` | `{}` | `{config, errors}` |
-| `usage/report`, `usage/refresh`, `usage/clear` | as `emx serve` today | |
+| `usage/configure` | `{agents?, pollInterval?, pollers?: {source: {command: argv}}}` | `{quotas}` |
+| `usage/report` | `{range?, filter?, withoutCache?, now?}` | report (unchanged format) |
+| `usage/refresh` | `{force?}` | `{}` (polls asynchronously) |
+| `usage/clear` | `{}` | `{}` (keeps quotas) |
 
 ### Daemon → client (notifications, per attached session)
 
@@ -145,11 +148,10 @@ Every event carries `{session, seq}`; `seq` increases by one per session.
 - `capabilities {capabilities}`: complete models (id, name, description,
   efforts, defaultEffort), modes, and slash commands (name, description,
   hint); also included in `AttachResult` and persisted with the transcript
-- `usage/call {model, usage}`: one live model call, with input (uncached),
-  cacheRead, cacheWrite, output counters; `usage/end {}` closes its turn
-- `quota {balance}`: account entries `{amount, currency}` after initialize
-  and each turn. Emacs still feeds these and usage events to `agent-usage`
-  until phase 6. Transcript history never replays usage.
+- Usage call/end and raw quota readings are internal backend events. The
+  daemon records and merges them before logging editor events; they never
+  go over the socket or replay. Emacs receives only the global quota and
+  report-invalidation notifications below.
 - `block/add {block, after?}` (`after` places it, e.g. earlier history)
 - `block/append {id, text}` (streamed text), `block/done {id}`
 - `block/update {id, ...fields}` (tool result, output, error)
@@ -157,7 +159,8 @@ Every event carries `{session, seq}`; `seq` increases by one per session.
 - `ask/add {ask}`, `ask/remove {id, resolution}` (see Approvals)
 - `notice {kind, ...fields}`
 - `queue {items}`, `children {ids}`
-- `usage/quotas {quotas}` (not per session)
+- `usage/quotas {quotas}` (global, also sent after hello)
+- `usage/changed {}` (global, after appending/clearing ledger records)
 
 Phase 2 additions are data only: questions carry an optional `intent`
 object unchanged (dsh's `{kind: "plan-review", approve: label}` selects
@@ -174,8 +177,11 @@ The implemented contract is `emx/daemon/protocol.ts`. In particular,
 `session/send` returns `{queued}`, `session/earlier` takes `{id, before,
 turns?}`, insertions use `block/add {block, before?}`, completion uses
 `block/update {id, fields}`, and notices are blocks with a `notice.kind`.
-`sessions/history`, forks, config/editor calls, children and usage reports
-in the design tables are later phases.
+`sessions/history`, forks, configuration files and children in the design
+tables remain later phases. Editor calls and usage requests are implemented.
+`usage/record {record}` and `usage/quota {agent, host?, windows?, balance?,
+plan?, credits?}` are editor-only notifications for the remaining Lisp
+backends; MCP peers and replaced editors cannot write usage.
 
 ### Attach and catching up
 
@@ -557,7 +563,7 @@ emx/config.json          tracked configuration
 emx/daemon/              socket server, sessions, events, editor calls
 emx/backends/            claude.ts, codex.ts, dsh.ts
 emx/collab/              children, mailbox, session_* tools
-emx/usage/               today's bin/emx-usage.js
+emx/usage/               ledger, quota polls, forecasts and turn accounting
 emx/remote/              --ensure, usage outbox
 lisp/agent/backend/dsh/  the dsh plugin, unchanged in place
 test/emx/                node --test suites, with fake CLIs
@@ -583,13 +589,70 @@ the end.
 4. **Claude**, then **Codex**.
 5. **Collab**: profiles from config, `session_*` tools, mailbox,
    children's lifecycle and limits, the approval policy above.
-6. **Usage**: `emx serve` becomes a daemon module.
+6. **Usage** (implemented): the daemon owns the ledger, quota polls and
+   accounting; Lisp backends send records to the same writer.
 7. **Remote**: install and `--ensure`, the `-L` forward, disconnect and
    reattach by `seq`, `config_*` through the local daemon, usage outbox,
    cross-daemon `session_*` through Emacs. Then remove the keeper and the
    relay.
 8. **Cut over**: remove the Lisp backends and what only they used; shrink
    `agent-session` (a `restart_required` struct change, done once).
+
+## Phase 6: daemon-owned usage
+
+`emx/usage/service.ts` ports the former `bin/emx-usage.js` algorithms;
+`types.ts` describes its files and `accounting.ts` consumes original
+backend events. The daemon initializes it only after acquiring its var-dir
+lock. Ledger and quota paths are always `<var>/agent-usage.jsonl` and
+`<var>/agent-quota.json`; socket clients cannot redirect them. The JSONL
+records, quota histories, calendar bucketing, forecasts, stale-source
+skipping, failure backoff and CLI commands are unchanged. `emx serve` and
+its JavaScript module are removed because no callers remain.
+
+Each daemon session sends its live accounting events to Accounting before
+any editor event is logged. Calls sum by model until usage/end; the first
+nonempty model counts the turn. Exit flushes a partial turn exactly once.
+ClaudeTotals keeps its existing proof of the first resumed baseline,
+falls back to the turn's own counters when ambiguous, and forgets the
+baseline after external-client writes. Adapter history filtering stays in
+place. Attach, catch-up, earlier history and reconnect cannot charge usage.
+Accounting continues while Emacs is disconnected. Handles are supplied on
+open and before sends so ledger session names retain the editor's handle;
+root abbreviation and child markers match the Lisp records.
+
+`agent-usage.el` retains accounting for Lisp backends, but sends their
+records and quota readings over agent-emx's shared local connection. It
+uses the same asynchronous ensure/hello path even when no daemon backend
+is selected. On hello Emacs supplies agent display order, the polling
+interval and the existing registered poller commands. The daemon stores
+those in `<var>/emx/usage.json`, retaining polls after editor disconnect or
+daemon restart. `agent-emx-var-directory` selects this single writer;
+legacy usage file variables describe its standard paths. The old `.eld`
+migration remains a one-time pre-start conversion. Batch Emacs only uses
+an explicitly started isolated daemon.
+
+Global `usage/quotas` snapshots decode to the same Lisp lists the echo
+line and page already draw. `usage/changed` schedules the page's existing
+idle refetch. Report filters, cache toggle, refresh behavior, clear's
+confirmation, and visible wording are unchanged. The old
+`agent-usage-restart-service` command now reconnects and reapplies poll
+settings, without stopping live sessions; code updates use the daemon's
+lifecycle rather than a separate usage subprocess.
+
+Verification uses the unchanged `test/fixtures/usage/` data in
+`test/emx/usage.test.ts`, plus socket/accounting/restart tests in
+`usage-daemon.test.ts`. Fake quota peers cover all three CLI poll protocols
+without credentials or model calls. ERT still renders the same page and
+echo line from those fixtures over an isolated daemon socket.
+
+Phase 6 verification (2026-10-20): `tsc -p emx` passes; `node --test
+test/emx/ test/emx-mcp-test.js` passes all 118 tests. The full AGENTS ERT
+suite passes 254 tests with one environment-dependent scroll test skipped
+(255 total, no unexpected results), using the live checkout's package
+directory but only worktree source and temporary daemon state. Evil-on and
+evil-off byte compilation each report only the two existing `lang-agda.el`
+slot warnings. Bridge and dsh plugin syntax checks pass. No real model or
+quota calls, live Emacs server, default daemon or reload was used.
 
 ## Open questions
 

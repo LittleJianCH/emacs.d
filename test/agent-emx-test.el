@@ -547,7 +547,7 @@
         (should (equal (mapcar #'car sent) '("hello")))
         (funcall hello nil)
         (should (equal (mapcar #'car (reverse sent))
-                       '("hello" "session/stop" "sessions/list")))
+                       '("hello" "usage/configure" "session/stop" "sessions/list")))
         (should (equal (plist-get (cdr (cadr sent)) :id) "s"))
         (should (equal (agent-emx--connection-pending-stops connection) '("s")))
         ;; Transport errors retain the stop for the next hello.
@@ -574,7 +574,9 @@
   (unless (and (executable-find "node")
                (file-exists-p (expand-file-name "emx/daemon/main.ts" agent-emx--checkout)))
     (ert-skip "Node or the daemon implementation is not available yet"))
-  (let* ((agent-emx-var-directory (make-temp-file "emx-" t))
+  (let* ((agent-usage-poll-interval 0)
+         (agent-usage--connection nil)
+         (agent-emx-var-directory (make-temp-file "emx-" t))
          (agent-emx--connections (make-hash-table :test #'equal))
          (agent-session-submit-functions nil)
          (agent-session-status-functions nil)
@@ -678,9 +680,22 @@
         (agent-emx-test--event session 3 "usage/end")
         (agent-emx-test--event session 3 "usage/end")
         (agent-emx-test--event session 4 "quota" :balance [(:amount 12.34 :currency "CNY")])
-        (should (equal calls '(("fake/chat" :input 1 :cache-read 2 :cache-write 3 :output 4))))
-        (should (= ends 1))
-        (should (equal quotas '((:balance ((:amount 12.34 :currency "CNY"))))))))))
+        (should-not calls)
+        (should (= ends 0))
+        (should-not quotas)))))
+
+(ert-deftest agent-emx-test-shared-connection-binds-before-callback ()
+  "Usage may have connected before a session opens on the same socket."
+  (agent-emx-test--with-session
+    (let ((connection (agent-emx--make-connection)))
+      (cl-letf (((symbol-function 'agent-emx--local-connection)
+                 (lambda (callback _error)
+                   (funcall callback connection)
+                   connection)))
+        (agent-emx--connection
+         session (lambda (ready)
+                   (should (eq ready (agent-emx--get session :emx-connection))))
+         #'ignore)))))
 
 (ert-deftest agent-emx-test-plan-review-feedback ()
   (dolist (choice '(0 1))
@@ -781,7 +796,9 @@
 (ert-deftest agent-emx-test-dsh-round-trip ()
   (unless (executable-find "node") (ert-skip "Node is unavailable"))
   (require 'agent-dsh)
-  (let* ((agent-emx-var-directory (make-temp-file "emx-dsh-" t))
+  (let* ((agent-usage-poll-interval 0)
+         (agent-usage--connection nil)
+         (agent-emx-var-directory (make-temp-file "emx-dsh-" t))
          (agent-emx--connections (make-hash-table :test #'equal))
          (process-environment
           (cons (concat "EMX_DSH_EXECUTABLE="
@@ -814,11 +831,17 @@
             (agent-emx-test--wait (lambda () (agent-session--pending-asks session)))
             (agent-session--answer session (car (agent-session--pending-asks session)) 0)
             (agent-emx-test--wait
-             (lambda () (and (= ends 1) (eq (agent-session-status session) 'idle))))
+             (lambda () (eq (agent-session-status session) 'idle)))
             (should (eq (agent-session-setting session :mode) 'edits))
-            (should (equal (caar calls) "fake/chat"))
-            (should (equal (cdar calls) '(:input 2 :cache-read 3 :cache-write 4 :output 5)))
-            (agent-emx-test--wait (lambda () quotas))
+            (should-not calls)
+            (should (= ends 0))
+            (should-not quotas)
+            (let (report)
+              (agent-emx--request connection "usage/report" '(:range "all")
+                                  (lambda (value) (setq report value)))
+              (agent-emx-test--wait (lambda () report))
+              (should (= (plist-get (plist-get report :total) :tokens) 14))
+              (should (= (plist-get (plist-get report :total) :turns) 1)))
             (should-not (agent-session-process session))
             (should (string-match-p "dsh 版本为 test-version" (agent-emx-test--transcript session))))
         (when (buffer-live-p buffer) (agent-session-kill-quietly buffer))
@@ -1091,23 +1114,6 @@
 
 (ert-deftest agent-emx-test-codex-quota-and-notices ()
   (agent-emx-test--with-session
-    (let (readings)
-      (cl-letf (((symbol-function 'agent-usage-set-quota)
-                 (lambda (s &rest args) (should (eq s session)) (push args readings))))
-        (agent-emx-test--event
-         session 1 "quota/rate-limits"
-         :rateLimits '(:plan "plus" :windows [(:id "300" :minutes 300 :used 0.25 :resets 2000000000)]
-                             :credits 12.5))
-        (should (equal (plist-get (car readings) :plan) "plus"))
-        (should (equal (plist-get (car readings) :credits) 12.5))
-        (let ((window (car (plist-get (car readings) :windows))))
-          (should (equal (plist-get window :label) (agent-usage-window-label 300)))
-          (should (= (plist-get window :used) 0.25)))
-        (agent-emx-test--event session 2 "quota/rate-limits"
-                              :rateLimits '(:windows [] :credits "unlimited"))
-        (should (eq (plist-get (car readings) :credits) 'unlimited))
-        (agent-emx-test--event session 3 "quota/rate-limits" :rateLimits '(:windows []))
-        (should-not (plist-member (car readings) :credits))))
     (agent-emx-test--event session 4 "block/add"
                           :block '(:id "tools" :type "notice" :notice (:kind "codex-tools-changed")))
     (should (string-match-p "重启 Codex 后继续" (agent-emx-test--transcript session)))
@@ -1183,16 +1189,6 @@
 
 (ert-deftest agent-emx-test-claude-quota-and-notices ()
   (agent-emx-test--with-session
-    (let (reading)
-      (cl-letf (((symbol-function 'agent-usage-set-quota)
-                 (lambda (_ &rest args) (setq reading args))))
-        (agent-emx-test--event
-         session 1 "quota/rate-limits"
-         :rateLimits '(:windows [(:id "five_hour" :minutes 300 :used 0.2 :resets 1234)
-                                  (:id "seven_day_opus" :minutes 10080 :used 0.5 :resets 5678)]))
-        (should (equal (mapcar (lambda (w) (plist-get w :label))
-                              (plist-get reading :windows))
-                       '("5h" "周·Opus")))))
     (agent-emx-test--event
      session 2 "block/add"
      :block '(:id "child-effort" :type "notice" :notice (:kind "claude-child-effort" :level "error")))

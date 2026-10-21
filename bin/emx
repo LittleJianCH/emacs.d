@@ -11,8 +11,6 @@
 //   emx eval '(buffer-list)'         evaluate arbitrary Elisp
 //   emx mcp                          run as a stdio MCP server
 //   emx daemon [--ensure|--stop]      run or manage the session daemon (--var DIR)
-//   emx serve                        run the usage service of agent-usage.el
-//                                    (stdio JSON-RPC; see emx-usage.js)
 //
 // Methods are defined in lisp/agent/agent-ui.el; extend them with agent-ui-defmethod.
 // The config_* methods are emx's own (see "Config files" below).
@@ -325,7 +323,7 @@ function help(name) {
   lines.push('', 'emx help <method>  Show the full description of a method',
              'emx mcp            Run as a stdio MCP server',
              'emx daemon         Run the session daemon (--var DIR, --ensure, --stop)',
-             'emx serve          Run the usage service of agent-usage.el (stdio JSON-RPC)');
+             'Usage is served by emx daemon.');
   return lines.join('\n');
 }
 
@@ -462,7 +460,6 @@ async function main() {
   }
   if (method === 'mcp') return mcpServer();
   // The usage service needs no Emacs: it never goes through request().
-  if (method === 'serve') return require('./emx-usage.js').serve();
   if (!method || method === 'help' || method === '-h' || method === '--help') {
     console.log(help(rest[0]));
     return;

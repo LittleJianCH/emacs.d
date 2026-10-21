@@ -9,6 +9,9 @@
 // labels carry a kind that Emacs maps to its own (Chinese) text; agent
 // text (replies, tool output, questions an agent asks) is passed through.
 
+import type { ReportParams, UsageRecord, QuotaReading } from '../usage/types.ts'
+import type { UsageConfig, UsageService } from '../usage/service.ts'
+
 /** A session's id, assigned by the daemon. */
 export type SessionId = string
 
@@ -157,6 +160,7 @@ export interface Usage {
 }
 
 export interface OpenParams {
+  handle?: string
   agent: string
   root: string
   /** Claude's editor-installed skills; retained for effort/external restarts. */
@@ -238,6 +242,8 @@ export interface EarlierParams {
  * it: the daemon's user block takes that id, so Emacs recognizes it.
  */
 export interface SendParams {
+  /** Editor handle retained for ledger records, updated before a live turn. */
+  handle?: string
   id: SessionId
   text: string
   images?: string[]
@@ -263,6 +269,10 @@ export interface Requests {
   'session/answer': [{ id: SessionId, ask: string } & Answer, { stale: boolean }]
   'session/earlier': [EarlierParams, { earlier: boolean }]
   'session/stop': [{ id: SessionId }, {}]
+  'usage/configure': [Partial<Pick<UsageConfig, 'agents' | 'pollInterval' | 'pollers'>>, ReturnType<UsageService['configure']>]
+  'usage/report': [ReportParams, ReturnType<UsageService['report']>]
+  'usage/refresh': [{force?: boolean}, {}]
+  'usage/clear': [{}, {}]
   'daemon/stop': [{}, {}]
 }
 
@@ -287,9 +297,9 @@ export type SessionEvent =
   | { type: 'capabilities', capabilities: Capabilities }
   /** Live model calls only; resumed transcript usage is excluded. */
   | { type: 'usage/call', model: string, usage: Usage }
-  /** Flush the current turn's model calls to the client's usage ledger. */
+  /** Internal backend event: flush the turn to the daemon's usage ledger. */
   | { type: 'usage/end' }
-  /** Account balance reading; usage accounting remains in Emacs in phase 2. */
+  /** Internal account balance reading, consumed by daemon accounting. */
   | { type: 'quota', balance: { amount: number, currency: string }[] }
   /** Sparse Codex account readings; missing credits retain the known value. */
   | { type: 'quota/rate-limits', rateLimits: { plan?: string,
@@ -316,6 +326,9 @@ export interface DaemonNotifications {
   'replaced': {}
   /** Sent only to MCP connections. */
   'mcp/tools_changed': {}
+  /** A visible report should be refetched after ledger writes or clear. */
+  'usage/changed': {}
+  'usage/quotas': {quotas: ReturnType<UsageService['configure']>['quotas']}
   /** The session list changed (opened, stopped, status). */
   'sessions': { sessions: SessionSummary[] }
 }
@@ -335,7 +348,11 @@ export const ErrorCode = {
 } as const
 
 /** Editor notifications reuse hello's tools payload. */
-export interface EditorNotifications { 'editor/tools': EditorTools }
+export interface EditorNotifications {
+  'editor/tools': EditorTools
+  'usage/record': {record: UsageRecord}
+  'usage/quota': QuotaReading
+}
 /** MCP cancellation references the socket request id, as in MCP stdio. */
 export interface McpNotifications { 'notifications/cancelled': { requestId: number } }
 export interface EditorRequests { 'editor/call': [EditorCall, {

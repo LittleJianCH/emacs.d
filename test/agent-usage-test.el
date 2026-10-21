@@ -3,9 +3,9 @@
 ;;; Commentary:
 
 ;; Tests what Emacs sends the usage service (records, quota readings),
-;; the echo-area line, and, against a real `emx serve' on the fixtures of
+;; the echo-area line, and, against a real isolated daemon on the fixtures of
 ;; test/fixtures/usage/, the usage page.  The sums and forecasts themselves
-;; are tested in test/emx-usage-test.js.
+;; are tested in test/emx/usage.test.ts.
 ;; Run:
 ;;   emacs --batch --init-directory=. --eval '(setq my/use-evil nil)'
 ;;     -l init.el -l test/agent-usage-test.el -f ert-run-tests-batch-and-exit
@@ -15,6 +15,7 @@
 (require 'ert)
 (require 'agent-session)
 (require 'agent-usage)
+(require 'agent-emx)
 (require 'agent-claude)
 (require 'agent-codex)
 
@@ -466,9 +467,10 @@
          (agent-usage-quota-file (expand-file-name "agent-quota.json" dir))
          (agent-usage-poll-interval 0)
          (agent-usage-pollers nil)
-         (agent-usage--service nil)
+         (agent-usage--connection nil)
+         (agent-emx-var-directory dir)
+         (agent-emx--connections (make-hash-table :test #'equal))
          (agent-usage--snapshot nil)
-         (agent-usage--callbacks (make-hash-table))
          (agent-usage-change-functions nil)
          (agent-session-agents '((dsh :title "DeepSeek") (codex :title "Codex")
                                  (claude :title "Claude")))
@@ -524,8 +526,11 @@
               (should (equal agent-usage--filter '(:agent "claude")))
               (agent-usage-unfilter)
               (should-not agent-usage--filter))))
-      (when (process-live-p agent-usage--service)
-        (delete-process agent-usage--service))
+      (when (and agent-usage--connection
+                 (process-live-p (agent-emx--connection-process agent-usage--connection)))
+        (delete-process (agent-emx--connection-process agent-usage--connection)))
+      (call-process "node" nil nil nil (expand-file-name "bin/emx" agent-emx--checkout)
+                    "daemon" "--var" dir "--stop")
       (delete-directory dir t))))
 
 ;;; Service and migration
@@ -577,21 +582,52 @@
                                    (file-attributes agent-usage-file))))))
       (delete-directory dir t))))
 
-(ert-deftest agent-usage-test-gave-up ()
-  "Once the service gave up, nothing but a restart starts it again."
-  (let ((noninteractive nil)
-        (agent-usage--service nil)
-        (agent-usage--gave-up nil)
-        (agent-usage--exits nil)
-        (starts 0))
-    (cl-letf (((symbol-function 'agent-usage--start)
-               (lambda () (cl-incf starts) (error "No node"))))
+(ert-deftest agent-usage-test-daemon-transport ()
+  "Usage uses the shared asynchronous connection and decodes its vectors."
+  (let ((agent-usage--connection 'shared) sent result)
+    (cl-letf (((symbol-function 'agent-usage--service) (lambda () 'shared))
+              ((symbol-function 'agent-emx--local-connection)
+               (lambda (callback _error) (funcall callback 'shared)))
+              ((symbol-function 'agent-emx--write)
+               (lambda (connection message)
+                 (should (eq connection 'shared)) (setq sent message)))
+              ((symbol-function 'agent-emx--request)
+               (lambda (connection method params callback _error)
+                 (should (eq connection 'shared))
+                 (should (equal method "usage/report"))
+                 (should-not (plist-get (plist-get params :filter) :model))
+                 (funcall callback '(:quotas [(:windows [] :duplicate :false)])))))
+      (agent-usage--notify "record" '(:record (:input 1)))
+      (should (equal (plist-get sent :method) "usage/record"))
+      (agent-usage--request "report" '(:filter (:model :null))
+                            (lambda (value) (setq result value)))
+      (should (equal result '(:quotas ((:windows nil :duplicate nil))))))))
+
+(ert-deftest agent-usage-test-shared-quota-push ()
+  "Global pushes update the existing echo/page data without a session."
+  (let ((connection (agent-emx--make-connection))
+        (agent-usage--snapshot nil)
+        (changes 0)
+        (agent-usage-change-functions nil))
+    (add-hook 'agent-usage-change-functions (lambda () (cl-incf changes)))
+    (agent-emx--dispatch connection
+                         '(:method "usage/quotas"
+                           :params (:quotas [(:agent "codex" :host nil :windows []
+                                                     :credits "unlimited" :duplicate :false)])))
+    (should (= changes 1))
+    (should (equal agent-usage--snapshot
+                   '((:agent "codex" :host nil :windows nil :credits "unlimited" :duplicate nil))))
+    (agent-emx--dispatch connection '(:method "usage/changed" :params nil))
+    (should (= changes 2))))
+
+(ert-deftest agent-usage-test-no-implicit-batch-daemon ()
+  "A stale batch connection cannot discover a default daemon."
+  (let ((noninteractive t)
+        (agent-usage--connection (agent-emx--make-connection)))
+    (cl-letf (((symbol-function 'agent-emx--local-connection)
+               (lambda (&rest _) (ert-fail "Started an implicit batch daemon"))))
       (should-not (agent-usage--service))
-      (should agent-usage--gave-up)
-      (should-not (agent-usage--service))
-      (should (= starts 1))
-      (agent-usage-restart-service)
-      (should (= starts 2)))))
+      (agent-usage--notify "record" '(:record (:input 1))))))
 
 (ert-deftest agent-usage-test-fetch-order ()
   "A report arriving after a newer one was asked for is dropped; a group

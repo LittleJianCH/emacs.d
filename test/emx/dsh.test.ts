@@ -71,17 +71,16 @@ test('initialize passes local launch, settings, parent and MCP; advertises choic
 })
 
 test('streamed blocks, tool results, usage, balance, discard, errors and slash commands', async (t) => {
-  const { send, session, client, requests } = await setup(t)
+  const { send, session, client, requests, daemon } = await setup(t)
   const events = await send('hello')
   assert.equal(events.filter((n) => n.method === 'status' && n.params.status === 'running').length, 1)
   assert.deepEqual(events.filter((n) => n.method === 'block/append').map((n) => n.params.text), ['你', '好'])
   assert.ok(session.blocks.some((b) => b.type === 'tool' && b.view.kind === 'command' && b.status === 'done' && b.output === 'hi'))
   assert.equal(session.blocks.filter((b) => b.id === 'user-hello').length, 1)
-  assert.deepEqual(events.find((n) => n.method === 'usage/call')!.params.usage,
-    { input: 2, cacheRead: 3, cacheWrite: 4, output: 5 })
-  assert.ok(events.some((n) => n.method === 'usage/end'))
-  const quota = await client.waitFor((n) => n.method === 'quota')
-  assert.deepEqual(quota.params.balance, [{ amount: 12.34, currency: 'CNY' }])
+  assert.equal(daemon.usage.report({range: 'all'}).total.tokens, 14)
+  assert.equal(daemon.usage.report({range: 'all'}).total.turns, 1)
+  const quota = await client.waitFor((n) => n.method === 'usage/quotas' && n.params.quotas.length)
+  assert.deepEqual(quota.params.quotas[0].balance, [{ amount: 12.34, currency: 'CNY' }])
   await send('discard')
   assert.equal(session.index.has('discarded'), false)
   await send('error')
@@ -162,7 +161,7 @@ test('resume replays transcript once and excludes its usage; daemon MCP is rebui
     await peer.request('session/configure', { id, model: 'fake/restored', effort: 'low' })
     const from = peer.notifications.length
     await peer.request('session/send', { id, text: 'hello' })
-    await peer.waitFor((n) => n.method === 'usage/end', 5000, 'resumed turn', from)
+    await peer.waitFor((n) => n.method === 'status' && n.params.status === 'idle', 5000, 'resumed turn', from)
     const resumed = restored.sessions.get(id)!
     assert.equal(resumed.blocks.filter((b) => b.id === 'old-user').length, 1)
     assert.equal(resumed.daemonSocket, restored.socket)
@@ -188,7 +187,7 @@ test('steering, interruption, queued turns and unexpected process exit settle co
   assert.deepEqual(await client.request('session/send', { id, text: 'queued' }), { queued: true })
   const next = client.notifications.length
   await client.request('session/interrupt', { id })
-  await client.waitFor((n) => n.method === 'usage/end', 5000, 'queued turn', next + 1)
+  await client.waitFor((n) => n.method === 'status' && n.params.status === 'idle', 5000, 'queued turn', next + 1)
   await send('hello')
   const end = client.notifications.length
   await client.request('session/send', { id, text: 'exit' })

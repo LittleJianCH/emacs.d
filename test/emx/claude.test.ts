@@ -40,7 +40,7 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
   const send = async (text: string) => {
     const from = client.notifications.length
     await client.request('session/send', { id, text })
-    await client.waitFor((n) => n.method === 'usage/end', 5000, 'turn end', from)
+    await client.waitFor((n) => n.method === 'status' && n.params.status === 'idle', 5000, 'turn end', from)
     await client.waitFor((n) => n.method === 'status' && n.params.status === 'idle', 5000, 'idle', from)
     return client.notifications.slice(from)
   }
@@ -73,10 +73,10 @@ test('launch flags, daemon MCP, skills, choices and child lifetime', async (t) =
 })
 
 test('stream thinking, text and complete tool arguments/results; exclude subagents; usage deltas', async (t) => {
-  const { send, session } = await setup(t)
+  const { send, session, daemon } = await setup(t)
   for (let i = 0; i < 2; i++) {
     const events = await send('hello')
-    assert.deepEqual(events.find((e) => e.method === 'usage/call')!.params.usage, { input: 2, cacheRead: 3, cacheWrite: 4, output: 5 })
+    assert.deepEqual(daemon.usage.report({range: 'all'}).total, { input: 2 * (i + 1), cache_read: 3 * (i + 1), cache_write: 4 * (i + 1), output: 5 * (i + 1), turns: i + 1, child_turns: 0, tokens: 14 * (i + 1) })
   }
   assert.ok(session.blocks.some((b) => b.type === 'text' && b.kind === 'thinking' && b.text === 'consider' && b.done))
   assert.ok(session.blocks.some((b) => b.type === 'text' && b.text === 'hello' && b.done))
@@ -100,7 +100,7 @@ test('permissions echo raw nested JSON and always suggestions; question answers 
       assert.equal(event.params.ask.questions[0].multi, true)
       await client.request('session/answer', { id, ask: event.params.ask.id, answers: [{ selected: ['one'], custom: 'custom' }] })
     }
-    await client.waitFor((e) => e.method === 'usage/end', 5000, 'answered', from)
+    await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle', 5000, 'answered', from)
   }
   const responses = (await calls()).filter((m) => m.type === 'control_response').map((m) => m.response.response)
   assert.deepEqual(responses[0], { behavior: 'allow', updatedInput: { command: 'echo hi', preserve: { f: false, t: true, n: null, a: [], o: {}, unicode: '你好' } },
@@ -141,7 +141,7 @@ test('child effort changes report a notice without losing conversation; steering
   await client.request('session/send', { id, text: 'hold' })
   const from = client.notifications.length
   assert.deepEqual(await client.request('session/steer', { id, text: 'steer', block: 'steered' }), { accepted: true })
-  await client.waitFor((e) => e.method === 'usage/end', 5000, 'steer', from)
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle', 5000, 'steer', from)
   assert.ok(session.index.has('steered'))
   await client.request('session/send', { id, text: 'approval' })
   const ask = await client.waitFor((e) => e.method === 'ask/add')
@@ -194,14 +194,14 @@ test('large transcript streaming excludes bookkeeping and leaves a partial last 
 })
 
 test('external client follow debounces and restarts with resume before next send', async (t) => {
-  const { client, session, file, calls, send } = await setup(t)
+  const { client, session, file, calls, send, daemon } = await setup(t)
   await send('hello')
   await appendFile(file, JSON.stringify({ type: 'user', uuid: 'external', entrypoint: 'claude-desktop', message: { content: 'outside' } }) + '\n')
   await client.waitFor((e) => e.method === 'block/add' && e.params.block.id === 'external', 5000, 'external follow')
   assert.ok(session.blocks.some((b) => b.type === 'notice' && b.notice.kind === 'claude-external-source'))
   const events = await send('after-external')
-  assert.deepEqual(events.find((e) => e.method === 'usage/call')!.params.usage,
-    { input: 2, cacheRead: 3, cacheWrite: 4, output: 5 }, 'external totals must be forgotten before resuming')
+  assert.deepEqual(daemon.usage.report({range: 'all'}).total.tokens,
+    28, 'external totals must be forgotten before resuming')
   const messages = await calls()
   const spawn = messages.findLastIndex((m) => m.type === 'spawn')
   const prompt = messages.findIndex((m) => m.type === 'user' && m.message.content === 'after-external')
@@ -211,9 +211,9 @@ test('external client follow debounces and restarts with resume before next send
 })
 
 test('rate limit readings, crash, restart and resume', async (t) => {
-  const { client, id, session, send, calls } = await setup(t)
+  const { client, id, session, send, calls, daemon } = await setup(t)
   const events = await send('rate')
-  assert.deepEqual(events.find((e) => e.method === 'quota/rate-limits')!.params.rateLimits.windows,
+  assert.deepEqual(daemon.usage.quotas[0].windows.map(({id, minutes, used, resets}) => ({id, minutes, used, resets})),
     [{ id: 'five_hour', minutes: 300, used: 0.3, resets: 1234 }, { id: 'seven_day_opus', minutes: 10080, used: 0.7, resets: 5678 }])
   const from = client.notifications.length
   await client.request('session/send', { id, text: 'exit' })
@@ -248,11 +248,11 @@ test('historical fixtures preserve tool diffs/results, queued prompts, image cou
 })
 
 test('a resumed process reports its own usage when restored model totals are unknown', async (t) => {
-  const { send } = await setup(t, { resume: 'saved' })
+  const { send, daemon } = await setup(t, { resume: 'saved' })
+  let turns = 0
   for (const text of ['first resumed turn', 'next turn']) {
     const events = await send(text)
-    assert.deepEqual(events.filter((e) => e.method === 'usage/call').map((e) => e.params.usage),
-      [{ input: 2, cacheRead: 3, cacheWrite: 4, output: 5 }])
+    assert.equal(daemon.usage.report({range: 'all'}).total.tokens, 14 * ++turns)
   }
 })
 
@@ -261,14 +261,14 @@ test('denied approvals retain declined tool status; image content is sent as bas
   await client.request('session/send', { id, text: 'approval' })
   const ask = await client.waitFor((e) => e.method === 'ask/add')
   await client.request('session/answer', { id, ask: ask.params.ask.id, choice: 'deny' })
-  await client.waitFor((e) => e.method === 'usage/end')
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle')
   assert.equal(session.index.get('ask-tool')?.type, 'tool')
   assert.equal((session.index.get('ask-tool') as any).status, 'declined')
   const image = join(dir, 'image.png')
   await writeFile(image, 'fixture-image-bytes')
   const from = client.notifications.length
   await client.request('session/send', { id, text: 'image', images: [image] })
-  await client.waitFor((e) => e.method === 'usage/end', 5000, 'image turn', from)
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle', 5000, 'image turn', from)
   const message = (await calls()).filter((m) => m.type === 'user').at(-1).message
   assert.deepEqual(message.content, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from('fixture-image-bytes').toString('base64') } }, { type: 'text', text: 'image' }])
 })
@@ -278,7 +278,7 @@ test('cached quota is republished on fresh attach without replaying usage', asyn
   await send('rate')
   const from = client.notifications.length
   await client.request('session/attach', { id })
-  await client.waitFor((e) => e.method === 'quota/rate-limits', 5000, 'cached quota', from)
+  await client.waitFor((e) => e.method === 'usage/quotas', 5000, 'cached quota', from)
   assert.equal(client.notifications.slice(from).some((e) => e.method === 'usage/call'), false)
 })
 
@@ -297,7 +297,7 @@ test('cancelled AskUserQuestion is denied, not allowed with empty answers', asyn
   await client.request('session/send', { id, text: 'question' })
   const ask = await client.waitFor((e) => e.method === 'ask/add')
   await client.request('session/answer', { id, ask: ask.params.ask.id })
-  await client.waitFor((e) => e.method === 'usage/end')
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle')
   const response = (await calls()).find((m) => m.type === 'control_response').response.response
   assert.deepEqual(response, { behavior: 'deny', message: 'The user declined to answer these questions.' })
 })
@@ -321,7 +321,7 @@ test('pipelined configure, steer and interrupt reserve and follow a preparing se
   const steered = client.request('session/steer', { id, text: 'after-hold' })
   assert.deepEqual(await steered, { accepted: true })
   await held
-  await client.waitFor((e) => e.method === 'usage/end', 5000, 'ordered steer', next)
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle', 5000, 'ordered steer', next)
   assert.deepEqual((await calls()).filter((m) => m.type === 'user').slice(-2).map((m) => m.message.content), ['hold', 'after-hold'])
 })
 
@@ -337,7 +337,7 @@ test('send during an idle effort restart waits for the single replacement proces
   const { client, id, calls, session } = await setup(t, {}, undefined, { extraArgs: ['--fixture-delay-exit'] })
   fixtureCalls = calls
   await client.request('session/send', { id, text: 'hello' })
-  await client.waitFor((e) => e.method === 'usage/end')
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle')
   const configuring = client.request('session/configure', { id, effort: 'high' })
   for (let i = 0; !(await calls()).some((m) => m.type === 'terminating'); i++) {
     assert.ok(i < 200, 'old process must enter delayed termination')
@@ -360,7 +360,7 @@ test('send during an idle effort restart waits for the single replacement proces
   assert.equal(delivered[0].pid, live[0].pid)
   assert.equal(session.blocks.filter((b) => b.id === 'racing-send').length, 1)
   await client.request('session/interrupt', { id })
-  await client.waitFor((e) => e.method === 'usage/end', 5000, 'managed replacement interrupt', from)
+  await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle', 5000, 'managed replacement interrupt', from)
 })
 
 
@@ -398,7 +398,7 @@ test('permission responses preserve input and suggestions byte for byte', async 
     } else {
       await client.request('session/answer', { id, ask: event.params.ask.id, answers: [{ selected: ['one'] }] })
     }
-    await client.waitFor((e) => e.method === 'usage/end', 5000, 'raw permission reply', from)
+    await client.waitFor((e) => e.method === 'status' && e.params.status === 'idle', 5000, 'raw permission reply', from)
   }
   const responses = (await calls()).filter((m) => m.type === 'raw-response').map((m) => m.line)
   assert.equal(responses[0], '{"type":"control_response","response":{"subtype":"success","request_id":"raw-permission","response":'

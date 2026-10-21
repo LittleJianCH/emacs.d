@@ -20,6 +20,7 @@ export interface SessionOptions {
   editorTools?: () => import('./protocol.ts').EditorTools
   restored?: boolean
   transcript?: Transcript
+  onUsage?: (session: Session, event: SessionEvent) => void
   onChange?: (summaryChanged: boolean) => void
 }
 
@@ -54,6 +55,7 @@ export class Session implements SessionHost {
   seq = 0
   readonly log: EventParams[] = []
   notify: ((event: EventParams) => void) | undefined
+  #onUsage?: SessionOptions['onUsage']
   #onChange: (summaryChanged: boolean) => void
   #resume: string | undefined
   #queued: Message[] = []
@@ -70,6 +72,7 @@ export class Session implements SessionHost {
     this.settings = { ...options.settings }
     this.status = options.restored ? 'idle' : 'starting'
     this.#resume = options.resume
+    this.#onUsage = options.onUsage
     this.#onChange = options.onChange ?? (() => {})
     if (options.transcript) {
       this.capabilities = structuredClone(options.transcript.capabilities ?? this.capabilities)
@@ -102,6 +105,9 @@ export class Session implements SessionHost {
 
   /** Apply exactly once; log immutable events, independently of block state. */
   emit(input: SessionEvent): void {
+    this.#onUsage?.(this, input)
+    // Accounting is applied at the producer boundary, never logged or replayed.
+    if (this.#onUsage && ['usage/call', 'usage/end', 'quota', 'quota/rate-limits'].includes(input.type)) return
     let event = structuredClone(input)
     if (event.type === 'block/add') {
       const existing = this.index.get(event.block.id)

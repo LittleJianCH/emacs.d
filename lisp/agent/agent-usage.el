@@ -3,9 +3,8 @@
 ;;; Commentary:
 
 ;; How many tokens the agents started from this Emacs used, and what their
-;; accounts have left.  The bookkeeping and the arithmetic run in `emx
-;; serve', a service this module starts (bin/emx-usage.js documents its
-;; protocol): it is the only writer of the ledger (`agent-usage-file') and
+;; accounts have left.  The bookkeeping and arithmetic run in the emx
+;; daemon (emx/usage/), the only writer of the ledger (`agent-usage-file') and
 ;; of the quotas (`agent-usage-quota-file'), sums and forecasts them, and
 ;; asks the agents' CLIs for their quota every `agent-usage-poll-interval'
 ;; seconds.  Emacs only passes events on and draws what it gets back.
@@ -15,8 +14,9 @@
 ;; other clients of the same accounts (Claude Desktop, a terminal) are not.
 ;; Subagents are sessions of their own and are counted like any other.
 ;; Turning what agents report into turns needs each session's state and
-;; stays here: Claude's running totals become deltas, Codex's and
-;; DeepSeek's calls are summed per turn.
+;; stays here for Lisp backends: Claude's running totals become deltas,
+;; Codex's and DeepSeek's calls are summed per turn.  Daemon backends
+;; account directly, including while Emacs is disconnected.
 ;;
 ;; Quota: backends pass what an agent reports about its account to
 ;; `agent-usage-set-quota'; emx adds what its polls find and pushes the
@@ -32,6 +32,13 @@
 (require 'agent-session)
 
 (declare-function my/var "init-base")
+(declare-function agent-emx--local-connection "agent-emx")
+(declare-function agent-emx--request "agent-emx")
+(declare-function agent-emx--write "agent-emx")
+(declare-function agent-emx--connection-ready "agent-emx")
+(declare-function agent-emx--connection-process "agent-emx")
+(declare-function agent-emx--connection-var "agent-emx")
+(defvar agent-emx-var-directory)
 
 (defgroup agent-usage nil
   "Usage and quota of the agents Emacs runs."
@@ -66,22 +73,12 @@ A source that reported its quota more recently is skipped."
 FUNCTION returns the command (a list) emx runs, or nil not to poll; it
 is left out when its program isn't installed.  Backends add themselves.")
 
-(defvar agent-usage--service nil "The `emx serve' process.")
-(defvar agent-usage--callbacks (make-hash-table) "Request id -> callback.")
-(defvar agent-usage--next-id 0 "Id of the latest request to emx.")
-(defvar agent-usage--exits nil "Times the service exited lately.")
-(defvar agent-usage--gave-up nil
-  "Non-nil once the service kept dying or couldn't start.
-Nothing starts it again but `agent-usage-restart-service'.")
+(defvar agent-usage--connection nil "The shared local daemon connection.")
 (defvar agent-usage--snapshot nil
   "The quotas emx pushed last: a list of plists, in display order.")
 
 (defvar agent-usage-change-functions nil
   "Functions called with no arguments after usage or quotas changed.")
-
-(defun agent-usage--service-command ()
-  "Command line of the usage service."
-  (list (expand-file-name "emx" agent-session-bin-directory) "serve"))
 
 (defun agent-usage--pollers ()
   "The `pollers' parameter of the service's initialize."
@@ -93,28 +90,35 @@ Nothing starts it again but `agent-usage-restart-service'.")
                                  (list :command (vconcat command))))))
     (or pollers (make-hash-table))))
 
-(defun agent-usage--write (message)
-  "Send MESSAGE, a plist, to the service as one JSON line."
-  (process-send-string agent-usage--service
-                       (concat (json-serialize message :null-object :null :false-object :false)
-                               "\n")))
+(defun agent-usage--lists (value)
+  "Decode daemon VALUE into the lists and booleans the usage UI uses."
+  (cond ((memq value '(:false :null)) nil)
+        ((vectorp value) (mapcar #'agent-usage--lists value))
+        ((consp value) (cons (agent-usage--lists (car value))
+                             (agent-usage--lists (cdr value))))
+        (t value)))
 
-(defun agent-usage--dispatch (line)
-  "Handle LINE, one JSON message from the service."
-  (when-let* ((message (ignore-errors
-                         (json-parse-string line :object-type 'plist :array-type 'list
-                                            :null-object nil :false-object nil))))
-    (let ((id (plist-get message :id)))
-      (cond
-       ((and id (not (plist-get message :method)))
-        (when-let* ((callback (gethash id agent-usage--callbacks)))
-          (remhash id agent-usage--callbacks)
-          (if-let* ((err (plist-get message :error)))
-              (message "用量服务出错：%s" (plist-get err :message))
-            (funcall callback (plist-get message :result)))))
-       ((equal (plist-get message :method) "quotas")
-        (setq agent-usage--snapshot (plist-get (plist-get message :params) :quotas))
-        (run-hooks 'agent-usage-change-functions))))))
+(defun agent-usage--receive-quotas (quotas)
+  "Display the daemon's pushed QUOTAS."
+  (setq agent-usage--snapshot (agent-usage--lists quotas))
+  (run-hooks 'agent-usage-change-functions))
+
+(defun agent-usage--connected (connection)
+  "Configure usage on a newly ready local daemon CONNECTION.
+File names belong to its var directory; only poll commands and ordering
+come from Emacs.  The daemon retains them when Emacs disconnects."
+  (setq agent-usage--connection connection)
+  (agent-emx--request
+   connection "usage/configure"
+   (list :agents (vconcat (mapcar #'symbol-name
+                                 (reverse (mapcar #'car agent-session-agents))))
+         :pollInterval agent-usage-poll-interval :pollers (agent-usage--pollers))
+   (lambda (result) (agent-usage--receive-quotas (plist-get result :quotas)))
+   #'agent-usage--error))
+
+(defun agent-usage--error (error)
+  "Report daemon ERROR without blocking the editor."
+  (message "用量服务出错：%s" (plist-get error :message)))
 
 (defun agent-usage--json-record (record)
   "Old ledger RECORD, a plist with Lisp keys, as a JSON record."
@@ -183,83 +187,62 @@ exist yet, and kept as .bak."
       (rename-file old-quota (concat old-quota ".bak") t))))
 
 (defun agent-usage--start ()
-  "Start the usage service and initialize it."
+  "Find or asynchronously start the shared local daemon."
   (agent-usage--migrate)
-  (let ((pending ""))
-    (setq agent-usage--service
-          (make-process
-           :name "emx-usage"
-           :command (agent-usage--service-command)
-           :connection-type 'pipe
-           :coding 'utf-8-unix
-           :noquery t
-           :stderr (get-buffer-create " *emx-usage stderr*")
-           :filter (lambda (_process output)
-                     (setq pending (concat pending output))
-                     (let ((lines (split-string pending "\n")))
-                       (setq pending (car (last lines)))
-                       (mapc #'agent-usage--dispatch (butlast lines))))
-           :sentinel #'agent-usage--sentinel)))
-  ;; The first message, so emx knows its files before any event.
-  (agent-usage--request
-   "initialize"
-   (list :usageFile (expand-file-name agent-usage-file)
-         :quotaFile (expand-file-name agent-usage-quota-file)
-         :agents (vconcat (mapcar #'symbol-name (reverse (mapcar #'car agent-session-agents))))
-         :pollInterval agent-usage-poll-interval
-         :pollers (agent-usage--pollers))
-   (lambda (result)
-     (setq agent-usage--snapshot (plist-get result :quotas))
-     (run-hooks 'agent-usage-change-functions))))
-
-(defun agent-usage--sentinel (process _event)
-  "Restart the service PROCESS after it died, unless it keeps dying."
-  (unless (process-live-p process)
-    (clrhash agent-usage--callbacks)
-    (when (eq process agent-usage--service)
-      (setq agent-usage--service nil)
-      (let ((now (float-time)))
-        (setq agent-usage--exits (cons now (seq-filter (lambda (time) (> time (- now 60)))
-                                                       agent-usage--exits)))
-        (if (> (length agent-usage--exits) 3)
-            (progn (setq agent-usage--gave-up t)
-                   (message "用量服务（emx serve）反复退出，已停止重启；见 *emx-usage stderr*"))
-          (unless noninteractive (agent-usage--service)))))))
+  (require 'agent-emx)
+  (setq agent-usage--connection
+        (agent-emx--local-connection #'ignore #'agent-usage--error)))
 
 (defun agent-usage--service ()
-  "The running usage service, started if need be; nil if it can't run.
-A batch Emacs (tests) only uses one it started itself."
-  (unless (or (process-live-p agent-usage--service) noninteractive agent-usage--gave-up)
-    (condition-case err
-        (agent-usage--start)
-      (error (message "用量服务无法启动：%s；修好后 M-x agent-usage-restart-service"
-                      (error-message-string err))
-             (setq agent-usage--service nil
-                   agent-usage--gave-up t))))
-  (and (process-live-p agent-usage--service) agent-usage--service))
+  "Ensure the daemon is connected; batch runs require an explicit start."
+  (let ((process (and agent-usage--connection
+                      (agent-emx--connection-process agent-usage--connection))))
+    (if noninteractive
+        ;; A pure transport test may have left a mock connection behind.
+        ;; Batch calls must never discover or start the default daemon.
+        (and (processp process) (process-live-p process)
+             (equal (expand-file-name agent-emx-var-directory)
+                    (agent-emx--connection-var agent-usage--connection))
+             agent-usage--connection)
+      (unless (and (processp process) (process-live-p process))
+        (agent-usage--start))
+      agent-usage--connection)))
+
+(defun agent-usage--with-connection (callback)
+  "Run CALLBACK once the usage daemon connection is ready."
+  (when (agent-usage--service)
+    (agent-emx--local-connection callback #'agent-usage--error)))
 
 (defun agent-usage--notify (method params)
-  "Send the service the notification METHOD with PARAMS."
-  (when (agent-usage--service)
-    (agent-usage--write (list :jsonrpc "2.0" :method method :params params))))
+  "Send the daemon usage notification METHOD with PARAMS."
+  (agent-usage--with-connection
+   (lambda (connection)
+     (agent-emx--write connection
+                       (list :jsonrpc "2.0" :method (concat "usage/" method)
+                             :params params)))))
+
+(defun agent-usage--nulls (value)
+  "Convert legacy JSON null markers in VALUE for agent-emx requests."
+  (cond ((eq value :null) nil)
+        ((consp value) (cons (agent-usage--nulls (car value))
+                             (agent-usage--nulls (cdr value))))
+        (t value)))
 
 (defun agent-usage--request (method params callback)
-  "Ask the service METHOD with PARAMS; call CALLBACK with the result."
-  (when (agent-usage--service)
-    (let ((id (cl-incf agent-usage--next-id)))
-      (puthash id callback agent-usage--callbacks)
-      (agent-usage--write (list :jsonrpc "2.0" :id id :method method :params params)))))
+  "Ask the daemon usage METHOD with PARAMS; call CALLBACK with the result."
+  (agent-usage--with-connection
+   (lambda (connection)
+     (agent-emx--request connection (concat "usage/" method)
+                         (agent-usage--nulls params)
+                         (lambda (result) (funcall callback (agent-usage--lists result)))
+                         #'agent-usage--error))))
 
 (defun agent-usage-restart-service ()
-  "Restart the usage service, e.g. after editing bin/emx-usage.js."
+  "Reconnect usage and reapply quota poll commands to the shared daemon.
+The daemon's code is updated by its normal version/restart mechanism."
   (interactive)
-  (setq agent-usage--exits nil
-        agent-usage--gave-up nil)
-  (when (process-live-p agent-usage--service)
-    (let ((process agent-usage--service))
-      (setq agent-usage--service nil)
-      (delete-process process)))
-  (agent-usage--service))
+  (agent-usage--start)
+  (agent-usage--with-connection #'agent-usage--connected))
 
 (defun agent-usage-refresh-quotas (&optional force)
   "Have emx poll the quotas not reported lately; all of them with FORCE."

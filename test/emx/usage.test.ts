@@ -1,29 +1,31 @@
-// Tests of `emx serve' (bin/emx-usage.js).  Run: node --test test/emx-usage-test.js
+// Port of the emx serve fixture suite. Run: node --test test/emx/usage.test.ts
 //
 // The fixtures in test/fixtures/usage/ hold five records (a blank line in
 // between and a last line cut short), and three quota entries; "now" is
 // 2026-10-21 12:00 in Asia/Shanghai.  The expected numbers were worked out
 // by hand.
 
-'use strict';
+
 process.env.TZ = 'Asia/Shanghai';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { spawn } = require('node:child_process');
-const readline = require('node:readline');
-const usage = require('../bin/emx-usage.js');
+import { test } from 'node:test';
+import * as assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { spawn } from 'node:child_process';
+import { DaemonServer } from '../../emx/daemon/server.ts';
+import { SocketClient } from './client.ts';
+import type { QuotaEntry } from '../../emx/usage/types.ts';
+import * as usage from '../../emx/usage/service.ts';
 
-const FIXTURES = path.join(__dirname, 'fixtures', 'usage');
+const FIXTURES = path.join(import.meta.dirname, '..', 'fixtures', 'usage');
 const NOW = 1792555200;
 const MIDNIGHT = 1792512000;
 const DAY = 86400;
 const AGENTS = ['claude', 'codex', 'dsh'];
 
-function close(actual, expected) {
+function close(actual: number, expected: number) {
   assert.ok(Math.abs(actual - expected) < 1e-6, `${actual} is not ${expected}`);
 }
 
@@ -36,13 +38,13 @@ function tempFiles() {
   return { dir, usageFile, quotaFile };
 }
 
-function fixtureReport(params) {
+function fixtureReport(params: any) {
   const records = usage.readLedger(path.join(FIXTURES, 'agent-usage.jsonl'));
   const quotas = usage.readQuotas(path.join(FIXTURES, 'agent-quota.json'));
   return usage.report(records, quotas, AGENTS, { now: NOW, ...params });
 }
 
-const tokensOf = (groups) => groups.map((g) => [g.key, g.tokens]);
+const tokensOf = (groups: any[]) => groups.map((g) => [g.key, g.tokens]);
 
 test('the week sums, groups and buckets the records', () => {
   const report = fixtureReport({ range: 'week' });
@@ -98,12 +100,12 @@ test('quotas come in display order with their forecasts', () => {
 });
 
 test('the forecast follows the recent trend', () => {
-  const weekly = (used, history) => ({ id: 'seven_day', minutes: 10080, used, resets: NOW + 4 * DAY, history });
+  const weekly = (used: number, history: number[][]) => ({ id: 'seven_day', minutes: 10080, used, resets: NOW + 4 * DAY, history });
   // Idle over the weekend, 20% today, four days left: right on pace.
-  close(usage.forecast(weekly(0.2, [[NOW - 3 * DAY, 0], [NOW - DAY, 0], [NOW, 0.2]]), NOW).projected, 1);
+  close(usage.forecast(weekly(0.2, [[NOW - 3 * DAY, 0], [NOW - DAY, 0], [NOW, 0.2]]), NOW)!.projected, 1);
   // Minutes of readings tell nothing yet; half a day does.
   assert.equal(usage.forecast(weekly(0.12, [[NOW - 600, 0.1], [NOW, 0.12]]), NOW), null);
-  close(usage.forecast(weekly(0.12, [[NOW - DAY / 2, 0.1], [NOW, 0.12]]), NOW).rate, 0.04);
+  close(usage.forecast(weekly(0.12, [[NOW - DAY / 2, 0.1], [NOW, 0.12]]), NOW)!.rate, 0.04);
   // Past its reset, a window has none.
   assert.equal(usage.forecast({ ...weekly(0.5, []), resets: NOW - 1 }, NOW), null);
 });
@@ -122,8 +124,8 @@ test('the ledger skips broken lines and appends after a cut-short one', () => {
 });
 
 test('quota readings merge, keep their period and round-trip', () => {
-  const quotas = [];
-  const window = (id, used, resets) => ({ id, label: id, minutes: 10080, used, resets });
+  const quotas: QuotaEntry[] = [];
+  const window = (id: string, used: number, resets: number) => ({ id, label: id, minutes: 10080, used, resets });
   usage.mergeQuota(quotas, { agent: 'codex', host: null, windows: [window('a', 0.1, 1000), window('b', 0.5, 1000)],
                              credits: 42 }, 1);
   usage.mergeQuota(quotas, { agent: 'codex', host: null, windows: [window('a', 0.2, 1100)] }, 2);
@@ -181,7 +183,7 @@ test("Codex's rate limits become a reading", () => {
 test('polls skip fresh sources, back off on failure and push quotas', async () => {
   const { dir, usageFile, quotaFile } = tempFiles();
   let now = NOW;
-  const sent = [];
+  const sent: any[] = [];
   const calls = { claude: 0, dsh: 0 };
   const service = new usage.UsageService({
     send: (message) => sent.push(message),
@@ -209,7 +211,7 @@ test('polls skip fresh sources, back off on failure and push quotas', async () =
     assert.deepEqual(calls, { claude: 1, dsh: 1 });
     assert.equal(sent.length, 1);
     assert.equal(sent[0].method, 'quotas');
-    assert.equal(service.quotas.find((q) => q.agent === 'claude').windows.find((w) => w.id === 'seven_day').used, 0.3);
+    assert.equal(service.quotas.find((q) => q.agent === 'claude')!.windows.find((w) => w.id === 'seven_day')!.used, 0.3);
     // 1000 s later the stale claude is polled again; dsh waits out its
     // backoff, twice the interval.
     now += 1000;
@@ -220,37 +222,26 @@ test('polls skip fresh sources, back off on failure and push quotas', async () =
   }
 });
 
-test('`emx serve` answers over stdio', async () => {
-  const { dir, usageFile, quotaFile } = tempFiles();
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'bin', 'emx'), 'serve'], {
-    stdio: ['pipe', 'pipe', 'inherit'],
-    env: { ...process.env, TZ: 'Asia/Shanghai' },
-  });
-  const responses = new Map();
-  const waiters = new Map();
-  readline.createInterface({ input: child.stdout }).on('line', (line) => {
-    const message = JSON.parse(line);
-    if (message.id == null) return;
-    responses.set(message.id, message);
-    waiters.get(message.id)?.(message);
-  });
-  const ask = (id, method, params) => new Promise((resolve) => {
-    waiters.set(id, resolve);
-    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-  });
+test('the daemon answers usage requests over its socket', async () => {
+  const { dir, usageFile } = tempFiles();
+  const daemon = new DaemonServer({ varDir: dir });
+  await daemon.start();
+  const client = await SocketClient.connect(daemon.socket);
   try {
-    const init = await ask(1, 'initialize', { usageFile, quotaFile, agents: AGENTS, pollInterval: 0 });
-    assert.equal(init.result.quotas.length, 3);
-    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'record', params: {
-      record: { time: NOW, agent: 'dsh', root: '~/c/', model: 'm', turns: 1, input: 10, cache_read: 0, cache_write: 0, output: 0 },
-    } }) + '\n');
-    const report = await ask(2, 'report', { range: 'week', now: NOW });
-    assert.equal(report.result.total.tokens, 3720);
+    await client.request('hello', {client: 'usage-test', version: daemon.version});
+    const init = await client.request('usage/configure', {agents: AGENTS, pollInterval: 0});
+    assert.equal(init.quotas.length, 3);
+    client.notify('usage/record', {record: {
+      time: NOW, agent: 'dsh', root: '~/c/', model: 'm', turns: 1, input: 10,
+      cache_read: 0, cache_write: 0, output: 0,
+    }});
+    const report = await client.request('usage/report', {range: 'week', now: NOW});
+    assert.equal(report.total.tokens, 3720);
     assert.equal(usage.readLedger(usageFile).length, 6);
   } finally {
-    child.stdin.end();
-    await new Promise((resolve) => child.on('close', resolve));
-    fs.rmSync(dir, { recursive: true });
+    await client.close();
+    await daemon.stop();
+    fs.rmSync(dir, {recursive: true});
   }
 });
 
@@ -282,7 +273,7 @@ test('two services sharing the files see each other', () => {
     };
     const a = make();
     const b = make();
-    const record = (input) => ({ record: { time: NOW, agent: 'dsh', root: '~/c/', model: 'm', turns: 1, input,
+    const record = (input: number) => ({ record: { time: NOW, agent: 'dsh', root: '~/c/', model: 'm', turns: 1, input,
                                            cache_read: 0, cache_write: 0, output: 0 } });
     a.record(record(10));
     b.record(record(20));
@@ -291,8 +282,8 @@ test('two services sharing the files see each other', () => {
     a.quota({ agent: 'claude', host: null, plan: 'max' });
     b.quota({ agent: 'codex', host: null, plan: 'pro' });
     const stored = usage.readQuotas(quotaFile);
-    assert.equal(stored.find((q) => q.agent === 'claude').plan, 'max');
-    assert.equal(stored.find((q) => q.agent === 'codex' && !q.host).plan, 'pro');
+    assert.equal(stored.find((q) => q.agent === 'claude')!.plan, 'max');
+    assert.equal(stored.find((q) => q.agent === 'codex' && !q.host)!.plan, 'pro');
     // Cleared by one, the other starts over too.
     a.clear();
     assert.equal(b.report({ range: 'week', now: NOW }).total.tokens, 0);
