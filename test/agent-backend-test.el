@@ -49,7 +49,8 @@
     (with-temp-buffer
       (let* ((default-directory agent-backend-test--root)
              (setup (prin1-to-string
-                     `(setq my/use-evil nil my/languages nil
+                     `(setq package-user-dir ,package-user-dir
+                            my/use-evil nil my/languages nil
                             my/agents ',enabled)))
              (check
               (prin1-to-string

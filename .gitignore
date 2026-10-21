@@ -11,4 +11,4 @@
 /projects.eld
 
 # emx daemon development dependencies
-/node_modules/
+/emx/node_modules/

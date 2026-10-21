@@ -1,3 +1,8 @@
 {
-  "type": "module"
+  "private": true,
+  "description": "Development types for the emx daemon.",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  }
 }

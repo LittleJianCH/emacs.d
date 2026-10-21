@@ -2,10 +2,18 @@
 
 import type { Answer, Ask, Block, Info, Settings, Status } from '../daemon/protocol.ts'
 import { EchoBackend } from './echo.ts'
+import { DshBackend } from './dsh.ts'
+import type { McpServer, SessionEvent } from '../daemon/protocol.ts'
 
 export type NewAsk = Ask extends infer A ? A extends Ask ? Omit<A, 'id'> : never : never
 
 export interface SessionHost {
+  readonly root: string
+  readonly settings: Settings
+  readonly info: Info
+  readonly blocks: Block[]
+  readonly mcpServers: McpServer[]
+  emit(event: SessionEvent): void
   setStatus(status: Status): void
   setInfo(info: Info): void
   addBlock(block: Block, before?: string): void
@@ -30,4 +38,5 @@ export interface Backend {
 
 export const backends: Record<string, (host: SessionHost) => Backend> = {
   echo: (host) => new EchoBackend(host),
+  dsh: (host) => new DshBackend(host),
 }

@@ -1,12 +1,13 @@
 // session.ts --- session state, event replay, history and turn scheduling.
 
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { backends } from '../backends/backend.ts'
 import type { Backend, NewAsk, SessionHost } from '../backends/backend.ts'
 import { ErrorCode } from './protocol.ts'
 import { RpcError } from './rpc.ts'
 import type { Answer, Ask, AttachResult, Block, Cursor, EventParams, Info,
-  SessionEvent, SessionSummary, Settings, Status } from './protocol.ts'
+  Capabilities, McpServer, SessionEvent, SessionSummary, Settings, Status } from './protocol.ts'
 
 export interface SessionOptions {
   id: string
@@ -15,14 +16,16 @@ export interface SessionOptions {
   info?: Info
   settings?: Settings
   resume?: string
+  mcpServers?: McpServer[]
   restored?: boolean
   transcript?: Transcript
-  onChange?: () => void
+  onChange?: (summaryChanged: boolean) => void
 }
 
 export interface Transcript {
   blocks: Block[]
   queue: Message[]
+  capabilities?: Capabilities
 }
 
 interface Message {
@@ -39,6 +42,8 @@ export class Session implements SessionHost {
   status: Status
   info: Info
   settings: Settings
+  readonly mcpServers: McpServer[]
+  capabilities: Capabilities = { models: [], modes: [], commands: [] }
   blocks: Block[] = []
   readonly index = new Map<string, Block>()
   readonly asks = new Map<string, { ask: Ask, resolve: (answer: Answer) => void }>()
@@ -47,7 +52,7 @@ export class Session implements SessionHost {
   seq = 0
   readonly log: EventParams[] = []
   notify: ((event: EventParams) => void) | undefined
-  #onChange: () => void
+  #onChange: (summaryChanged: boolean) => void
   #resume: string | undefined
   #queued: Message[] = []
   #active = false
@@ -57,12 +62,14 @@ export class Session implements SessionHost {
     this.id = options.id
     this.agent = options.agent
     this.root = options.root
+    this.mcpServers = structuredClone(options.mcpServers ?? [])
     this.info = structuredClone(options.info ?? {})
     this.settings = { ...options.settings }
     this.status = options.restored ? 'idle' : 'starting'
     this.#resume = options.resume
     this.#onChange = options.onChange ?? (() => {})
     if (options.transcript) {
+      this.capabilities = structuredClone(options.transcript.capabilities ?? this.capabilities)
       this.blocks = structuredClone(options.transcript.blocks)
       for (const block of this.blocks) this.index.set(block.id, block)
       this.#queued = structuredClone(options.transcript.queue)
@@ -81,9 +88,9 @@ export class Session implements SessionHost {
   }
 
   async start(): Promise<void> {
-    await this.backend.start(this.#resume)
+    await this.backend.start(this.resumeId())
     await this.backend.configure(this.settings)
-    this.#onChange()
+    this.#onChange(false)
   }
 
   newId(prefix: string): string {
@@ -93,9 +100,14 @@ export class Session implements SessionHost {
   /** Apply exactly once; log immutable events, independently of block state. */
   emit(input: SessionEvent): void {
     const event = structuredClone(input)
+    // Summary.info currently includes every info key; transcript events do not.
+    const summaryChanged = event.type === 'status' ? this.status !== event.status
+      : event.type === 'info' && Object.entries(event.info)
+        .some(([key, value]) => !isDeepStrictEqual(this.info[key], value))
     switch (event.type) {
       case 'status': this.status = event.status; break
       case 'info': this.info = { ...this.info, ...event.info }; break
+      case 'capabilities': this.capabilities = event.capabilities; break
       case 'settings': this.settings = { ...this.settings, ...event.settings }; break
       case 'block/add': {
         if (this.index.has(event.block.id)) break
@@ -137,7 +149,7 @@ export class Session implements SessionHost {
     this.log.push(logged)
     if (this.log.length > 2000) this.log.shift()
     this.notify?.(logged)
-    this.#onChange()
+    this.#onChange(summaryChanged)
     if (event.type === 'status' && event.status === 'idle') this.#drain()
   }
 
@@ -147,7 +159,11 @@ export class Session implements SessionHost {
     this.index.set(block.id, block)
   }
 
-  setStatus(status: Status): void { this.emit({ type: 'status', status }) }
+  setStatus(status: Status): void {
+    if (this.status === status) return
+    if (status === 'exited') this.#cancelAsks()
+    this.emit({ type: 'status', status })
+  }
   setInfo(info: Info): void { this.emit({ type: 'info', info }) }
   addBlock(block: Block, before?: string): void { this.emit({ type: 'block/add', block, before }) }
   append(id: string, text: string): void { this.emit({ type: 'block/append', id, text }) }
@@ -244,7 +260,7 @@ export class Session implements SessionHost {
   detach(): void { this.notify = undefined }
 
   transcript(): Transcript {
-    return structuredClone({ blocks: this.blocks, queue: this.#queued })
+    return structuredClone({ blocks: this.blocks, queue: this.#queued, capabilities: this.capabilities })
   }
 
   attach(after?: Cursor, turns = 20): { result: AttachResult, afterWrite: () => void } {
@@ -257,7 +273,7 @@ export class Session implements SessionHost {
     const result: AttachResult = { epoch: this.epoch, seq: this.seq, replay: replay ? 'events' : 'fresh',
       status: this.status, info: structuredClone(this.info), settings: { ...this.settings },
       queue: [...this.queue], asks: [...this.asks.values()].map(({ ask }) => structuredClone(ask)),
-      earlier }
+      earlier, capabilities: structuredClone(this.capabilities) }
     return { result, afterWrite: () => {
       for (const event of events) this.notify?.(event)
       if (!replay) {

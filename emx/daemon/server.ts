@@ -10,7 +10,7 @@ import { backends } from '../backends/backend.ts'
 import { acquireLock } from './lock.ts'
 import { codeVersion, socketPath, stateDir } from './paths.ts'
 import { ErrorCode } from './protocol.ts'
-import type { Answer, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
+import type { Answer, Cursor, Info, McpServer, SessionSummary, Settings } from './protocol.ts'
 import { Connection, Reply, RpcError } from './rpc.ts'
 import { Session } from './session.ts'
 import type { Transcript } from './session.ts'
@@ -22,6 +22,7 @@ interface SavedSession {
   info: Info
   settings: Settings
   resume?: string
+  mcpServers?: McpServer[]
 }
 
 export interface ServerOptions {
@@ -48,10 +49,33 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name)
 }
 
+function mcpServers(value: unknown): McpServer[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) invalid('Expected an array: mcpServers')
+  return value.map((entry) => {
+    const item = object(entry)
+    const result: McpServer = { name: string(item.name, 'name'),
+      command: string(item.command, 'command') }
+    for (const key of ['args', 'readOnly'] as const) {
+      if (item[key] === undefined) continue
+      if (!Array.isArray(item[key]) || !item[key].every((v) => typeof v === 'string')) {
+        invalid(`Expected string[]: ${key}`)
+      }
+      result[key] = item[key] as string[]
+    }
+    if (item.env !== undefined) {
+      result.env = {}
+      for (const [key, value] of Object.entries(object(item.env))) result.env[key] = string(value, key)
+    }
+    if (item.timeoutMs !== undefined) result.timeoutMs = integer(item.timeoutMs, 'timeoutMs', 1)
+    return result
+  })
+}
+
 function settings(value: unknown): Settings {
   const params = object(value)
   const result: Settings = {}
-  for (const key of ['model', 'effort', 'mode'] as const) {
+  for (const key of ['model', 'effort', 'mode', 'beforePlan'] as const) {
     if (params[key] === null || typeof params[key] === 'string') result[key] = params[key]
     else if (params[key] !== undefined) invalid(`Expected a string or null: ${key}`)
   }
@@ -78,6 +102,7 @@ export class DaemonServer {
   #idleExit: number
   #idleTimer: NodeJS.Timeout | undefined
   #saveTimer: NodeJS.Timeout | undefined
+  #sessionsTimer: NodeJS.Timeout | undefined
   #saveChain: Promise<void> = Promise.resolve()
   #savePending: Promise<void> | undefined
   #shutdown: Promise<void> | undefined
@@ -140,8 +165,14 @@ export class DaemonServer {
       .map((session) => session.summary())
   }
 
-  #changed(): void {
-    this.client?.notify('sessions', { sessions: this.#list() })
+  #changed(summaryChanged = true): void {
+    if (summaryChanged && !this.#stopping && this.#sessionsTimer === undefined) {
+      // Keep one deadline and publish the latest state, at most every 100 ms.
+      this.#sessionsTimer = setTimeout(() => {
+        this.#sessionsTimer = undefined
+        this.client?.notify('sessions', { sessions: this.#list() })
+      }, 100)
+    }
     if (!this.#stopping && this.#saveTimer === undefined) {
       // Later events share this deadline instead of postponing it.
       this.#saveTimer = setTimeout(() => {
@@ -149,11 +180,11 @@ export class DaemonServer {
         void this.persist().catch((error) => this.#log(`Cannot save sessions: ${error}`))
       }, 200)
     }
-    this.#checkIdle()
+    if (summaryChanged) this.#checkIdle()
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, onChange: () => this.#changed() })
+    return new Session({ ...saved, restored, transcript, onChange: (summaryChanged) => this.#changed(summaryChanged) })
   }
 
   async #restore(): Promise<void> {
@@ -175,7 +206,7 @@ export class DaemonServer {
         if (!Object.hasOwn(backends, agent)) throw new Error(`Unknown agent: ${agent}`)
         const saved: SavedSession = { id: string(record.id, 'id'), agent,
           root: string(record.root, 'root'), info: object(record.info ?? {}),
-          settings: settings(record.settings ?? {}), resume: optionalString(record.resume, 'resume') }
+          settings: settings(record.settings ?? {}), mcpServers: mcpServers(record.mcpServers), resume: optionalString(record.resume, 'resume') }
         // Session ids are also file names; reject paths in a damaged state table.
         if (!/^session-[a-zA-Z0-9-]+$/.test(saved.id)) throw new Error('Invalid session id')
         let transcript: Transcript | undefined
@@ -202,7 +233,7 @@ export class DaemonServer {
     const records: SavedSession[] = []
     for (const session of this.sessions.values()) {
       records.push({ id: session.id, agent: session.agent, root: session.root,
-        info: session.info, settings: session.settings, resume: session.resumeId() })
+        info: session.info, settings: session.settings, mcpServers: session.mcpServers, resume: session.resumeId() })
       files.set(this.#transcriptFile(session.id), JSON.stringify(session.transcript()) + '\n')
     }
     // Publish the table after its transcripts.
@@ -284,7 +315,8 @@ export class DaemonServer {
         // Native conversation forks are a later migration phase.
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
         const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
-          settings: settings(params.settings ?? {}), info: parent ? { parent } : {} })
+          settings: settings(params.settings ?? {}), mcpServers: mcpServers(params.mcpServers),
+          info: parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {} })
         this.sessions.set(session.id, session)
         return (async () => {
           try {
@@ -395,6 +427,7 @@ export class DaemonServer {
     this.#stopping = true
     this.#checkIdle()
     clearTimeout(this.#saveTimer)
+    clearTimeout(this.#sessionsTimer)
     try {
       await this.#saveChain.catch(() => {})
       // Preserve the queue before stopping backends cancels their pending work.

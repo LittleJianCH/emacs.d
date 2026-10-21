@@ -34,7 +34,7 @@ lisp/core/               base layer
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
-  agent-emx.el          backend rendering emx daemon sessions (doc/emx-daemon.md)
+  agent-emx.el          daemon client; agent-emx-agents opts dsh in (default nil)
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       backend implementation and registration
     dsh/                DeepSeek Harness bridge plugin and profile patches
@@ -43,6 +43,7 @@ lisp/app/                standalone applications
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server), usage service
 bin/emx-usage.js         `emx serve`: usage ledger, quotas, reports, forecasts, quota polls
 emx/                     the emx daemon (TypeScript run by Node directly): protocol, sessions, backends
+  backends/dsh.ts         local dsh bridge peer, enabled by agent-emx-agents
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
 doc/emx-daemon.md        design of moving agents into an emx daemon (in progress)
@@ -92,7 +93,13 @@ var/                     runtime state (history, backups, pasted images...); git
 - `backend/agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
-- `backend/agent-dsh.el` — DeepSeek Harness (`dsh`) backend. dsh's own SDK/ACP protocols are too
+- `backend/agent-dsh.el` — DeepSeek Harness (`dsh`) backend. The default remains
+  Lisp; `agent-emx-agents` containing `dsh` registers new sessions with `:backend emx
+  :emx-agent "dsh"` (set before startup or via `customize-set-variable`). Removing
+  it restores Lisp; existing sessions keep their backend. The daemon path is local
+  only, always disables native subagents, and rejects remote roots. It uses
+  `emx/backends/dsh.ts` with the same plugin; Lisp still renders notices and accounts
+  for usage until later migration phases. dsh's own SDK/ACP protocols are too
   thin (SDK cannot cancel or approve), so we ship a dsh plugin, `backend/dsh/emacs-bridge.mjs`,
   mounted into the stock `sdk` profile by `backend/dsh/emacs.yml` (`dsh --profile sdk --patch
   ...`). It drives one dsh agent through dsh's internal API (`ctx.agents`,
@@ -273,7 +280,7 @@ with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macr
 test/emx-usage-test.js` for the usage service, `node --check
 lisp/agent/backend/dsh/emacs-bridge.mjs` for the dsh plugin.
 
-The emx daemon is checked with `tsc -p .` (needs `npm install` once for
+The emx daemon is checked with `tsc -p emx` (needs `npm install --prefix emx` once for
 `@types/node`) and `node --test test/emx/`. Its tests run daemons only on temp
 var dirs, never the default one.
 

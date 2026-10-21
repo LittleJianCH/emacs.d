@@ -30,7 +30,7 @@ async function open(t: TestContext) {
   await daemon.persist()
   const file = join(dir, 'emx', 'sessions', `${id}.json`)
   const savedText = (): string => JSON.parse(fs.readFileSync(file, 'utf8')).blocks[0].text
-  return { daemon, session, savedText }
+  return { daemon, session, savedText, client }
 }
 
 test('events every 50 ms save several latest snapshots during a one-second stream', async (t) => {
@@ -127,4 +127,38 @@ test('a failed shutdown save and a failed backend stop still stop other backends
   assert.equal(child.error, undefined)
   assert.equal(child.status, 0, child.stderr)
   assert.match(child.stdout, /backends stopped; shutdown completed/)
+})
+
+
+test('streamed appends persist without flooding session summaries', async (t) => {
+  const { daemon, session, client, savedText } = await open(t)
+  await client.waitFor((n) => n.method === 'sessions')
+  const from = client.notifications.length
+  session.setStatus('running')
+  for (let i = 0; i < 40; i++) {
+    for (let j = 0; j < 10; j++) session.append('stream', 'x')
+    await delay(10)
+  }
+  session.setStatus('idle')
+  await client.waitFor((n) => n.method === 'sessions'
+    && n.params.sessions[0].status === 'idle', 5000, 'latest idle summary', from)
+  await delay(150)
+  const lists = client.notifications.slice(from).filter((n) => n.method === 'sessions')
+  assert.ok(lists.length <= 2, `expected at most two summary broadcasts, got ${lists.length}`)
+  await daemon.persist()
+  assert.equal(savedText(), 'x'.repeat(400))
+})
+
+test('summary changes coalesce to the latest info and identical info does not broadcast', async (t) => {
+  const { session, client } = await open(t)
+  await client.waitFor((n) => n.method === 'sessions')
+  const from = client.notifications.length
+  for (let i = 0; i < 100; i++) session.setInfo({ title: 'title-' + i })
+  await client.waitFor((n) => n.method === 'sessions'
+    && n.params.sessions[0].info.title === 'title-99', 5000, 'latest title', from)
+  assert.equal(client.notifications.slice(from).filter((n) => n.method === 'sessions').length, 1)
+  const unchanged = client.notifications.length
+  session.setInfo({ title: 'title-99' })
+  await delay(150)
+  assert.equal(client.notifications.slice(unchanged).filter((n) => n.method === 'sessions').length, 0)
 })

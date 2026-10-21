@@ -19,6 +19,8 @@ export interface Settings {
   model?: string | null
   effort?: string | null
   mode?: string | null
+  /** Permission mode retained while plan mode is active, including on resume. */
+  beforePlan?: string | null
 }
 
 /**
@@ -59,7 +61,9 @@ export interface Notice {
 }
 
 export type Block =
-  | { id: string, type: 'user', text: string, images?: string[] }
+  | { id: string, type: 'user', text: string, images?: string[],
+      /** Number of historical images when the original paths are unavailable. */
+      imageCount?: number }
   | { id: string, type: 'text', kind: 'assistant' | 'thinking', text: string, done: boolean }
   | { id: string, type: 'tool', view: ToolView, status: ToolStatus, output?: string }
   | { id: string, type: 'notice', notice: Notice }
@@ -78,6 +82,8 @@ export interface Question {
   other?: boolean
   secret?: boolean
   range?: [number, number, string]
+  /** Backend question semantics, e.g. {kind: "plan-review", approve: label}. */
+  intent?: Record<string, unknown>
 }
 
 export type Ask =
@@ -120,9 +126,38 @@ export interface SessionSummary {
   info: Info
 }
 
+/** A stdio MCP server, supplied by Emacs until editor calls move here. */
+export interface McpServer {
+  name: string
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+  timeoutMs?: number
+  /** Names of audited read-only tools, without the MCP prefix. */
+  readOnly?: string[]
+}
+
+/** Choices advertised by the backend, in its native ordering. */
+export interface Capabilities {
+  models: { id: string, name: string, description?: string,
+    efforts?: string[], defaultEffort?: string }[]
+  modes: string[]
+  commands: { name: string, description?: string, hint?: string }[]
+}
+
+/** One model call's counters; input excludes cached tokens. */
+export interface Usage {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  output: number
+}
+
 export interface OpenParams {
   agent: string
   root: string
+  /** Per-session editor bridge specs until phase 3 owns MCP transport. */
+  mcpServers?: McpServer[]
   settings?: Settings
   /** A session to resume, in the agent's own terms. */
   resume?: string
@@ -171,6 +206,8 @@ export interface AttachResult {
   settings: Settings
   queue: string[]
   asks: Ask[]
+  /** The backend choices in effect at this snapshot. */
+  capabilities: Capabilities
   /**
    * Whether turns before the ones sent remain (session/earlier).  Only
    * meaningful for a fresh view: after a replay of events the client's
@@ -238,6 +275,14 @@ export type SessionEvent =
   | { type: 'status', status: Status }
   | { type: 'info', info: Info }
   | { type: 'settings', settings: Settings }
+  /** Full replacement of the backend's available choices. */
+  | { type: 'capabilities', capabilities: Capabilities }
+  /** Live model calls only; resumed transcript usage is excluded. */
+  | { type: 'usage/call', model: string, usage: Usage }
+  /** Flush the current turn's model calls to the client's usage ledger. */
+  | { type: 'usage/end' }
+  /** Account balance reading; usage accounting remains in Emacs in phase 2. */
+  | { type: 'quota', balance: { amount: number, currency: string }[] }
   /** A new block, at the end, or before the block `before`. */
   | { type: 'block/add', block: Block, before?: string, history?: boolean }
   /** Streamed text of a text block, or output of a tool block. */

@@ -646,5 +646,194 @@
                     "daemon" "--var" agent-emx-var-directory "--stop")
       (delete-directory agent-emx-var-directory t))))
 
+(ert-deftest agent-emx-test-capabilities-and-usage-events ()
+  (agent-emx-test--with-session
+    (let (calls ends quotas)
+      (cl-letf (((symbol-function 'agent-usage-add-call)
+                 (lambda (_ model usage) (push (cons model usage) calls)))
+                ((symbol-function 'agent-usage-end-turn) (lambda (_) (cl-incf ends)))
+                ((symbol-function 'agent-usage-set-quota)
+                 (lambda (_ &rest props) (push props quotas))))
+        (setq ends 0)
+        (agent-emx-test--event
+         session 1 "capabilities" :capabilities
+         '(:models [(:id "fake/chat" :name "Chat" :efforts ["high"] :defaultEffort "high")]
+           :modes ["ask" "auto" "plan"] :commands [(:name "status" :hint "arg")]))
+        (should (equal (agent-session-backend-modes 'emx session) '(ask auto plan)))
+        (should (equal (plist-get (car (agent-session-backend-models 'emx session)) :efforts)
+                       '("high")))
+        (should (equal (plist-get (car (agent-session-backend-models 'emx session)) :default-effort)
+                       "high"))
+        (should (equal (agent-session-backend-commands 'emx session)
+                       '((:name "status" :hint "arg"))))
+        (dotimes (_ 2)
+          (agent-emx-test--event session 2 "usage/call" :model "fake/chat"
+                                :usage '(:input 1 :cacheRead 2 :cacheWrite 3 :output 4)))
+        (agent-emx-test--event session 3 "usage/end")
+        (agent-emx-test--event session 3 "usage/end")
+        (agent-emx-test--event session 4 "quota" :balance [(:amount 12.34 :currency "CNY")])
+        (should (equal calls '(("fake/chat" :input 1 :cache-read 2 :cache-write 3 :output 4))))
+        (should (= ends 1))
+        (should (equal quotas '((:balance ((:amount 12.34 :currency "CNY"))))))))))
+
+(ert-deftest agent-emx-test-plan-review-feedback ()
+  (dolist (choice '(0 1))
+    (agent-emx-test--with-session
+      (let (sent prompted)
+        (cl-letf (((symbol-function 'agent-emx--rpc)
+                   (lambda (_ method params &rest _) (setq sent (cons method params))))
+                  ((symbol-function 'read-string)
+                   (lambda (&rest _) (setq prompted t) " revise ")))
+          (agent-emx-test--event
+           session 1 "ask/add" :ask
+           '(:id "plan" :type "question" :tool "tool"
+             :questions [(:question "Plan" :options [(:label "yes") (:label "no")]
+                          :intent (:kind "plan-review" :approve "yes"))]))
+          (let* ((id (gethash "plan" (agent-emx--table session :emx-asks)))
+                 (ask (agent-session--ask session id)))
+            (should (equal (plist-get ask :title) "批准这个计划并开始执行？"))
+            (should (equal (plist-get ask :choices) '((0 "yes") (1 "no"))))
+            (agent-session--answer session id choice)
+            (should (eq prompted (= choice 1)))
+            (should (equal sent
+                           (list "session/answer" :ask "plan" :answers
+                                 (vector (if (= choice 0) '(:selected ["yes"])
+                                           '(:selected ["no"] :custom "revise"))))))))))))
+
+(ert-deftest agent-emx-test-dsh-localized-blocks ()
+  (agent-emx-test--with-session
+    (agent-emx--block session '(:id "u" :type "user" :text "past" :imageCount 2))
+    (should (equal (plist-get (agent-session--block session "u") :text) "[图片] [图片] past"))
+    (agent-emx--block session '(:id "plan" :type "tool" :status "done"
+                               :view (:name "todo_write" :kind "plan" :title ""
+                                      :items [(:text "A" :status "done")
+                                              (:text "B" :status "active")])))
+    (should (equal (plist-get (agent-session--block session "plan") :title) "更新计划"))
+    (should (equal (plist-get (agent-session--block session "plan") :output) "☑ A\n▶ B"))
+    (dolist (notice '(("backend-error" (:message "boom") "出错：boom")
+                      ("command-error" (:message "bad") "命令失败：bad")
+                      ("command-result" nil "命令已执行")
+                      ("max-tokens" nil "输出达到 token 上限")
+                      ("history-end" nil "—— 以上为历史记录 ——")
+                      ("dsh-warning" (:message "warning") "dsh：warning")
+                      ("dsh-version" (:version "X" :tested "Y") "dsh 版本为 X")))
+      (agent-emx--notice session (car notice) (list :kind (car notice) :args (cadr notice)))
+      (should (string-prefix-p (nth 2 notice)
+                               (plist-get (agent-session--block session (car notice)) :text))))))
+
+(ert-deftest agent-emx-test-failed-todo-shows-error-output ()
+  (agent-emx-test--with-session
+    (agent-emx-test--event
+     session 1 "block/add" :block
+     '(:id "todo" :type "tool" :status "running"
+       :view (:name "todo_write" :kind "plan" :title ""
+              :items [(:text "proposed task" :status "pending")])))
+    (should (equal (plist-get (agent-session--block session "todo") :output)
+                   "☐ proposed task"))
+    (agent-emx-test--event session 2 "block/update" :id "todo"
+                          :fields '(:status "error" :output "todo validation failed"))
+    (should (equal (plist-get (agent-session--block session "todo") :output)
+                   "todo validation failed"))
+    (should (string-match-p "todo validation failed" (agent-emx-test--transcript session)))
+    (should-not (string-match-p "☐ proposed task" (agent-emx-test--transcript session)))))
+
+(ert-deftest agent-emx-test-dsh-switch-keeps-existing-backend ()
+  (require 'agent-dsh)
+  (let ((agent-session-agents (copy-tree agent-session-agents))
+        (agent-emx-agents nil))
+    (agent-emx-test--with-session
+      (setf (agent-session-backend session) 'dsh)
+      (agent-emx--select-agents 'agent-emx-agents '(dsh))
+      (should (eq (agent-session--get 'dsh :backend) 'emx))
+      (should (equal (agent-session--get 'dsh :emx-agent) "dsh"))
+      (should (eq (agent-session-backend session) 'dsh))
+      (agent-emx--select-agents 'agent-emx-agents nil)
+      (should (eq (agent-session--get 'dsh :backend) 'dsh))
+      (should-not (agent-session--get 'dsh :emx-agent)))))
+
+(ert-deftest agent-emx-test-open-passes-mcp-and-parent ()
+  (require 'agent-dsh)
+  (agent-emx-test--with-session
+    (let ((agent-session-agents (copy-tree agent-session-agents))
+          (agent-emx-agents nil)
+          sent)
+      (agent-emx--select-agents 'agent-emx-agents '(dsh))
+      (setf (agent-session-agent session) 'dsh
+            (agent-session-info session) '(:parent "parent"))
+      (agent-emx--set session :emx-id nil)
+      (cl-letf (((symbol-function 'agent-dsh--mcp-servers)
+                 (lambda (_) [(:name "emacs" :command "node" :args ["emx" "mcp"])]))
+                ((symbol-function 'agent-emx--request)
+                 (lambda (_ method params &rest _) (setq sent (cons method params)))))
+        (agent-emx--attach session (agent-emx--make-connection))
+        (should (equal (car sent) "session/open"))
+        (should (equal (plist-get (cdr sent) :mcpServers)
+                       [(:name "emacs" :command "node" :args ["emx" "mcp"])]))
+        (should (equal (plist-get (cdr sent) :parent) "emacs"))))))
+
+(agent-session-define-agent test-emx-dsh :title "DeepSeek" :backend emx :emx-agent "dsh")
+
+(ert-deftest agent-emx-test-dsh-round-trip ()
+  (unless (executable-find "node") (ert-skip "Node is unavailable"))
+  (require 'agent-dsh)
+  (let* ((agent-emx-var-directory (make-temp-file "emx-dsh-" t))
+         (agent-emx--connections (make-hash-table :test #'equal))
+         (process-environment
+          (cons (concat "EMX_DSH_EXECUTABLE="
+                        (expand-file-name "test/emx/fixtures/dsh.mjs" agent-emx--checkout))
+                process-environment))
+         (agent-session-submit-functions nil)
+         (agent-session-status-functions nil)
+         (agent-session--list-refresh-function nil)
+         (agent-session--clock nil)
+         (agent-session-last-settings nil)
+         buffer session connection calls (ends 0) quotas)
+    (cl-letf (((symbol-function 'agent-usage-add-call)
+               (lambda (_ model usage) (push (cons model usage) calls)))
+              ((symbol-function 'agent-usage-end-turn) (lambda (_) (cl-incf ends)))
+              ((symbol-function 'agent-usage-set-quota)
+               (lambda (_ &rest props) (push props quotas))))
+      (unwind-protect
+          (progn
+            (setq buffer (agent-session-open 'test-emx-dsh agent-emx-var-directory "resume-id" '(:mode edits))
+                  session (buffer-local-value 'agent-session--current buffer)
+                  connection (agent-emx--get session :emx-connection))
+            (agent-emx-test--wait (lambda () (eq (agent-session-status session) 'idle)))
+            (should (string-match-p "past reply" (agent-emx-test--transcript session)))
+            (should-not calls)
+            (should (memq 'plan (agent-session-backend-modes 'emx session)))
+            (should (equal (plist-get (car (agent-session-backend-models 'emx session)) :id)
+                           "fake/chat"))
+            (agent-session-configure session :mode 'plan)
+            (agent-session-send session "plan")
+            (agent-emx-test--wait (lambda () (agent-session--pending-asks session)))
+            (agent-session--answer session (car (agent-session--pending-asks session)) 0)
+            (agent-emx-test--wait
+             (lambda () (and (= ends 1) (eq (agent-session-status session) 'idle))))
+            (should (eq (agent-session-setting session :mode) 'edits))
+            (should (equal (caar calls) "fake/chat"))
+            (should (equal (cdar calls) '(:input 2 :cache-read 3 :cache-write 4 :output 5)))
+            (agent-emx-test--wait (lambda () quotas))
+            (should-not (agent-session-process session))
+            (should (string-match-p "dsh 版本为 test-version" (agent-emx-test--transcript session))))
+        (when (buffer-live-p buffer) (agent-session-kill-quietly buffer))
+        (when (timerp agent-session--clock) (cancel-timer agent-session--clock))
+        (when (and connection (process-live-p (agent-emx--connection-process connection)))
+          (delete-process (agent-emx--connection-process connection)))
+        (call-process "node" nil nil nil (expand-file-name "bin/emx" agent-emx--checkout)
+                      "daemon" "--var" agent-emx-var-directory "--stop")
+        (delete-directory agent-emx-var-directory t)))))
+
+(ert-deftest agent-emx-test-parent-and-plan-settings ()
+  (agent-emx-test--with-session
+    (setf (agent-session-info session) (list :parent buffer)
+          (agent-session-settings session) '(:mode plan :before-plan full))
+    (should (equal (plist-get (agent-emx--choices session) :beforePlan) "full"))
+    (agent-emx-test--event session 1 "info" :info '(:parent "daemon-parent" :sessionId "native"))
+    (should (eq (plist-get (agent-session-info session) :parent) buffer))
+    (should (equal (agent-session-resume-id session) "native"))
+    (agent-emx-test--event session 2 "settings" :settings '(:mode "plan" :beforePlan "auto"))
+    (should (eq (plist-get (agent-session-settings session) :before-plan) 'auto))))
+
 (provide 'agent-emx-test)
 ;;; agent-emx-test.el ends here

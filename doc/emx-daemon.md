@@ -1,6 +1,7 @@
 # emx daemon: agents outside Emacs
 
-Status: design, not implemented. Branch `claude/emx-daemon`.
+Status: phases 1 and 2 implemented on `claude/emx-daemon`; later phases
+below remain design. The opt-in dsh path is local only.
 
 ## Goal
 
@@ -39,7 +40,7 @@ built for it), changing how sessions look, moving canvas or review UI.
   (22.18 and later), so there is no build step; only erasable syntax (no
   `enum`, `namespace` or parameter properties). `tsc --noEmit` joins the
   checks, with `@types/node` as the only development dependency
-  (`package.json` at the root, `node_modules/` ignored). `bin/emx`,
+  (`emx/package.json`, `emx/node_modules/` ignored). `bin/emx`,
   `bin/emx-usage.js` and the dsh plugin stay JavaScript until they move;
   the plugin runs inside dsh and stays JavaScript.
 - **A daemon on every host.** A remote project's agents run under a daemon
@@ -123,7 +124,7 @@ JSON-RPC 2.0, one JSON object per line, both directions over the socket.
 | `hello` | `{client, version, tools?}` | `{daemon, version, config}` |
 | `sessions/list` | `{root?}` | live sessions (summary) |
 | `sessions/history` | `{root, agent?}` | resumable past sessions |
-| `session/open` | `{agent, root, resume?, fork?, settings?, parent?}` | `{id}` |
+| `session/open` | `{agent, root, resume?, fork?, settings?, parent?, mcpServers?}` | `{id}` |
 | `session/attach` | `{id, after?, turns?}` (`turns` defaults to 20) | snapshot, then events (below) |
 | `session/detach` | `{id}` | `{}` |
 | `session/send` | `{id, text, images?}` | `{}` (queued while running) |
@@ -141,6 +142,14 @@ JSON-RPC 2.0, one JSON object per line, both directions over the socket.
 Every event carries `{session, seq}`; `seq` increases by one per session.
 
 - `status {status}`, `info {info}` (changed keys), `settings {settings}`
+- `capabilities {capabilities}`: complete models (id, name, description,
+  efforts, defaultEffort), modes, and slash commands (name, description,
+  hint); also included in `AttachResult` and persisted with the transcript
+- `usage/call {model, usage}`: one live model call, with input (uncached),
+  cacheRead, cacheWrite, output counters; `usage/end {}` closes its turn
+- `quota {balance}`: account entries `{amount, currency}` after initialize
+  and each turn. Emacs still feeds these and usage events to `agent-usage`
+  until phase 6. Transcript history never replays usage.
 - `block/add {block, after?}` (`after` places it, e.g. earlier history)
 - `block/append {id, text}` (streamed text), `block/done {id}`
 - `block/update {id, ...fields}` (tool result, output, error)
@@ -150,12 +159,30 @@ Every event carries `{session, seq}`; `seq` increases by one per session.
 - `queue {items}`, `children {ids}`
 - `usage/quotas {quotas}` (not per session)
 
+Phase 2 additions are data only: questions carry an optional `intent`
+object unchanged (dsh's `{kind: "plan-review", approve: label}` selects
+Emacs's plan approval UI). `OpenParams.mcpServers` temporarily carries
+stdio specs `{name, command, args?, env?, timeoutMs?, readOnly?}` from
+Emacs; these persist with the session so a daemon restart can remount
+MCP. Phase 3 replaces this per-session editor bridge. `Settings.beforePlan`
+retains the permission mode beneath plan mode, including on open/resume.
+A history user block may carry `imageCount` when original file paths are
+unavailable; Emacs renders its image labels.
+
+The implemented contract is `emx/daemon/protocol.ts`. In particular,
+`session/send` returns `{queued}`, `session/earlier` takes `{id, before,
+turns?}`, insertions use `block/add {block, before?}`, completion uses
+`block/update {id, fields}`, and notices are blocks with a `notice.kind`.
+`sessions/history`, forks, config/editor calls, children and usage reports
+in the design tables are later phases.
+
 ### Attach and catching up
 
-`session/attach` returns a snapshot (blocks in order, pending asks,
-queue, status, info, settings, `seq`), then streams events after it.
-Passing `after: seq` instead replays only the events after that sequence
-number from a per-session ring buffer, falling back to a snapshot when they
+`session/attach` returns a snapshot (pending asks, queue, status, info,
+settings, capabilities, `epoch`, `seq`, replay mode and whether earlier
+turns remain). A fresh attach then streams history blocks in order, ending
+with `history/done`. Passing `after: {epoch, seq}` instead replays only the
+events after that sequence number in the same epoch from a per-session ring buffer, falling back to a snapshot when they
 have been dropped. This is the keeper's byte-offset replay lifted to
 events. Emacs keeps the last `seq` per buffer, so a reconnect (daemon or
 Emacs side) redraws nothing it already shows.
@@ -200,7 +227,15 @@ stream into the session events above.
 - **dsh** first: the bridge plugin (`emacs-bridge.mjs`) already speaks a
   backend-neutral JSON-RPC vocabulary (`text`, `tool`, `tool/done`,
   `turn/end`, `usage`, `approval`, `question`), so the adapter is thin. The
-  plugin keeps running inside dsh; its peer becomes the daemon.
+  plugin keeps running inside dsh; its peer becomes the daemon. Phase 2
+  implements this in `emx/backends/dsh.ts`: local stdio transport, presets
+  and plan mode, configuration, slash commands, steering/cancel, tool views,
+  asks, discard, usage/balance, version warnings and resume transcripts.
+  Remote roots are rejected. Native subagents are always disabled on this
+  path. `EMX_DSH_EXECUTABLE` overrides `dsh` for installations and fake
+  protocol peers in tests; no API credentials pass through this option.
+  External session discovery and conversation forks stay on the old Lisp
+  path until the history/collaboration phases.
 - **Claude** is the hardest and shaped the event set: restart with
   `--resume` before the next send (effort change, messages from other
   clients, tools changed); `control_request` permissions and model / mode
@@ -221,6 +256,13 @@ daemon never writes UI prose. Notices and labels are structured
 returns to agents stay English.
 
 ## Configuration
+
+During migration, `agent-emx-agents` is a Lisp defcustom (default nil).
+Set it before loading dsh, or use `(customize-set-variable
+'agent-emx-agents '(dsh))`, to register new dsh sessions with `:backend emx
+:emx-agent "dsh"`. Removing dsh restores its Lisp registration; existing
+sessions retain their backend. The Lisp executable/native-subagent
+options continue to apply to the old path. Daemon config is a later phase.
 
 One tracked file, `emx/config.json`, with a git-ignored override at
 `var/emx/config.json` merged over it (user changes stay out of tracked
@@ -398,7 +440,7 @@ emx/usage/               today's bin/emx-usage.js
 emx/remote/              --ensure, usage outbox
 lisp/agent/backend/dsh/  the dsh plugin, unchanged in place
 test/emx/                node --test suites, with fake CLIs
-package.json             @types/node for tsc --noEmit
+emx/package.json         @types/node for tsc -p emx
 ```
 
 ## Migration
@@ -412,8 +454,9 @@ the end.
    `emx` backend renders the events into today's session buffer. ERT runs
    against a daemon started on a temp socket, node tests against fake
    clients.
-2. **dsh** through the daemon, behind a switch (`my/agents` entry or a
-   per-agent option), old path still available.
+2. **dsh** through the daemon, behind `agent-emx-agents` (default nil),
+   old path still available. Implemented for local roots; real-daemon tests
+   use a fake dsh peer without contacting the API.
 3. **Editor calls and `emx mcp` over the daemon**; stamp files removed.
 4. **Claude**, then **Codex**.
 5. **Collab**: profiles from config, `session_*` tools, mailbox,

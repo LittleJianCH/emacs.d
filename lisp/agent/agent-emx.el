@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Optional backend, not loaded by init.el during the daemon migration.
+;; Optional backend; agent-dsh loads it to define the migration switch.
 ;; Register agents with :backend emx and optionally :emx-agent "name".
 ;; The socket belongs to the connection, never to agent-session-process.
 
@@ -10,10 +10,26 @@
 
 (require 'agent-session)
 (require 'json)
+(require 'agent-usage)
 
 (defgroup agent-emx nil
   "Sessions owned by the emx daemon."
   :group 'agent-session)
+
+(defun agent-emx--select-agents (symbol value)
+  "Set SYMBOL to VALUE and update registrations for future sessions."
+  (set-default symbol value)
+  (when-let* ((entry (assq 'dsh agent-session-agents)))
+    (setcdr entry (plist-put (cdr entry) :backend (if (memq 'dsh value) 'emx 'dsh)))
+    (setcdr entry (plist-put (cdr entry) :emx-agent (and (memq 'dsh value) "dsh")))))
+
+(defcustom agent-emx-agents nil
+  "Agents whose new sessions run through the emx daemon.
+Currently supports dsh for local projects.  Nil keeps the Lisp backends.
+Customize this option before opening a session; existing sessions keep
+using the backend they started with."
+  :type '(repeat symbol)
+  :set #'agent-emx--select-agents)
 
 (defcustom agent-emx-var-directory
   (if (boundp 'my/var) (symbol-value 'my/var)
@@ -29,7 +45,14 @@
   '(("effort-after-turn" . "推理强度将在当前回合结束后生效")
     ("restart-for-external" . "正在重新接入其他客户端更新的会话")
     ("interrupted" . "已中断")
-    ("error" . "代理发生错误"))
+    ("error" . "代理发生错误")
+    ("backend-error" . "出错：%s")
+    ("max-tokens" . "输出达到 token 上限")
+    ("history-end" . "—— 以上为历史记录 ——")
+    ("dsh-warning" . "dsh：%s")
+    ("dsh-version" . "dsh 版本为 %s，桥接插件按 %s 编写，若有异常可能需要适配")
+    ("command-error" . "命令失败：%s")
+    ("command-result" . (lambda (args) (or (plist-get args :message) "命令已执行"))))
   "Notice kinds and their Chinese wording.
 A value is a format string, with args values in wire order, or a function
 accepting the args plist.  Unknown kinds are displayed dimly as-is."
@@ -276,7 +299,13 @@ command asynchronously so starting a daemon never waits in the editor."
       ("user"
        (unless existing
          (agent-session--new-block session id
-                                   (list :type 'user :text (plist-get block :text)))))
+                                   (list :type 'user :text
+                                         (string-join
+                                          (append (make-list
+                                                   (or (plist-get block :imageCount)
+                                                       (length (plist-get block :images)))
+                                                   "[图片]")
+                                                  (list (plist-get block :text))) " ")))))
       ("text"
        (if existing
            (agent-session--update session id :text (plist-get block :text)
@@ -288,9 +317,23 @@ command asynchronously so starting a daemon never waits in the editor."
       ("tool"
        (let ((view (plist-get block :view)))
          (agent-session-tool session id :kind (intern (plist-get view :kind))
-                             :title (plist-get view :title)
+                             :title (pcase (plist-get view :name)
+                                      ("todo_write" "更新计划")
+                                      ("exit_plan_mode" "提交计划")
+                                      ("skill" (concat "技能 " (plist-get view :title)))
+                                      (_ (plist-get view :title)))
                              :status (intern (plist-get block :status))
-                             :diff (plist-get view :diff) :output (plist-get block :output))))
+                             :diff (plist-get view :diff)
+                             :output (if (and (plist-member view :items)
+                                              (member (plist-get block :status)
+                                                      '("running" "done")))
+                                         (mapconcat
+                                          (lambda (item)
+                                            (concat (pcase (plist-get item :status)
+                                                      ("done" "☑") ("active" "▶") (_ "☐"))
+                                                    " " (plist-get item :text)))
+                                          (plist-get view :items) "\n")
+                                       (plist-get block :output)))))
       ("notice" (agent-emx--notice session id (plist-get block :notice))))))
 
 (defun agent-emx--question (question)
@@ -305,6 +348,32 @@ command asynchronously so starting a daemon never waits in the editor."
         :secret (eq (plist-get question :secret) t)
         :range (append (plist-get question :range) nil)))
 
+(defun agent-emx--plan-review (session ask question)
+  "Render ASK's plan review QUESTION using the native approval footer."
+  (let* ((options (append (plist-get question :options) nil))
+         (approve (plist-get (plist-get question :intent) :approve)))
+    (agent-session-ask
+     session :title "批准这个计划并开始执行？" :tool (plist-get ask :tool)
+     :choices (seq-map-indexed (lambda (option index)
+                                 (list index (plist-get option :label))) options)
+     :callback
+     (lambda (index)
+       (let* ((label (plist-get (nth index options) :label))
+              (feedback (unless (equal label approve)
+                          (string-trim (read-string "修改意见（可留空）：")))))
+         (agent-emx--rpc
+          session "session/answer"
+          (list :ask (plist-get ask :id) :answers
+                (vconcat
+                 (mapcar
+                  (lambda (q)
+                    (if (eq q question)
+                        (append (list :selected (vector label))
+                                (when (and feedback (not (string-empty-p feedback)))
+                                  (list :custom feedback)))
+                      (list :selected [])))
+                  (append (plist-get ask :questions) nil))))))))))
+
 (defun agent-emx--ask (session ask)
   "Show wire ASK in SESSION, keeping its id separate from the UI id."
   (let* ((id (plist-get ask :id))
@@ -312,7 +381,15 @@ command asynchronously so starting a daemon never waits in the editor."
     (unless (gethash id table)
       (puthash
        id
-       (if (equal (plist-get ask :type) "approval")
+       (cond
+        ((seq-find (lambda (q) (equal (plist-get (plist-get q :intent) :kind)
+                                      "plan-review"))
+                   (plist-get ask :questions))
+         (agent-emx--plan-review
+          session ask (seq-find (lambda (q) (equal (plist-get (plist-get q :intent) :kind)
+                                                    "plan-review"))
+                                (plist-get ask :questions))))
+        ((equal (plist-get ask :type) "approval")
            (agent-session-ask
             session :title (or (plist-get (plist-get ask :view) :title)
                                (plist-get ask :description) "需要确认")
@@ -325,8 +402,8 @@ command asynchronously so starting a daemon never waits in the editor."
                              (append (plist-get ask :choices) nil))
             :callback (lambda (choice)
                         (agent-emx--rpc session "session/answer"
-                                        (list :ask id :choice (symbol-name choice)))))
-         (agent-session-ask-questions
+                                        (list :ask id :choice (symbol-name choice))))))
+        (t (agent-session-ask-questions
           session :questions (mapcar #'agent-emx--question
                                       (append (plist-get ask :questions) nil))
           :tool (plist-get ask :tool)
@@ -342,7 +419,7 @@ command asynchronously so starting a daemon never waits in the editor."
                                          (list :custom (plist-get answer :custom)))))
                              (if (eq answers 'cancel)
                                  (make-list (length (plist-get ask :questions)) nil)
-                               answers))))))))
+                               answers)))))))))
        table))))
 
 (defun agent-emx--close-asks (session label)
@@ -415,14 +492,25 @@ command asynchronously so starting a daemon never waits in the editor."
           (list :id (agent-emx--get session :emx-id) :before before :turns 20)
           nil (lambda (error) (agent-emx--error session error))))))))
 
+(defun agent-emx--info (session info)
+  "Apply wire INFO to SESSION, preserving its Lisp parent buffer.
+The daemon parent id is not a buffer; collaboration moves in phase 5."
+  (let ((props (cl-loop for (key value) on info by #'cddr
+                        unless (eq key :parent) append (list key value))))
+    (apply #'agent-session-set-info session props))
+  (when-let* ((resume (plist-get info :sessionId)))
+    (agent-emx--set session :resume resume)))
+
 (defun agent-emx--settings (session settings)
   "Apply daemon SETTINGS to SESSION without sending them back."
-  (cl-loop for key in '(:model :effort :mode)
+  (cl-loop for key in '(:model :effort :mode :beforePlan)
            when (plist-member settings key)
            do (let ((value (plist-get settings key)))
                 (setf (agent-session-settings session)
-                      (plist-put (agent-session-settings session) key
-                                 (if (and (eq key :mode) value) (intern value) value)))))
+                      (plist-put (agent-session-settings session)
+                                 (if (eq key :beforePlan) :before-plan key)
+                                 (if (and (memq key '(:mode :beforePlan)) value)
+                                     (intern value) value)))))
   (agent-session--refresh session))
 
 (defun agent-emx--event (session method params)
@@ -462,8 +550,21 @@ command asynchronously so starting a daemon never waits in the editor."
                (agent-session-set-status session (intern (plist-get params :status)))
              (when (agent-emx--get session :emx-replay)
                (setf (agent-session-queue session) queue)))))
-        ("info" (apply #'agent-session-set-info session (plist-get params :info)))
+        ("info" (agent-emx--info session (plist-get params :info)))
         ("settings" (agent-emx--settings session (plist-get params :settings)))
+        ("capabilities"
+         (agent-emx--set session :emx-capabilities (plist-get params :capabilities))
+         (agent-session--refresh session))
+        ("usage/call"
+         (let ((usage (plist-get params :usage)))
+           (agent-usage-add-call session (plist-get params :model)
+                                 (list :input (plist-get usage :input)
+                                       :cache-read (plist-get usage :cacheRead)
+                                       :cache-write (plist-get usage :cacheWrite)
+                                       :output (plist-get usage :output)))))
+        ("usage/end" (agent-usage-end-turn session))
+        ("quota"
+         (agent-usage-set-quota session :balance (append (plist-get params :balance) nil)))
         ("block/add"
          ;; A retried page repeats its received prefix; leave those blocks alone.
          (unless (and history
@@ -570,8 +671,9 @@ command asynchronously so starting a daemon never waits in the editor."
 (defun agent-emx--finish-attach (session result)
   "Finish applying RESULT once its replay is complete."
   (agent-emx--set session :emx-replay nil)
-  (apply #'agent-session-set-info session (plist-get result :info))
+  (agent-emx--info session (plist-get result :info))
   (agent-emx--settings session (plist-get result :settings))
+  (agent-emx--set session :emx-capabilities (plist-get result :capabilities))
   (agent-emx--set session :emx-queue (plist-get result :queue))
   (agent-emx--set session :emx-attaching nil)
   (agent-session-set-status session (intern (plist-get result :status)))
@@ -592,6 +694,8 @@ command asynchronously so starting a daemon never waits in the editor."
   (let ((waiters (agent-emx--get session :emx-waiters)))
     (agent-emx--set session :emx-waiters nil)
     (dolist (callback waiters) (funcall callback))))
+
+(declare-function agent-dsh--mcp-servers "agent-dsh" (session))
 
 (defun agent-emx--attach (session connection)
   "Attach SESSION on ready CONNECTION, opening it first if necessary."
@@ -618,6 +722,12 @@ command asynchronously so starting a daemon never waits in the editor."
        (append (list :agent (or (agent-session--get (agent-session-agent session) :emx-agent)
                                (symbol-name (agent-session-agent session)))
                      :root (agent-session-root session) :settings (agent-emx--choices session))
+               (when (equal (agent-session--get (agent-session-agent session) :emx-agent) "dsh")
+                 (list :mcpServers (agent-dsh--mcp-servers session)))
+               (when (agent-session-child-p session)
+                 (list :parent (or (and (agent-session-parent session)
+                                        (agent-emx--get (agent-session-parent session) :emx-id))
+                                   "emacs")))
                (when (agent-emx--get session :resume)
                  (list :resume (agent-emx--get session :resume))))
        (lambda (result)
@@ -668,9 +778,12 @@ command asynchronously so starting a daemon never waits in the editor."
 
 (defun agent-emx--choices (session)
   "Return SESSION's settings in wire form."
-  (cl-loop for key in '(:model :effort :mode)
-           append (let ((value (agent-session-setting session key)))
-                    (list key (if (symbolp value) (and value (symbol-name value)) value)))))
+  (append
+   (cl-loop for key in '(:model :effort :mode)
+            for value = (agent-session-setting session key)
+            append (list key (if (symbolp value) (and value (symbol-name value)) value)))
+   (when-let* ((mode (plist-get (agent-session-settings session) :before-plan)))
+     (list :beforePlan (symbol-name mode)))))
 
 (defun agent-emx--message (text)
   "Return wire fields for message TEXT and its already displayed block."
@@ -705,9 +818,19 @@ command asynchronously so starting a daemon never waits in the editor."
 (cl-defmethod agent-session-backend-apply-settings ((_ (eql emx)) session _changed)
   (agent-emx--rpc session "session/configure" (agent-emx--choices session)))
 
-(cl-defmethod agent-session-backend-modes ((_ (eql emx)) _session) nil)
-(cl-defmethod agent-session-backend-models ((_ (eql emx)) _session) nil)
-(cl-defmethod agent-session-backend-commands ((_ (eql emx)) _session) nil)
+(cl-defmethod agent-session-backend-modes ((_ (eql emx)) session)
+  (mapcar #'intern (append (plist-get (agent-emx--get session :emx-capabilities) :modes) nil)))
+
+(cl-defmethod agent-session-backend-models ((_ (eql emx)) session)
+  (mapcar (lambda (model)
+            (list :id (plist-get model :id) :name (plist-get model :name)
+                  :description (plist-get model :description)
+                  :efforts (append (plist-get model :efforts) nil)
+                  :default-effort (plist-get model :defaultEffort)))
+          (append (plist-get (agent-emx--get session :emx-capabilities) :models) nil)))
+
+(cl-defmethod agent-session-backend-commands ((_ (eql emx)) session)
+  (append (plist-get (agent-emx--get session :emx-capabilities) :commands) nil))
 
 (cl-defmethod agent-session-backend-stop ((_ (eql emx)) session)
   (agent-emx--set session :emx-generation
