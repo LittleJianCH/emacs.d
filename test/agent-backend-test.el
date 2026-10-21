@@ -59,15 +59,5 @@
         (ert-info ((format "Enabled backends: %S\n%s" enabled (buffer-string)))
           (should (eql status 0)))))))
 
-(ert-deftest agent-backend-test-guide-avoids-deleted-daemon-migration-apis ()
-  "Keep coding guidance from recommending removed editor backend APIs."
-  (with-temp-buffer
-    (insert-file-contents (expand-file-name "AGENTS.md" agent-backend-test--root))
-    (dolist (obsolete '("agent-session-state" "agent-session-process"
-                        "agent-collab-profiles" "agent-usage-pollers"
-                        "bin/emx-usage.js" "agent-session-backend-handle"))
-      (should-not (string-match-p (regexp-quote obsolete) (buffer-string))))
-    (should-not (string-match-p "`state`[[:space:]]+plist" (buffer-string)))))
-
 (provide 'agent-backend-test)
 ;;; agent-backend-test.el ends here

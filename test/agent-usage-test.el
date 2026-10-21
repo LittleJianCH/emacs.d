@@ -43,43 +43,6 @@
                   (push (cons method params) agent-usage-test--sent))))
        ,@body)))
 
-(defun agent-usage-test--session (&optional agent)
-  "Make a local test session for AGENT, claude by default."
-  (agent-session--make
-   :agent (or agent 'claude)
-   :backend (or agent 'claude)
-   :root "/tmp/proj/"
-   :info (list :handle "h1" :model "claude-opus-5-5")))
-
-(defun agent-usage-test--records ()
-  "The records sent in this test, newest first, with Lisp-style keys."
-  (cl-loop for (method . params) in agent-usage-test--sent
-           when (equal method "record")
-           collect (cl-loop for (key value) on (plist-get params :record) by #'cddr
-                            append (pcase key
-                                     (:cache_read (list :cache-read value))
-                                     (:cache_write (list :cache-write value))
-                                     (:agent (list :agent (intern value)))
-                                     (_ (list key value))))))
-
-(defun agent-usage-test--records-of (model)
-  "Records of MODEL sent in this test, newest first."
-  (seq-filter (lambda (record) (equal (plist-get record :model) model))
-              (agent-usage-test--records)))
-
-(defun agent-usage-test--approx (a b)
-  "Non-nil if A and B are the same number up to rounding."
-  (and (numberp a) (numberp b) (< (abs (- a b)) 1e-9)))
-
-(defun agent-usage-test--quota (agent &optional host)
-  "The latest quota reading sent for AGENT on HOST, windows as a list."
-  (cl-loop for (method . params) in agent-usage-test--sent
-           when (and (equal method "quota")
-                     (equal (plist-get params :agent) (symbol-name agent))
-                     (equal (plist-get params :host) (or host :null)))
-           return (plist-put (copy-sequence params) :windows
-                             (append (plist-get params :windows) nil))))
-
 (ert-deftest agent-usage-test-echo-text ()
   "The echo line shows windows, balances, reset windows and low faces."
   (agent-usage-test--with-files

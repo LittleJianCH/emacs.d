@@ -1098,10 +1098,6 @@ question unanswered, and quitting halfway keeps the answers so far."
     (funcall (plist-get (alist-get method agent-ui--methods nil nil #'equal) :function)
              params)))
 
-(defun agent-session-test--poll (pending)
-  "Poll the deferred result PENDING once."
-  (agent-ui--poll (cadr pending) nil))
-
 (ert-deftest agent-session-test-handles ()
   (agent-session-test--with-session
    (let* ((agent-emx-config--value
@@ -1127,18 +1123,6 @@ question unanswered, and quitting halfway keeps the answers so far."
                              (agent-collab--mention-note session "看下 @cfi-meaning 的结论")))
      (should (equal (agent-collab--mention-note session "mail me@cfi-meaning or @test-echo")
                     "mail me@cfi-meaning or @test-echo")))))
-
-(defun agent-session-test--first-message (session &optional key)
-  "Text of the first user message in SESSION's transcript.
-With KEY, that property of its block instead, such as :hidden."
-  (seq-some (pcase-lambda (`(,_ . ,block))
-              (and (eq (plist-get block :type) 'user) (plist-get block (or key :text))))
-            (agent-session--blocks-in-order session)))
-
-(defun agent-session-test--last-user (session)
-  "The last user block of SESSION, as (ID . BLOCK)."
-  (seq-find (pcase-lambda (`(,_ . ,block)) (eq (plist-get block :type) 'user))
-            (reverse (agent-session--blocks-in-order session))))
 
 (ert-deftest agent-session-test-subagent-ask-mirror ()
   "A child's confirmations and questions also wait in its parent's footer,
@@ -1244,20 +1228,6 @@ expanded; the user's own messages stay whole."
             (should (equal (rpc "_poll" (list :id id)) '(:ok t :result "done")))
             (should (eq (plist-get (rpc "_poll" (list :id id)) :ok) :false))))
       (delete-directory dir t))))
-
-(defmacro agent-session-test--with-fake-remote (&rest body)
-  "Run BODY with /rpc:dev: paths treated as remote, on host paths after the prefix.
-File name handlers are off, so tramp never tries to reach the host."
-  `(cl-letf* ((file-name-handler-alist nil)
-              (real (symbol-function 'file-remote-p))
-              ((symbol-function 'file-remote-p)
-               (lambda (file &optional identification connected)
-                 (if (and (stringp file) (string-prefix-p "/rpc:dev:" file))
-                     (pcase identification
-                       ('localname (substring file (length "/rpc:dev:")))
-                       (_ "/rpc:dev:"))
-                   (funcall real file identification connected)))))
-     ,@body))
 
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

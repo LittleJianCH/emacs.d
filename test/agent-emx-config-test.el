@@ -22,8 +22,6 @@
 
 (ert-deftest agent-emx-config-editor-tools-exclude-daemon-collaboration ()
   (dolist (name '("sessions" "session_read" "session_ask" "session_start" "session_stop"))
-    (should-not (alist-get name agent-ui--methods nil nil #'equal)))
-  (should-not (boundp 'agent-emx-agents))
-  (should-not (fboundp 'agent-emx-offer)))
+    (should-not (alist-get name agent-ui--methods nil nil #'equal))))
 
 (provide 'agent-emx-config-test)

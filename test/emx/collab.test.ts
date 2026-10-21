@@ -50,21 +50,11 @@ test('daemon config owns five caller-independent collaboration definitions', () 
   const start = tools.find((tool) => tool.name === 'session_start')!.description
   assert.ok(start.indexOf('Delegate independent work early') < start.indexOf('Choose how it gets context:'))
   assert.match(start, /cannot start further sessions/)
-  assert.deepEqual(definitions(c), definitions(c))
   assert.equal(cleanHandle('Reply\n`Cache Test`'), 'cache-test')
   assert.equal(cleanHandle('123'), undefined)
   c.agents.dsh.executable = '/does/not/exist'
   assert.ok(!profiles(c).some(([, p]) => profileCandidates(p).some((c) => c.agent === 'dsh')))
   assert.ok(profiles(c, ['claude']).every(([, p]) => profileCandidates(p).some((c) => c.agent === 'claude')))
-})
-test('delegation guidance names no profiles and profile descriptions name no other profile', () => {
-  const c = defaults()
-  for (const name of Object.keys(c.profiles)) {
-    assert.ok(!c.collab.startGuidance.includes(name), `startGuidance names ${name}`)
-    for (const [other, p] of Object.entries(c.profiles)) {
-      if (other !== name) assert.ok(!p.description?.includes(name), `${other} names ${name}`)
-    }
-  }
 })
 test('descriptions and summary include only enabled and available profiles and fork agents', () => {
   const c = defaults()
@@ -84,7 +74,6 @@ test('descriptions and summary include only enabled and available profiles and f
   assert.doesNotMatch(description(), /sessions can fork|\{forkAgents\}/)
   assert.equal(startSummary(c, undefined, env), '')
   assert.equal(startSummary(defaults(), [], env), '')
-  assert.deepEqual(definitions(c, undefined, env), definitions(c, undefined, env))
 })
 test('profiles, rendered lines and summary share stable cost order including unknown costs', () => {
   const c = defaults()

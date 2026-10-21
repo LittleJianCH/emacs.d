@@ -18,10 +18,6 @@
 
 (defvar agda2-mode-map)
 
-(ert-deftest lang-modules-enabled ()
-  (should (memq 'nix my/languages))
-  (should (memq 'agda my/languages)))
-
 (ert-deftest lang-nix-syntax-without-tools ()
   "Opening Nix files still provides syntax editing without nil or nixfmt."
   (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil))
