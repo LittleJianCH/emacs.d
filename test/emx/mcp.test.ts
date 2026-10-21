@@ -16,9 +16,15 @@ import { Connection } from '../../emx/daemon/rpc.ts'
 const definition = (name: string) => ({ name, description: name, inputSchema: { type: 'object' } })
 const tools = { tools: ['context', 'deferred', 'hold', 'error'].map(definition), readOnly: ['context'] }
 
-async function setup(t: import('node:test').TestContext) {
+async function setup(t: import('node:test').TestContext, options: {
+  agents?: string[], environment?: (root: string) => NodeJS.ProcessEnv
+} = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'emx-mcp-'))
   const daemon = new DaemonServer({ varDir: dir })
+  daemon.collab.host.environment = options.environment
+  daemon.configuration.value.collab.handleCommand = []
+  daemon.configuration.value.collab.agentHandleCommands = {}
+  daemon.configuration.value.usage.pollInterval = 0
   t.after(async () => { await daemon.stop(); await rm(dir, { recursive: true, force: true }) })
   await daemon.start()
   const editor = new Connection(createConnection(daemon.socket))
@@ -33,7 +39,7 @@ async function setup(t: import('node:test').TestContext) {
       : params.params.id === 'hold' ? { ok: true, pending: 'hold' } : { ok: true, result: 'deferred result' }
     return { ok: true, result: params.caller }
   }
-  await editor.request('hello', { client: 'test', version: daemon.version, tools })
+  await editor.request('hello', { client: 'test', version: daemon.version, tools, agents: options.agents })
   const { id } = await editor.request('session/open', { agent: 'echo', root: dir }) as any
   const child = spawn(process.execPath, [fileURLToPath(new URL('../../bin/emx', import.meta.url)), 'mcp'], {
     env: { ...process.env, EMX_DAEMON_SOCKET: daemon.socket, EMX_SESSION: id,
@@ -65,6 +71,9 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
   const init = await request('initialize')
   assert.equal(init.capabilities.tools.listChanged, true)
   assert.equal(init.instructions.includes('config_read'), false)
+  const summary = daemon.collab.startSummary(dir)
+  assert.ok(summary.startsWith('- Subagent profiles here, cheapest first:'))
+  assert.ok(init.instructions.endsWith('\n' + summary))
   assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(tools).tools })
   assert.equal(daemon.client?.socket.destroyed, false, 'MCP hello does not replace editor')
   const result = await request('tools/call', { name: 'context', arguments: {} })
@@ -95,6 +104,35 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
       await assert.rejects(peer.request('mcp/call', { name: 'context' }), /Emacs is not attached/)
     } finally { peer.socket.destroy() }
   } finally { await restored.stop() }
+})
+
+test('initialize uses enabled profiles in the bound session root environment before tools/list', async (t) => {
+  const roots: string[] = []
+  const { dir, request, daemon, editor, wait } = await setup(t, { agents: ['codex'], environment: (root) => {
+    roots.push(root)
+    return { PATH: '', EMX_CODEX_EXECUTABLE: process.execPath }
+  } })
+  const init = await request('initialize')
+  const summary = '- Subagent profiles here, cheapest first: coder (medium); reviewer (high).  session_start describes each.'
+  assert.ok(init.instructions.endsWith('\n' + summary))
+  assert.doesNotMatch(init.instructions, /coder-flash|explorer|generalist|expert|DeepSeek/)
+  assert.ok(roots.length > 0)
+  assert.ok(roots.every((root) => root === dir))
+  const start = (await request('tools/list')).tools.find((tool: any) => tool.name === 'session_start').description
+  assert.match(start, /  Codex sessions can fork\./)
+  assert.doesNotMatch(start, /coder-flash|explorer|generalist|expert|DeepSeek/)
+  await editor.request('hello', { client: 'test', version: daemon.version, tools, agents: [] })
+  await wait((m) => m.method === 'notifications/tools/list_changed')
+  assert.equal(daemon.collab.startSummary(dir), '')
+  const updated = (await request('tools/list')).tools.find((tool: any) => tool.name === 'session_start').description
+  assert.doesNotMatch(updated, /sessions can fork|- coder:|- reviewer:/)
+  assert.equal((await request('initialize')).instructions, init.instructions, 'summary stays fixed for the MCP process lifetime')
+})
+
+test('initialize omits the generated profile line when no profiles are available', async (t) => {
+  const { request } = await setup(t, { agents: [] })
+  const init = await request('initialize')
+  assert.doesNotMatch(init.instructions, /Subagent profiles here|undefined/)
 })
 
 test('cancellation cleans up the deferred result and stops polling', async (t) => {

@@ -9,6 +9,8 @@ import type { Block, EditorTools, SessionEvent, Settings } from './protocol.ts'
 import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop']
+export const forkAgents = ['claude', 'codex', 'dsh']
+const costRanks: Record<string, number> = { minimal: 0, low: 1, medium: 2, high: 3, premium: 4, unknown: 5 }
 const modes = ['plan', 'ask', 'edits', 'auto', 'full']
 const icons: Record<string, string> = { command: '$', edit: '✎', read: '≡', search: '⌕', web: '◎', mcp: '⚙', task: '◆', plan: '☰', question: '?', other: '•' }
 export const format = (text: string, ...args: unknown[]): string => {
@@ -24,13 +26,43 @@ export function executable(command: string, env: NodeJS.ProcessEnv = process.env
 export function agentExecutable(c: Config, agent: string, env: NodeJS.ProcessEnv = process.env): string {
   return env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? c.agents[agent]?.executable ?? agent
 }
+function availableAgent(c: Config, agent: string, enabled: string[] | undefined, env: NodeJS.ProcessEnv): boolean {
+  return !!c.agents[agent] && (!enabled || enabled.includes(agent)) && executable(agentExecutable(c, agent, env), env)
+}
+/** Single seam for future quota-based profile costs. */
+export function profileCost(name: string, profile: Profile): string {
+  return profile.cost ?? 'unknown'
+}
 export function profiles(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): [string, Profile][] {
-  return Object.entries(c.profiles).filter(([, p]) => (!enabled || enabled.includes(p.agent)) && executable(agentExecutable(c, p.agent, env), env))
+  const rank = ([name, p]: [string, Profile]) => costRanks[profileCost(name, p)] ?? costRanks.unknown
+  return Object.entries(c.profiles).filter(([, p]) => availableAgent(c, p.agent, enabled, env))
+    .sort((a, b) => rank(a) - rank(b))
+}
+function profileLines(c: Config, available: [string, Profile][]): string {
+  return available.map(([name, p]) => `- ${name}: ${c.agents[p.agent].title}${p.model ? ' ' + p.model : ''}, ${profileCost(name, p)} cost.  ${p.description ?? ''}`).join('\n')
+}
+export function startSummary(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): string {
+  const groups = new Map<string, string[]>()
+  for (const [name, p] of profiles(c, enabled, env)) {
+    const cost = profileCost(name, p)
+    if (!groups.has(cost)) groups.set(cost, [])
+    groups.get(cost)!.push(name)
+  }
+  return groups.size ? format(c.collab.prompts.startSummary,
+    [...groups].map(([cost, names]) => `${names.join(', ')} (${cost})`).join('; ')) : ''
 }
 export function definitions(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): EditorTools['tools'] {
-  return c.collab.tools.map((tool) => ({ ...tool, description: tool.description + (tool.name === 'session_start'
-    ? '\n\n' + (c.collab.startGuidance ? c.collab.startGuidance + '\n\n' : '') + c.collab.prompts.profileHeader
-      + profiles(c, enabled, env).map(([name, p]) => `- ${name}: ${c.agents[p.agent].title}${p.model ? ' ' + p.model : ''}, ${p.cost ?? 'unknown'} cost.  ${p.description ?? ''}`).join('\n') : '') }))
+  const titles = forkAgents.filter((a) => availableAgent(c, a, enabled, env)).map((a) => c.agents[a].title)
+  const joined = titles.length < 2 ? titles.join('') : titles.slice(0, -1).join(', ') + ' and ' + titles.at(-1)
+  return c.collab.tools.map((tool) => {
+    if (tool.name !== 'session_start') return { ...tool }
+    // {forkAgents} occupies a whole line; omit it when no available backend can fork.
+    const description = tool.description.replace(/^\{forkAgents\}(?:\n|$)/m,
+      titles.length ? format(c.collab.prompts.forkAgents, joined) + '\n' : '')
+    return { ...tool, description: description + '\n\n'
+      + (c.collab.startGuidance ? c.collab.startGuidance + '\n\n' : '') + c.collab.prompts.profileHeader
+      + profileLines(c, profiles(c, enabled, env)) }
+  })
 }
 export function cleanHandle(value: string): string | undefined {
   const last = value.trim().toLowerCase().split('\n').at(-1) ?? ''
@@ -155,6 +187,9 @@ export class Collaboration {
       readOnly: [...new Set([...editor.readOnly.filter((name) =>
         !toolNames.includes(name) && editor.tools.some((tool) => tool.name === name)),
         'sessions', 'session_read'])].sort() }
+  }
+  startSummary(root?: string): string {
+    return startSummary(this.config, this.enabled, root ? this.host.environment?.(root) : undefined)
   }
   /** Include asynchronous visibility/hub delivery after pending entries are removed. */
   restartBlockers(): { session?: string, reason: string }[] {
@@ -345,7 +380,7 @@ export class Collaboration {
     let name: string, profile: Profile, fork: string | undefined
     if (context === 'fork') {
       if (p.profile !== undefined) throw new Error('A fork uses your own agent and model; omit profile')
-      if (!['claude', 'codex', 'dsh'].includes(caller.agent)) throw new Error(`${this.#title(caller)} sessions can't fork; use handoff`)
+      if (!forkAgents.includes(caller.agent)) throw new Error(`${this.#title(caller)} sessions can't fork; use handoff`)
       fork = caller.resumeId()
       if (!fork) throw new Error('Your session has no conversation to fork yet')
       name = this.#handle(caller) + '-fork'; profile = { agent: caller.agent, ...caller.settings }

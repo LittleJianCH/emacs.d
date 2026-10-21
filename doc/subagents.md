@@ -137,9 +137,13 @@ knows the task best and needs no model call to do it. Without one the child is
 named after its profile. An agent
 never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
-The shared MCP instructions in `bin/emx` name `session_start` as the entry point
-for delegating independent work early. Its tool description opens with that
-trigger before explaining context modes. `collab.startGuidance` adds the
+The shared MCP instructions in `emx/cli/main.ts` name `session_start` as the entry
+point for delegating independent work early. `mcp/hello` appends a short summary
+of available profiles grouped by cost, so agents see them before discovering
+the tool. Its tool description opens with the delegation trigger before explaining
+context modes, and lists only enabled, executable fork backends by title.
+`collab.startGuidance` names no profiles; per-profile use belongs in each
+profile's description. It adds the
 details: after brief orientation, delegate a bounded independent task before
 doing it yourself, continue a different part, and reconsider as new work appears.
 Trivial tasks, the immediate blocker on the next step, tightly coupled work and
@@ -148,18 +152,17 @@ not automatically into code, tests and docs; the parent must not edit files
 assigned to a child either.
 
 Give a concise brief with the goal, context, scope, constraints, verification
-and expected report. Do not complete the work merely to specify it. Quick
-investigations go to explorer, simple questions with long reading to
-explorer-flash, implementation and long runs to the coders, and reasoning that
-depends heavily on the conversation to a fork. Long runs with known commands
+and expected report. Do not complete the work merely to specify it. Choose a
+profile by its description; reasoning that depends heavily on the conversation
+goes to a fork. Long runs with known commands
 and inputs do not need a fork just to preserve context. For nontrivial work whose
 context is costly to summarize, fork instead of doing it all locally. Choose the
 least costly profile likely to finish reliably, tell the user why, avoid
 duplicating the child's task, and verify the important claims in its report.
 
 Substantive changes get a separate review before final delivery, even when no
-commit was requested. Use reviewer, or a second pass by a fork when reviewer
-is the caller's own agent and model. Explicitly ask for findings, not edits:
+commit was requested. Use a profile meant for review, or a second pass by a fork
+when that profile is the caller's own agent and model. Explicitly ask for findings, not edits:
 a fork inherits the caller's permissions and context, so it does not provide
 a fresh perspective or enforce the reviewer's plan mode. Children still do
 only their assigned task and cannot delegate, including for review; this
@@ -175,11 +178,13 @@ Protocol tests check that the trigger and child exception are exposed; they do
 not establish how often models follow them. Compare new sessions on a trivial
 edit, independent investigations and a substantive change, checking delegation
 timing, duplicate work, result quality, usage and elapsed time. Shared MCP
-instructions are sent at initialization: changing `bin/emx` requires a new MCP
-connection, whereas Lisp tool descriptions use the refresh mechanism below.
-Costs come in five tiers, minimal, low, medium, high and premium, so the most
-expensive models stand apart: DeepSeek flash is minimal, Haiku low, Codex's
-gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
+instructions and the generated summary are fixed for the MCP process lifetime;
+MCP has no instructions-changed notification. Tool descriptions use the refresh
+mechanism below. Profiles are filtered by enabled agents and executable
+availability in the session root's environment, then sorted by cost: minimal,
+low, medium, high, premium and unknown, with configuration order within a tier.
+Both the tool description and the summary use `profileCost`, the single seam
+for future quota-based costs; profiles themselves remain in `emx/config.json`.
 
 ### Rules
 

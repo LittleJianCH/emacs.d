@@ -50,9 +50,9 @@ const MCP_BODY = `
   document or diff.
 - Atomic review (原子审查): follow the emacs-atomic-review skill.
 - @handles name other agent sessions in this Emacs: sessions, session_read, session_ask.
-- For nontrivial work with independent parts, use session_start to delegate a
-  bounded task early, then continue another part yourself. Discover session_start
-  if it is not listed.
+- For nontrivial work with independent parts, use session_start (discover it if
+  it is not listed) to delegate a bounded task early, then continue another part
+  yourself; the available profiles are listed below.
   If you are a subagent assigned one task, do it yourself without starting sessions.
 - After editing Lisp or emx/ code in this Emacs configuration, call reload.
 - Other editor operations: eval.

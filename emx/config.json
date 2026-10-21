@@ -30,35 +30,35 @@
       "model": "deepseek-official/deepseek-flash",
       "mode": "auto",
       "cost": "minimal",
-      "description": "Writes code and tests to a clear specification."
+      "description": "Implementation or long runs with a clear goal and verification: writes code and tests to a clear specification."
     },
     "explorer": {
       "agent": "claude",
       "model": "haiku",
       "mode": "plan",
       "cost": "low",
-      "description": "Answers short, quick questions without editing: finds a definition, checks a fact in a few files or docs.  Its price rises fivefold once its context passes 100K tokens, so not for long reading."
+      "description": "Bounded investigations needing a few reads: finds a definition, checks a fact in a few files or docs.  Doesn't edit.  Its price rises fivefold once its context passes 100K tokens, so not for long reading."
     },
     "explorer-flash": {
       "agent": "dsh",
       "model": "deepseek-official/deepseek-flash",
       "mode": "ask",
       "cost": "minimal",
-      "description": "Investigates without editing when the question is simple but the reading is long: many or large files, logs, docs."
+      "description": "Investigations where the question is simple but the reading is long: many or large files, logs, docs.  Doesn't edit."
     },
     "coder": {
       "agent": "codex",
       "model": "gpt-6.1-sol",
       "mode": "auto",
       "cost": "medium",
-      "description": "Writes code that needs more judgment than coder-flash: changes across files, debugging, refactoring."
+      "description": "Implementation that needs more judgment: changes across files, debugging, refactoring."
     },
     "reviewer": {
       "agent": "codex",
       "model": "gpt-6-astra",
       "mode": "plan",
       "cost": "high",
-      "description": "Reviews changes independently and reproduces what it finds; reports findings without editing files."
+      "description": "Reviews substantive changes before delivery; reproduces what it finds and reports findings without editing files."
     },
     "generalist": {
       "agent": "claude",
@@ -73,11 +73,11 @@
       "mode": "plan",
       "cost": "premium",
       "confirm": true,
-      "description": "Works through the hardest problems: subtle bugs, tricky designs.  Use it when you are stuck, not for routine work."
+      "description": "Works through the hardest problems: subtle bugs, tricky designs.  Use it when you are stuck or the user asks for it, not for routine work."
     }
   },
   "collab": {
-    "startGuidance": "When to start a session: after brief orientation on a nontrivial task, identify work that can proceed independently.  Delegate it before doing that work yourself, then continue a different part.  Reconsider when new independent work appears, not just at the start of the user's request.\n- Bounded investigations: explorer for a few reads, explorer-flash for simple questions needing many or large files, logs or docs.\n- Implementation or long runs with a clear goal and verification: coder-flash; coder when the work needs more judgment.\n- Reasoning that depends heavily on your conversation: fork.  Use expert when you are stuck or the user requests it.\n- Substantive changes: get a separate review before final delivery, even if no commit was requested.  Use reviewer, or fork for a second pass if reviewer is your own agent and model.  Ask for findings, not edits: a fork inherits your permissions as well as your context.\nKeep trivial tasks, the immediate blocker on your next step, tightly coupled work and work needing user dialogue local.  Split by independent outcome and file ownership; code, tests and docs are not automatically independent.  Never have two sessions edit the same files, including yourself.\nGive the goal, relevant context, file scope, constraints, verification and expected report.  A concise brief is enough: don't finish the investigation or implementation merely to prepare it.  For long runs, pass known commands and inputs rather than forking just to preserve them.  For nontrivial work whose context is costly to summarize, fork instead of doing it all locally.\nTell the user the profile and why.  While the child works, do not duplicate its task.  Integrate its report and verify the claims that matter before relying on them.  If you are a child assigned one task, complete it yourself; do not start sessions, including for review.",
+    "startGuidance": "When to start a session: after brief orientation on a nontrivial task, identify work that can proceed independently.  Delegate it before doing that work yourself, then continue a different part.  Reconsider when new independent work appears, not just at the start of the user's request.\nEach profile below says what it is for; choose the least costly one likely to complete the task reliably.  Reasoning that depends heavily on your conversation: fork.\nSubstantive changes: get a separate review before final delivery, even if no commit was requested: start a profile meant for review, or fork for a second pass if that profile is your own agent and model.  Ask for findings, not edits: a fork inherits your permissions as well as your context.\nKeep trivial tasks, the immediate blocker on your next step, tightly coupled work and work needing user dialogue local.  Split by independent outcome and file ownership; code, tests and docs are not automatically independent.  Never have two sessions edit the same files, including yourself.\nGive the goal, relevant context, file scope, constraints, verification and expected report.  A concise brief is enough: don't finish the investigation or implementation merely to prepare it.  For long runs, pass known commands and inputs rather than forking just to preserve them.  For nontrivial work whose context is costly to summarize, fork instead of doing it all locally.\nTell the user the profile and why.  While the child works, do not duplicate its task.  Integrate its report and verify the claims that matter before relying on them.  If you are a child assigned one task, complete it yourself; do not start sessions, including for review.",
     "maxActive": 4,
     "handoffLimit": 60000,
     "closeFinished": true,
@@ -174,7 +174,7 @@
       },
       {
         "name": "session_start",
-        "description": "Start a subagent to do one bounded task and report back.\nDelegate independent work early on nontrivial tasks, before doing it\nyourself, and continue another part.  Keep trivial or tightly coupled\nwork local.  A child assigned one task cannot start further sessions.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n  Claude, Codex and DeepSeek sessions can fork.\nChoose the least costly profile likely to complete the task reliably.\nFor your own agent and model, use fork instead of a profile, including\nfor review.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
+        "description": "Start a subagent to do one bounded task and report back.\nDelegate independent work early on nontrivial tasks, before doing it\nyourself, and continue another part.  Keep trivial or tightly coupled\nwork local.  A child assigned one task cannot start further sessions.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n{forkAgents}\nChoose the least costly profile likely to complete the task reliably.\nFor your own agent and model, use fork instead of a profile, including\nfor review.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -235,7 +235,9 @@
       "mention": "(@%s is the %s session \"%s\"; read it with the emacs session_read tool.)",
       "profileHeader": "Profiles, by cost from minimal through low, medium and high to premium:\n",
       "handlePrompt": "Name this coding conversation with a short English handle: one or two lowercase words joined by '-', at most 16 characters, about its topic. Reply with the handle only.\n\nFirst message:\n",
-      "task": "Your task:\n"
+      "task": "Your task:\n",
+      "forkAgents": "  %s sessions can fork.",
+      "startSummary": "- Subagent profiles here, cheapest first: %s.  session_start describes each."
     }
   },
   "usage": {

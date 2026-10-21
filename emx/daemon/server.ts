@@ -479,10 +479,10 @@ export class DaemonServer {
     if (method === 'mcp/hello') {
       if (this.#mcp.has(connection)) invalid('MCP connection is already bound to a session')
       const session = string(object(value).session, 'session')
-      this.#session({ id: session })
+      const bound = this.#session({ id: session })
       if (connection === this.client) invalid('An editor connection cannot become an MCP connection')
       this.#mcp.set(connection, session)
-      return { remote: !!this.outbox }
+      return { remote: !!this.outbox, instructions: this.collab.startSummary(bound.root) }
     }
     const mcp = this.#mcp.get(connection)
     if (mcp !== undefined) {

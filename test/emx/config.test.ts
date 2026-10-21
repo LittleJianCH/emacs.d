@@ -23,6 +23,11 @@ test('config validates defaults and rejects malformed policy with a field path',
     { collab: { typo: true } }, { agents: { claude: { executable: '' } } }]) {
     assert.throws(() => validate(merge(defaults(), patch)), /config\./)
   }
+  for (const key of ['startSummary', 'forkAgents']) {
+    const c = defaults()
+    delete c.collab.prompts[key]
+    assert.throws(() => validate(c), { message: `config.collab.prompts.${key}: expected string` })
+  }
 })
 test('config reload retains last good config on JSON and validation errors; deletion resets override', () => {
   const dir = mkdtempSync(join(tmpdir(), 'emx-config-'))

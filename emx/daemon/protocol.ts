@@ -275,7 +275,7 @@ export interface Requests {
   'ping': [{}, HelloResult]
   /** Makes this connection the daemon's Emacs; a previous one gets `replaced`. */
   'hello': [HelloParams, HelloResult]
-  'mcp/hello': [{ session: SessionId }, {}]
+  'mcp/hello': [{ session: SessionId }, { remote: boolean, instructions: string }]
   'mcp/tools': [{}, { tools: EditorTools['tools'] }]
   'mcp/call': [{ name: string, arguments?: Record<string, unknown> }, unknown]
   'config/get': [{}, { config: import('../config.ts').Config, errors: string[] }]

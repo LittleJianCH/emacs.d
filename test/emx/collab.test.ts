@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Collaboration, definitions, profiles, cleanHandle, turns } from '../../emx/daemon/collab.ts'
+import { Collaboration, definitions, profiles, profileCost, startSummary, cleanHandle, turns } from '../../emx/daemon/collab.ts'
 import { Session } from '../../emx/daemon/session.ts'
 import { checkoutRoot, emxRoot } from '../../emx/daemon/paths.ts'
 import { DaemonServer } from '../../emx/daemon/server.ts'
@@ -55,6 +55,51 @@ test('daemon config owns five caller-independent collaboration definitions', () 
   c.agents.dsh.executable = '/does/not/exist'
   assert.ok(!profiles(c).some(([, p]) => p.agent === 'dsh'))
   assert.ok(profiles(c, ['claude']).every(([, p]) => p.agent === 'claude'))
+})
+test('delegation guidance names no profiles and profile descriptions name no other profile', () => {
+  const c = defaults()
+  for (const name of Object.keys(c.profiles)) {
+    assert.ok(!c.collab.startGuidance.includes(name), `startGuidance names ${name}`)
+    for (const [other, p] of Object.entries(c.profiles)) {
+      if (other !== name) assert.ok(!p.description?.includes(name), `${other} names ${name}`)
+    }
+  }
+})
+test('descriptions and summary include only enabled and available profiles and fork agents', () => {
+  const c = defaults()
+  for (const a of Object.values(c.agents)) a.executable = process.execPath
+  const env = { PATH: '' }
+  const description = (enabled?: string[]) => definitions(c, enabled, env).find((t) => t.name === 'session_start')!.description
+  assert.match(description(), /\n  Claude, Codex and DeepSeek sessions can fork\.\n/)
+  c.agents.dsh.executable = '/does/not/exist'
+  const start = description(), summary = startSummary(c, undefined, env)
+  for (const text of [start, summary]) assert.doesNotMatch(text, /coder-flash|explorer-flash|DeepSeek|\{forkAgents\}/)
+  assert.match(start, /\n  Claude and Codex sessions can fork\.\n/)
+  assert.equal(summary, '- Subagent profiles here, cheapest first: explorer (low); coder (medium); reviewer, generalist (high); expert (premium).  session_start describes each.')
+  assert.match(description(['codex']), /\n  Codex sessions can fork\.\n/)
+  assert.doesNotMatch(description(['dsh']), /sessions can fork|\{forkAgents\}/)
+  c.agents.claude.executable = c.agents.codex.executable = '/does/not/exist'
+  assert.doesNotMatch(description(), /sessions can fork|\{forkAgents\}/)
+  assert.equal(startSummary(c, undefined, env), '')
+  assert.equal(startSummary(defaults(), [], env), '')
+  assert.deepEqual(definitions(c, undefined, env), definitions(c, undefined, env))
+})
+test('profiles, rendered lines and summary share stable cost order including unknown costs', () => {
+  const c = defaults()
+  for (const a of Object.values(c.agents)) a.executable = process.execPath
+  const env = { PATH: '' }
+  c.profiles.unpriced = { agent: 'codex' }
+  const expected = ['coder-flash', 'explorer-flash', 'explorer', 'coder', 'reviewer', 'generalist', 'expert', 'unpriced']
+  const renderedNames = () => definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description
+    .split(c.collab.prompts.profileHeader)[1].split('\n').map((line) => line.slice(2, line.indexOf(':')))
+  assert.deepEqual(profiles(c, undefined, env).map(([name]) => name), expected)
+  assert.deepEqual(renderedNames(), expected)
+  assert.equal(profileCost('unpriced', c.profiles.unpriced), 'unknown')
+  assert.equal(startSummary(c, undefined, env), '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); reviewer, generalist (high); expert (premium); unpriced (unknown).  session_start describes each.')
+  c.profiles.explorer.cost = 'premium'
+  assert.deepEqual(renderedNames(), ['coder-flash', 'explorer-flash', 'coder', 'reviewer', 'generalist', 'explorer', 'expert', 'unpriced'])
+  assert.match(startSummary(c, undefined, env), /explorer, expert \(premium\)/)
+  assert.match(definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description, /- explorer: Claude haiku, premium cost\./)
 })
 test('every daemon collaboration tool works; origin and hidden notes survive separately; child closes after mailbox', async () => {
   const t = setup()

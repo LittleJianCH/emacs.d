@@ -618,8 +618,12 @@ configuration and where the caller runs, never on who is calling: a forked
 session must see exactly its parent's tools to keep its prompt cache.
 
 Profiles are filtered by the enabled agents Emacs sends on `hello` and by
-whether their executable is runnable in that place's environment. A daemon
-names a first submission with the configured cheap commands (the agent's own
+whether their executable is runnable in that place's environment. They are
+sorted by `profileCost`, preserving configuration order within a tier.
+`mcp/hello` supplies a short cost-grouped profile summary for MCP instructions.
+MCP has no instructions-changed notification: this summary stays fixed for the MCP process lifetime while tool descriptions update via `tools/list_changed`.
+
+A daemon names a first submission with the configured cheap commands (the agent's own
 `collab.agentHandleCommands[agent]` first, then `collab.handleCommand`),
 cleans the model's answer into a handle, and makes handles unique. The
 session title defaults to the first 80 characters of its first message.
