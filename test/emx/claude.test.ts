@@ -60,6 +60,165 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
   return { dir, file, daemon, client, id, attached, session, calls, send }
 }
 
+async function until(predicate: () => boolean | Promise<boolean>) {
+  const deadline = Date.now() + 5000
+  while (!await predicate()) {
+    assert.ok(Date.now() < deadline, 'condition completes within five seconds')
+    await delay(10)
+  }
+}
+
+for (const trigger of ['background', 'background-assistant']) test(`background completion starts an accounted autonomous turn (${trigger})`, async (t) => {
+  const { client, session, daemon, send } = await setup(t)
+  assert.equal(session.status, 'idle', 'initialize/init does not start a turn')
+  const emitted = t.mock.method(session, 'emit')
+  const from = client.notifications.length
+  await send(trigger)
+  assert.equal(session.status, 'idle')
+  assert.equal(session.busy(), false, 'background work does not block input or collaboration')
+  assert.equal(session.pendingWork(), true)
+  assert.deepEqual(session.info.backgroundTasks, [{ id: 'background-1', description: 'Fixture background command', type: 'local_bash' }])
+  await client.waitFor((n) => n.method === 'info' && n.params.info.backgroundTasks?.length === 0, 5000, 'task list cleared', from)
+  assert.equal(session.status, 'idle', 'wake init alone is not a running turn')
+  assert.equal(session.pendingWork(), true, 'waking bridges the empty task list')
+  await client.waitFor((n) => n.method === 'block/append' && n.params.text === 'FINISHED', 5000, 'autonomous reply', from)
+  const wake = client.notifications.findIndex((n) => n.method === 'block/append' && n.params.text === 'FINISHED')
+  await client.waitFor((n) => n.method === 'status' && n.params.status === 'idle', 5000, 'autonomous turn end', wake)
+  assert.equal(session.pendingWork(), false)
+  assert.deepEqual(client.notifications.slice(from).filter((n) => n.method === 'status').map((n) => n.params.status),
+    ['running', 'idle', 'running', 'idle'])
+  assert.equal(emitted.mock.calls.filter((c) => c.arguments[0].type === 'usage/call').length, 2)
+  assert.equal(emitted.mock.calls.filter((c) => c.arguments[0].type === 'usage/end').length, 2)
+  assert.equal(daemon.usage.report({ range: 'all' }).total.turns, 2)
+  assert.equal(daemon.usage.report({ range: 'all' }).total.tokens, 28)
+  assert.ok(session.blocks.some((b) => b.type === 'notice' && b.notice.kind === 'claude-task-done'
+    && b.notice.args?.description === 'Fixture background command'
+    && b.notice.args.status === 'completed' && b.notice.args.summary === 'Fixture finished'
+    && b.notice.args.autonomous === true))
+  assert.deepEqual(session.info.backgroundTasks, [])
+})
+
+test('hibernate waits for background work and the wake gap, then rearms after the autonomous turn', async (t) => {
+  const { session, client, send, daemon } = await setup(t)
+  // Production config uses whole seconds; use a shorter interval in this test.
+  daemon.configuration.value.sessions.hibernateAfter = 0.04
+  await send('background')
+  await session.hibernate()
+  assert.equal(session.backend.alive(), true, 'explicit hibernate is also guarded')
+  await delay(120)
+  assert.equal(session.backend.alive(), true, 'idle timer cannot kill a background task')
+  await client.waitFor((n) => n.method === 'info' && n.params.info.backgroundTasks?.length === 0)
+  await delay(100)
+  assert.equal(session.backend.alive(), true, 'idle timer cannot kill a waking process')
+  await client.waitFor((n) => n.method === 'block/append' && n.params.text === 'FINISHED')
+  await until(() => !session.backend.alive())
+  assert.equal(session.status, 'idle')
+  assert.equal(session.pendingWork(), false)
+})
+
+test('ambient tasks do not block hibernation', async (t) => {
+  const { session, send } = await setup(t)
+  await send('background-ambient')
+  assert.equal(session.pendingWork(), false)
+  assert.equal((session.info.backgroundTasks as unknown[]).length, 1)
+  await session.hibernate()
+  assert.equal(session.backend.alive(), false)
+  assert.deepEqual(session.info.backgroundTasks, [])
+})
+
+for (const stop of [true, false]) test(`background state clears on ${stop ? 'stop' : 'process exit'}`, async (t) => {
+  const { session, client, id, send } = await setup(t)
+  await send('background')
+  if (stop) await client.request('session/stop', { id })
+  else {
+    await client.request('session/send', { id, text: 'exit' })
+    await until(() => session.status === 'exited')
+  }
+  assert.equal(session.pendingWork(), false)
+  assert.deepEqual(session.info.backgroundTasks, [])
+})
+
+test('missing autonomous wake expires after fifteen seconds and rearms hibernation', async (t) => {
+  const { session, send, client, daemon } = await setup(t)
+  daemon.configuration.value.sessions.hibernateAfter = 0.04
+  const hibernate = t.mock.method(session, 'hibernate')
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    await send('background-no-wake')
+    await client.waitFor((n) => n.method === 'info' && n.params.info.backgroundTasks?.length === 0)
+    assert.equal(session.pendingWork(), true)
+    t.mock.timers.tick(14999)
+    assert.equal(session.pendingWork(), true)
+    t.mock.timers.tick(1)
+    assert.equal(session.pendingWork(), false)
+    t.mock.timers.tick(40)
+    assert.equal(hibernate.mock.callCount(), 1, 'wake timeout rearms the idle timer')
+    await hibernate.mock.calls[0].result
+    assert.equal(session.backend.alive(), false)
+  } finally { t.mock.timers.reset() }
+})
+
+test('prepare defers tool-set and external-source restarts once while background work is pending', async (t) => {
+  const { session, client, file, calls, send } = await setup(t)
+  await send('background')
+  await appendFile(file, JSON.stringify({ type: 'user', uuid: 'external-background', entrypoint: 'cli', message: { content: 'external change' } }) + '\n')
+  client.notify('editor/tools', { tools: editorTools.tools, readOnly: [] })
+  await send('during background')
+  await send('still during background')
+  assert.equal((await calls()).filter((c) => c.type === 'spawn').length, 1)
+  assert.equal(session.blocks.filter((b) => b.type === 'notice' && b.notice.kind === 'claude-restart-deferred').length, 1)
+  await client.waitFor((n) => n.method === 'block/append' && n.params.text === 'FINISHED')
+  await until(() => session.status === 'idle' && !session.pendingWork())
+  await send('after background')
+  assert.equal((await calls()).filter((c) => c.type === 'spawn').length, 2)
+  assert.ok(session.blocks.some((b) => b.type === 'notice' && b.notice.kind === 'restart-for-external'))
+})
+
+for (const duringTurn of [false, true]) test(`effort restart waits for tasks and the wake turn (configured ${duringTurn ? 'during turn' : 'idle'})`, async (t) => {
+  const { session, client, id, calls, send } = await setup(t)
+  await send('background')
+  if (duringTurn) {
+    await client.request('session/send', { id, text: 'hold' })
+    await until(() => session.status === 'running')
+  }
+  await client.request('session/configure', { id, effort: 'high' })
+  if (duringTurn) {
+    await client.request('session/interrupt', { id })
+    await until(() => session.status === 'idle')
+  }
+  assert.equal((await calls()).filter((c) => c.type === 'spawn').length, 1)
+  await client.waitFor((n) => n.method === 'info' && n.params.info.backgroundTasks?.length === 0)
+  assert.equal((await calls()).filter((c) => c.type === 'spawn').length, 1, 'no restart in wake gap')
+  await client.waitFor((n) => n.method === 'block/append' && n.params.text === 'FINISHED')
+  await until(async () => session.status === 'idle' && (await calls()).filter((c) => c.type === 'spawn').length === 2)
+  const spawned = (await calls()).filter((c) => c.type === 'spawn').at(-1)
+  assert.equal(spawned.argv[spawned.argv.indexOf('--effort') + 1], 'high')
+})
+
+test('a send in the wake gap keeps the guard for a deferred effort restart', async (t) => {
+  const { session, client, id, calls, send } = await setup(t)
+  await send('background-slow-wake')
+  await client.waitFor((n) => n.method === 'info' && n.params.info.backgroundTasks?.length === 0)
+  await client.request('session/configure', { id, effort: 'high' })
+  await send('in the wake gap')
+  assert.equal((await calls()).filter((c) => c.type === 'spawn').length, 1, 'user turn end does not restart before the wake')
+  await client.waitFor((n) => n.method === 'block/append' && n.params.text === 'FINISHED')
+  await until(async () => session.status === 'idle' && (await calls()).filter((c) => c.type === 'spawn').length === 2)
+})
+
+test('prepare during an autonomous turn defers a pending restart', async (t) => {
+  const { session, client, id, calls, send } = await setup(t)
+  await send('background-slow-wake')
+  await client.request('session/configure', { id, effort: 'high' })
+  await client.waitFor((n) => n.method === 'block/append' && n.params.text === 'FINISHED')
+  assert.equal(session.status, 'running')
+  assert.equal(session.pendingWork(), false, 'the wake guard ends when the autonomous turn starts')
+  // A send prepared in the wake gap can see the autonomous turn begin meanwhile.
+  await session.backend.prepare!()
+  assert.equal((await calls()).filter((c) => c.type === 'spawn').length, 1)
+  await until(async () => session.status === 'idle' && (await calls()).filter((c) => c.type === 'spawn').length === 2)
+})
+
 const transcript = (count: number) => Array.from({ length: count }, (_, i) => [
   { type: 'user', uuid: `u${i}`, message: { content: `prompt ${i}` } },
   { type: 'assistant', uuid: `a${i}`, message: { content: [{ type: 'thinking', thinking: 'not displayed' }, { type: 'text', text: `reply ${i}` }] } },

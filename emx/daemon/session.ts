@@ -77,6 +77,7 @@ export class Session implements SessionHost {
   #stopped = false
   #hibernateAfter: () => number
   #hibernateTimer?: NodeJS.Timeout
+  #pendingWork = false
   #resolveEnvironment: () => Promise<NodeJS.ProcessEnv>
   #environment?: Promise<NodeJS.ProcessEnv>
 
@@ -117,6 +118,8 @@ export class Session implements SessionHost {
   busy(): boolean {
     return this.#active || ['starting', 'running', 'disconnected'].includes(this.status)
   }
+
+  pendingWork(): boolean { return this.backend.pendingWork?.() ?? false }
 
   /** Lifecycle work can still own a process even when status is idle. */
   get operating(): boolean { return this.#operationCount > 0 }
@@ -241,7 +244,10 @@ export class Session implements SessionHost {
     this.#onChange(summaryChanged)
     this.#onEvent?.(this, event)
     if (event.type === 'status' && event.status === 'idle') this.#drain()
-    if (['status', 'ask/add', 'ask/remove'].includes(event.type)) this.refreshHibernate()
+    const pendingWork = this.pendingWork()
+    const pendingChanged = pendingWork !== this.#pendingWork
+    this.#pendingWork = pendingWork
+    if (pendingChanged || ['status', 'ask/add', 'ask/remove'].includes(event.type)) this.refreshHibernate()
   }
 
   #replace(block: Block): void {
@@ -386,7 +392,7 @@ export class Session implements SessionHost {
   hibernate(): Promise<void> {
     return this.#operate(async () => {
       if (this.#stopped || this.info.parent || this.#active || this.asks.size
-        || this.status !== 'idle' || !this.backend.alive()) return
+        || this.pendingWork() || this.status !== 'idle' || !this.backend.alive()) return
       clearTimeout(this.#hibernateTimer)
       this.#resume = this.resumeId()
       await this.backend.stop()
@@ -398,7 +404,7 @@ export class Session implements SessionHost {
     clearTimeout(this.#hibernateTimer)
     const seconds = this.#hibernateAfter()
     if (!seconds || this.#stopped || this.info.parent || this.#active || this.asks.size
-      || this.status !== 'idle' || !this.backend.alive()) return
+      || this.pendingWork() || this.status !== 'idle' || !this.backend.alive()) return
     this.#hibernateTimer = setTimeout(() => {
       void this.hibernate().catch((error) => this.addBlock({
         id: this.newId('notice'), type: 'notice', notice: {

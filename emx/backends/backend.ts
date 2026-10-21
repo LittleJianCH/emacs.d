@@ -44,6 +44,8 @@ export interface Backend {
   configure(settings: Settings): void | Promise<void>
   stop(): void | Promise<void>
   alive(): boolean
+  /** Idle background work keeps the process alive without blocking new input. */
+  pendingWork?(): boolean
   resumeId(): string | undefined
   /** Republish account readings after a fresh snapshot, never token usage. */
   reattached?(): void

@@ -600,7 +600,9 @@ appended as usual.  Used to load history above what is already shown."
     ('tool (agent-session--format-tool id block))
     ('notice (concat (propertize (plist-get block :text)
                                  'face (or (plist-get block :face) 'agent-session-dim))
-                     "\n"))))
+                     "\n"
+                     (when (consp (plist-get block :fold))
+                       (agent-session--format-fold id (plist-get block :fold)))))))
 
 ;;; Markdown and code highlighting
 
@@ -802,6 +804,15 @@ At most `agent-session-message-head-lines' lines and 600 characters."
        (string-join (seq-take lines agent-session-message-head-lines) "\n")
        600 nil nil "…"))))
 
+(defun agent-session--format-fold (id fold)
+  "Format the fold summary button for block ID, from FOLD data."
+  (concat "  "
+          (make-text-button
+           (concat (if (plist-get fold :collapsed) "▸ " "▾ ")
+                   (propertize (plist-get fold :summary) 'face 'agent-session-dim))
+           nil 'type 'agent-session-fold 'agent-session-block id)
+          "\n"))
+
 (defun agent-session--format-user (id block)
   "Format a user message.
 When the turn is folded, a one-line summary of the process follows below
@@ -834,12 +845,7 @@ When the turn is folded, a one-line summary of the process follows below
                        'face 'agent-session-dim)
                       "\n"))
             (when (consp fold)
-              (concat "  "
-                      (make-text-button
-                       (concat (if (plist-get fold :collapsed) "▸ " "▾ ")
-                               (propertize (plist-get fold :summary) 'face 'agent-session-dim))
-                       nil 'type 'agent-session-fold 'agent-session-block id)
-                      "\n")))))
+              (agent-session--format-fold id fold)))))
 
 (defun agent-session--format-text (session id block)
   "Format an agent reply or thinking.
@@ -1217,10 +1223,19 @@ Clicking the header line folds it; when expanded, the diff or output is shown."
     (overlay-put overlay 'isearch-open-invisible (lambda (o) (overlay-put o 'invisible nil)))
     overlay))
 
-(defun agent-session--fold-turn (session user-id activity limit &optional duration)
-  "Fold the turn starting at user message USER-ID.
+(defun agent-session--turn-start-p (block)
+  "Non-nil if BLOCK begins a turn.
+That is a user message, or a notice marked :turn-start for an autonomous
+turn that has no user message."
+  (or (eq (plist-get block :type) 'user)
+      (and (eq (plist-get block :type) 'notice)
+           (plist-get block :turn-start))))
+
+(defun agent-session--fold-turn (session anchor-id activity limit &optional duration)
+  "Fold the turn starting at ANCHOR-ID.
+ANCHOR-ID is its user message, or a notice that begins an autonomous turn.
 ACTIVITY is the blocks that follow it (in order).  LIMIT is the end of the
-turn (the start of the next user message, or the end of the transcript for
+turn (the start of the next anchor, or the end of the transcript for
 the last turn).  The turn's last agent remark stays visible (an interrupted
 turn may have tool calls after it); the process before and after it is
 folded separately.  Nothing is folded when the process has no tool calls.
@@ -1235,9 +1250,9 @@ DURATION is the turn's elapsed time, used in the summary."
                           (append before after)))
          (start-of (lambda (entry) (marker-position (plist-get (cdr entry) :start)))))
     (if (null tools)
-        (agent-session--update session user-id :fold 'none)
+        (agent-session--update session anchor-id :fold 'none)
       (agent-session--update
-       session user-id
+       session anchor-id
        :fold (list :collapsed t
                    :summary (agent-session--fold-summary tools duration)
                    :overlays
@@ -1254,13 +1269,13 @@ DURATION is the turn's elapsed time, used in the summary."
   "Fold all finished turns that aren't folded yet.
 DURATION is the elapsed time of the latest turn."
   (let ((turns nil) (current nil))
-    ;; Split into turns by user message: ((USER-ID . ACTIVITY) ...)
+    ;; Split into turns by anchor block: ((ANCHOR-ID . ACTIVITY) ...)
     (dolist (entry (agent-session--blocks-in-order session))
       (cond
        ;; Queued messages sit inside the previous turn for now and move to the
        ;; end when sent, so they don't delimit turns.
        ((plist-get (cdr entry) :queued))
-       ((eq (plist-get (cdr entry) :type) 'user)
+       ((agent-session--turn-start-p (cdr entry))
         (when current (push current turns))
         (setq current (list (car entry))))
        (current (setcdr (last current) (list entry)))))
@@ -1268,12 +1283,15 @@ DURATION is the elapsed time of the latest turn."
     (let ((latest (car turns))
           (turns (nreverse turns)))
       (cl-loop for (turn . rest) on turns
-               do (let ((user (agent-session--block session (car turn)))
+               do (let ((anchor (agent-session--block session (car turn)))
                         (limit (if rest
                                    (marker-position
                                     (plist-get (agent-session--block session (caar rest)) :start))
                                  (marker-position (agent-session-tail session)))))
-                    (unless (plist-get user :fold)
+                    ;; Only the latest turn can still grow: a reconnect can apply
+                    ;; idle between an autonomous turn's notice and its reply.
+                    (unless (let ((fold (plist-get anchor :fold)))
+                              (and fold (not (and (eq fold 'none) (eq turn latest)))))
                       (agent-session--fold-turn session (car turn) (cdr turn) limit
                                                 (and (eq turn latest) duration))))))))
 
@@ -1599,10 +1617,12 @@ Questions already answered show their answers."
      (propertize (concat "   C-c C-y " (if answers "继续回答" "回答") " · C-c C-n 不回答\n")
                  'face 'agent-session-dim))))
 
-(defun agent-session-notice (session text &optional face id)
-  "Insert a notice line TEXT with FACE and optional stable ID."
+(defun agent-session-notice (session text &optional face id &rest props)
+  "Insert a notice line TEXT with FACE and optional stable ID.
+PROPS are added to the block, e.g. :turn-start for a notice that begins
+an autonomous turn with no user message."
   (agent-session--new-block session (or id (format "notice-%s" (random)))
-                            (list :type 'notice :text text :face face)))
+                            (append (list :type 'notice :text text :face face) props)))
 
 (defun agent-session-set-info (session &rest props)
   "Update the header-line info PROPS: :model :tokens etc."
@@ -1710,6 +1730,36 @@ Send queued messages when idle."
         (plist-get (agent-session-info session) :model)
         "默认模型")))
 
+(defun agent-session-background-tasks (session)
+  "Running background tasks of SESSION, as a list of plists.
+Backends keep them in the session info under :backgroundTasks; a JSON
+array arrives as a vector.  Each task has :id, :description and :type."
+  (when-let* ((tasks (plist-get (agent-session-info session) :backgroundTasks)))
+    (append tasks nil)))
+
+(defun agent-session--background-tasks-help (tasks)
+  "Tooltip listing the running background TASKS, in order."
+  (concat (format "后台任务 %d 个" (length tasks))
+          (mapconcat
+           (lambda (task)
+             (let ((description (plist-get task :description))
+                   (type (plist-get task :type)))
+               (concat "\n- "
+                       (if (and (stringp description)
+                                (not (string-empty-p description)))
+                           description
+                         "未命名任务")
+                       (if (and (stringp type) (not (string-empty-p type)))
+                           (format "（%s）" type)
+                         ""))))
+           tasks "")))
+
+(defun agent-session--background-tasks-label (tasks)
+  "Compact label for the running background TASKS, with a tooltip."
+  (propertize (format "后台 %d" (length tasks))
+              'face 'agent-session-dim
+              'help-echo (agent-session--background-tasks-help tasks)))
+
 (defun agent-session--mode-line-control (label command help)
   "Clickable mode-line segment LABEL: a mouse click runs COMMAND.
 HELP is the help echo."
@@ -1750,6 +1800,8 @@ HELP is the help echo."
      (when-let* ((queued (length (agent-session-queue session)))
                  ((> queued 0)))
        (propertize (format "  排队 %d" queued) 'face 'agent-session-dim))
+     (when-let* ((tasks (agent-session-background-tasks session)))
+       (concat "  " (agent-session--background-tasks-label tasks)))
      (propertize (format "  %s" (file-name-nondirectory
                                  (directory-file-name (agent-session-root session))))
                  'face 'agent-session-dim)

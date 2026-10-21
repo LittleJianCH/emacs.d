@@ -765,8 +765,8 @@ export class DaemonServer {
         }
         // Recheck after the editor's list request: a turn may have started.
         if (params.idleOnly && [...this.sessions.values()].some((session) =>
-          session.status === 'running' || session.status === 'starting' || session.info.parent)) {
-          throw new RpcError(ErrorCode.InvalidParams, 'Finish active turns, asks and children before restart')
+          session.status === 'running' || session.status === 'starting' || session.info.parent || session.pendingWork())) {
+          throw new RpcError(ErrorCode.InvalidParams, 'Finish active turns, background tasks, asks and children before restart')
         }
         return new Reply({}, () => { void this.stop() })
       }
@@ -857,6 +857,7 @@ export class DaemonServer {
       const add = (reason: string) => waiting.push({ session: session.id, reason })
       if (session.info.parent) add('live child session must close')
       if (session.busy()) add(`session ${session.status}; turn or preparation in flight`)
+      if (session.pendingWork()) add('background task pending')
       if (session.operating) add('session lifecycle operation in flight')
       if (session.asks.size) add('approval or question pending')
       if (session.queue.length) add('queued message pending')

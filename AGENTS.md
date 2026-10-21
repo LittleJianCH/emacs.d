@@ -89,6 +89,8 @@ var/                     runtime state (history, backups, pasted images...); git
   changes and resume for effort changes. Streams native JSONL history in pages,
   follows external clients, and resumes to catch up before sending. Native
   discovery reads bounded title/head/tail data, including Desktop worktrees.
+  Background tasks keep the process alive across idle periods and defer restarts;
+  completion wakes an accounted autonomous turn, with a 15-second wake guard.
 - `emx/backends/codex.ts` — Codex app-server JSON-RPC, approvals, models and
   settings. Injects daemon MCP and preserves developer instructions. A saved
   thread restarts on editor tool changes; ephemeral children keep their process.

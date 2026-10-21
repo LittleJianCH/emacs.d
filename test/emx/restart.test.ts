@@ -16,8 +16,13 @@ async function wait(predicate: () => boolean) {
   assert.ok(predicate(), 'restart completes within five seconds')
 }
 
-async function fixture(stopCollab = true) {
+async function fixture(stopCollab = true, agent = 'echo') {
   const dir = mkdtempSync('/tmp/emx-restart-')
+  const saved = { ...process.env }
+  if (agent === 'claude') {
+    process.env.EMX_CLAUDE_LOG = join(dir, 'cli.jsonl')
+    process.env.EMX_CLAUDE_PROJECTS_DIR = join(dir, 'projects')
+  }
   mkdirSync(join(dir, 'emx'))
   writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({
     collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
@@ -27,14 +32,44 @@ async function fixture(stopCollab = true) {
   await daemon.start()
   const peer = new Connection(createConnection(daemon.socket))
   await peer.request('hello', { client: 'test', version: 'test' })
-  const opened = await peer.request('session/open', { agent: 'echo', root: dir }) as { id: string }
+  const opened = await peer.request('session/open', { agent, root: dir }) as { id: string }
   const session = daemon.sessions.get(opened.id)!
   await wait(() => !session.operating)
   if (stopCollab) daemon.collab.stop() // Synthetic collaboration blockers below are cleared explicitly.
   return { dir, daemon, peer, session, launches, cleanup: async () => {
     peer.socket.destroy(); await daemon.stop(); rmSync(dir, { recursive: true, force: true })
+    if (agent === 'claude') {
+      for (const key of ['EMX_CLAUDE_LOG', 'EMX_CLAUDE_PROJECTS_DIR']) {
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key]
+      }
+    }
   } }
 }
+
+test('restart and idleOnly stop wait for background tasks, the empty wake gap and the autonomous turn', async () => {
+  const f = await fixture(true, 'claude')
+  try {
+    await f.peer.request('session/send', { id: f.session.id, text: 'background' })
+    await wait(() => f.session.status === 'idle' && f.session.pendingWork())
+    assert.equal(f.session.busy(), false)
+    await assert.rejects(f.peer.request('daemon/stop', { idleOnly: true }), /background tasks/)
+    const reply = await f.peer.request('daemon/restart', { version: 'new', runtime: '/new/bin/emx' }) as any
+    assert.equal(reply.status, 'restart_scheduled')
+    assert.ok(reply.waiting.some((w: any) => w.session === f.session.id && w.reason === 'background task pending'))
+    await wait(() => Array.isArray(f.session.info.backgroundTasks) && f.session.info.backgroundTasks.length === 0)
+    assert.equal(f.session.status, 'idle', 'init is not a wake turn')
+    assert.equal(f.session.pendingWork(), true, 'wake guard outlives the task list')
+    await delay(100)
+    assert.equal(f.launches.length, 0)
+    assert.ok(f.daemon.restartBlockers().some((w) => w.reason === 'background task pending'))
+    await wait(() => f.session.blocks.some((b) => b.type === 'text' && b.text === 'FINISHED'))
+    assert.equal(f.launches.length, 0, 'autonomous turn must finish first')
+    await wait(() => f.launches.length === 1)
+    assert.equal(f.session.backend.alive(), false)
+    assert.equal(f.session.pendingWork(), false)
+  } finally { await f.cleanup() }
+})
 
 test('idle live CLI hibernates after the restart reply; current code is left alone', async () => {
   const f = await fixture()

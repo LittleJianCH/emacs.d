@@ -224,6 +224,9 @@ export class ClaudeBackend implements Backend {
   #resume: string | undefined
   #running = false
   #restart = false
+  #restartDeferred = false
+  #tasks = new Map<string, { id: string, description: string, type: string, ambient: boolean }>()
+  #waking: NodeJS.Timeout | undefined
   #external = false
   #readOnly: string[] = []
   #confirmed: Settings = {}
@@ -247,6 +250,40 @@ export class ClaudeBackend implements Backend {
 
   #notice(kind: string, args?: Record<string, string | number | boolean>, level?: 'error' | 'warning'): void {
     this.host.addBlock({ id: this.host.newId('notice'), type: 'notice', notice: { kind, args, level } })
+  }
+  pendingWork(): boolean { return !!this.#waking || [...this.#tasks.values()].some((task) => !task.ambient) }
+
+  #publishTasks(): void {
+    // Publish even if only the waking guard changed, so idle timers are updated.
+    this.host.setInfo({ backgroundTasks: [...this.#tasks.values()].map(({ id, description, type }) => ({ id, description, type })) })
+  }
+  #clearTasks(): void {
+    clearTimeout(this.#waking)
+    this.#waking = undefined
+    this.#tasks.clear()
+    this.#publishTasks()
+  }
+  #beginTurn(): void {
+    if (this.#running || this.#stopped || !this.alive()) return
+    this.#running = true
+    this.host.setStatus('running')
+    if (this.#waking) {
+      clearTimeout(this.#waking)
+      this.#waking = undefined
+      this.#publishTasks()
+    }
+  }
+  #deferRestart(): void {
+    if (!this.#restartDeferred) this.#notice('claude-restart-deferred')
+    this.#restartDeferred = true
+  }
+  #maybeRestart(): boolean {
+    if (!this.#restart || this.#running || this.pendingWork() || this.#stopped || !this.alive()) return false
+    this.#restart = false
+    void this.host.restart().catch((error) => {
+      this.#notice('backend-error', { message: String(error) }, 'error'); this.host.setStatus('exited')
+    })
+    return true
   }
   #write(message: unknown): void { this.#process?.stdin.write(JSON.stringify(message) + '\n') }
   #control(request: object): Promise<any> {
@@ -302,6 +339,7 @@ export class ClaudeBackend implements Backend {
       if (this.#process !== child) return
       this.#process = undefined
       this.#running = false
+      this.#clearTasks()
       for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(error ?? new Error('Claude exited')) }
       this.#pending.clear()
       this.host.emit({ type: 'usage/end' })
@@ -405,10 +443,11 @@ export class ClaudeBackend implements Backend {
           this.#confirmed.effort = previous.effort
           this.host.emit({ type: 'settings', settings: { effort: previous.effort ?? null } })
           this.#notice('claude-child-effort', undefined, 'error')
-        } else if (this.#running) {
+        } else if (this.#running || this.pendingWork()) {
           this.#confirmed.effort = settings.effort ?? null
           this.#restart = true
-          this.#notice('effort-after-turn')
+          if (this.pendingWork()) this.#deferRestart()
+          else this.#notice('effort-after-turn')
         } else await this.#restartProcess()
       }
     } catch (error) {
@@ -421,10 +460,26 @@ export class ClaudeBackend implements Backend {
     await this.#kill()
     await this.start(this.#resume)
     this.#restart = false
+    this.#restartDeferred = false
   }
+
+  /** An autonomous turn can begin while a send is still being prepared. */
+  #holding(): boolean { return this.#running || this.pendingWork() }
 
   async prepare(): Promise<void> {
     await this.#syncSoon()
+    const toolsChanged = (): boolean => !this.host.info.parent
+      && JSON.stringify(this.#readOnly) !== JSON.stringify(this.host.editorTools().readOnly)
+    // Keep the external-source flag and old tool snapshot: both are retried on
+    // the next prepare, without sacrificing this process's background work or
+    // an autonomous turn that began during preparation.
+    const defer = (): boolean => {
+      if (!this.#holding()) return false
+      if (this.#external || this.#restart || toolsChanged()) this.#deferRestart()
+      return true
+    }
+    if (defer()) return
+    this.#restartDeferred = false
     if (this.#external) {
       if (this.host.info.parent) throw new Error('Cannot resume a non-persistent Claude child')
       this.#external = false
@@ -432,8 +487,12 @@ export class ClaudeBackend implements Backend {
       this.#notice('restart-for-external')
       await this.#restartProcess()
     }
-    while (!this.host.info.parent
-      && JSON.stringify(this.#readOnly) !== JSON.stringify(this.host.editorTools().readOnly)) {
+    if (this.#restart) {
+      if (defer()) return
+      await this.#restartProcess()
+    }
+    while (toolsChanged()) {
+      if (defer()) return
       await this.#restartProcess()
     }
   }
@@ -451,6 +510,7 @@ export class ClaudeBackend implements Backend {
     // arrive as soon as session/send returns, while preparation is still busy.
     this.#running = true
     this.host.setStatus('running')
+    // Keep any wake guard: this turn can end before the CLI's autonomous one starts.
     const task = this.#send(text, images, block).catch((error) => {
       this.#running = false
       throw error
@@ -507,13 +567,43 @@ export class ClaudeBackend implements Backend {
           this.#resume = message.session_id
           this.host.setInfo({ sessionId: this.#resume, model: message.model })
           void this.#watchFile()
+        } else if (message.subtype === 'background_tasks_changed') {
+          this.#tasks.clear()
+          for (const task of Array.isArray(message.tasks) ? message.tasks : []) {
+            if (typeof task.task_id !== 'string') continue
+            this.#tasks.set(task.task_id, { id: task.task_id,
+              description: typeof task.description === 'string' ? task.description : '',
+              type: typeof task.task_type === 'string' ? task.task_type : '', ambient: task.ambient === true })
+          }
+          this.#publishTasks()
+          this.#maybeRestart()
+        } else if (message.subtype === 'task_notification') {
+          const task = this.#tasks.get(message.task_id)
+          // Idle completion wakes a turn of its own; mid-turn it joins the current one.
+          const autonomous = !this.#running && !this.#stopped && this.alive()
+          if (autonomous) {
+            clearTimeout(this.#waking)
+            this.#waking = setTimeout(() => {
+              this.#waking = undefined
+              this.#publishTasks()
+              this.#maybeRestart()
+            }, 15000)
+            this.#waking.unref()
+            this.#publishTasks()
+          }
+          this.#notice('claude-task-done', {
+            description: task?.description ?? '',
+            status: typeof message.status === 'string' ? message.status : '',
+            summary: typeof message.summary === 'string' ? message.summary : '',
+            autonomous,
+          })
         }
         break
       case 'stream_event': {
         const event = message.event
         const id = `${this.#messageId}-${event.index}`
         switch (event.type) {
-          case 'message_start': this.#messageId = event.message.id; this.#usage(event.message.usage); break
+          case 'message_start': this.#beginTurn(); this.#messageId = event.message.id; this.#usage(event.message.usage); break
           case 'message_delta': this.#usage(event.usage); break
           case 'content_block_start': {
             const part = event.content_block
@@ -531,6 +621,7 @@ export class ClaudeBackend implements Backend {
         break
       }
       case 'assistant':
+        this.#beginTurn()
         for (const part of message.message?.content ?? []) if (part.type === 'tool_use') {
           const view = toolView(this.host.root, part.name, part.input)
           if (this.host.blocks.some((b) => b.id === part.id)) this.host.update(part.id, { view })
@@ -561,12 +652,7 @@ export class ClaudeBackend implements Backend {
         this.#running = false
         void this.#watchFile()
         // Keep the session non-idle until the deferred restart has completed.
-        if (this.#restart) {
-          this.#restart = false
-          void this.host.restart().catch((error) => {
-            this.#notice('backend-error', { message: String(error) }, 'error'); this.host.setStatus('exited')
-          })
-        } else this.host.setStatus('idle')
+        if (!this.#maybeRestart()) this.host.setStatus('idle')
         break
     }
   }
@@ -639,6 +725,7 @@ export class ClaudeBackend implements Backend {
     const child = this.#process
     if (!child) return
     this.#process = undefined
+    this.#clearTasks()
     for (const p of this.#pending.values()) { clearTimeout(p.timer); p.reject(new Error('Claude stopped')) }
     this.#pending.clear()
     const closed = once(child, 'close').catch(() => {})
@@ -648,6 +735,7 @@ export class ClaudeBackend implements Backend {
   }
   async stop(): Promise<void> {
     this.#stopped = true
+    this.#clearTasks()
     this.#watch?.close(); this.#watch = undefined
     if (this.#timer) clearTimeout(this.#timer)
     this.#timer = undefined

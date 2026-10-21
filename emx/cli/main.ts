@@ -41,7 +41,8 @@ function help(name?: string): string {
 // does), so they only say when to reach for each tool; how to use it belongs in the
 // tool's own description.
 const MCP_HEAD = `Your session is hosted in the user's Emacs: this conversation is an Emacs buffer, and these tools operate that Emacs.
-- When the user means the current page, window, input box or editor, that is Emacs unless they name another app: call context first.`
+- When the user means the current page, window, input box or editor, that is Emacs unless they name another app: call context first.
+- Long-running commands, when your Bash tool has run_in_background: use it rather than a detached shell waiter; this session's process stays alive while they run, and their completion starts a new turn for you to report back.`
 
 const MCP_BODY = `
 - Formatted content (option comparisons, plans, review results, diagrams, progress):

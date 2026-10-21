@@ -311,6 +311,32 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
      (agent-session-test--type "/default")
      (should (eq (agent-session-setting agent-session--current :mode) 'full)))))
 
+(ert-deftest agent-session-test-background-tasks ()
+  "Running background tasks show a compact indicator while some run."
+  (agent-session-test--with-session
+   (let* ((session agent-session--current)
+          (buffer (current-buffer)))
+     (should-not (string-match-p "后台" (agent-session-test--mode-line)))
+     (agent-session-set-info
+      session :backgroundTasks
+      (vector '(:id "a" :description "cargo test" :type "bash")
+              '(:id "b" :description "npm run build" :type "bash")))
+     (should (string-match-p "后台 2" (agent-session-test--mode-line)))
+     (let* ((line (agent-session--mode-line session))
+            (help (get-text-property (string-match "后台" line) 'help-echo line)))
+       (should (string-match-p "cargo test" help))
+       (should (string-match-p "npm run build" help)))
+     ;; The sidebar shows it next to the status with the same tooltip.
+     (with-temp-buffer
+       (agent-session-list--insert-live buffer "  ")
+       (let ((text (buffer-string)))
+         (should (string-match-p "空闲.*后台 2.*Echo" text))
+         (should (string-match-p "cargo test"
+                                 (get-text-property (string-match "后台" text)
+                                                    'help-echo text)))))
+     (agent-session-set-info session :backgroundTasks (vector))
+     (should-not (string-match-p "后台" (agent-session-test--mode-line))))))
+
 (ert-deftest agent-session-test-approval ()
   "Pending requests show only in the footer.
 The transcript only marks waiting and the outcome on the related tool."
@@ -446,6 +472,50 @@ The summary can be expanded."
      ;; Next turn: earlier folds are untouched; the new turn folds too when it ends
      (agent-session-test--type "第二个问题")
      (should (string-match-p "收到：第二个问题" (agent-session-test--visible-transcript))))))
+
+(ert-deftest agent-session-test-autonomous-turn ()
+  "A turn that starts with a notice folds, marks unread and keeps its reply."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     (agent-session-set-status session 'running)
+     (agent-session-notice session "后台任务完成：测试" 'agent-session-dim
+                           "task-done" :turn-start t)
+     (agent-session-tool session "c1" :kind 'command :title "cargo test" :status 'ok)
+     (agent-session-text session "a1" "全部通过。")
+     (agent-session-text-done session "a1")
+     ;; The session isn't displayed: the finished turn is marked unread.
+     (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+       (agent-session-set-status session 'idle))
+     (should (eq (agent-session-status session) 'idle))
+     (should (plist-get (agent-session-info session) :unread))
+     (let ((visible (agent-session-test--visible-transcript)))
+       (should (string-match-p "后台任务完成：测试" visible))
+       (should (string-match-p "执行了 1 个操作" visible))
+       (should (string-match-p "全部通过。" visible))
+       (should-not (string-match-p "cargo test" visible)))
+     ;; Expanding the notice's summary shows the folded step.
+     (goto-char (point-min))
+     (search-forward "执行了")
+     (push-button (button-start (button-at (point))))
+     (should (string-match-p "cargo test" (agent-session-test--visible-transcript))))))
+
+(ert-deftest agent-session-test-autonomous-turn-after-idle-replay ()
+  "An autonomous turn replayed as idle before its reply still folds later."
+  (agent-session-test--with-session
+   (let ((session agent-session--current))
+     ;; Reconnect in the wake gap: the notice arrives, then the idle status.
+     (agent-session-notice session "后台任务完成：测试" 'agent-session-dim
+                           "task-done" :turn-start t)
+     (agent-session-set-status session 'idle)
+     (should (eq (plist-get (agent-session--block session "task-done") :fold) 'none))
+     (agent-session-set-status session 'running)
+     (agent-session-tool session "c1" :kind 'command :title "cargo test" :status 'ok)
+     (agent-session-text session "a1" "全部通过。")
+     (agent-session-text-done session "a1")
+     (agent-session-set-status session 'idle)
+     (let ((visible (agent-session-test--visible-transcript)))
+       (should (string-match-p "执行了 1 个操作" visible))
+       (should-not (string-match-p "cargo test" visible))))))
 
 (ert-deftest agent-session-test-fold-skips-queued ()
   "A queued message inside the previous turn does not split that turn."

@@ -57,6 +57,23 @@
                    ("claude-desktop" "Claude Desktop")
                    ("cli" "终端中的 Claude Code")
                    (source (or source "其他客户端"))))))
+    ("claude-task-done"
+     . (lambda (args)
+         (let* ((description (plist-get args :description))
+                (summary (plist-get args :summary))
+                (label (pcase (plist-get args :status)
+                         ("completed" "后台任务完成")
+                         ("failed" "后台任务失败")
+                         ("stopped" "后台任务已停止")
+                         (_ "后台任务结束")))
+                (name (if (and (stringp description)
+                               (not (string-empty-p description)))
+                          description
+                        (and (stringp summary)
+                             (not (string-empty-p summary))
+                             summary))))
+           (if name (concat label "：" name) label))))
+    ("claude-restart-deferred" . "后台任务运行中，Emacs 工具更新将在任务结束后生效")
     ("codex-tools-changed" . "Emacs 的工具有更新，重启 Codex 后继续")
     ("codex-config-read-failed" . "读取 Codex 配置失败，未注入 Emacs 环境说明；保留原有指令：%s")
     ("dsh-warning" . "dsh：%s")
@@ -866,10 +883,16 @@ ROLE usage obtains a separate non-exclusive connection."
          (face (if (null format) 'agent-session-dim
                  (pcase (plist-get notice :level)
                    ("error" 'agent-session-error) ("warning" 'warning)
-                   (_ 'agent-session-dim)))))
+                   (_ 'agent-session-dim))))
+         ;; A background task finishing while idle starts an autonomous turn
+         ;; with this notice as its first block: fold that turn here, not on a
+         ;; message.  Mid-turn completions stay inside the current turn.
+         (props (when (and (equal kind "claude-task-done")
+                           (eq (plist-get args :autonomous) t))
+                  (list :turn-start t))))
     (if (agent-session--block session id)
-        (agent-session--update session id :text text :face face)
-      (agent-session-notice session text face id))))
+        (apply #'agent-session--update session id :text text :face face props)
+      (apply #'agent-session-notice session text face id props))))
 
 (defun agent-emx--block (session block)
   "Render a complete wire BLOCK in SESSION."

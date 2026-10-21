@@ -222,11 +222,16 @@ The item is highlighted on mouse hover and opens on click."
 
 (defun agent-session-list--set-help (start end help)
   "Show HELP as the tooltip of the text from START to END.
-Buttons, such as ×, keep their own tooltips."
+Buttons, such as ×, and text marked `agent-session-list-own-help', such as
+the background task indicator, keep their own tooltips."
   (let ((pos start))
     (while (< pos end)
-      (let ((next (next-single-property-change pos 'button nil end)))
-        (unless (get-text-property pos 'button)
+      (let* ((next-button (next-single-property-change pos 'button nil end))
+             (next-own (next-single-property-change
+                        pos 'agent-session-list-own-help nil end))
+             (next (min (or next-button end) (or next-own end))))
+        (unless (or (get-text-property pos 'button)
+                    (get-text-property pos 'agent-session-list-own-help))
           (put-text-property pos next 'help-echo help))
         (setq pos next)))))
 
@@ -259,11 +264,16 @@ HEAD is cut first, so the handle stays readable."
   "Insert the entry of the live session BUFFER, indented by INDENT."
   (let* ((session (buffer-local-value 'agent-session--current buffer))
          (project (agent-session-list--project-name (agent-session-root session)))
+         (tasks (agent-session-background-tasks session))
          (start (point)))
     (agent-session-list--insert-entry
      (list :buffer buffer)
      (agent-session-list--head-line
       (concat indent (agent-session-status-label session)
+              (when tasks
+                (concat "  " (propertize
+                              (agent-session--background-tasks-label tasks)
+                              'agent-session-list-own-help t)))
               (propertize (format "  %s · %s" (agent-session-title session) project)
                           'face 'agent-session-dim))
       (if-let* ((handle (agent-session-handle session)))

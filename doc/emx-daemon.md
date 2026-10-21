@@ -108,6 +108,23 @@ turn or waiting on an approval or question keeps its process. No child is
 hibernated: a child has no resumable transcript of its own, and it closes
 with its task.
 
+Claude's non-ambient background tasks also keep their CLI alive while the session
+is idle, without blocking new messages or `session_ask`. The CLI's authoritative
+`background_tasks_changed` list is published as `info.backgroundTasks` (including
+ambient tasks for display). An idle `task_notification` protects the gap after
+the task list empties until an assistant message or streamed `message_start`
+starts an autonomous turn, or 15 seconds elapse without a wake; a user turn sent
+in the gap keeps the guard, since it can end first. `system/init` alone never
+starts a turn, and a send prepared while the autonomous turn begins defers any
+restart. Autonomous replies use normal status and usage
+accounting; task completion adds a `claude-task-done` notice.
+
+While background work or its wake is pending, Claude defers process replacement
+for effort, editor read-only tool changes and external-client history. A single
+`claude-restart-deferred` notice explains the delay. Effort changes restart after
+both the turn and pending work finish; tool/history changes retry on the next
+send preparation. On stop or CLI exit the task list and wake guard are cleared.
+
 A daemon that loses its editor does not stop its agents. They keep running
 until the daemon stops, their session is stopped, they hibernate, or the
 CLI exits. On a clean stop the daemon flushes the current turn to usage,
@@ -137,7 +154,8 @@ their buffers; recovering history does not start CLIs. The next send resumes eac
 native session with the new code.
 
 If busy, `daemon/restart` records a pending target and returns immediately. The
-old daemon continues serving new requests until every blocker clears: running,
+old daemon continues serving new requests until every blocker clears: background
+tasks or their pending wake (`background task pending`); running,
 starting or disconnected turns/preparation; lifecycle operations; approvals and
 questions; queued messages; live children (including finished children that have
 not closed); child creation; pending `session_ask` replies and mailbox/outgoing

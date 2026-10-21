@@ -107,6 +107,51 @@
                             :fields '(:notice (:kind "named" :args (:name "甲"))))
       (should (equal (plist-get (agent-session--block session "n") :text) "名称：甲")))))
 
+(ert-deftest agent-emx-test-claude-background-notices ()
+  "Claude background task notices carry Chinese wording.
+Only an idle completion, marked autonomous, starts a turn."
+  (agent-emx-test--with-session
+    (agent-emx--notice session "done"
+                       '(:kind "claude-task-done"
+                         :args (:description "npm test" :status "completed" :summary "ok"
+                                :autonomous t)))
+    (should (equal (plist-get (agent-session--block session "done") :text)
+                   "后台任务完成：npm test"))
+    (should (plist-get (agent-session--block session "done") :turn-start))
+    (agent-emx--notice session "mid"
+                       '(:kind "claude-task-done"
+                         :args (:description "npm test" :status "completed" :summary "ok"
+                                :autonomous :false)))
+    (should-not (plist-get (agent-session--block session "mid") :turn-start))
+    (agent-emx--notice session "failed"
+                       '(:kind "claude-task-done"
+                         :args (:description "" :status "failed" :summary "exit 1")))
+    (should (equal (plist-get (agent-session--block session "failed") :text)
+                   "后台任务失败：exit 1"))
+    (agent-emx--notice session "stopped"
+                       '(:kind "claude-task-done"
+                         :args (:description "cargo build" :status "stopped" :summary "")))
+    (should (equal (plist-get (agent-session--block session "stopped") :text)
+                   "后台任务已停止：cargo build"))
+    (agent-emx--notice session "restart"
+                       '(:kind "claude-restart-deferred" :args nil))
+    (should (equal (plist-get (agent-session--block session "restart") :text)
+                   "后台任务运行中，Emacs 工具更新将在任务结束后生效"))))
+
+(ert-deftest agent-emx-test-background-tasks-info ()
+  "Wire arrays of background tasks show as a compact mode-line indicator."
+  (agent-emx-test--with-session
+    (agent-emx--info session
+                     '(:backgroundTasks [(:id "a" :description "cargo test" :type "bash")]))
+    (should (equal (agent-session-background-tasks session)
+                   '((:id "a" :description "cargo test" :type "bash"))))
+    (should (string-match-p "后台 1"
+                            (substring-no-properties (agent-session--mode-line session))))
+    (agent-emx--info session '(:backgroundTasks []))
+    (should-not (agent-session-background-tasks session))
+    (should-not (string-match-p "后台"
+                                (substring-no-properties (agent-session--mode-line session))))))
+
 (ert-deftest agent-emx-test-approval-answer-and-remove ()
   (agent-emx-test--with-session
     (let (sent)

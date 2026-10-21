@@ -60,6 +60,31 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     const text = m.message.content
     if (text === 'exit') process.exit(7)
     if (text === 'hold') { held = true; return }
+    if (typeof text === 'string' && text.startsWith('background')) {
+      const task = { task_id: 'background-1', run_id: 'run-1', task_type: 'local_bash', description: 'Fixture background command',
+        ...(text === 'background-ambient' ? { ambient: true } : {}) }
+      emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [task] })
+      emit({ type: 'system', subtype: 'task_started', ...task, tool_use_id: 'background-tool', is_backgrounded: true })
+      stream('STARTED')
+      finish()
+      setTimeout(() => {
+        emit({ type: 'system', subtype: 'task_updated', task_id: task.task_id })
+        emit({ type: 'system', subtype: 'task_notification', ...task, tool_use_id: 'background-tool', status: 'completed', summary: 'Fixture finished' })
+        emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
+        // Init is deliberately separated from message_start: it must not count
+        // as a turn, and pending work must protect this otherwise empty gap.
+        emit({ type: 'system', subtype: 'init', session_id: id, model })
+        if (text === 'background-no-wake') return
+        // The slow variant leaves room to act in the wake gap and the wake turn.
+        const slow = text === 'background-slow-wake'
+        setTimeout(() => {
+          if (text === 'background-assistant') emit({ type: 'assistant', message: { content: [] } })
+          stream('FINISHED')
+          setTimeout(() => finish(), slow ? 600 : 80)
+        }, slow ? 800 : 200)
+      }, 700)
+      return
+    }
     if (text === 'raw-approval' || text === 'raw-question') {
       active = text
       const input = readFileSync(new URL('./claude-input.json', import.meta.url), 'utf8').trim()
