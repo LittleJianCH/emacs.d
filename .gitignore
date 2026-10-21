@@ -9,3 +9,6 @@
 /url/
 *.elc
 /projects.eld
+
+# emx daemon development dependencies
+/node_modules/

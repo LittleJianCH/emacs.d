@@ -1,0 +1,9 @@
+{
+  "name": "emacs-d",
+  "private": true,
+  "description": "Development dependencies of the emx daemon: types for tsc --noEmit.",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  }
+}

@@ -752,6 +752,11 @@ Runs on a timer, so it never opens a connection."
 Restart what else of the session went down with the connection."
   (ignore backend session))
 
+(cl-defgeneric agent-session-backend-reconnect (backend session)
+  "Begin reconnecting SESSION; return non-nil if handled asynchronously."
+  (ignore backend session)
+  nil)
+
 (defvar agent-session-reattach-functions nil
   "Functions called with a session attached again to its kept agent.")
 
@@ -772,7 +777,9 @@ Signal an error if the host can't be reached."
 
 (defun agent-session-ensure-attached (session)
   "Attach SESSION again if it is disconnected, or signal a user error."
-  (when (eq (agent-session-status session) 'disconnected)
+  (when (and (eq (agent-session-status session) 'disconnected)
+             (not (agent-session-backend-reconnect
+                   (agent-session-backend session) session)))
     (condition-case err
         (agent-session-reattach session)
       (error (user-error "与主机的连接还没恢复：%s" (error-message-string err))))
@@ -1947,10 +1954,10 @@ Questions already answered show their answers."
      (propertize (concat "   C-c C-y " (if answers "继续回答" "回答") " · C-c C-n 不回答\n")
                  'face 'agent-session-dim))))
 
-(defun agent-session-notice (session text &optional face)
-  "Insert a notice line TEXT with FACE into the transcript."
-  (agent-session--new-block session (format "notice-%s" (random)) (list :type 'notice :text text
-                                                                       :face face)))
+(defun agent-session-notice (session text &optional face id)
+  "Insert a notice line TEXT with FACE and optional stable ID."
+  (agent-session--new-block session (or id (format "notice-%s" (random)))
+                            (list :type 'notice :text text :face face)))
 
 (defun agent-session-set-info (session &rest props)
   "Update the header-line info PROPS: :model :tokens etc."
@@ -2014,7 +2021,8 @@ Send queued messages when idle."
       (agent-session--remove-block session (car next))
       (agent-session--new-block session (car next) (list :type 'user :text (cdr next)
                                                          :origin origin :hidden hidden))
-      (agent-session--deliver session (agent-session--with-hidden (cdr next) hidden)))))
+      (agent-session--deliver session (agent-session--with-hidden (cdr next) hidden)
+                              (car next)))))
 
 ;;; Mode line: agent / model / reasoning effort / permission mode / usage / status
 
@@ -2384,11 +2392,16 @@ send; the transcript keeps showing what the user wrote.")
   (dolist (filter agent-session-send-filters text)
     (setq text (funcall filter session text))))
 
-(defun agent-session--deliver (session text)
+(defvar agent-session-outgoing-block nil
+  "Id of the user block for the message currently handed to a backend.
+Bound during send and steer; nil for calls without a displayed message.")
+
+(defun agent-session--deliver (session text &optional block)
   "Hand TEXT to the backend of SESSION for sending."
-  (agent-session-set-status session 'running)
-  (agent-session-backend-send (agent-session-backend session) session
-                              (agent-session--outgoing session text)))
+  (let ((agent-session-outgoing-block block))
+    (agent-session-set-status session 'running)
+    (agent-session-backend-send (agent-session-backend session) session
+                                (agent-session--outgoing session text))))
 
 (defun agent-session--with-hidden (text hidden)
   "TEXT as sent to the agent, followed by HIDDEN, the part not shown."
@@ -2415,7 +2428,7 @@ block in the transcript."
           (setf (agent-session-queue session)
                 (append (agent-session-queue session) (list (cons id text))))
           (agent-session--refresh session))
-      (agent-session--deliver session (agent-session--with-hidden text hidden)))
+      (agent-session--deliver session (agent-session--with-hidden text hidden) id))
     id))
 
 (defun agent-session-send (session text)
@@ -2461,16 +2474,17 @@ doesn't support steering, interrupt the current turn and send TEXT first."
    ;; Local commands like /model run in Emacs as usual.
    ((agent-session--run-local-command session text))
    (t
-    (if (agent-session-backend-steer (agent-session-backend session) session
-                                     (agent-session--outgoing session text))
-        (agent-session--new-block session (format "user-%s" (random))
-                                  (list :type 'user :text text :steer t))
-      (let ((id (format "user-%s" (random))))
-        (agent-session--new-block session id (list :type 'user :text text :queued t))
-        (setf (agent-session-queue session) (cons (cons id text) (agent-session-queue session)))
-        (agent-session-backend-interrupt (agent-session-backend session) session)
-        (agent-session-notice session "该 agent 不支持引导，已中断当前回合，随后发送")))
-    (agent-session--refresh session))))
+    (let ((agent-session-outgoing-block (format "user-%s" (random))))
+      (if (agent-session-backend-steer (agent-session-backend session) session
+                                       (agent-session--outgoing session text))
+          (agent-session--new-block session agent-session-outgoing-block
+                                    (list :type 'user :text text :steer t))
+        (let ((id (format "user-%s" (random))))
+          (agent-session--new-block session id (list :type 'user :text text :queued t))
+          (setf (agent-session-queue session) (cons (cons id text) (agent-session-queue session)))
+          (agent-session-backend-interrupt (agent-session-backend session) session)
+          (agent-session-notice session "该 agent 不支持引导，已中断当前回合，随后发送")))
+      (agent-session--refresh session)))))
 
 (defun agent-session--take-queued (session id)
   "Take ID (default the oldest) out of the queue of SESSION.
@@ -3331,7 +3345,8 @@ With an active region, include its line range."
   "Register agent NAME and define the command agent-session-NAME.
 PLIST: :backend the backend symbol (default NAME), :title the display
 name, :key the key that starts it in `agent-session-command-map',
-:executable the variable naming the program it runs."
+:executable the variable naming the program it runs, :emx-agent the
+daemon's agent name when using the emx backend."
   (declare (indent 1))
   (let ((command (intern (format "agent-session-%s" name)))
         (key (plist-get plist :key)))
@@ -3340,7 +3355,8 @@ name, :key the key that starts it in `agent-session-command-map',
              (list :backend ',(or (plist-get plist :backend) name)
                    :title ,(or (plist-get plist :title) (capitalize (symbol-name name)))
                    :key ,key
-                   :executable ',(plist-get plist :executable)))
+                   :executable ',(plist-get plist :executable)
+                   :emx-agent ,(plist-get plist :emx-agent)))
        (defun ,command (&optional new)
          ,(format "Open a %s session for the current project.
 With a prefix arg, create a new one." name)

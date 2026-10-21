@@ -10,6 +10,7 @@
 //   emx context                      the user's current file, cursor, selection
 //   emx eval '(buffer-list)'         evaluate arbitrary Elisp
 //   emx mcp                          run as a stdio MCP server
+//   emx daemon [--ensure|--stop]      run or manage the session daemon (--var DIR)
 //   emx serve                        run the usage service of agent-usage.el
 //                                    (stdio JSON-RPC; see emx-usage.js)
 //
@@ -323,6 +324,7 @@ function help(name) {
   }
   lines.push('', 'emx help <method>  Show the full description of a method',
              'emx mcp            Run as a stdio MCP server',
+             'emx daemon         Run the session daemon (--var DIR, --ensure, --stop)',
              'emx serve          Run the usage service of agent-usage.el (stdio JSON-RPC)');
   return lines.join('\n');
 }
@@ -454,6 +456,7 @@ function mcpServer() {
 
 async function main() {
   const [method, ...rest] = process.argv.slice(2);
+  if (method === 'daemon') return import('../emx/daemon/main.ts').then((m) => m.main(rest));
   if (method === 'mcp') return mcpServer();
   // The usage service needs no Emacs: it never goes through request().
   if (method === 'serve') return require('./emx-usage.js').serve();

@@ -124,14 +124,14 @@ JSON-RPC 2.0, one JSON object per line, both directions over the socket.
 | `sessions/list` | `{root?}` | live sessions (summary) |
 | `sessions/history` | `{root, agent?}` | resumable past sessions |
 | `session/open` | `{agent, root, resume?, fork?, settings?, parent?}` | `{id}` |
-| `session/attach` | `{id, after?}` | snapshot, then events (below) |
+| `session/attach` | `{id, after?, turns?}` (`turns` defaults to 20) | snapshot, then events (below) |
 | `session/detach` | `{id}` | `{}` |
 | `session/send` | `{id, text, images?}` | `{}` (queued while running) |
 | `session/steer` | `{id, text, images?}` | `{accepted}` |
 | `session/interrupt` | `{id}` | `{}` |
 | `session/configure` | `{id, model?, effort?, mode?}` | `{}` |
 | `session/answer` | `{id, ask, choice?, answers?}` | `{stale?}` |
-| `session/earlier` | `{id, before}` | `{}` (blocks arrive as events) |
+| `session/earlier` | `{id, turns?}` | `{}` (blocks arrive as events) |
 | `session/stop` | `{id}` | `{}` |
 | `config/reload` | `{}` | `{config, errors}` |
 | `usage/report`, `usage/refresh`, `usage/clear` | as `emx serve` today | |

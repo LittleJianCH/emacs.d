@@ -1,0 +1,430 @@
+// server.ts --- one socket, one editor client, and a persistent session table.
+
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
+import type { Server } from 'node:net'
+import { join, resolve } from 'node:path'
+import { backends } from '../backends/backend.ts'
+import { acquireLock } from './lock.ts'
+import { codeVersion, socketPath, stateDir } from './paths.ts'
+import { ErrorCode } from './protocol.ts'
+import type { Answer, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
+import { Connection, Reply, RpcError } from './rpc.ts'
+import { Session } from './session.ts'
+import type { Transcript } from './session.ts'
+
+interface SavedSession {
+  id: string
+  agent: string
+  root: string
+  info: Info
+  settings: Settings
+  resume?: string
+}
+
+export interface ServerOptions {
+  varDir: string
+  idleExit?: number
+  log?: (message: string) => void
+}
+
+function invalid(message: string): never {
+  throw new RpcError(ErrorCode.InvalidParams, message)
+}
+
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('Expected an object')
+  return value as Record<string, unknown>
+}
+
+function string(value: unknown, name: string): string {
+  if (typeof value !== 'string') invalid(`Expected a string: ${name}`)
+  return value
+}
+
+function optionalString(value: unknown, name: string): string | undefined {
+  return value === undefined ? undefined : string(value, name)
+}
+
+function settings(value: unknown): Settings {
+  const params = object(value)
+  const result: Settings = {}
+  for (const key of ['model', 'effort', 'mode'] as const) {
+    if (params[key] === null || typeof params[key] === 'string') result[key] = params[key]
+    else if (params[key] !== undefined) invalid(`Expected a string or null: ${key}`)
+  }
+  return result
+}
+
+function integer(value: unknown, name: string, minimum: number): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
+    invalid(`Expected an integer >= ${minimum}: ${name}`)
+  }
+  return value
+}
+
+export class DaemonServer {
+  readonly varDir: string
+  readonly socket: string
+  readonly server: Server
+  readonly sessions = new Map<string, Session>()
+  readonly version = codeVersion()
+  readonly finished: Promise<void>
+  client: Connection | undefined
+  #connections = new Set<Connection>()
+  #idleExit: number
+  #idleTimer: NodeJS.Timeout | undefined
+  #saveTimer: NodeJS.Timeout | undefined
+  #saveChain: Promise<void> = Promise.resolve()
+  #savePending: Promise<void> | undefined
+  #shutdown: Promise<void> | undefined
+  #stopping = false
+  #releaseLock: (() => void) | undefined
+  #log: (message: string) => void
+  #finish!: () => void
+
+  constructor(options: ServerOptions) {
+    this.varDir = resolve(options.varDir)
+    this.socket = socketPath(this.varDir)
+    this.#idleExit = options.idleExit ?? 900
+    this.#log = options.log ?? (() => {})
+    this.finished = new Promise((resolve) => { this.#finish = resolve })
+    this.server = createServer((socket) => {
+      const connection = new Connection(socket)
+      this.#connections.add(connection)
+      connection.onRequest = (method, params) => this.#request(connection, method, params)
+      connection.onClose = () => {
+        this.#connections.delete(connection)
+        if (this.client === connection) {
+          this.client = undefined
+          for (const session of this.sessions.values()) session.detach()
+        }
+        this.#checkIdle()
+      }
+    })
+    this.server.on('error', (error) => this.#log(`Socket error: ${error.message}`))
+  }
+
+  async start(): Promise<void> {
+    const dir = stateDir(this.varDir)
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    await chmod(dir, 0o700)
+    this.#releaseLock = await acquireLock(dir)
+    try {
+      // Only the lock holder may remove an abandoned socket.
+      await unlink(this.socket).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+      })
+      await this.#restore()
+      await new Promise<void>((resolve, reject) => {
+        this.server.once('error', reject)
+        this.server.listen(this.socket, () => {
+          this.server.off('error', reject)
+          resolve()
+        })
+      })
+      await chmod(this.socket, 0o600)
+      this.#log(`Listening on ${this.socket}`)
+      this.#checkIdle()
+    } catch (error) {
+      await this.stop()
+      throw error
+    }
+  }
+
+  #list(root?: string): SessionSummary[] {
+    return [...this.sessions.values()].filter((session) => root === undefined || session.root === root)
+      .map((session) => session.summary())
+  }
+
+  #changed(): void {
+    this.client?.notify('sessions', { sessions: this.#list() })
+    if (!this.#stopping && this.#saveTimer === undefined) {
+      // Later events share this deadline instead of postponing it.
+      this.#saveTimer = setTimeout(() => {
+        this.#saveTimer = undefined
+        void this.persist().catch((error) => this.#log(`Cannot save sessions: ${error}`))
+      }, 200)
+    }
+    this.#checkIdle()
+  }
+
+  #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
+    return new Session({ ...saved, restored, transcript, onChange: () => this.#changed() })
+  }
+
+  async #restore(): Promise<void> {
+    let data: unknown
+    try {
+      data = JSON.parse(await readFile(join(stateDir(this.varDir), 'sessions.json'), 'utf8'))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.#log(`Cannot load sessions: ${error}`)
+      return
+    }
+    if (!Array.isArray(data)) {
+      this.#log('Cannot load sessions: expected an array')
+      return
+    }
+    for (const entry of data) {
+      try {
+        const record = object(entry)
+        const agent = string(record.agent, 'agent')
+        if (!Object.hasOwn(backends, agent)) throw new Error(`Unknown agent: ${agent}`)
+        const saved: SavedSession = { id: string(record.id, 'id'), agent,
+          root: string(record.root, 'root'), info: object(record.info ?? {}),
+          settings: settings(record.settings ?? {}), resume: optionalString(record.resume, 'resume') }
+        // Session ids are also file names; reject paths in a damaged state table.
+        if (!/^session-[a-zA-Z0-9-]+$/.test(saved.id)) throw new Error('Invalid session id')
+        let transcript: Transcript | undefined
+        try {
+          const data = JSON.parse(await readFile(this.#transcriptFile(saved.id), 'utf8'))
+          if (!Array.isArray(data.blocks) || !Array.isArray(data.queue)) throw new Error('Invalid transcript')
+          transcript = data
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.#log(`Cannot load transcript: ${error}`)
+        }
+        this.sessions.set(saved.id, this.#make(saved, true, transcript))
+      } catch (error) {
+        this.#log(`Ignoring invalid saved session: ${error}`)
+      }
+    }
+  }
+
+  #transcriptFile(id: string): string {
+    return join(stateDir(this.varDir), 'sessions', `${id}.json`)
+  }
+
+  #snapshot(): Map<string, string> {
+    const files = new Map<string, string>()
+    const records: SavedSession[] = []
+    for (const session of this.sessions.values()) {
+      records.push({ id: session.id, agent: session.agent, root: session.root,
+        info: session.info, settings: session.settings, resume: session.resumeId() })
+      files.set(this.#transcriptFile(session.id), JSON.stringify(session.transcript()) + '\n')
+    }
+    // Publish the table after its transcripts.
+    files.set(join(stateDir(this.varDir), 'sessions.json'), JSON.stringify(records) + '\n')
+    return files
+  }
+
+  persist(): Promise<void> {
+    clearTimeout(this.#saveTimer)
+    this.#saveTimer = undefined
+    if (this.#savePending) return this.#savePending
+    const task = this.#saveChain.catch(() => {}).then(async () => {
+      this.#savePending = undefined
+      // Snapshot when the write starts, including changes while it was queued.
+      const files = this.#snapshot()
+      await mkdir(join(stateDir(this.varDir), 'sessions'), { recursive: true, mode: 0o700 })
+      for (const [file, data] of files) {
+        const temp = `${file}.${process.pid}.tmp`
+        await writeFile(temp, data, { mode: 0o600 })
+        await rename(temp, file)
+      }
+    })
+    this.#savePending = task
+    this.#saveChain = task
+    return task
+  }
+
+  #persistSync(): void {
+    mkdirSync(join(stateDir(this.varDir), 'sessions'), { recursive: true, mode: 0o700 })
+    for (const [file, data] of this.#snapshot()) {
+      const temp = `${file}.${process.pid}.tmp`
+      writeFileSync(temp, data, { mode: 0o600 })
+      renameSync(temp, file)
+    }
+  }
+
+  #session(params: Record<string, unknown>): Session {
+    const id = string(params.id, 'id')
+    const session = this.sessions.get(id)
+    if (!session) throw new RpcError(ErrorCode.NoSession, `No such session: ${id}`)
+    return session
+  }
+
+  #message(params: Record<string, unknown>): { text: string, images?: string[], block?: string } {
+    const text = string(params.text, 'text')
+    const block = optionalString(params.block, 'block')
+    if (params.images !== undefined && (!Array.isArray(params.images)
+      || !params.images.every((image) => typeof image === 'string'))) invalid('Expected string[]: images')
+    return { text, images: params.images as string[] | undefined, block }
+  }
+
+  #request(connection: Connection, method: string, value: unknown): unknown {
+    if (method !== 'hello' && method !== 'ping' && method !== 'daemon/stop'
+      && connection !== this.client) {
+      throw new RpcError(ErrorCode.NotClient, 'Say hello to become the client')
+    }
+    const params = object(value)
+    if (this.#stopping) throw new RpcError(ErrorCode.Internal, 'Daemon is stopping')
+    switch (method) {
+      case 'ping': return { daemon: process.pid, version: this.version }
+      case 'hello': {
+        string(params.client, 'client')
+        string(params.version, 'version')
+        if (this.client !== connection) {
+          this.client?.notify('replaced', {})
+          for (const session of this.sessions.values()) session.detach()
+        }
+        this.client = connection
+        this.#checkIdle()
+        return { daemon: process.pid, version: this.version }
+      }
+      case 'sessions/list': return { sessions: this.#list(optionalString(params.root, 'root')) }
+      case 'session/open': {
+        const agent = string(params.agent, 'agent')
+        if (!Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
+        const root = string(params.root, 'root')
+        const resume = optionalString(params.resume, 'resume')
+        const parent = optionalString(params.parent, 'parent')
+        // Native conversation forks are a later migration phase.
+        if (params.fork !== undefined) invalid('Session forks are not supported yet')
+        const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
+          settings: settings(params.settings ?? {}), info: parent ? { parent } : {} })
+        this.sessions.set(session.id, session)
+        return (async () => {
+          try {
+            await session.start()
+          } catch (error) {
+            await session.stop()
+            this.sessions.delete(session.id)
+            this.#changed()
+            throw error
+          }
+          this.#changed()
+          await this.persist()
+          return { id: session.id }
+        })()
+      }
+      case 'session/attach': {
+        const session = this.#session(params)
+        let after: Cursor | undefined
+        if (params.after !== undefined) {
+          const cursor = object(params.after)
+          const seq = integer(cursor.seq, 'after.seq', 0)
+          if (seq === undefined) invalid('Expected after.seq')
+          after = { epoch: string(cursor.epoch, 'after.epoch'), seq }
+        }
+        const turns = integer(params.turns, 'turns', 0)
+        session.notify = (event) => {
+          if (this.client === connection) connection.notify(event.type, event)
+        }
+        const attached = session.attach(after, turns)
+        return new Reply(attached.result, attached.afterWrite)
+      }
+      case 'session/detach': this.#session(params).detach(); return {}
+      case 'session/send': {
+        const session = this.#session(params)
+        const message = this.#message(params)
+        return session.send(message.text, message.images, message.block)
+      }
+      case 'session/steer': {
+        const session = this.#session(params)
+        const message = this.#message(params)
+        return { accepted: session.steer(message.text, message.images, message.block) }
+      }
+      case 'session/interrupt': this.#session(params).interrupt(); return {}
+      case 'session/configure': return this.#session(params).configure(settings(params)).then(() => ({}))
+      case 'session/answer': {
+        const session = this.#session(params)
+        const id = string(params.ask, 'ask')
+        const answer: Answer = {}
+        if (params.choice !== undefined) {
+          if (params.choice !== 'allow' && params.choice !== 'always' && params.choice !== 'deny') {
+            invalid('Invalid approval choice')
+          }
+          answer.choice = params.choice
+        }
+        if (params.answers !== undefined) {
+          if (!Array.isArray(params.answers)) invalid('Expected an array: answers')
+          answer.answers = params.answers.map((input) => {
+            const item = object(input)
+            if (!Array.isArray(item.selected) || !item.selected.every((s) => typeof s === 'string')) {
+              invalid('Expected string[]: selected')
+            }
+            return { selected: item.selected as string[], custom: optionalString(item.custom, 'custom') }
+          })
+        }
+        return session.answer(id, answer)
+      }
+      case 'session/earlier': {
+        const session = this.#session(params)
+        return session.earlier(string(params.before, 'before'), integer(params.turns, 'turns', 0))
+      }
+      case 'session/stop': {
+        const session = this.#session(params)
+        return session.stop().then(async () => {
+          this.sessions.delete(session.id)
+          this.#changed()
+          // Await older writes before deleting, so none can recreate this file.
+          await this.persist()
+          await unlink(this.#transcriptFile(session.id)).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== 'ENOENT') throw error
+          })
+          return {}
+        })
+      }
+      case 'daemon/stop': return new Reply({}, () => { void this.stop() })
+      default: throw new RpcError(ErrorCode.MethodNotFound, `Method not found: ${method}`)
+    }
+  }
+
+  #checkIdle(): void {
+    const busy = this.client !== undefined || [...this.sessions.values()].some((session) => session.backend.alive())
+    if (busy || this.#stopping) {
+      clearTimeout(this.#idleTimer)
+      this.#idleTimer = undefined
+    } else if (this.#idleTimer === undefined) {
+      this.#idleTimer = setTimeout(() => {
+        this.#log('Idle timeout')
+        void this.stop()
+      }, this.#idleExit * 1000)
+    }
+  }
+
+  stop(): Promise<void> {
+    this.#shutdown ??= this.#close()
+    return this.#shutdown
+  }
+
+  async #close(): Promise<void> {
+    this.#stopping = true
+    this.#checkIdle()
+    clearTimeout(this.#saveTimer)
+    try {
+      await this.#saveChain.catch(() => {})
+      // Preserve the queue before stopping backends cancels their pending work.
+      // A restored session has a new epoch, no asks, and starts idle.
+      this.#persistSync()
+    } catch (error) {
+      this.#log(`Cannot save sessions on shutdown: ${error}`)
+    }
+    for (const session of this.sessions.values()) {
+      try { await session.stop() } catch (error) {
+        this.#log(`Cannot stop backend for ${session.id}: ${error}`)
+      }
+    }
+    // end() flushes the daemon/stop response before closing its socket.
+    for (const connection of this.#connections) connection.close()
+    const force = setTimeout(() => {
+      for (const connection of this.#connections) connection.socket.destroy()
+    }, 500)
+    await new Promise<void>((resolve) => this.server.close(() => resolve()))
+    clearTimeout(force)
+    if (this.#releaseLock) {
+      await unlink(this.socket).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') this.#log(`Cannot remove socket: ${error.message}`)
+      })
+      try { this.#releaseLock() } catch (error) {
+        this.#log(`Cannot remove lock: ${error}`)
+      }
+      this.#releaseLock = undefined
+    }
+    this.#log('Stopped')
+    this.#finish()
+  }
+}

@@ -34,6 +34,7 @@ lisp/core/               base layer
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
+  agent-emx.el          backend rendering emx daemon sessions (doc/emx-daemon.md)
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       backend implementation and registration
     dsh/                DeepSeek Harness bridge plugin and profile patches
@@ -41,6 +42,7 @@ lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server), usage service
 bin/emx-usage.js         `emx serve`: usage ledger, quotas, reports, forecasts, quota polls
+emx/                     the emx daemon (TypeScript run by Node directly): protocol, sessions, backends
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
 doc/emx-daemon.md        design of moving agents into an emx daemon (in progress)
@@ -56,7 +58,9 @@ test/init-term-test.el      ERT suite for the terminal module
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
+test/agent-emx-test.el      ERT suite for the emx backend (starts a daemon on a temp var dir)
 test/emx-usage-test.js      node --test suite for `emx serve` (fixtures in test/fixtures/usage/)
+test/emx/                   node --test suites for the emx daemon
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
 
@@ -246,6 +250,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
       -l test/agent-usage-test.el \
+      -l test/agent-emx-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
@@ -267,6 +272,10 @@ with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macr
 `node --check bin/emx` and `node --check bin/emx-usage.js` for the bridge, `node --test
 test/emx-usage-test.js` for the usage service, `node --check
 lisp/agent/backend/dsh/emacs-bridge.mjs` for the dsh plugin.
+
+The emx daemon is checked with `tsc -p .` (needs `npm install` once for
+`@types/node`) and `node --test test/emx/`. Its tests run daemons only on temp
+var dirs, never the default one.
 
 Add or update a regression test for every bug fix and UI behavior change. Tests that
 need the Claude/Codex backends should exercise their pure functions (as the sync and
