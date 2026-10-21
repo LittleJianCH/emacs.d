@@ -199,6 +199,11 @@ Importers take a PID lease under the publication lock and import the
 resolved generation. Cleanup keeps the current, previous and live
 generations. A host install has no sources and imports `dist` directly.
 
+`bin/emx` builds before dispatching every command, including bare CLI help.
+The compiled `cli/main.js` dispatches daemon/MCP or uses the bare emacsclient
+transport. Host installs use the same entry with no compiler or sources.
+The recursive runtime manifest includes all compiled `cli/` modules.
+
 `node bin/emx daemon --manifest` prints the version and the runtime
 manifest without starting a daemon. The check-only compiler is
 `emx/node_modules/.bin/tsc -p emx`.
@@ -1049,7 +1054,10 @@ Chinese. Errors the daemon returns to agents stay English.
 ## Code layout
 
 ```
-bin/emx                  entry: CLI, `emx mcp`, `emx daemon`, build on demand
+bin/emx                  launcher: locate/build and pin dist, import cli/main.js
+emx/cli/main.ts          command dispatch, help and MCP instructions
+emx/cli/args.ts          positional/flag arguments, JSON files and stdin
+emx/cli/emacsclient.ts   bare CLI agent-ui-rpc transport and deferred polling
 emx/config.json          tracked configuration
 emx/config.ts            validation, merge, push, watched reloads
 emx/daemon/              socket server, sessions, events, editor calls, locks

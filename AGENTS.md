@@ -41,8 +41,9 @@ lisp/agent/              shared agent support (see below)
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
-bin/emx                  Node bridge: CLI, MCP server and daemon entry
+bin/emx                  minimal launcher: locate/build dist, import compiled CLI
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
+  cli/                   argument parsing, help, emacsclient transport, daemon/MCP dispatch
   backends/               Claude, Codex, dsh protocol adapters and native history
   usage/                 ledger, quotas, forecasts, polls and live turn accounting
   mcp.ts                 stdio MCP client (requires daemon socket/session binding)
@@ -172,7 +173,9 @@ children retain their original set. Keep flags caller-independent so forks
 share their parent's prompt cache under the same configuration and place.
 `emx mcp` requires `EMX_DAEMON_SOCKET` and `EMX_SESSION`, and uses
 `mcp/hello`, `mcp/tools`, `mcp/call`. The legacy emacsclient MCP transport
-is removed. Bare `bin/emx` CLI commands still use emacsclient explicitly.
+is removed. Bare CLI commands use `emx/cli/emacsclient.ts` and temporary request/response
+files through `agent-ui-rpc`; `emx/cli/main.ts` dispatches daemon and MCP commands.
+Host `config_*` tools live only in `emx/daemon/config-files.ts`.
 Editor calls and deferred polling use the attached daemon connection; MCP
 clients cannot take over the editor role.
 

@@ -91,6 +91,7 @@ test('manifest versions describe runtime bytes and source-free hosts never need 
   const dir = fixture(t)
   const first = JSON.parse((await command(dir)).stdout)
   assert.ok(first.files.includes('emx/dist/package.json'))
+  for (const name of ['main', 'args', 'emacsclient']) assert.ok(first.files.includes(`emx/dist/cli/${name}.js`))
   assert.ok(first.files.every((file: string) => !/\.ts$|node_modules|tsconfig|package-lock|build-stamp/.test(file)))
   const host = install(dir, first)
   assert.equal(fs.existsSync(join(host, 'emx/node_modules')), false)
@@ -103,7 +104,7 @@ test('manifest versions describe runtime bytes and source-free hosts never need 
   }
   fs.appendFileSync(join(dir, 'emx/daemon/main.ts'), '\n// comments do not change emitted code\n')
   assert.equal(JSON.parse((await command(dir)).stdout).version, first.version)
-  fs.appendFileSync(join(dir, 'emx/daemon/main.ts'), '\nvoid "changed runtime"\n')
+  fs.appendFileSync(join(dir, 'emx/cli/main.ts'), '\nvoid "changed CLI runtime"\n')
   assert.notEqual(JSON.parse((await command(dir)).stdout).version, first.version)
   const config = join(dir, 'emx/config.json')
   const value = JSON.parse(fs.readFileSync(config, 'utf8')); value.collab.maxActive++
