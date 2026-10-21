@@ -404,6 +404,40 @@ Wrapped diff lines were hard to read and broke the line-number column."
         (should-error (agent-review--mark-reviewed '("full" . "a.txt")))
         (should-error (agent-review--mark-reviewed "full"))))))
 
+(ert-deftest agent-review-test-redraw-in-unselected-window ()
+  "Redrawing an item shown in a window that is not selected keeps it whole.
+`window-max-chars-per-line' selects the window it measures, which moved
+point to the window's point in the middle of drawing an item: the rest
+was inserted at the item's start, out of order and outside the item."
+  (agent-review-test--with-repo repo
+    (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                       "概览" (agent-review-test--plan)))
+           (comment (agent-review-annotate-lines review agent-review-test--change "为什么改")))
+      (agent-review-test--with-buffer review
+        (let ((other (selected-window))
+              (window (split-window)))
+          (unwind-protect
+              (progn
+                (set-window-buffer window (current-buffer))
+                (set-window-point window (agent-review--find 'agent-review-heading "atomic-1"))
+                ;; The answer arrives while the user works in another window.
+                (agent-review-reply (plist-get review :id) (plist-get comment :id) 1 "回答")
+                (agent-review--refresh (plist-get review :id) "atomic-1")
+                (should (eq (selected-window) other))
+                (let ((pos (point-min)) runs)
+                  (while (< pos (point-max))
+                    (push (get-text-property pos 'agent-review-in) runs)
+                    (setq pos (next-single-property-change pos 'agent-review-in nil (point-max))))
+                  (should (equal (nreverse runs) '(nil "atomic-1" "atomic-2" "atomic-3"))))
+                (goto-char (point-min))
+                (should (search-forward "1. 改第二行" nil t))
+                (should (search-forward "改第二行的原因" nil t))
+                (should (search-forward "+line two" nil t))
+                (should (search-forward "为什么改" nil t))
+                (should (search-forward "回答" nil t))
+                (should (search-forward "2. 改第十八行并加 b" nil t)))
+            (delete-window window)))))))
+
 ;; a.txt has 20 lines; item 1 changes line 2 and item 2 line 18.
 (ert-deftest agent-review-test-expand-gaps ()
   (agent-review-test--with-repo repo

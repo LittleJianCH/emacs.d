@@ -1089,7 +1089,9 @@ review does not keep are highlighted together as a fragment instead."
 (defun agent-review--fill-width ()
   "Columns prose is filled to: the review window's width, at most 100."
   (min 100 (1- (if-let* ((window (get-buffer-window (current-buffer) t)))
-                   (window-max-chars-per-line window)
+                   ;; It selects WINDOW, which moves point to the window's
+                   ;; point: drawing an item would go on at the wrong place.
+                   (save-excursion (window-max-chars-per-line window))
                  81))))
 
 (defun agent-review--fill (text &optional indent)
