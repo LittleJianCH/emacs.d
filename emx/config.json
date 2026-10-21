@@ -26,6 +26,10 @@
     "pi": {
       "title": "Pi",
       "executable": "pi",
+      "extraArgs": [
+        "--tools",
+        "+grep,+find,+ls"
+      ],
       "defaultModel": "opencode-go/kimi-k3",
       "models": {
         "include": [
@@ -57,7 +61,7 @@
     "explorer-flash": {
       "agent": "pi",
       "model": "opencode-go/deepseek-v4.1-flash",
-      "mode": "ask",
+      "mode": "plan",
       "cost": "minimal",
       "description": "Investigations where the question is simple but the reading is long: many or large files, logs, docs.  Doesn't edit."
     },

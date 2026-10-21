@@ -65,6 +65,7 @@ test('new Pi sessions explicitly select a filtered default, advertise models and
   const init = (await requests())[0]
   assert.equal(init.argv[init.argv.indexOf('--model') + 1], 'opencode-go/kimi-k3')
   assert.ok(!init.argv.includes('--thinking'), 'no effort means Pi keeps its own default level')
+  assert.equal(init.argv[init.argv.indexOf('--tools') + 1], '+grep,+find,+ls', 'read-only search tools join the defaults')
   assert.ok(!init.argv.includes('--no-session'))
   assert.ok(!init.argv.includes('--approve'))
   assert.match(init.argv[init.argv.indexOf('-e') + 1], /pi\/emacs-extension.js$/)
