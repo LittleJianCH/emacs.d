@@ -12,6 +12,7 @@ import type { TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { DaemonServer } from '../../emx/daemon/server.ts'
 import { SocketClient } from './client.ts'
+import type { DaemonClient } from './client.ts'
 
 async function open(t: TestContext) {
   const dir = fs.mkdtempSync(join(tmpdir(), 'emx-save-'))
@@ -161,4 +162,49 @@ test('summary changes coalesce to the latest info and identical info does not br
   session.setInfo({ title: 'title-99' })
   await delay(150)
   assert.equal(client.notifications.slice(unchanged).filter((n) => n.method === 'sessions').length, 0)
+})
+
+test('session/open retries share a creation id across pending startup, reconnect and restart', async (t) => {
+  const dir = fs.mkdtempSync(join(tmpdir(), 'emx-open-once-'))
+  fs.mkdirSync(join(dir, 'emx'))
+  fs.writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({
+    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 } }))
+  let daemon = new DaemonServer({ varDir: dir, remote: true })
+  let client: DaemonClient | undefined
+  let release!: (env: NodeJS.ProcessEnv) => void
+  const gate = new Promise<NodeJS.ProcessEnv>((resolve) => { release = resolve })
+  daemon.environments!.get = () => gate
+  try {
+    await daemon.start()
+    client = await SocketClient.connect(daemon.socket)
+    await client.request('hello', { client: 'open-test', version: daemon.version })
+    const params = { creationId: 'client-open-1', agent: 'echo', root: dir }
+    const first = client.request('session/open', params)
+    while (!daemon.sessions.size) await delay(1)
+    const session = [...daemon.sessions.values()][0]
+    const start = t.mock.method(session.backend, 'start')
+    const retry = await client.request('session/open', params)
+    release({ ...process.env })
+    const opened = await first
+    assert.equal(retry.id, opened.id)
+    assert.equal(start.mock.callCount(), 1)
+    await client.close()
+    client = await SocketClient.connect(daemon.socket)
+    const hello = await client.request('hello', { client: 'open-test', version: daemon.version })
+    assert.equal(hello.sessions?.[0].creationId, params.creationId)
+    assert.deepEqual(await client.request('session/open', params), opened)
+    assert.equal(daemon.sessions.size, 1)
+    await client.close(); client = undefined
+    await daemon.stop()
+    daemon = new DaemonServer({ varDir: dir })
+    await daemon.start()
+    client = await SocketClient.connect(daemon.socket)
+    await client.request('hello', { client: 'open-test', version: daemon.version })
+    assert.deepEqual(await client.request('session/open', params), opened)
+    assert.equal(daemon.sessions.size, 1)
+    assert.equal(daemon.sessions.get(opened.id)?.summary().creationId, params.creationId)
+  } finally {
+    release({ ...process.env }); await client?.close(); await daemon.stop()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

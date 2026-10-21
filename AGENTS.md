@@ -48,7 +48,7 @@ emx/                     the emx daemon (TypeScript compiled on demand to genera
   mcp.ts                 stdio MCP client (requires daemon socket/session binding)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
-doc/emx-daemon.md        design of moving agents into an emx daemon (in progress)
+doc/emx-daemon.md        design of the emx daemon, sessions and remote projects
 test/agent-backend-test.el  ERT suite for enabled daemon registrations
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
@@ -102,15 +102,20 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-emx.el` — one client backend for every enabled agent. Connections own
   sockets; `agent-session` holds only view/client state. Events render into the
   existing UI API, with sequence cursors for disconnect/replay and earlier
-  history. The struct removed its process slot and renamed state to client in
+  history. Hello restores live top-level views before children; native resume
+  reuses live daemon sessions. Installed skills travel as backend-neutral
+  session context and are inherited across backend boundaries. The struct removed its process slot and renamed state to client in
   phase 8: this is `restart_required`; never hot-reload that layout change.
 - `agent-emx-remote.el` — content-addressed host runtime install and private
   `ssh -L` ControlMaster transport for all remote sessions. Node 18.17+ (or
-  20.3+) is checked with the project program lookup. Timers only restore local
+  20.3+) is checked in the actual home-directory bootstrap. Repairs publish
+  fresh generations behind a version pointer and retain existing installs.
+  Timers only restore local
   forwards for connected hosts; install, ensure, root expansion, skills and
   uploads run on user action. Host config overrides executables only. Durable
   usage outboxes use sequence acknowledgments. Children remain in the parent's
-  daemon; cross-daemon collaboration is deferred. Tests simulate a host locally.
+  daemon; cross-daemon list/read/ask and replies use Emacs as the hub. Tests
+  simulate a host locally.
 - `agent-remote.el` — shared ControlMaster lookup and input upload helpers.
   No reverse bridge, keeper, relay, per-session emx or byte-offset reattach.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
@@ -122,7 +127,7 @@ var/                     runtime state (history, backups, pasted images...); git
   filesystem stamps or a polling timer. The bare CLI retains `agent-ui-rpc`.
 - `agent-collab.el` — editor-only collaboration: enrich user mentions from
   cached daemon wording and link child progress in the parent's tool block.
-  `agent-emx` adopts child views and routes answers; `agent-session` mirrors
+  `agent-emx` recovers daemon views, routes cross-daemon calls and answers; `agent-session` mirrors
   child asks in the parent's footer. `emx/daemon/collab.ts` owns all five
   `session_*` tools, handles, profiles, forks, children and persisted mailboxes.
   Policy is in `emx/config.json` plus `var/emx/config.json`, with no Lisp
@@ -222,8 +227,9 @@ imports. `bin/emx` invokes the local compiler into a temporary tree, copies
 `emx/dist` to a complete immutable generation (`emx/.dist-build-*`). A source
 stamp skips unchanged builds; competing builders wait under a lock, and a
 failed compile leaves dist intact. Dist and generations are generated and
-git-ignored. Keep old generations while processes may still import them;
-they can be removed once those processes have exited. Hosts receive only the
+git-ignored. Importers pin their resolved generation with a PID lease under
+the publication lock. Publishing also handles real dist directories; cleanup
+keeps the current, previous and live generations. Hosts receive only the
 manifest's dist files, `bin/emx` and dsh plugins, and never need build tools.
 Node 18.17+ (or 20.3+) is required by `AbortSignal.any`; tests themselves use
 this machine's Node with type stripping. Set `EMX_NODE_MIN=/path/to/node`
@@ -266,7 +272,8 @@ plain `load`, it:
 - refuses to load a file whose `cl-defstruct` layout changed (it would break live
   objects, including the `agent-session` you may be running in) and reports
   `restart_required`; slots appended at the end load with a warning, since objects
-  made before lack them. Prefer keeping per-backend state in the `state` plist;
+  made before lack them. Backend state lives in the daemon; the `client` plist
+  holds only the editor's view/connection state;
 - never reloads `init.el` / `early-init.el` (`restart_required`), nor files that only
   depend on a changed file: reload those yourself when they expand a changed macro.
 

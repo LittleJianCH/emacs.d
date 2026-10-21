@@ -46,7 +46,7 @@ test('multiple calls/models count one child turn; zero records and replay never 
   assert.equal((await client.request('usage/report', {range: 'all'})).total.child_turns, 1)
 })
 
-test('detached accounting and process exit flush once; Lisp notifications use the same writer', async (t) => {
+test('detached accounting and process exit flush once; editor requests use the same writer', async (t) => {
   const {daemon, client, id, session, ledger, dir} = await setup(t)
   await client.close()
   session.emit({type: 'usage/call', model: 'crash', usage: call(10)})
@@ -57,8 +57,8 @@ test('detached accounting and process exit flush once; Lisp notifications use th
   const peer = await SocketClient.connect(daemon.socket)
   try {
     await peer.request('hello', {client: 'new-editor', version: daemon.version})
-    peer.notify('usage/record', {record: {agent: 'claude', root: '/rpc:dev:/project/', session: 'lisp', model: 'lisp', input: 3, turns: 1}})
-    peer.notify('usage/quota', {agent: 'dsh', host: 'dev', balance: [{amount: 9, currency: 'CNY'}]})
+    await peer.request('usage/record', {id: 'record', source: 'editor', sequence: 1, record: {agent: 'claude', root: '/rpc:dev:/project/', session: 'lisp', model: 'lisp', input: 3, turns: 1}})
+    await peer.request('usage/quota', {id: 'quota', source: 'editor', sequence: 2, reading: {agent: 'dsh', host: 'dev', balance: [{amount: 9, currency: 'CNY'}]}})
     const report = await peer.request('usage/report', {range: 'all'})
     assert.equal(report.total.tokens, 22)
     assert.equal(report.total.turns, 2)
@@ -150,9 +150,9 @@ test('two usage subscribers do not replace the editor or each other', async (t) 
     assert.equal(hello.capabilities?.usage, 1)
     await assert.rejects(peer.request('sessions/list', {}), /usage/i)
   }
-  assert.deepEqual(await a.request('usage/record', {id: 'a', record: {agent: 'claude', input: 3}}), {id: 'a'})
-  assert.deepEqual(await b.request('usage/record', {id: 'b', record: {agent: 'codex', input: 5}}), {id: 'b'})
-  await a.request('usage/quota', {id: 'q', reading: {agent: 'codex', windows: [{id: 'week', used: 0.5}]}})
+  assert.deepEqual(await a.request('usage/record', {id: 'a', source: 'a', sequence: 1, record: {agent: 'claude', input: 3}}), {id: 'a', source: 'a', sequence: 1})
+  assert.deepEqual(await b.request('usage/record', {id: 'b', source: 'b', sequence: 1, record: {agent: 'codex', input: 5}}), {id: 'b', source: 'b', sequence: 1})
+  await a.request('usage/quota', {id: 'q', source: 'a', sequence: 2, reading: {agent: 'codex', windows: [{id: 'week', used: 0.5}]}})
   for (const peer of [a, b]) await peer.waitFor((n) => n.method === 'usage/quotas' && n.params.quotas.length > 0)
   assert.equal((await a.request('usage/report', {range: 'all'})).total.tokens, 8)
   assert.equal((await client.request('sessions/list', {})).sessions.length, 1)
@@ -160,10 +160,10 @@ test('two usage subscribers do not replace the editor or each other', async (t) 
   for (const peer of [client, a, b]) assert.ok(!peer.notifications.some((n) => n.method === 'replaced'))
 })
 
-test('acknowledged ids dedupe uncertain delivery even after daemon restart', async (t) => {
+test('producer sequences deduplicate uncertain delivery even after daemon restart', async (t) => {
   const {daemon, client, dir, ledger} = await setup(t)
-  const record = {id: 'uncertain-record', record: {agent: 'codex', input: 7}}
-  const quota = {id: 'uncertain-quota', reading: {agent: 'codex', windows: [{id: 'week', used: 0.5}]}}
+  const record = {id: 'uncertain-record', source: 'editor', sequence: 1, record: {agent: 'codex', input: 7}}
+  const quota = {id: 'uncertain-quota', source: 'editor', sequence: 2, reading: {agent: 'codex', windows: [{id: 'week', used: 0.5}]}}
   await client.request('usage/record', record)
   await client.request('usage/quota', quota)
   await client.close()
@@ -173,9 +173,9 @@ test('acknowledged ids dedupe uncertain delivery even after daemon restart', asy
   const peer = await SocketClient.connect(restarted.socket)
   try {
     await peer.request('usage/hello', {})
-    assert.deepEqual(await peer.request('usage/record', record), {id: record.id})
+    assert.deepEqual(await peer.request('usage/record', record), {id: record.id, source: 'editor', sequence: 2})
     const before = readFileSync(join(dir, 'agent-quota.json'), 'utf8')
-    assert.deepEqual(await peer.request('usage/quota', quota), {id: quota.id})
+    assert.deepEqual(await peer.request('usage/quota', quota), {id: quota.id, source: 'editor', sequence: 2})
     assert.equal(readFileSync(join(dir, 'agent-quota.json'), 'utf8'), before)
     assert.equal(ledger().length, 1)
     assert.equal((await peer.request('usage/report', {range: 'all'})).total.tokens, 7)

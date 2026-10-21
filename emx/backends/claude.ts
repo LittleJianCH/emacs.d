@@ -1,3 +1,4 @@
+import { sessionSkills } from './backend.ts'
 // claude.ts --- local Claude Code stream-json peer and streaming transcript reader.
 
 import { spawn } from 'node:child_process'
@@ -283,7 +284,7 @@ export class ClaudeBackend implements Backend {
     this.#resume = resume
     this.#totals.newProcess()
     const desired = { ...this.host.settings }
-    const skills = this.host.info.claude as { skillsDir?: string, supersededSkills?: string[] } | undefined
+    const skills = sessionSkills(this.host)
     const config = configuration(this.host)
     const disallowed = config.disallowedTools ?? defaultDisallowedTools
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
@@ -300,7 +301,9 @@ export class ClaudeBackend implements Backend {
     if (skills?.skillsDir) args.push('--add-dir', skills.skillsDir)
     if (skills?.supersededSkills?.length) args.push('--settings', JSON.stringify({ skillOverrides: Object.fromEntries(skills.supersededSkills.map((s) => [s, 'off'])) }))
     args.push(...config.extraArgs ?? [])
-    const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, env: await this.host.environment?.(), stdio: 'pipe' })
+    const env = await this.host.environment?.()
+    if (this.#stopped) return
+    const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
     child.stderr.resume()

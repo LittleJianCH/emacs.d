@@ -11,13 +11,13 @@ function service(dir: string) {
   return usage
 }
 
-test('backlogs beyond old receipt caches survive apply-before-ack and producer/owner restarts', () => {
+test('large ordered backlogs survive apply-before-ack and producer/owner restarts', () => {
   const dir = fs.mkdtempSync('/tmp/emx-watermarks-')
   const file = join(dir, 'outbox.json')
   try {
-    // Migrate a legacy producer backlog, preserving its receipt ids.
-    const backlog = Array.from({ length: 10001 }, (_, i) => ({ id: 'old-' + i, method: 'record', params: { record: { agent: 'codex', input: 1 } } }))
-    fs.writeFileSync(file, JSON.stringify(backlog))
+    const source = 'producer'
+    const backlog = Array.from({ length: 10001 }, (_, i) => ({ id: 'entry-' + i, source, sequence: i + 1, method: 'record', params: { record: { agent: 'codex', input: 1 } } }))
+    fs.writeFileSync(file, JSON.stringify({ source, sequence: backlog.length, entries: backlog }))
     let outbox = new Outbox(file); outbox.restore()
     let owner = service(dir)
     const deliver = () => {
@@ -54,15 +54,32 @@ test('backlogs beyond old receipt caches survive apply-before-ack and producer/o
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('migration recognizes all legacy ledger ids, including receipts older than 10000', () => {
-  const dir = fs.mkdtempSync('/tmp/emx-receipt-migrate-')
+for (const failed of ['record', 'quota']) test(`a failed ${failed} blocks higher sequences and watermark acknowledgments`, () => {
+  const dir = fs.mkdtempSync('/tmp/emx-gap-')
+  const outbox = new Outbox(join(dir, 'outbox.json'))
+  const owner = service(dir)
   try {
-    fs.writeFileSync(join(dir, 'ledger.jsonl'), Array.from({ length: 10002 }, (_, i) => JSON.stringify({ id: 'legacy-' + i, time: 1, agent: 'codex', input: 1 })).join('\n') + '\n')
-    let owner = service(dir)
-    ;(owner.record as any)({ id: 'legacy-0', source: 'migrated', sequence: 1, record: { input: 1 } })
-    owner.stop(); owner = service(dir)
-    ;(owner.record as any)({ id: 'new-id', source: 'migrated', sequence: 1, record: { input: 1 } })
-    assert.equal(fs.readFileSync(join(dir, 'ledger.jsonl'), 'utf8').trim().split('\n').length, 10002)
-    owner.stop()
-  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+    for (let i = 1; i <= 7; i++) outbox.add(i === 5 ? failed as 'record' | 'quota' : 'record',
+      i === 5 && failed === 'quota' ? { reading: { agent: 'codex', credits: 5 } } : { record: { input: i } })
+    const deliver = (entry: any) => entry.method === 'record' ? owner.record({ ...entry.params, ...entry })
+      : owner.quota(entry.params.reading, entry.id, entry.source, entry.sequence)
+    for (const entry of outbox.entries.slice(0, 4)) { const ack = deliver(entry); outbox.ack(ack.source!, ack.sequence!) }
+    const fifth = outbox.entries[0]
+    // Real filesystem failure at the application boundary, not a mocked record().
+    const blocked = failed === 'record' ? join(dir, 'ledger.jsonl') : join(dir, 'quotas.json')
+    const backup = blocked + '.saved'
+    if (fs.existsSync(blocked)) fs.renameSync(blocked, backup)
+    fs.mkdirSync(blocked)
+    assert.throws(() => deliver(fifth))
+    assert.equal(owner.receipt(undefined, fifth.source).sequence, 4)
+    fs.rmdirSync(blocked)
+    if (fs.existsSync(backup)) fs.renameSync(backup, blocked)
+    assert.throws(() => deliver(outbox.entries[1]), /sequence/i)
+    for (const entry of [...outbox.entries]) { const ack = deliver(entry); outbox.ack(ack.source!, ack.sequence!) }
+    assert.equal(outbox.entries.length, 0)
+    assert.equal(owner.receipt(undefined, fifth.source).sequence, 7)
+    const records = fs.readFileSync(join(dir, 'ledger.jsonl'), 'utf8').trim().split('\n').map((s) => JSON.parse(s))
+    assert.equal(records.length, failed === 'record' ? 7 : 6)
+    assert.equal(records.reduce((sum, r) => sum + r.input, 0), failed === 'record' ? 28 : 23)
+  } finally { owner.stop(); fs.rmSync(dir, { recursive: true, force: true }) }
 })

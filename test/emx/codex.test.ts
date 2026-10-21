@@ -50,7 +50,7 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfi
 test('Codex launches private daemon MCP, skill replacements, modes and instructions', async (t) => {
   const { id, daemon, dir, requests, attached } = await setup(t, {
     settings: { model: 'fake-cheap', effort: 'high', mode: 'auto' },
-    codex: { skillsRoot: '/tmp/skills', supersededSkills: ['atomic-review'] }, parent: 'parent' })
+    skills: { skillsDir: '/tmp/skills', supersededSkills: ['atomic-review'] }, parent: 'parent' })
   const log = await requests(), init = log.find((r) => r.method === 'initialize')
   assert.equal(init.argv[0], 'app-server')
   const overrides = init.argv.filter((_: string, i: number) => init.argv[i - 1] === '-c')

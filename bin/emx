@@ -22,6 +22,7 @@
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
+const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 
@@ -106,14 +107,50 @@ async function buildLock() {
   } finally { fs.unlinkSync(owner); }
 }
 
+const pinnedBuilds = new Set();
+function pinBuild(runtime) {
+  if (!pinnedBuilds.has(runtime)) {
+    const dir = path.join(runtime, '.pids');
+    fs.mkdirSync(dir, { recursive: true });
+    const lease = path.join(dir, String(process.pid));
+    fs.writeFileSync(lease, '');
+    pinnedBuilds.add(runtime);
+    process.once('exit', () => { try { fs.unlinkSync(lease); } catch {} });
+  }
+  return runtime;
+}
+
+function pruneBuilds(current) {
+  let previous;
+  try { previous = fs.readFileSync(path.join(EMX_DIR, '.dist-previous'), 'utf8'); } catch {}
+  for (const name of fs.readdirSync(EMX_DIR)) {
+    if (!name.startsWith('.dist-build-') || name === path.basename(current) || name === previous) continue;
+    const generation = path.join(EMX_DIR, name), pids = path.join(generation, '.pids');
+    let live = false;
+    if (fs.existsSync(pids)) for (const entry of fs.readdirSync(pids)) {
+      const pid = Number(entry);
+      if (!Number.isSafeInteger(pid) || pid <= 0) { live = true; continue; }
+      try { process.kill(pid, 0); live = true; }
+      catch (error) {
+        if (error.code === 'ESRCH') fs.rmSync(path.join(pids, entry), { force: true });
+        else live = true; // Permission errors cannot prove an importer is dead.
+      }
+    }
+    if (!live) fs.rmSync(generation, { recursive: true, force: true });
+  }
+}
+
 async function ensureBuild() {
-  if (!fs.existsSync(path.join(EMX_DIR, 'daemon/main.ts'))) return;
-  if (built(sourceStamp())) return;
+  if (!fs.existsSync(path.join(EMX_DIR, 'daemon/main.ts'))) return DIST;
   const release = await buildLock();
   try {
     for (;;) {
       const stamp = sourceStamp();
-      if (built(stamp)) return;
+      if (built(stamp)) {
+        const runtime = pinBuild(fs.realpathSync(DIST));
+        pruneBuilds(runtime);
+        return runtime;
+      }
       const temp = fs.mkdtempSync(path.join(EMX_DIR, '.dist-stage-'));
       const link = temp + '.link';
       try {
@@ -133,8 +170,15 @@ async function ensureBuild() {
         const generation = temp.replace('.dist-stage-', '.dist-build-');
         fs.renameSync(temp, generation);
         fs.symlinkSync(path.basename(generation), link);
+        let previous;
+        try {
+          previous = path.basename(fs.readlinkSync(DIST));
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
         fs.renameSync(link, DIST);
-        return;
+        if (previous) fs.writeFileSync(path.join(EMX_DIR, '.dist-previous'), previous);
+        const runtime = pinBuild(generation);
+        pruneBuilds(runtime);
+        return runtime;
       } finally {
         fs.rmSync(link, { force: true });
         fs.rmSync(temp, { recursive: true, force: true });
@@ -464,12 +508,12 @@ const MCP_BODY = `
 async function main() {
   const [method, ...rest] = process.argv.slice(2);
   if (method === 'daemon') {
-    await ensureBuild();
-    return import('../emx/dist/daemon/main.js').then((m) => m.main(rest));
+    const runtime = await ensureBuild();
+    return import(pathToFileURL(path.join(runtime, 'daemon/main.js')).href).then((m) => m.main(rest));
   }
   if (method === 'mcp') {
-    await ensureBuild();
-    return import('../emx/dist/mcp.js').then((m) => m.serve(MCP_HEAD + MCP_BODY, VERSION));
+    const runtime = await ensureBuild();
+    return import(pathToFileURL(path.join(runtime, 'mcp.js')).href).then((m) => m.serve(MCP_HEAD + MCP_BODY, VERSION));
   }
   // The usage service needs no Emacs: it never goes through request().
   if (!method || method === 'help' || method === '-h' || method === '--help') {

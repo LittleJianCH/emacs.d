@@ -168,7 +168,7 @@ test('host ensure, config push, live agent cursor replay, editor calls, and usag
     }
     const records = fs.readFileSync(join(local, 'agent-usage.jsonl'), 'utf8').trim().split('\n').map(JSON.parse as any)
     assert.equal(records.length, unique.filter((e) => e.method === 'record').length)
-    for (const entry of unique) await editor.request('usage/ack', { id: entry.id })
+    for (const entry of unique) await editor.request('usage/ack', { source: entry.source, sequence: entry.sequence })
     const outbox = join(home, '.cache/emacs-agent/emx/state', id, 'emx/usage-outbox.json')
     assert.deepEqual(JSON.parse(fs.readFileSync(outbox, 'utf8')).entries, [])
     await editor.request('session/stop', { id: session })
@@ -191,16 +191,16 @@ test('host ensure, config push, live agent cursor replay, editor calls, and usag
   }
 })
 
-test('outbox remains on disk until its individual receipt is acknowledged', () => {
+test('outbox retains the unacknowledged sequence suffix on disk', () => {
   const dir = fs.mkdtempSync('/tmp/emx-outbox-'), file = join(dir, 'outbox.json')
   try {
     const first = new Outbox(file)
     first.add('record', { record: { input: 3 } }); first.add('quota', { reading: { agent: 'codex' } })
     const second = new Outbox(file); second.restore()
     assert.deepEqual(second.entries, first.entries)
-    second.ack(first.entries[1].id)
+    second.ack(first.source, first.entries[0].sequence)
     const third = new Outbox(file); third.restore()
-    assert.deepEqual(third.entries, [first.entries[0]])
+    assert.deepEqual(third.entries, [first.entries[1]])
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -249,8 +249,8 @@ test('delayed remote quota delivery preserves the sampling time and forecast his
     local.initialize({ usageFile: join(dir, 'local.jsonl'), quotaFile: join(dir, 'local.json') })
     host.quota({ agent: 'codex', windows: [{ id: '5h', minutes: 300, used: 0.25, resets: 1000 }] })
     const entry = outbox.entries[0]
-    local.quota({ ...entry.params.reading, host: 'test-host' }, entry.id)
-    local.quota({ ...entry.params.reading, host: 'test-host' }, entry.id)
+    local.quota({ ...entry.params.reading, host: 'test-host' }, entry.id, entry.source, entry.sequence)
+    local.quota({ ...entry.params.reading, host: 'test-host' }, entry.id, entry.source, entry.sequence)
     const reading = JSON.parse(fs.readFileSync(join(dir, 'local.json'), 'utf8'))[0]
     assert.equal(reading.time, 100)
     assert.deepEqual(reading.windows[0].history, [[100, 0.25]])

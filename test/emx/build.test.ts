@@ -1,7 +1,7 @@
 // build.test.ts --- atomic checkout builds and source-free host runtimes.
 import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
-import { execFile, spawnSync } from 'node:child_process'
+import { execFile, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -163,4 +163,44 @@ test('minimum Node runs every compiled module, daemon, config, echo session and 
   assert.equal(mcp.status, 0, mcp.stderr)
   assert.equal(JSON.parse(mcp.stdout).result.serverInfo.name, 'emacs')
   await peer.request('session/stop', { id: session.id })
+})
+
+test('publishing reclaims only unpinned generations', async (t) => {
+  const dir = fixture(t)
+  await command(dir)
+  const pinnedFile = join(dir, 'pinned')
+  const holder = spawn(process.execPath, ['-e', `require(${JSON.stringify(join(dir, 'bin/emx'))}).ensureBuild().then(g=>{
+    require('node:fs').writeFileSync(${JSON.stringify(pinnedFile)},g);setInterval(()=>{},1000)})`],
+  { env: { ...process.env, HOME: dir }, stdio: 'ignore' })
+  t.after(() => holder.kill())
+  const deadline = Date.now() + 10000
+  while (!fs.existsSync(pinnedFile) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+  assert.ok(fs.existsSync(pinnedFile))
+  const pinned = fs.readFileSync(pinnedFile, 'utf8')
+  const source = join(dir, 'emx/daemon/main.ts')
+  for (let i = 0; i < 4; i++) {
+    fs.appendFileSync(source, `\nvoid "generation-${i}"\n`)
+    await command(dir)
+  }
+  assert.ok(fs.existsSync(pinned), 'running importers retain their generation')
+  const generations = () => fs.readdirSync(join(dir, 'emx')).filter((name) => name.startsWith('.dist-build-'))
+  assert.ok(generations().length <= 3, generations().join(','))
+  const closed = new Promise((r) => holder.once('exit', r)); holder.kill(); await closed
+  await command(dir)
+  assert.equal(fs.existsSync(pinned), false)
+  assert.ok(generations().length <= 2)
+})
+
+test('generation cleanup tolerates an importer removing its lease while being probed', async (t) => {
+  const dir = fixture(t)
+  await command(dir)
+  const stale = join(dir, 'emx/.dist-build-raced'), lease = join(stale, '.pids/2147483647')
+  fs.mkdirSync(join(stale, '.pids'), { recursive: true }); fs.writeFileSync(lease, '')
+  // Reproduce exit-handler cleanup between directory listing and ESRCH cleanup.
+  // The real publisher, lease files and OS probe are all exercised.
+  const script = `const fs=require('node:fs'),kill=process.kill;
+    process.kill=function(pid,signal){if(pid===2147483647)fs.rmSync(${JSON.stringify(lease)},{force:true});return kill.call(process,pid,signal)};
+    require(${JSON.stringify(join(dir, 'bin/emx'))}).ensureBuild().catch(e=>{console.error(e);process.exitCode=1});`
+  await exec(process.execPath, ['-e', script], { env: { ...process.env, HOME: dir }, timeout: 20000 })
+  assert.equal(fs.existsSync(stale), false)
 })

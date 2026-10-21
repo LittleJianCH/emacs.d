@@ -1,1148 +1,1034 @@
 # emx daemon: agents outside Emacs
 
-Status: phases 1–8 implemented on `claude/emx-daemon`.
-Every enabled agent session uses the daemon. The three Lisp backend files
-are registration modules only; `my/agents` still chooses enabled agents.
-Cross-daemon collaboration remains deferred. Remote transport is tested
-with a simulated host; actual tramp-rpc/sshd verification remains outstanding.
-Phase 8 changes the session struct once and requires restarting Emacs.
-The phase histories below record the transitional designs at the time.
+Every agent session runs under a long-lived `emx` daemon. Emacs connects to
+the daemon over a Unix socket and keeps the display and the interaction:
+session buffers, input, approvals and questions, canvas pages, review
+buffers, and the editor operations agents call. The daemon owns the agent
+processes, the session state and transcript, approval and collaboration
+policy, configuration, and usage accounting. A remote project's agents run
+under a daemon on their host; Emacs attaches to it the same way.
 
 ## Goal
 
-Move everything about running agents out of Emacs into a long-lived emx
-daemon. Emacs keeps the display and the interaction: session buffers,
-input, the footer's confirmations and questions, canvas pages, review
-buffers, and the editor operations agents call (`open`, `read_buffer`,
-`context`, `eval`, ...).
+Move everything about running an agent out of Emacs: the CLI process, its
+protocol, history replay, retries, policy and accounting. Emacs never parses
+an agent's stream, replays a history or runs a backend's state machine, so a
+busy or broken agent cannot freeze the editor.
 
-What we get:
+What this gives:
 
-- Emacs never parses an agent's stream, replays a history or runs a
-  backend's state machine, so a busy agent can't freeze it. (Today large
-  histories already had to move into python3 scripts for that reason.)
-- Sessions outlive Emacs. Restarting Emacs, a failed reload, or a
-  `cl-defstruct` change that needs a restart no longer kills agents;
-  Emacs attaches again and catches up. The former remote-only keeper has been removed.
-- Policy lives in one place and is tested with `node --test`: approvals,
-  children and their mailbox, concurrency limits, usage. The differences
-  between Claude, Codex and dsh (like dsh's MCP calls needing our own gate)
-  are absorbed by one layer instead of three Lisp files.
-- Profiles, agents and policy become emx configuration, not defcustoms.
+- **Sessions outlive Emacs.** Restarting Emacs, a failed reload, or a
+  `cl-defstruct` change that requires a restart does not kill agents. Emacs
+  reattaches and catches up from its cursor.
+- **One place for policy.** Approvals, children and the mailbox, concurrency
+  limits and usage live in the daemon and are tested with `node --test`. The
+  differences between Claude, Codex and dsh are absorbed by one layer
+  instead of three protocol implementations.
+- **Configuration, not defcustoms.** Agents, profiles, start guidance, limits
+  and polling live in `emx/config.json` and its runtime override.
 
-Non-goals: a second front end (it should become possible, but nothing is
-built for it), changing how sessions look, moving canvas or review UI.
+Non-goals: a second front end (the protocol could make one possible, but
+none exists), changing how sessions look, and moving the canvas or review UI
+out of Emacs.
 
-## Decisions taken
+## Decisions
 
-- **Independent daemon.** It is not a child of Emacs. Emacs connects to it
-  and may come and go.
-- **Agent configuration is emx's.** Agents, profiles (roles), start
-  guidance, limits and approval policy move from `agent-collab-profiles`
-  and friends into an emx config file.
-- **TypeScript, compiled to dist.** A pinned local TypeScript compiler
-  (`npm install --prefix emx`) emits ESM JavaScript into generated, ignored
-  `emx/dist/`, mirroring `emx/`. The build targets ES2022, rewrites `.ts`
-  imports to `.js`, and keeps `erasableSyntaxOnly`. `config.json` is copied
-  into dist alongside a minimal `package.json` declaring ESM. The check-only
-  `emx/node_modules/.bin/tsc -p emx` still covers the TypeScript tests too;
-  tests can run directly with this machine's newer Node. `bin/emx` and the
-  dsh plugin remain JavaScript. Runtime Node is 18.17+ (or 20.3+):
-  `AbortSignal.any` is the limiting API; `structuredClone`, `Array.at`,
-  `findLast`, `Object.hasOwn`, `randomUUID` and promise timers are older.
-  See the [Node 18.17 release notes](https://nodejs.org/en/blog/release/v18.17.0).
-  Node 19 and Node 20.0–20.2 lack that API and are rejected.
-- **A daemon on every host.** A remote project's agents run under a daemon
-  on that host, which Emacs attaches to like the local one (see Remote
-  projects). It replaces the keeper and the MCP relay.
-- **Assumed, to confirm:** canvas rendering and the review UI stay in
-  Emacs; review's data and git work may move later.
+- **An independent daemon per checkout.** The daemon is not a child of
+  Emacs. Emacs connects to it and may come and go; a worktree runs its own
+  daemon and never shares the main checkout's.
+- **One daemon per host for remote projects.** A remote project's agents
+  run under a daemon on that host, one per user, host and client checkout.
+  Emacs attaches to it like the local daemon.
+- **One attached Emacs per daemon.** A daemon serves a single editor, as one
+  Emacs server serves all its frames. A second Emacs saying `hello` takes
+  over and the first is told it was replaced. Agents' MCP clients and the
+  usage connection are not editors and may connect in any number.
+- **The daemon owns policy.** Agents, profiles, approval and collaboration
+  rules, limits and polling intervals are emx configuration. Lisp holds no
+  policy fallbacks; it keeps display preferences.
+- **TypeScript compiled to `emx/dist`.** A pinned local compiler
+  (`npm install --prefix emx`) emits ESM JavaScript for ES2022 into a
+  generated, git-ignored `emx/dist/`. `bin/emx` builds on demand from a
+  source checkout and imports only compiled `.js`; a host install has no
+  sources and imports the installed tree. `bin/emx` and the dsh plugin stay
+  JavaScript.
+- **Node 18.17+ or 20.3+.** `AbortSignal.any` is the limiting API. Node 19
+  and Node 20.0–20.2 are not supported. Host installs check the actual Node
+  in the home-directory bootstrap, independently of project program lookup.
+- **The editor keeps its tools.** New agent-to-Emacs abilities are
+  `agent-ui-defmethod`s reached through `editor/call`; only work that needs
+  no Emacs state (the `config_*` file tools) runs in emx itself.
+- **The UI stays in Emacs.** Canvas pages, review buffers, session buffers
+  and the editor methods remain where they are.
 
-## Processes
+## Processes and lifetime
 
 ```
                  Unix socket (owner-only)
- Emacs  <───────────────────────────────>  emx daemon ── claude -p ...
- (view, input,        JSON-RPC 2.0          (sessions,    codex app-server
-  editor tools)       NDJSON both ways       policy,       dsh + emacs-bridge.mjs
-                                            usage)
-                                              ▲
- agent's MCP client ── emx mcp (stdio) ───────┘  thin client of the daemon
+ Emacs  <────────────────────────────────>  emx daemon ── claude -p ...
+ (view, input,        JSON-RPC 2.0           (sessions,    codex app-server
+  editor tools)       NDJSON both ways        policy,      dsh + emacs-bridge.mjs
+                                              usage)
+                                               ▲
+  agent's MCP client ── emx mcp (stdio) ───────┘  a thin client of the daemon
 ```
 
-- **One daemon per checkout.** Its socket and state live under the
-  checkout's `var/` (`var/emx/daemon.sock`, falling back to
-  `$TMPDIR/emx-<hash of checkout>.sock` when the path is too long for a
-  Unix socket). A worktree therefore runs its own daemon and never touches
-  the one the user's Emacs uses: that is how this branch is developed.
-- **Start:** Emacs runs `emx daemon` detached (`setsid`) when it finds no
-  live socket; a second start finds the socket and exits. `emx daemon
-  --stop` and `M-x` equivalents stop it.
-- **Lifetime:** like tmux, it lives while it has something to keep: an
-  attached client or a live agent process. With neither for
-  `daemon.idleExit` (default 15 minutes) it writes its session table and
-  exits; the next client starts it again and finds the sessions there.
-  Sessions are records, not processes: an idle session's CLI is stopped
-  after `sessions.hibernateAfter` (default 2 hours) and resumed on the
-  next send (`--resume`, thread resume, dsh resume), a few seconds that
-  cost no cache since the prompt cache has expired by then. A session
-  running a turn or waiting on an approval or a question keeps its process.
-  Children keep theirs too: Claude's and Codex's save no transcript
-  (`--no-session-persistence`, ephemeral threads), so they can't resume,
-  and no child is hibernated; they close when done anyway.
-- **Build before entry:** `bin/emx` imports only compiled `.js`, for both
-  daemon and daemon-backed MCP commands. In a checkout it hashes source
-  paths, contents and mtimes (`emx/**/*.ts`, config, tsconfigs, package
-  manifests and the entry itself). An unchanged stamp avoids the compiler.
-  A hard-link owner lock serializes builders, including recovery after a
-  dead owner; the second process rechecks the stamp after waiting. A build
-  goes into `emx/.dist-stage-*`; errors are printed and leave the previous
-  runtime intact. Edits during compilation cause a retry. A successful tree
-  becomes an immutable `.dist-build-*` generation, and renaming a temporary
-  symlink over `emx/dist` publishes it atomically. Old generations remain for
-  processes/imports already using them; remove them after those processes
-  exit. Config defaults take effect after the next build/daemon restart.
-  A host install has no sources and simply imports dist, with no build step.
-  Build explicitly with `node bin/emx daemon --manifest`; check with
-  `emx/node_modules/.bin/tsc -p emx`.
-- **Stale code:** a daemon reports the hash of the built runtime it runs on
-  `hello`. When the client's differs, a daemon with no live agent restarts
-  at once; otherwise the client says so and the daemon restarts once every
-  agent is idle, hibernating them first. Current implementation: `--ensure`
-  compares `codeVersion()` with `ping`; when ping advertises
-  `capabilities.stopIfIdle: 1`, it requests `daemon/stop {ifIdle: true}`.
-  The daemon atomically refuses with `{stopped: false}` if an agent is live
-  or starting (including a pending child start); otherwise it commits to
-  shutdown before returning `{stopped: true}`. Refusal returns `stale: true`.
-  Emacs displays a Chinese notice offering `M-x agent-emx-restart-daemon`. This explicit command requires idle,
-  resumable sessions, persists and stops them, then starts current code; active
-  turns, asks and ephemeral children must finish first. Automatic restart when
-  all agents become idle remains deferred. Daemons without `stopIfIdle`
-  are always left running with `stale: true`; only the explicit restart
-  command may stop them. Probes never take over the editor connection.
-- **One Emacs.** A daemon serves a single Emacs, as one Emacs server
-  serves all its frames and emacsclients. A second Emacs saying `hello`
-  takes over and the first is told it was replaced. Agents' `emx mcp`
-  processes also connect to the socket, any number of them, but only to
-  run tools. Usage producers/subscribers instead say `usage/hello`: any number
-  can publish records/readings and receive quota snapshots without taking over
-  the editor. Only sessions and editor tools require the exclusive role.
-- **Crash:** agent processes die with the daemon (they are its children).
-  The session table (`var/emx/sessions.json`) is written on every change,
-  so the next daemon lists the sessions and resumes them on the next send,
-  as after hibernation. A crash is noticed by the client losing the
-  socket; Emacs starts a daemon again and reattaches.
+### One daemon per checkout
 
-## Session model (owned by the daemon)
+The daemon's socket and state live under the checkout's `var/`:
+`<var>/emx/daemon.sock`, or `$TMPDIR/emx-<hash of var>.sock` when the path
+would exceed the Unix-socket limit (100 bytes; both macOS and Linux allow
+more, macOS is the tighter). `agent-emx-var-directory` chooses `<var>`; the
+default is the checkout's `var/`.
 
-A session record holds what `agent-session` holds today, minus the buffer:
-agent, root, status (`starting`, `idle`, `running`, `disconnected`,
-`exited`), info (model, tokens, title, handle, parent, profile...),
-settings (model, effort, mode), the queue, the transcript, pending asks,
-children, and backend state.
+Emacs starts the daemon with:
 
-The **transcript** is an ordered list of blocks with stable ids:
-`user`, `text` (assistant), `thinking`, `tool`, `notice`. A tool block
-carries a normalized view computed by the backend adapter (what
-`agent-claude--tool-view` and its peers compute today): `kind` (`command`,
-`read`, `edit`, `search`, `web`, `task`, `question`, `plan`, `mcp`,
-`other`), `title`, and per kind `command`, `path`, `diff` (unified diff
-text) or `items` (plan entries with status). Labels are never prose from
-the daemon: see Localization.
+```
+node <checkout>/bin/emx daemon --var <var> --ensure
+```
+
+`--ensure` probes the socket with `ping`, starts a detached daemon if none
+answers, waits up to five seconds and prints
+`{socket, version, pid, started, stale}`. A second ensure reuses a live
+daemon of the same version. `emx daemon --stop` stops it, as do the
+daemon's `SIGTERM`/`SIGINT` handlers. Interactive Emacs runs ensure
+asynchronously; batch Emacs may use `call-process`.
+
+### Exit and hibernation
+
+The daemon lives while it has something to keep: an attached editor, a
+usage-only client, or a live agent process. With none of these for
+`daemon.idleExit` (default 15 minutes) it writes its session table and
+exits; the next client starts it again and finds the sessions there.
+
+Sessions are records, not processes. An idle session's CLI is stopped after
+`sessions.hibernateAfter` (default 2 hours) and resumed on the next send
+(`--resume`, thread resume, or the dsh bridge's resume). A session running a
+turn or waiting on an approval or question keeps its process. No child is
+hibernated: a child has no resumable transcript of its own, and it closes
+with its task.
+
+A daemon that loses its editor does not stop its agents. They keep running
+until the daemon stops, their session is stopped, they hibernate, or the
+CLI exits. On a clean stop the daemon flushes the current turn to usage,
+persists the session table and each transcript, stops the backends, and
+exits. A crash loses the running processes but not the records: the table
+is written on every change (with a short debounce) and synchronously on
+shutdown.
+
+### Stale code and restart
+
+The daemon's version is a hash of its runtime files: `emx/dist/**/*.js`,
+`*.json`, `bin/emx`, and the dsh `.mjs`/`.yml` files. A daemon reports it
+on `hello` and `ping`, and `--ensure` compares it with its own.
+
+When the versions differ, `ensure` asks a daemon that advertises
+`capabilities.stopIfIdle: 1` to stop, atomically, only if no agent is live or
+starting and no ask is pending. If the daemon refuses, `ensure` returns
+`stale: true` and Emacs shows a Chinese notice: the explicit
+`M-x agent-emx-restart-daemon` stops idle top-level sessions, persisting
+their resume ids, starts current code, and the next send resumes them. It
+refuses while a turn is running or starting or a child exists. A daemon
+without `stopIfIdle` is left running.
+Automatic restart when all agents become idle is not implemented; the
+explicit command is the supported path. A probe never takes over the editor
+connection.
+
+### Locks and sockets
+
+One daemon owns a state directory. It publishes `daemon.lock` by hard-linking
+a complete owner record containing its PID, reclaims a lock whose owner is
+gone under a small mutex directory, and removes the socket only while it
+holds the lock. State and socket directories are mode 0700; the socket is
+0600.
+
+A host daemon uses the same lock under
+`~/.cache/emacs-agent/emx/state/<client id>/emx/`. Its socket is
+`~/.cache/emacs-agent/emx/run/<client id>.sock`; when that path is too long it
+uses `$XDG_RUNTIME_DIR/emx-<hash of id>.sock`, or `/tmp/emx-<uid>/` when
+`XDG_RUNTIME_DIR` is unset or also too long. The fallback directory must be
+owned by the user, mode 0700, and not a symlink.
+
+The client id is the first 16 hex digits of SHA-1 of the checkout's real
+path, a NUL, and the machine name. The same worktree and the main checkout
+therefore get separate daemons on one host, and two machines never share
+one. `--client` and `--var` are mutually exclusive; `--stop --client <id>`
+stops only that host/client daemon.
+
+### Build on demand
+
+`bin/emx` imports only compiled `.js` for `emx daemon` and `emx mcp`. In a
+source checkout it hashes the source paths, contents and mtimes of
+`emx/**/*.ts`, the config and tsconfigs, the package manifests, and the entry
+itself. An unchanged stamp skips the compiler.
+
+A hard-link owner lock, with recovery after a dead owner, serializes
+builders; a waiter rechecks the stamp after acquiring the lock. A build goes
+into `emx/.dist-stage-*`; compiler errors are printed and leave the previous
+runtime intact. Edits during compilation cause a retry. A complete tree is
+renamed to an immutable `.dist-build-*` generation, and a temporary symlink
+is renamed over `emx/dist` to publish it atomically. A real `dist` directory
+from a hand-run compiler is first renamed to a retained generation.
+Importers take a PID lease under the publication lock and import the
+resolved generation. Cleanup keeps the current, previous and live
+generations. A host install has no sources and imports `dist` directly.
+
+`node bin/emx daemon --manifest` prints the version and the runtime
+manifest without starting a daemon. The check-only compiler is
+`emx/node_modules/.bin/tsc -p emx`.
+
+## Session model
+
+A session record holds what the session UI needs, minus the buffer: agent,
+root, status, info, settings, capabilities, queue, transcript, pending asks,
+children, and backend state. The daemon assigns the id.
+
+Statuses are `starting`, `idle`, `running`, `disconnected` and `exited`.
+`disconnected` is an editor-side condition for a remote session whose
+transport is down; the agent itself keeps running under its daemon.
+
+- **Info** is open-ended: model, tokens, title, handle, parent,
+  parentSession, profile, native session id, skills context, and the Claude
+  or Codex skill fields retained for process restarts.
+- **Settings** are model, effort, mode and `beforePlan` (the permission mode
+  retained beneath plan mode, including across resume). Null means the
+  agent's default.
+- **Capabilities** are the backend's models (id, name, description, efforts,
+  default effort), modes and slash commands, in the backend's own terms.
+- **The queue** holds messages accepted while a turn runs.
+- **Asks** are pending approvals or questions (below).
+- **The transcript** is an ordered list of blocks with stable ids: `user`
+  (with optional images, image count and origin), `text` (assistant or
+  thinking), `tool` and `notice`.
+
+A tool block carries a normalized view computed by the backend adapter:
+`kind` (`command`, `read`, `edit`, `search`, `web`, `task`, `question`,
+`plan`, `mcp`, `other`), the agent's tool name, a short title, and per kind
+`command`, `path`, a unified `diff`, or plan `items`. The daemon never writes
+UI prose: see Localization.
+
+Sessions persist as `<var>/emx/sessions.json` (id, agent, root, info,
+settings, resume id) and one `<var>/emx/sessions/<id>.json` per transcript
+(blocks, queue, capabilities). Writes are debounced and atomic. Children are
+not persisted: after a daemon crash they have no resumable native
+transcript, so the restored table contains only top-level sessions. A
+restored session is `idle` with a new epoch, no asks and its queued messages;
+its CLI starts on the next send.
 
 ## Protocol
 
 JSON-RPC 2.0, one JSON object per line, both directions over the socket.
+Requests may flow both ways; the contract is `emx/daemon/protocol.ts`.
 
-### Client → daemon
+### Requests
 
 | method | params | result |
 |---|---|---|
-| `hello` | `{client, version, tools?}` | `{daemon, version, config}` |
-| `sessions/list` | `{root?}` | live sessions (summary) |
-| `sessions/history` | `{root, agent?}` | resumable past sessions |
-| `session/open` | `{agent, root, resume?, fork?, settings?, parent?}` | `{id}` |
-| `session/attach` | `{id, after?, turns?}` (`turns` defaults to 20) | snapshot, then events (below) |
+| `ping` | `{}` | `{daemon, version, capabilities, liveAgents}` |
+| `hello` | `{client, version, agents?, config?, tools?}` | `{daemon, version, capabilities, config, sessions}` |
+| `sessions/list` | `{root?}` | `{sessions}` |
+| `sessions/history` | `{agent, root}` | `{items}` |
+| `session/open` | `{agent, root, settings?, resume?, parent?, handle?, skills?, claude?, codex?}` | `{id}` |
+| `session/attach` | `{id, after?, turns?}` | snapshot (below) |
 | `session/detach` | `{id}` | `{}` |
-| `session/send` | `{id, text, images?}` | `{}` (queued while running) |
-| `session/steer` | `{id, text, images?}` | `{accepted}` |
+| `session/send` | `{id, text, images?, block?, handle?}` | `{queued}` |
+| `session/steer` | `{id, text, images?, block?, handle?}` | `{accepted}` |
 | `session/interrupt` | `{id}` | `{}` |
-| `session/configure` | `{id, model?, effort?, mode?}` | `{}` |
-| `session/answer` | `{id, ask, choice?, answers?}` | `{stale?}` |
-| `session/earlier` | `{id, turns?}` | `{}` (blocks arrive as events) |
+| `session/context` | `{id, skills}` | `{}` |
+| `session/configure` | `{id, model?, effort?, mode?, beforePlan?}` | `{}` |
+| `session/answer` | `{id, ask, choice?, answers?}` | `{stale}` |
+| `session/earlier` | `{id, before, turns?}` | `{earlier}` |
 | `session/stop` | `{id}` | `{}` |
-| `config/get` | `{}` | `{config, errors}` |
-| `config/reload` | `{}` | `{config, errors}` |
-| `usage/configure` | `{agents?, pollInterval?, pollers?: {source: {command: argv}}}` | `{quotas}` |
-| `usage/report` | `{range?, filter?, withoutCache?, now?}` | report (unchanged format) |
+| `config/get`, `config/reload` | `{}` | `{config, errors}` |
+| `config/push` | `{config}` | `{config, errors}` (host daemon) |
+| `config/call` | `{method, arguments}` | `string` (local daemon) |
+| `usage/hello` | `{}` | `{daemon, version, capabilities, config}` |
+| `usage/configure` | `{agents?, pollers?, pollInterval?}` | `{quotas}` |
+| `usage/record` | `{id, record, source?, sequence?}` | receipt `{id, source?, sequence}` |
+| `usage/quota` | `{id, reading, source?, sequence?}` | receipt |
+| `usage/ack` | `{source?, sequence?, id?}` | `{}` (host daemon) |
+| `usage/report` | `{range?, filter?, withoutCache?, now?}` | report |
 | `usage/refresh` | `{force?}` | `{}` (polls asynchronously) |
 | `usage/clear` | `{}` | `{}` (keeps quotas) |
+| `collab/list` | `{}` | `{sessions}` |
+| `collab/read` | `{id, last?, before?, tools?}` | text |
+| `collab/ask` | `{id, prompt, route, origin}` | text |
+| `collab/deliver` | `{id, route, mail}` | `{}` |
+| `collab/retry` | `{}` | `{}` |
+| `mcp/hello` | `{session}` | `{remote}` |
+| `mcp/tools` | `{}` | `{tools}` |
+| `mcp/call` | `{name, arguments?}` | method result |
+| `daemon/stop` | `{ifIdle?, idleOnly?}` | `{stopped?}` |
 
-### Daemon → client (notifications, per attached session)
+`hello` is the editor role: it replaces any previous editor, returns the
+session summaries and effective config, and starts a collaboration retry.
+Its reply is followed by a `usage/quotas` snapshot, the host usage outbox
+(when there is one), and the session list. `usage/hello` is a non-exclusive
+usage role restricted to `usage/*` and `ping`. `mcp/hello` binds a
+connection to one existing session. Neither can become the editor.
 
-Every event carries `{session, seq}`; `seq` increases by one per session.
+`session/open` reuses a live top-level session whose native resume id, agent
+and root match instead of starting a second process. The `fork` field in
+`OpenParams` is reserved but rejected; native forks go through
+`session_start context=fork` (Collaboration).
+
+### Events and cursors
+
+Session events are notifications named by their type, with `{session, seq}`
+in the params. `seq` increases by one per event of a session, and a new
+epoch begins when a session is created or restored by another daemon
+process. A seq means nothing without its epoch.
+
+Session events:
 
 - `status {status}`, `info {info}` (changed keys), `settings {settings}`
-- `capabilities {capabilities}`: complete models (id, name, description,
-  efforts, defaultEffort), modes, and slash commands (name, description,
-  hint); also included in `AttachResult` and persisted with the transcript
-- Usage call/end and raw quota readings are internal backend events. The
-  daemon records and merges them before logging editor events; they never
-  go over the socket or replay. Emacs receives only the global quota and
-  report-invalidation notifications below.
-- `block/add {block, after?}` (`after` places it, e.g. earlier history)
-- `block/append {id, text}` (streamed text), `block/done {id}`
-- `block/update {id, ...fields}` (tool result, output, error)
-- `block/remove {ids}` (an abandoned attempt)
-- `ask/add {ask}`, `ask/remove {id, resolution}` (see Approvals)
-- `notice {kind, ...fields}`
-- `queue {items}`, `children {ids}`
-- `usage/quotas {quotas}` (global, also sent after hello)
-- `usage/changed {}` (global, after appending/clearing ledger records)
+- `capabilities {capabilities}` (full replacement)
+- `block/add {block, before?, history?}`
+- `block/append {id, text}` (streamed text or tool output)
+- `block/update {id, fields}`, `block/remove {ids}`
+- `ask/add {ask}`, `ask/remove {id, resolution}`
+- `queue {items}`
+- `history/done {earlier}`
 
-Phase 2 additions are data only: questions carry an optional `intent`
-object unchanged (dsh's `{kind: "plan-review", approve: label}` selects
-Emacs's plan approval UI). Phase 3 removes `OpenParams.mcpServers`:
-the dsh backend builds its own `node <checkout>/bin/emx mcp` spec using
-the daemon socket, daemon session id, cached read-only names and the
-same 1,800,000 ms timeout as the Lisp backend. No editor socket, buffer
-name or stamp path is persisted in a session. `Settings.beforePlan`
-retains the permission mode beneath plan mode, including on open/resume.
-A history user block may carry `imageCount` when original file paths are
-unavailable; Emacs renders its image labels.
+Usage and quota events (`usage/call`, `usage/end`, `quota`,
+`quota/rate-limits`) are internal backend events. The daemon applies them to
+accounting before logging an editor event; they never go over the socket and
+never replay.
 
-The implemented contract is `emx/daemon/protocol.ts`. In particular,
-`session/send` returns `{queued}`, `session/earlier` takes `{id, before,
-turns?}`, insertions use `block/add {block, before?}`, completion uses
-`block/update {id, fields}`, and notices are blocks with a `notice.kind`.
-`sessions/history` and the direct `session/open.fork` parameter remain later
-work. Native forks are available through `session_start context=fork`.
-Configuration, children, editor calls and usage requests are implemented.
-`usage/record {record}` and `usage/quota {agent, host?, windows?, balance?,
-plan?, credits?}` are editor-only notifications for the remaining Lisp
-backends; MCP peers and replaced editors cannot write usage.
+Global notifications:
 
-### Attach and catching up
+- `sessions {sessions}` when the session list changes (debounced)
+- `config {config, errors}`
+- `usage/quotas {quotas}`, `usage/changed {}`
+- `collab/closed {id}`
+- `replaced {}` (another Emacs took over)
+- `mcp/tools_changed {}` to MCP connections
+- `usage/outbox {entries}` to a host daemon's editor, on hello and every
+  five seconds while entries remain
 
-`session/attach` returns a snapshot (pending asks, queue, status, info,
-settings, capabilities, `epoch`, `seq`, replay mode and whether earlier
-turns remain). A fresh attach then streams history blocks in order, ending
-with `history/done`. Passing `after: {epoch, seq}` instead replays only the
-events after that sequence number in the same epoch from a per-session ring buffer, falling back to a snapshot when they
-have been dropped. This is the keeper's byte-offset replay lifted to
-events. Emacs keeps the last `seq` per buffer, so a reconnect (daemon or
-Emacs side) redraws nothing it already shows.
+Editor notifications are `editor/tools {tools, readOnly}` (changed editor
+definitions and the private read-only classification), and the legacy
+`usage/record` / `usage/quota` notifications. Current Emacs sends usage as
+`usage/record` and `usage/quota` requests with a producer source and
+sequence; the notification form remains for older editors.
 
-### Daemon → Emacs requests (editor calls)
+### Attach, fresh views and earlier history
 
-`editor/call {method, params, caller}` → result or error. The daemon sends
-it to the attached Emacs for the editor tools agents call through MCP
-(below). With no Emacs attached it fails at once with an error saying so;
-calls that wait on the user (`session_ask` confirmations, canvas buttons)
-keep using the existing defer-and-poll scheme between the daemon and Emacs.
+`session/attach` returns a snapshot: pending asks, queue, status, info,
+settings, capabilities, `epoch`, `seq`, the replay mode, and whether earlier
+turns remain.
 
-## MCP: `emx mcp` becomes a daemon client
+- With no `after`, or an epoch the daemon no longer has, the mode is
+  `fresh`. Emacs clears its view; the daemon then streams history blocks in
+  order, ending with `history/done`. A fresh transfer is complete only at
+  that event: an interrupted transfer must not keep the new cursor and
+  attaches fresh again.
+- With `after: {epoch, seq}` in the current epoch and a seq still in the
+  per-session event log, the mode is `events` and exactly the events after
+  the cursor are replayed in order. The log is a ring of the last 2,000
+  events; when the cursor has fallen out of it, the daemon falls back to a
+  snapshot.
 
-Phase 3 is opt-in through `EMX_DAEMON_SOCKET`. With it set, `emx mcp`
-loads `emx/mcp.ts`, connects only to that socket and identifies itself
-with `mcp/hello {session: EMX_SESSION}`. This connection cannot say
-`hello`, take over the editor or control sessions. Without the variable,
-the existing emacsclient temp-file path, stamp watcher and remote-only
-`config_*` tools are unchanged. Bare CLI commands also keep that path.
-Host daemon sessions also offer `config_read`, `config_edit` and
-`config_write`, forwarded through Emacs to the local daemon.
+History blocks sent for a fresh attach or for `session/earlier` carry
+`history: true` and the seq they were sent at. They do not advance `seq`, and
+neither does `history/done`. A fresh attach sends the last `turns` turns
+(default 20), where a turn starts at a user block; if all turns were
+selected, any preamble is included.
 
-An MCP connection binds once to an existing daemon session; a second
-`mcp/hello` on that connection is an error, even for the same session.
-The owner-only socket trusts every process running as the user, like the
-rest of the design. There is no per-session authentication: agents can
-already run emacsclient themselves. The session id routes calls; it is
-not an authentication token.
+`session/earlier {id, before, turns?}` sends the turns before the block
+`before` (the first block Emacs shows), default 20, with `before` set so
+Emacs can insert them. The daemon keeps no paging state: a request lost with
+the connection is simply made again. If the loaded transcript has fewer
+turns than requested and the backend has a native transcript, the backend's
+optional `loadEarlier` hook supplies the rest first. `history/done` reports
+whether older turns remain.
 
-| direction | method | payload / result |
-|---|---|---|
-| MCP → daemon | `mcp/hello` | `{session}` → `{}` |
-| MCP → daemon | `mcp/tools` | `{}` → `{tools}` |
-| MCP → daemon | `mcp/call` | `{name, arguments?}` → method result or JSON-RPC error |
-| MCP → daemon | `notifications/cancelled` | `{requestId}` of the socket call |
-| editor → daemon | `hello` | `{client, version, tools?: {tools, readOnly}}` |
-| editor → daemon | `editor/tools` | notification `{tools, readOnly}` |
-| daemon → MCP | `mcp/tools_changed` | notification `{}` |
-| daemon → editor | `editor/call` | `{method, params, caller: {session, root, place: null}}` |
+### Editor calls
 
-- Editor methods and canvas still come from Lisp. Phase 5 replaces the five
-  collaboration definitions with daemon definitions and handles their calls
-  directly, even without Emacs; other methods retain the editor transport.
-  Emacs sends `agent-ui--describe nil` and the private audited read-only
-  names on hello. The existing two-second signature timer also checks
-  ready daemon connections and sends `editor/tools` when definitions or
-  permission classifications change. Stamp files remain for Lisp-started
-  Claude/Codex/dsh sessions until their cut-over.
-- The daemon saves the last definitions and classification atomically in
-  `<stateDir>/tools.json`. `mcp/tools` returns only the definitions, even
-  without an editor or after daemon restart. Calls without an editor fail
-  immediately with `Emacs is not attached`. Neither readOnly nor
-  `readOnlyHint` is exposed in MCP tool definitions. Dsh uses the private
-  names in its existing bridge approval gate when mounting the server.
-- `mcp/tools_changed` becomes MCP `notifications/tools/list_changed` on
-  stdio. The fork-cache rule stays: definitions and classifications depend
-  on configuration and place, never on the calling session.
-- Emacs maps the daemon session id to its attached session buffer, derives
-  root/place locally, and calls `agent-ui-call` with `agent-ui-caller`
-  bound just as for `agent-ui-rpc`. Unknown/unattached callers fail; caller
-  root text is not trusted. The reply is `{ok, result}` or `{ok, pending}`
-  or `{ok: false, error}`, matching the legacy transport.
-- The daemon polls deferred results with `editor/call` of `_poll` every
-  second. Cancellation stops waiting and cancels the pending result; late
-  deferred ids are released too. Editor disconnection or replacement
-  fails outstanding calls rather than replaying their side effects on
-  another editor. Stdio tool failures are MCP `isError` results.
+`editor/call {method, params, caller}` is a daemon-to-Emacs request. `caller`
+is `{session, root, place}`; Emacs derives the place locally and does not
+trust the wire's root text. The result uses agent-ui's envelope:
+`{ok, result}`, `{ok, pending}` or `{ok, error}`.
+
+The daemon sends editor calls for the tools agents call through MCP. It
+keeps the editor's definitions and its private read-only classification in
+`<var>/emx/tools.json` (written atomically and restored at startup), and
+`editor/tools` updates them when methods are registered or a module loads.
+A method that waits on the user returns a deferred id at once; the daemon
+polls `_poll` every second and cancels with `_poll {id, cancel: true}` when
+the caller goes away. With no editor attached, calls fail at once with
+`Emacs is not attached`; editor disconnection or replacement aborts
+outstanding calls rather than replaying their side effects on another
+editor.
+
+## MCP through the daemon
+
+`emx mcp` requires `EMX_DAEMON_SOCKET` and `EMX_SESSION`, connects to that
+socket and identifies itself with `mcp/hello {session}`. It cannot say
+`hello`, take over the editor or control sessions. The daemon injects this
+MCP server only into its own agent processes, never globally.
+
+Bare `emx <method>` commands do not use the daemon: they go through
+`emacsclient` and `agent-ui-rpc`.
+
+The stdio facade implements `initialize`, `ping`, `tools/list` and
+`tools/call`. `mcp/tools` is served from the daemon, including without an
+editor and after a daemon restart. `mcp/tools_changed` becomes MCP
+`notifications/tools/list_changed`; Claude and dsh act on it, while Codex
+restarts its saved thread before the next send when its tool list changed.
+`notifications/cancelled` aborts the corresponding socket call, and tool
+failures are MCP `isError` results.
+
+An MCP connection binds once to an existing session; a second `mcp/hello` on
+the same connection is an error, even for the same session. The session id
+routes calls. It is not an authentication token: the owner-only socket
+trusts every process running as the user, and an agent could already run
+`emacsclient` itself.
+
+On a host daemon, the injected definitions include `config_read`,
+`config_edit` and `config_write`, because the agent's own file tools work on
+the project host and cannot reach the machine running Emacs. Calls go over
+the editor connection like other editor calls, and Emacs forwards them to
+the local daemon's `config/call`. The local daemon does the file I/O, so it
+never blocks Emacs; Emacs is asked only about buffers visiting the file
+(`_config_modified`, `_config_written`). Paths are confined to the
+configuration checkout outside `.git`, exact replacement is checked,
+numbered reads are preserved, and a buffer with unsaved changes causes a
+refusal. This is a guardrail against editing the wrong host's files, not a
+sandbox: `eval` remains unrestricted.
 
 ## Backends
 
-Each backend is a daemon module with the interface of today's generics:
-`start`, `send`, `steer`, `interrupt`, `configure`, `stop`, `history`,
-`fork`, `models`, `modes`, `commands`, `reattached`. It turns its CLI's
-stream into the session events above.
+Each backend is a daemon module with the same interface: `start(resume)`,
+`send`, `steer`, `interrupt`, `configure`, `stop`, `alive`, `resumeId`, the
+optional `reattached`, `hasEarlier`/`loadEarlier`, and `flush` before a fork.
+It turns its CLI's stream into the session events above. A fake `echo`
+backend exists for tests.
 
-- **dsh** first: the bridge plugin (`emacs-bridge.mjs`) already speaks a
-  backend-neutral JSON-RPC vocabulary (`text`, `tool`, `tool/done`,
-  `turn/end`, `usage`, `approval`, `question`), so the adapter is thin. The
-  plugin keeps running inside dsh; its peer becomes the daemon. Phase 2
-  implements this in `emx/backends/dsh.ts`: local stdio transport, presets
-  and plan mode, configuration, slash commands, steering/cancel, tool views,
-  asks, discard, usage/balance, version warnings and resume transcripts.
-  Phase 7 maps remote project roots to host paths before opening sessions
-  on a host daemon. Native subagents are always disabled on this path. `EMX_DSH_EXECUTABLE` overrides `dsh` for installations and fake
-  protocol peers in tests; no API credentials pass through this option.
-  External session discovery stays on the old Lisp path; phase 5 adds
-  native conversation forks through the daemon collaboration tools.
-- **Claude** is the hardest and shaped the event set: restart with
-  `--resume` before the next send (effort change, messages from other
-  clients, tools changed); `control_request` permissions and model / mode
-  switches; history loaded in pages and inserted before the first block
-  (`block/add` with `after`); following the transcript file for messages
-  written by Claude Desktop or a terminal; `modelUsage` running totals
-  turned into deltas. Reading `~/.claude/projects/...jsonl` moves from the
-  python3 scripts to streaming Node code for local projects.
-- **Codex**: `codex app-server` JSON-RPC; resume a thread in a new process
-  when its tools changed.
+`sessions/history {agent, root}` discovers past native sessions without
+opening one: Claude's JSONL transcripts (including Desktop worktrees),
+Codex's `thread/list` and dsh's `sessions/list`, grouped by git worktree and
+run on the daemon that owns the host. Emacs maps host roots back through its
+transport.
 
-### Phase 4a: local Claude sessions
+All three adapters accept an executable override from their effective agent
+configuration and from an environment variable used by installations and
+protocol fixtures (`EMX_CLAUDE_EXECUTABLE`, `EMX_CODEX_EXECUTABLE`,
+`EMX_DSH_EXECUTABLE`). No credentials pass through those options.
 
-Implemented in `emx/backends/claude.ts` behind `agent-emx-agents` containing
-`claude`; the Lisp backend remains the default. The daemon runs the same
-stream-json command and permission modes, injecting its own MCP socket and
-session id. `session/open.claude` supplies `skillsDir` and
-`supersededSkills`, retained for restarts. Permissions preserve the original
-input and suggestions, including JSON false/null, arrays and empty objects;
-AskUserQuestion adds answers to a copy of that original input. Tool views,
-thinking, text, results, errors and rate-limit windows use existing events.
-Denied tool results retain the `declined` status.
+### dsh
 
-Model and permission mode change through control requests. Effort changes
-restart with `--resume`, immediately when idle or after the active turn;
-non-persistent children report a notice instead. Running `modelUsage`
-totals become deltas using the Lisp baseline-proof rules, so a resumed
-process cannot charge historical totals as the current turn.
+The adapter is the peer of the bridge plugin,
+`lisp/agent/backend/dsh/emacs-bridge.mjs`, mounted by `emacs.yml` into dsh's
+`sdk` profile:
 
-History uses two streaming JSONL passes, retaining only the last page's
-turn offsets and display blocks. `session/earlier` calls an optional backend
-history hook beyond the daemon's loaded transcript. The saved byte boundary
-survives daemon persistence. A directory watch coalesces writes for 500 ms,
-shows messages from entrypoints other than `sdk-cli`, and restarts with
-`--resume` before the next send; that restart forgets the usage baseline.
-The watcher also handles transcripts created during the first turn.
+```
+dsh --profile sdk --patch <checkout>/lisp/agent/backend/dsh/emacs.yml \
+    [--patch <checkout>/lisp/agent/backend/dsh/no-subagents.yml]
+```
 
-`EMX_CLAUDE_CONFIG` is transitional daemon configuration: a JSON object
-with `executable`, `extraArgs`, `disallowedTools` (default `Agent`,
-`Workflow`, `SendMessage`, `ListAgents`) and `historyTurns` (default 20).
-`EMX_CLAUDE_EXECUTABLE` overrides the executable for installations/tests;
-`EMX_CLAUDE_PROJECTS_DIR` isolates transcript fixtures. Fake CLI tests do
-not contact the API. Phase 5 replaces those defaults with the shared
-config-file/watcher while retaining environment overrides for fixtures.
+The bridge replaces dsh's own SDK JSON-RPC server and drives one dsh agent
+through dsh's internal API. It speaks the same line-delimited JSON-RPC the
+adapter expects, so the adapter maps `initialize`, `configure`, `prompt`,
+`steer`, `cancel` and `flush` onto dsh and turns the bridge's `status`,
+`text`/`text/done`, `discard`, `tool`/`tool/done`, `turn/end`, `usage`,
+`config` and `error` notifications into blocks and events. `initialize`
+reports the session id, title, models, presets, plan availability, commands,
+history (on resume), warnings and dsh's version; a version other than the
+one the bridge was written for is shown as a notice. `balance` supplies the
+account balance for usage; failures there never interrupt a turn.
 
-Remote projects use a host daemon in phase 7. Phase 5 supports native forks
-through `session_start context=fork`. Historical
-session discovery stays on the Lisp side, which already scans Claude's
-project directory; the daemon handles live sessions and transcript paging.
-Claude receives MCP tool-list notifications directly, so it does not need
-Codex's tool-change process restart.
+The hard parts: the bridge depends on dsh internals and needs adjusting when
+dsh is upgraded; dsh asks about an MCP call only when a hook does, so the
+bridge asks about every emx call except the read-only methods given in
+`readOnly`, unless the preset is Full access, or Auto, whose reviewer judges
+each call first; plan review arrives as a `question` with intent
+`{kind: "plan-review", approve: label}`; and the API key stays in dsh's own
+credentials file. Native subagents are disabled by the second patch unless
+`agents.dsh.nativeSubagents` is true, and emx is mounted per agent.
 
-Phase 4a verification (2026-10-20): `tsc -p emx` passes; the combined
-daemon/MCP/usage Node suite passes 104 tests, including 18 fake-Claude
-cases. The AGENTS ERT suite plus daemon UI tests passes 251 tests with one
-environment-dependent scroll test skipped. Evil-on/off byte compilation
-has only the two existing lang-agda slot warnings; the language ERT suite
-passes 23 tests with evil enabled. A single real Haiku turn through an
-isolated daemon and temp project sent `say hi in one word` and streamed
-`Hi` (one delta), then `usage/end` and idle. The usage delta for
-`claude-haiku-5-5` was input 2, cacheRead 0, cacheWrite 19157, output 5.
-No default Emacs server or daemon was used and no config was reloaded.
+### Claude
 
-### Phase 4b: local Codex sessions
+The adapter runs the CLI with stream-json input and output, partial
+messages, `--permission-prompt-tool stdio`, a per-process `--mcp-config`
+pointing at `emx mcp` with the daemon socket and session id, the permission
+mode, disallowed native subagent tools, the model, effort, skill directory
+and skill overrides. It answers `control_request` approvals and
+AskUserQuestion, switches model and permission mode through control
+requests, and reads the CLI's `result`, `assistant`, `user`, `stream_event`
+and `rate_limit_event` messages.
 
-Implemented behind `agent-emx-agents` containing `codex`; nil remains the
-Lisp default. `emx/backends/codex.ts` maps app-server items, reasoning,
-commands and streamed output, file diffs, MCP calls, plans, web searches,
-approvals and user questions into the existing blocks and asks. Every
-turn carries model, effort, approval policy, sandbox and reviewer, using
-the Lisp mode mapping. Configuration reads preserve the user's developer
-instructions before appending the Emacs context; failures omit the override
-and show a notice. `session/open.codex` carries `skillsRoot` and
-`supersededSkills`, retained with the session for process restarts.
+The hard parts shape the adapter:
 
-The MCP subprocess runs this checkout's `node bin/emx mcp` with the daemon
-socket and session id, and a 1,800-second timeout. A changed editor tool
-catalog or permission classification triggers a fresh process and
-`thread/resume` before the next message. Children use ephemeral threads
-and retain their initial tools. `EMX_CODEX_CONFIG` is transitional daemon
-configuration, a JSON object with `executable`, `extraArgs` and
-`nativeSubagents` (default false). `EMX_CODEX_EXECUTABLE` overrides the
-program for installations and fake app-server tests; no credentials are
-passed in either option.
+- **Effort changes need a restart** with `--resume`; it happens at once when
+  idle or after the active turn, and a non-persistent child reports a notice
+  instead.
+- **A transcript is written by other clients too.** A directory watch
+  coalesces writes for 500 ms and turns entries from entrypoints other than
+  `sdk-cli` into blocks. Before the next send the CLI is restarted with
+  `--resume` so its context catches up; that restart forgets the usage
+  baseline.
+- **History is read in two streaming passes**, retaining only the last
+  page's turn offsets and display blocks. The saved byte boundary survives
+  daemon persistence, and `session/earlier` pages further back without
+  reading the whole file. The same reader pauses on a partial final line.
+- **Usage totals are cumulative across a resumed process.** `modelUsage`
+  totals become deltas against a baseline; the first report of a process
+  must prove where it started, and an ambiguous report falls back to the
+  turn's own counters.
+- **Permissions compare their own JSON.** Approval replies splice the
+  original raw `input` and `permission_suggestions` arguments, including
+  false, null, arrays and empty objects, so the CLI's comparison still
+  matches; an `always` answer carries the suggestions and a denial keeps the
+  `declined` status.
 
-Live token notifications become `usage/call` only inside a turn and when
-the thread total changes; `usage/end` flushes them. History and duplicate
-notifications never count. `quota/rate-limits` carries sparse `plan`,
-`windows` (id, minutes, used fraction, resets) and numeric or `unlimited`
-credits. A fresh attach republishes the cached account reading after
-`history/done`, without replaying token usage. Resume fetches all pages of
-`thread/turns/list`; the common session layer serves the requested last
-turns and `session/earlier`. A crashed app-server resumes its saved id on
-the next send.
+Children run with `--no-session-persistence`. A native fork uses
+`--resume <parent> --fork-session`; images are sent as base64 content.
 
-Remote roots use a host daemon in phase 7. Phase 5 implements ephemeral `thread/fork`
-through `session_start context=fork`. Discovering
-past sessions stays in Lisp's `thread/list` implementation; use the Lisp
-registration to browse sessions outside the daemon's own session table.
-Shared historical discovery remains later work.
+### Codex
 
-## Localization
+The adapter runs `codex app-server` and speaks its JSON-RPC: `initialize`,
+`model/list`, `thread/start`, `thread/resume`, `thread/fork`,
+`thread/turns/list`, `turn/start`, `turn/steer`, `turn/interrupt`,
+`account/rateLimits/read` and `skills/extraRoots/set`. It injects the emx MCP
+server per process with `-c mcp_servers.emacs.*` and the daemon socket and
+session id, and sets a 1,800-second tool timeout. Every turn carries the
+model, effort, approval policy, sandbox and reviewer from the mode mapping.
+It maps app-server items (reasoning, commands and their streamed output,
+file diffs, MCP calls, plans, web searches), approvals and user questions
+into blocks and asks.
 
-Conventions stay: agent-facing text in English, UI text in Chinese. The
-daemon never writes UI prose. Notices and labels are structured
-(`{kind: "effort-after-turn"}`, `{kind: "restart-for-external"}`, tool view
-`kind: "plan"`); Lisp maps kinds to Chinese strings. Errors the daemon
-returns to agents stay English.
-
-## Configuration
-
-During migration, `agent-emx-agents` is a Lisp defcustom (default nil).
-Set it before loading dsh, or use `(customize-set-variable
-'agent-emx-agents '(dsh))`, to register new dsh sessions with `:backend emx
-:emx-agent "dsh"`. Removing dsh restores its Lisp registration; existing
-sessions retain their backend. The asynchronously received effective
-configuration supplies launch policy and collaboration policy on both
-paths; the old Lisp options remain offline defaults.
-
-Phase 5a implements `emx/config.json` and the optional, git-ignored
-`<var>/emx/config.json` override. Objects merge deeply; arrays, scalars and
-null replace. Unknown fields, malformed JSON and invalid types report field
-paths and keep the last good effective config. Both files are polled every
-250 ms (including atomic replacement); reload is debounced 75 ms.
-`config/get` and `config/reload` return `{config, errors}`. Hello includes
-`config`; changes push a global `config {config, errors}` notification and
-`mcp/tools_changed`.
-
-Schema:
-
-- `agents`: executable, title, extraArgs, Claude disallowedTools/historyTurns,
-  Codex/dsh nativeSubagents. Enabled agents remain `my/agents` during migration.
-- `profiles`: named objects with agent, model, effort, mode, cost, description,
-  confirm. All current profile keys are preserved.
-- `collab`: startGuidance, maxActive, handoffLimit, closeFinished, confirm,
-  textLimit, replyLimit, confirmTimeout, handleTimeout, handleCommand,
-  agentHandleCommands, tools (verbatim descriptions and input schemas),
-  prompts (verbatim task, fork, handoff, mailbox and naming text).
-- `usage.pollInterval`, `daemon.idleExit`, `sessions.hibernateAfter`: seconds.
-
-Lisp collaboration reads the asynchronously pushed config from
-`agent-emx-config.el`; accessors never make blocking requests. Its defcustoms
-remain **offline fallbacks**, used before a config arrives. A disconnected
-editor retains its last effective snapshot until reconnection. Display
-preferences remain in Lisp. The transitional backend environment overrides
-remain for protocol fixtures and installations; file values otherwise apply
-on the next spawn. Existing processes retain their launch flags. Legacy
-`usage/configure` still accepts Lisp quota-poller registration, but its
-legacy pollInterval field cannot override the file's polling interval. Tests
-that disable polling set it to zero in their temporary override file.
-
-### Phase 5b: daemon collaboration
-
-`emx/daemon/collab.ts` serves `sessions`, `session_read`, `session_ask`,
-`session_start` and `session_stop` directly. Definitions come from the
-configuration, filtered by installed executables and the enabled agents
-Emacs sends on hello. Enabled agents are persisted with collaboration
-state. Definitions never depend on caller identity, status, model or child
-status; a Node test compares them byte for byte with Lisp's definitions.
-Refusals happen at call time.
-
-The daemon names first submissions with the configured cheap commands (own
-agent first, global fallback), limits concurrent starts including pending
-confirmations, caps modes, and implements fresh/handoff/fork. Handoff text
-is fixed per parent turn and puts the task last. Claude forks use resume
-plus fork-session and no persistence; Codex forks are ephemeral and omit
-new developer instructions; dsh flushes the parent before forkFrom and uses
-the native parentSession. Children do not hibernate or survive a daemon
-crash as resumable sessions.
-
-Pending replies and batched mailboxes live in `<var>/emx/collab.json`.
-Long replies are saved under `<var>/replies/`. The original agent-facing
-wording, hidden sender notes, tool summary and one-message idle delivery
-are preserved. Visible user text and origins are retained separately from
-hidden notes in the transcript and persisted queue. A child closes after
-its result reaches the mailbox, unless failed or visible in Emacs. Closing
-a parent stops its children; session_stop cancels its expected reply.
-
-Emacs receives private `editor/call` methods `_session_open` and
-`_session_visible` (never MCP definitions), plus `collab/closed` and the
-session summaries. It creates and attaches a child view without a second
-CLI, links the parent's oldest unlinked session_start block, and reuses
-native parent/footer approval mirroring. Reconnect reattaches existing
-child views. With no editor, collaboration continues; user confirmations
-remain pending until answered or timed out. An unresponsive visibility
-query conservatively keeps the child open.
-
-**Cross-path choice:** the migration does not bridge daemon tools to Lisp
-sessions. Daemon sessions list/read/ask daemon sessions only. Lisp tools
-retain their current buffer-based behavior and can inspect attached daemon
-views, but this is not a symmetric cross-path collaboration API. Use the
-same execution path for sessions that need to collaborate. A complete
-bridge must route asynchronous confirmations and reply tracking across both
-owners; it is deferred rather than duplicating mailbox ownership.
+The hard parts: app-server takes settings on `turn/start`, so changes apply
+to the next turn; a saved thread whose editor tools changed is restarted in
+a new process and resumed before the next send, while an ephemeral child
+keeps the tools it started with; the user's developer instructions must be
+preserved from `config/read` before the Emacs context is appended; and token
+usage is read from changed thread totals only inside a turn, so replayed or
+duplicate notifications never count. Resume fetches all pages of
+`thread/turns/list` once; the session layer serves the requested page and
+`session/earlier`. Rate limits arrive as sparse account readings. Native
+subagents are disabled unless `agents.codex.nativeSubagents` is true.
 
 ## Approvals
 
-The daemon decides; Emacs shows and answers. How the three CLIs treat
-their own subagents (checked 2026-10-20 against Claude Code's docs, the
-openai/codex sources and the deepseek-harness sources):
+The daemon decides the policy; Emacs shows the request and returns the
+answer. There are two ask types:
 
-| | Claude Code | Codex | dsh |
-|---|---|---|---|
-| child's permissions | parent's mode and rules | parent's approval policy, sandbox and reviewer, copied at spawn | fixed at spawn |
-| a call that needs approval | prompts the user in the main session | commands prompt the user; MCP calls are refused with "ask the parent agent" | refused; the child reports it to the parent |
-| automatic reviewer | auto mode's classifier | Guardian (`auto_review`) | auto-review plugin |
-| parent agent approves | no, by design | no interface | no; Auto weighs a parent's explicit instruction |
+- `approval`: one of the backend's choices (`allow`, `always` where it
+  supports a session-wide answer, or `deny`), with the tool view and the
+  agent's own description.
+- `question`: one or more questions with options, multi-select, custom
+  answers, a numeric range, secrecy, and an optional `intent` object that
+  selects a specialized UI (dsh's plan review uses Emacs's native plan
+  approval footer).
 
-We follow them:
+The first answer wins; a late answer gets `{stale: true}`. An interrupted or
+stopped session cancels its asks.
 
-- **Read-only tools run without asking**: the audited read-only emx
-  methods, and each CLI's own read-only actions as it judges them. For
-  Claude this means `--allowedTools mcp__emacs__<method>`, for Codex
-  per-tool approval on those methods, for dsh the bridge's gate.
-- **`auto` hands approvals to each backend's own reviewer** (Claude's
-  classifier, Codex's Guardian, dsh's auto-review). What the reviewer
-  refuses, or can't decide, reaches the user.
-- **No delegation to the parent agent.** A child's request is shown in the
-  parent's footer too, as today; the user answers it in either place.
-- **A child that hits a limit hands it back**: it reports what it needs
-  (for a reviewer, a verification request) and the parent, which has the
-  wider permissions, does it or starts a session that can.
-- First answer wins; a late answer gets `stale`.
+The audited read-only editor methods (`context`, `buffers`, `read_buffer`,
+`diagnostics`) and collaboration's `sessions` and `session_read` are marked
+read-only. Their names go to the dsh bridge, whose gate lets those MCP calls
+through; Claude and Codex apply their own permission machinery, and the
+classification is never exposed as an MCP hint. The permission modes are the
+same names in Emacs and the daemon: `ask`, `edits`, `auto`, `full`, `plan`.
+Each backend maps them to its own settings. `auto` delegates to that
+backend's reviewer (Claude's classifier, Codex's `auto_review`, dsh's
+auto-review), and what a reviewer refuses or cannot decide reaches the user.
+
+A child's mode never exceeds its parent's. A child's own confirmations and
+questions are shown in the child and mirrored in the parent's footer; the
+user answers in either place. The daemon never asks the parent agent to
+approve a child's request. A child that needs more permission reports what
+it needs, and the parent, which has the wider permissions, does it or starts
+a session that can.
+
+## Collaboration
+
+The daemon serves the five collaboration tools directly:
+`sessions`, `session_read`, `session_ask`, `session_start` and
+`session_stop`. Their definitions come from `collab.tools` in configuration;
+`session_start`'s description is extended with `collab.startGuidance` and
+the profiles available at the caller's place. Definitions depend on
+configuration and where the caller runs, never on who is calling: a forked
+session must see exactly its parent's tools to keep its prompt cache.
+
+Profiles are filtered by the enabled agents Emacs sends on `hello` and by
+whether their executable is runnable in that place's environment. A daemon
+names a first submission with the configured cheap commands (the agent's own
+`collab.agentHandleCommands[agent]` first, then `collab.handleCommand`),
+cleans the model's answer into a handle, and makes handles unique. The
+session title defaults to the first 80 characters of its first message.
+Users mention sessions as `@handle`.
+
+Each session summary includes its handle, session id, agent, place, title,
+project root, status (`awaiting-approval` when an ask is pending), turn
+count, whether it is the caller's own, and its parent and children.
+
+### Children and context
+
+`session_start` starts a child of a profile, or a fork of the caller:
+
+| context | The child gets | Harness and model |
+|---|---|---|
+| `fresh` | the task alone | the profile's |
+| `handoff` | a text copy of the parent's conversation, then the task | the profile's |
+| `fork` | the parent's own conversation, up to the `session_start` call | the caller's agent, model and settings |
+
+Only sessions the user opened can start sessions. A child can start no
+further sessions, takes no `session_ask`, and sends none; it does one task
+and reports its final reply. Its mode is capped at the caller's. At most
+`collab.maxActive` children of one parent may be working at once, counting
+pending starts; `collab.confirm` or a profile's `confirm` asks the user
+first. A dsh fork flushes the parent's native log first; every fork requires
+a live native conversation. Children inherit the caller's skills context.
+
+A handoff is cached per parent turn. Within `collab.handoffLimit`
+characters it keeps the latest turn (cut from the front if need be), the
+first user message, then as many intervening turns as fit, newest first,
+with a note naming what was left out. The task always comes last.
+
+Children live in their parent's daemon. Closing a parent closes its
+children. A child is not resumable after a daemon crash, and it is closed
+when its reply has been delivered unless it failed or the user is looking at
+it (`_session_visible`; an unresponsive visibility query conservatively
+keeps it open). `session_stop` closes only a session the caller started.
+
+### Mailbox
+
+A reply to `session_ask` or a child's final reply is a mailbox message for
+the asker. Pending work is persisted in `<var>/emx/collab.json`; long replies
+are saved under `<var>/replies/` and clipped in the message. When the asker
+is idle, the mailbox delivers every waiting reply as one message, with a
+hidden note saying it came from Emacs rather than the user. Hidden notes and
+the visible user text are kept separately in the transcript and queue, so a
+later echo of the user block cannot reveal a note.
+
+`session_read` formats the latest turns with `tools` set to `none`,
+`summary` or `full`, clips text at `collab.textLimit`, and pages backwards
+with `before`.
+
+### Across daemons
+
+The attached Emacs is the hub. A daemon answers `sessions` with its own
+sessions and asks Emacs (`_collab_sessions`) for the others; Emacs queries
+every other attached editor connection with `collab/list`, labels rows with
+their place, and qualifies external handles with a stable daemon route.
+Emacs uses existing connections and never connects to a host to list
+sessions.
+
+For an external `session_read` or `session_ask`, the caller's daemon invokes
+`_collab_read` or `_collab_ask`; Emacs resolves the destination and forwards
+`collab/read` or `collab/ask` over that daemon's editor connection. A plain
+handle works when it names one external session; ambiguous handles require
+the qualified id. Confirmation, when configured, belongs to the asking
+daemon. The receiving daemon checks that the target is idle and not a child.
+
+The receiving daemon persists the pending ask and then its outgoing reply.
+`_collab_deliver` carries the reply through Emacs to `collab/deliver` on the
+asking daemon, whose mailbox owns final delivery. An acknowledgment follows
+a durable mailbox write; persisted receipt ids suppress duplicate delivery.
+Replies that cannot be delivered stay queued and are retried when editor
+connections return (`hello`, `collab/retry`, and each settle). Cross-daemon
+calls fail with an English error when Emacs is not attached. Children never
+move between daemons.
+
+Emacs also enriches user input: a mentioned `@handle` gets a note naming the
+session and its agent, using the wording cached from the daemon's config.
+
+## Configuration
+
+There are two files:
+
+- `<checkout>/emx/config.json` is tracked and shipped with the runtime.
+- `<var>/emx/config.json` is an optional, git-ignored override.
+
+Objects merge deeply; arrays, scalars and null replace. Unknown fields,
+malformed JSON and invalid types report a `config.<path>` error and keep the
+last good effective configuration. Both files are polled every 250 ms,
+including atomic replacement; a reload is debounced by 75 ms. `config/get`
+and `config/reload` return `{config, errors}`; a change pushes a global
+`config` notification and `mcp/tools_changed` to MCP peers.
+
+The schema:
+
+| Section | Keys |
+|---|---|
+| `agents` | `title`, `executable`, `extraArgs`, `nativeSubagents`; Claude also `disallowedTools`, `historyTurns` |
+| `profiles` | `agent`, `model`, `effort`, `mode`, `cost`, `description`, `confirm` |
+| `usage` | `pollInterval` (seconds) |
+| `daemon` | `idleExit` (seconds) |
+| `sessions` | `hibernateAfter` (seconds) |
+
+`collab` holds `startGuidance`, `maxActive`, `handoffLimit`, `closeFinished`,
+`confirm`, `textLimit`, `replyLimit`, `confirmTimeout`, `handleTimeout`,
+`handleCommand`, `agentHandleCommands`, the five `tools` definitions, and
+`prompts` (task, handoff, mailbox and naming text).
+
+Modes are `plan`, `ask`, `edits`, `auto` and `full`; a profile's cost is
+`minimal`, `low`, `medium`, `high` or `premium`. The default durations are
+900 seconds for `usage.pollInterval` and `daemon.idleExit`, and 7,200 for
+`sessions.hibernateAfter`.
+
+`my/agents` in `init.el` chooses which agent registration modules Emacs
+loads; on `hello` the daemon receives that enabled list and uses it for
+collaboration profiles and usage, and Emacs requests history only for
+enabled agents. The configuration holds settings for every configured
+agent.
+
+Emacs caches the effective config as it arrives (`agent-emx-config.el`) and
+uses it only for display: agent titles, executable names and the wording of
+input notes. It never makes a blocking config request for policy, and policy
+does not come from Lisp defcustoms. A disconnected editor keeps its last
+snapshot until it reconnects.
+
+On a host daemon the local file is the source. Emacs sends the effective
+config in `hello.config` and again with `config/push` on change or local
+reconnection, preserving JSON empty objects, false and null. The host
+persists the pushed base in `<state>/emx/client-config.json`, so it survives
+an editor or daemon restart. `~/.config/emx/config.json` on the host may
+override only `agents.<name>.executable`; any other override is rejected and
+the last good config retained. Host config notifications never overwrite
+Emacs's local cache.
+
+Environment overrides remain for installations and protocol fixtures:
+`EMX_CLAUDE_CONFIG`, `EMX_CLAUDE_PROJECTS_DIR`, `EMX_CODEX_CONFIG` and the
+three executable variables above. File values apply on the next spawn;
+existing processes keep their launch flags.
+
+## Usage
+
+### One writer
+
+The local daemon's `UsageService` (`emx/usage/`) is the single writer of the
+authoritative ledger and quota files:
+
+- `<var>/agent-usage.jsonl`, one JSON record per model per turn:
+  `{time, agent, root, session, model, turns, child?, input, cache_read,
+  cache_write, output}`. Input excludes cached tokens. A cut-short last line
+  is skipped and the next append starts its own line.
+- `<var>/agent-quota.json`, the latest reading per agent and host:
+  `{agent, host, time, plan?, credits?, balance?, windows: [{id, label,
+  minutes, used, resets, history}]}`. A window keeps up to 300 readings of
+  its current period (same reset time within ten minutes).
+- `<var>/agent-usage.jsonl.watermarks.json` is the delivery watermark index.
+
+There are no prices: the accounts are mostly subscription plans. Only
+sessions the daemon runs are counted; a CLI run elsewhere is not. A host
+daemon keeps its own ledger and quota file as a cache for local freshness
+and reporting, and an outbox for delivery; the local ledger remains
+authoritative.
+
+### Accounting
+
+Backend usage events are applied at the producer boundary, before any editor
+event is logged. Attach, history replay, catch-up and reconnection cannot
+charge usage. Accounting continues while Emacs is disconnected.
+
+Claude's cumulative `modelUsage` totals become deltas against a per-process
+baseline, with the first report of a resumed process proving where it
+started (see Claude). A restart for external transcript writes forgets the
+baseline. Codex and dsh report one call at a time; calls are summed per
+model inside a turn and flushed by `usage/end` or an exit. Exit flushes a
+partial turn once. Records carry the editor's handle, a `child` marker for
+children, and a home-abbreviated root.
+
+### Polling and reports
+
+Quota pollers are derived from the effective agent executables, not from
+editor-supplied commands: Claude through `claude -p /usage --output-format
+json --no-session-persistence`, Codex through `codex app-server` and
+`account/rateLimits/read`, dsh through its patched bridge and `balance`.
+Polling settings are persisted in `<var>/emx/usage.json`, so polls continue
+without an editor or across a daemon restart. `usage/configure` carries the
+enabled agent list for display order; it does not override the poller
+commands or the interval, which come from configuration.
+
+The service checks every `min(usage.pollInterval, 60)` seconds and polls a
+source only when its last reading is older than `usage.pollInterval`
+(default 900 seconds). A failure backs off exponentially up to an hour.
+`usage/refresh {force: true}` polls everything now; opening the usage page
+forces a poll, and sending a message polls only the stale sources.
+
+`usage/report` takes `range` (`today`, `week`, `month` or all), an exact
+`filter`, `withoutCache` and `now`. It returns the total, sums grouped by
+agent, model and root, calendar buckets, and the quota snapshot. Each window
+carries a `forecast` or a `wait` (seconds until readings suffice). The rate
+comes from the last seventh of the window (at least an hour; a day for a
+weekly window) so idle days do not make the rest look plentiful. A window
+forecasts once its readings cover half of that span.
+
+### Outboxes and watermarks
+
+Delivery is acknowledged and replayable in both directions.
+
+- **A host outbox** (`<state>/emx/usage-outbox.json`) gives every producer a
+  stable `source`, a monotonically increasing `sequence`, and entries
+  (`{id, source, sequence, method, params}`) written before delivery. On
+  hello, and every five seconds while entries remain, it offers them to
+  Emacs. Emacs forwards each entry to the local daemon with the same source
+  and sequence, adding the host label (quota) or remote root prefix (record),
+  and acknowledges the host only after the local daemon's receipt.
+- **An editor outbox** (`<var>/emx/editor-usage-<source hash>.el`) does the
+  same for entries the editor still produces, including pending pre-upgrade
+  records and quota readings. Each Emacs process has its own source and
+  file. Recovery scans for files whose recorded process is gone on this
+  host, or that have no recorded PID, merges their entries preserving
+  delivery identities, saves the complete result before deleting the old
+  files, and never allocates new sequence numbers from a dead source.
+  Duplicate ids are removed.
+- **The ledger owner refuses gaps.** A source's expected sequence is its
+  watermark plus one, and anything at or below the watermark is a duplicate.
+  A ledger record stores its delivery identity (`_delivery`) in the same
+  append as its counters; a quota entry stores each producer's watermark
+  (`_watermarks`). Startup rebuilds the watermarks from those operations if a
+  crash preceded the separate index or the acknowledgment. A watermark only
+  advances after a successful apply, so an uncertain reply is retried.
+- **Legacy ids remain supported.** Ledger records can carry the old `id`;
+  migration scans the whole ledger for ids without delivery identity, so a
+  receipt older than any cache is not charged twice. Host array outboxes are
+  migrated once to source/sequence entries.
+
+### Emacs
+
+Emacs only displays and forwards. It keeps the latest pushed quota snapshot
+and draws:
+
+- the echo line (`agent-usage-echo-mode`, in ` *Minibuf-0*`) with the 5-hour
+  and weekly windows and account balances, right-aligned and clickable;
+- the usage page (`C-c a u`), from one `usage/report`, with the accounts'
+  allowances, headline numbers, timeline, and usage by agent, model and
+  project. `RET` on a row filters to it; `r`, `d`, `w`, `m`, `a`, `c` change
+  the range or cache toggle.
+- `usage/changed` refetches a visible page; `usage/quotas` updates the echo
+  line and page.
+
+`agent-usage-clear` deletes the ledger after confirmation and keeps quotas.
+`agent-usage-restart-service` reconnects and reapplies poll settings without
+stopping agents; code changes go through the daemon's normal version and
+restart path.
 
 ## Remote projects
 
-Agents selected by `agent-emx-agents` run under the host daemon. Agents
-still on their Lisp backend retain `agent-keeper.py`, the local emx and
-`agent-remote-relay.py` over the `-R` bridge until phase 8. Existing
-sessions keep their original backend.
+A remote project is an `/rpc:` root. Its agent CLI runs on the project's
+host, so it uses the host's toolchain, credentials and history. Emacs stays
+local and attaches to the host's daemon through a forwarded socket.
 
 ```
- this machine                         │ host
-                                      │
- Emacs ── unix socket ── ssh -O forward -L ── unix socket ── emx daemon ── agent CLIs
-  │      (private dir)     over the tramp-rpc               (~/.cache/      │
-  │                        ControlMaster                    emacs-agent/)   └ emx mcp
-  └── local emx daemon (local sessions, config_* file tools, usage ledger)
+ this machine                              │ host
+                                           │
+ Emacs ── Unix socket ── ssh -O forward -L ── Unix socket ── emx daemon ── agent CLIs
+   │      (private dir)     over the tramp-rpc              (~/.cache/       │
+   │                        ControlMaster                    emacs-agent/)   └ emx mcp
+   └── local emx daemon (local sessions, config_* tools, usage ledger)
 ```
 
 ### Install
 
-The daemon's code is copied to the host content-addressed:
-`~/.cache/emacs-agent/emx/<hash>/`, the hash being the one `hello`
-reports, so a copy is made once per version and several versions can
-coexist (as the dsh plugin is copied today). `daemon --manifest` returns
-this version, runtime paths, byte sizes and SHA-256 hashes: JavaScript/JSON
-under `emx/dist/`, `bin/emx`, and the dsh `.mjs`/`.yml` files. Sources,
-tsconfigs, dependency manifests, build stamps, `node_modules` and tests are
-excluded (dist's minimal ESM package marker is included). The version hashes
-exactly these paths and bytes; source mtimes or erased comments can rebuild
-without changing the runtime version. Each process reads its own immutable
-generation when hashing; installed and local manifests agree. Hosts never
-compile or install npm dependencies.
-On user action, Emacs copies through the file handler into a unique private
-staging directory beside the target, verifies every size and hash, and writes
-`.complete` containing the version. An atomic rename publishes the directory;
-a concurrent completed publication wins and the staging copy is removed.
-Ensure checks the marker's contents. A failed ensure repairs the installation
-and retries once, on the user-triggered path only. The host needs Node 18.17+ or 20.3+, checked in the same single round trip that looks up the agent
-programs when a remote session opens (`agent-session-check-programs`);
-python3 is no longer needed. The agents' credentials stay the host's own,
-as today.
+The runtime is content-addressed by the version `hello` reports. On user
+action, Emacs reads `bin/emx daemon --manifest` (version, runtime paths, byte
+sizes and SHA-256 hashes), copies each file into a unique private staging
+directory under `~/.cache/emacs-agent/emx/<version>.stage-*` on the host,
+verifies every size and hash, writes `.complete` containing the version, and
+atomically renames the directory to `~/.cache/emacs-agent/emx/<version>/`.
+A concurrent completed publication wins and the staging copy is removed.
+Repairs publish a fresh `<version>.install-*` directory and atomically switch
+the `<version>.current` symlink, retaining every published directory an
+existing daemon might still import.
 
-### One daemon per host and client checkout
+The manifest covers `emx/dist/**/*.js` and `*.json`, `bin/emx`, and the dsh
+`.mjs`/`.yml` files, not sources, tsconfigs, dependency manifests, build
+stamps, `node_modules` or tests. The version hashes exactly those paths and
+bytes, so source mtimes or erased comments can rebuild without changing the
+runtime version. A host never compiles or installs npm dependencies, and
+needs no python3.
 
-The host runs one daemon per user and per client checkout:
-`~/.cache/emacs-agent/emx/run/<client id>.sock`, in a directory of mode
-0700. If the socket path exceeds 100 bytes (below both macOS and Linux
-limits), it uses a stable hash of the client id in `$XDG_RUNTIME_DIR`, or
-`/tmp/emx-<uid>/` if unset or too long. The fallback directory must be owned
-by the user, mode 0700 and not a symlink. The client id is a hash of the checkout's path and the machine's
-name. So this branch's worktree and the user's main checkout get separate
-daemons on the same host, and two machines never share one. Its state
-(session table, usage outbox) lives next to it in
-`~/.cache/emacs-agent/emx/state/<client id>/`. The id is the first 16 hex
-digits of SHA-1(checkout real path, NUL, machine name). Session state,
-logs and the outbox use the existing `emx/` subdirectory there; the host's
-usage files are only a cache for local quota freshness/reporting. The
-local daemon remains the authoritative combined ledger. `--client` and
-`--var` are mutually exclusive; `--stop --client <id>` stops only that
-host/client daemon.
+The home-directory bootstrap checks the actual Node (18.17+ or 20.3+) and the
+marker/hash integrity, then runs `node <dir>/bin/emx daemon --client <id>
+--ensure`. Exit 44 (missing or mismatched marker) and 45 (verified corrupt
+files) trigger one install and retry; other failures surface their stderr.
+The agents' credentials stay the host's own.
 
 ### Connecting
 
-1. Emacs runs one command on the host through tramp-rpc:
-   `node <dir>/bin/emx daemon --client <id> --ensure`. It copies nothing;
-   it starts the daemon detached (`setsid`) unless one answers on the
-   socket, and prints the socket path and the running daemon's code hash.
-   Emacs wraps this in a shell check for the version's `.complete` marker.
-   A missing or mismatched marker returns status 44; an explicit connection
-   repairs a failed install and retries once. Ensure and copies run before
-   asynchronous local callbacks, never in timers or sentinels. Ensure
-   retains a stale daemon with live agents; once none are live, it replaces
-   it using the same atomic stop-if-idle guard as local ensure.
+1. Emacs runs the bootstrap on the host through tramp-rpc, from the home
+   directory so the daemon's base environment has no project direnv. It
+   starts the daemon detached unless one answers, and prints the socket path
+   and running code version.
 2. Emacs forwards a private local socket to the remote one over the
-   ControlMaster: `ssh -S <control> -O forward -L <local>:<remote> host`,
-   as `agent-remote-bridge` does today with `-R`. The local end lives in a
-   temporary directory of mode 0700.
-3. Emacs connects to the local end and speaks exactly the local protocol:
-   `hello`, `session/attach`, events, editor calls. Nothing in the
-   protocol knows it crosses a host. Emacs shares one connection per host
-   prefix and local var directory, with sessions still keyed by their
-   project places: separate projects must not take over the same daemon's
-   exclusive editor role. Tool descriptions use the connection's project
-   place. Local sessions and the usage-only connection remain independent.
+   ControlMaster: `ssh -S <control> -O forward -L <local>:<remote> <host>`.
+   The local directory is mode 0700.
+3. Emacs connects to the local end and speaks exactly the local protocol.
+   Nothing in the protocol knows it crosses a host.
 
-The forward belongs to the ControlMaster, so a new master (after a
-reconnect) gets a new forward, as the bridge does today. A host where
-stream-local forwarding is disabled (`AllowStreamLocalForwarding no`) can
-fall back to piping the connection through a tramp-rpc process running
-`emx connect`, at the cost of a slower path; we build that only if a host
-needs it.
+Emacs shares one connection per host prefix and local var directory, with
+sessions keyed by project. Separate projects on one host therefore share the
+daemon's exclusive editor role, while local sessions and the usage-only
+connection remain independent. Tool descriptions use the connection's
+project place. The forward belongs to the ControlMaster; a new master gets a
+new forward and the old one is cancelled.
 
 ### Losing the connection
 
-When SSH drops, the forwarded socket closes: Emacs marks that host's
-sessions `disconnected` and the agents keep running under the daemon,
-which is what the keeper does today. Editor calls fail at once with
-"Emacs is not attached" (what the relay does today), and approvals and
-questions wait in the daemon. Once tramp-rpc is connected again (Emacs
-notices on its existing hooks and timer, never opening a connection
-itself), Emacs makes a new forward and reattaches each session with
-`after: seq`, so it receives exactly the events it missed, pending asks
-included. Sending to a disconnected session reconnects first, as today.
-Automatic reconnect reuses the socket path remembered from the last successful
-ensure; it never runs a host process, including through `make-process` with
-a file handler. If the daemon no longer answers, the session stays disconnected
-until a send or `M-x agent-emx-reconnect` runs ensure again. A silent automatic
-hello times out locally after two seconds. Only existing session ids are
-reattached automatically; opening sessions and copying skills require user
-action. Forward setup uses
-`agent-remote--master` in connected-only mode, which checks the existing
-master without `file-directory-p` on the project. The 10-second reconnect
-timer never opens a host, starts a remote process or copies files. A changed master replaces
-and cancels the old forward and its private local directory.
-`agent-emx-restart-daemon` targets the current daemon view's host (or the
-local daemon outside a host view), so a stale host daemon can be restarted
-after resumable sessions become idle.
+When SSH drops, the forwarded socket closes. Emacs marks that host's
+sessions `disconnected`; the daemon and agents keep running, approvals and
+questions wait there, and editor calls fail at once with `Emacs is not
+attached`. Once tramp-rpc is connected again, a 10-second timer notices it
+without opening a connection itself; a new forward is made and each session
+reattaches with `after: {epoch, seq}`, so it receives exactly the events it
+missed, pending asks included. Sending to a disconnected session reconnects
+first.
 
-### Editor calls and paths
+Automatic reconnect reuses the socket path and version remembered from the
+last successful ensure. It never runs a host process, starts a remote
+command or copies files; if the daemon no longer answers, the session stays
+disconnected until a send or `M-x agent-emx-reconnect` runs ensure again. A
+silent automatic hello times out locally after two seconds. Only existing
+session ids reattach automatically; opening new sessions and copying skills
+require user action. A changed master replaces and cancels the old forward
+and its private local directory.
 
-A remote agent's MCP client runs `node <dir>/bin/emx mcp` on the host,
-which talks to the host's daemon. Editor tools are forwarded over the
-client connection to Emacs: no relay, no per-session local emx. Paths stay
-in the host's terms on the wire; Emacs maps them to `/rpc:host:` names
-(`agent-session-expand-file-name`, as today). Before asynchronous opening,
-Emacs expands remote roots (including `~`) once on the host and retains the
-`/rpc:` prefix for editor mapping. Pasted image attachments are uploaded with
-`agent-remote-upload` before send or steer; the wire contains host paths.
+### Paths and editor calls
 
-The `config_*` tools read and write this machine's Emacs configuration,
-which the host can't reach. The host daemon forwards them to Emacs like an
-editor call, and Emacs passes them to the local daemon, which does the
-file I/O (it never blocks Emacs, which is why they live in emx today).
-`config/call {method, arguments}` is local-editor-only. The port retains
-checkout/symlink/`.git` guards, numbered reads, exact replacement checks,
-unsaved-buffer refusal and visiting-buffer refresh. Only the private
-`_config_modified`/`_config_written` editor requests touch buffers. Tools
-and their private read-only classification are cached on the host, so
-`config_read` is available to each backend without a permission prompt.
+Paths stay in the host's terms on the wire; Emacs maps them to
+`/rpc:<host>:...` names (`agent-session-expand-file-name`). Before
+asynchronous opening, Emacs expands a remote root (including `~`) once on
+the host and retains its `/rpc:` prefix for editor mapping. Editor results
+have the remote prefix stripped before they go back to the agent. Pasted
+image attachments are uploaded with `agent-remote-upload` before send or
+steer, so the wire contains readable host paths.
+
+A remote agent's MCP client runs `node <dir>/bin/emx mcp` on the host and
+talks to the host daemon. Its editor calls travel over the client connection
+to Emacs. The `config_*` tools are the exception described under MCP.
 
 ### Project environments
 
-Bootstrap runs in the host home directory, outside the first project's direnv.
-The daemon keeps that base environment and computes each session's overlay by
-running `direnv export json` in its root. Direnv enforces `.envrc` authorization;
-an unavailable or blocked direnv leaves the base environment unchanged. The
-overlay uses the same essential variables as tramp-rpc (including PATH, compiler,
-Rust, Python and Node paths), so its program lookup and daemon spawn agree.
-Each CLI and the `emx mcp` it launches inherit this project environment. Results
-are cached per root for up to five minutes and invalidated by parent `.envrc`
-and `.direnv` changes; filesystem inspection and direnv run asynchronously in
-Node, never on an Emacs timer.
+The daemon keeps the environment it was started with, from the host home
+directory, as its base. For each project root it computes an overlay by
+running `direnv export json` in that root. Direnv enforces `.envrc`
+authorization; an unavailable or blocked direnv leaves the base environment
+unchanged and shows a notice. The overlay keeps the same essential variables
+as tramp-rpc (PATH, compiler, Rust, Python and Node paths, and similar), so
+program lookup and the spawned CLI/MCP agree. Each CLI and the `emx mcp` it
+launches inherit the project environment.
 
-### Configuration, usage and collaboration across hosts
+Results are cached per root for five minutes and invalidated by changes to
+`.envrc` and `.direnv` entries in the root or its ancestors. Filesystem
+inspection and direnv run asynchronously in Node, never on an Emacs timer.
+The cached environment is used for tool descriptions and start validation;
+an explicit session start refreshes that root's MCP clients, not a timer.
 
-- **Configuration:** the local config file is the source. Emacs sends the
-  effective config in `hello.config` and again with `config/push` on change
-  or local reconnection. It preserves JSON empty objects, false and null.
-  The host persists the pushed base in `emx/client-config.json`, so it
-  survives editor/daemon restarts. `~/.config/emx/config.json` may override
-  only `agents.<name>.executable`; all other overrides are rejected with
-  last-good config retained. Host config notifications never overwrite
-  Emacs's local policy cache. Host quota commands use those executables
-  and the installed dsh plugin, rather than local-machine command paths.
-- **Usage:** the ledger stays local. Each host outbox and Emacs editor outbox
-  persists a stable producer `source`, a monotonically increasing `sequence`,
-  and pending entries before delivery. Entries retain their old UUID `id` for
-  migration, plus `method` and `params`. Hello and a 5-second attached retry
-  replay pending host entries in sequence order. Emacs adds host/root context
-  and relays the same source and sequence to `usage/record` or `usage/quota`.
-  The ledger owner returns its applied sequence watermark; only then does
-  Emacs send `usage/ack {source, sequence}`. Anything at or below that source's
-  watermark is a duplicate, independent of backlog size or receipt-cache age.
-  Records persist delivery identity with the counters in the same append;
-  quota snapshots retain each producer's watermark atomically. Startup rebuilds
-  watermarks from those operations if a crash preceded the separate watermark
-  index or acknowledgment. Producer state retains its sequence even when its
-  outbox becomes empty. Editor outboxes use `emx/editor-usage-<server hash>.el`;
-  host outboxes use `emx/usage-outbox.json`. Existing host array outboxes receive
-  source/sequences once before replay. Migration scans all legacy ledger ids,
-  including receipts older than the former 10,000-entry cache, without charging
-  them again. Legacy id-only peers remain supported during upgrade.
-  Remote quotas preserve their sampling times and never replace the combined
-  local snapshot; a stale producer sequence cannot overwrite a newer reading.
-- **Collaboration limitation:** children, `session_start`, `session_stop`
-  and mailbox delivery remain in the parent's daemon. `sessions` lists
-  only that daemon; `session_read` and `session_ask` resolve only its
-  handles. Cross-daemon list/read/ask is deferred, like the phase-5 mixed
-  Lisp/daemon bridge: asynchronous confirmations and reply ownership need
-  a shared routing contract. An unknown target explicitly reports that
-  cross-daemon collaboration is unsupported. Use sessions in the same
-  daemon for collaborating tasks; no cross-host calls are silently routed.
+## Recovery after an Emacs restart
 
-### Security
+`hello` returns the session summaries before new session requests are
+processed. Emacs rebuilds live top-level views by daemon id, then adopts
+their children; a fresh `session/attach` replays transcripts and pending
+asks into those views. This path is shared by local and host connections.
+An existing view is reused when its daemon id or its native resume id, agent
+and root match, so a restart does not open a second CLI.
 
-Same model as today: owner-only sockets and directories on both ends, no
-other authentication; anyone who can act as the user on the host can drive
-its agents, as they can drive the agents themselves today.
+Each editor start has a distinct identity token, so a late `session/open`
+reply after switching agents is stopped rather than attached to a new view.
+Stops that could not be delivered are retained and sent after the next hello.
 
-### What goes away
+Skill roots travel as backend-neutral session context on `session/open` and
+`session/context`, including for dsh parents; children inherit it, and Claude
+and Codex translate it to their own launch flags and skill roots. Editor
+tools are re-sent on hello and after a method or module change, so the daemon
+and its MCP peers see the current catalog. The editor usage outbox is
+restored and flushed; a host connection is re-established only on demand or
+by the connected-host timer. If the daemon itself restarted, the session
+table and transcripts are restored idle with a new epoch and no asks, and
+the next send resumes each session.
 
-Removal moves to phase 8: `agent-keeper.py`, `agent-remote-relay.py` and
-their tests, the `-R` bridge and per-session local emx, and keeper byte-offset
-reattach still serve non-opted-in Lisp backends. `agent-emx-remote.el`
-installs/starts the host daemon, owns the `-L` transport, maps paths and
-relays config/usage for opted-in sessions. Both paths coexist deliberately.
+## Security model
+
+Owner-only sockets and directories on both ends, no other authentication.
+Any process that can act as the user can drive that user's daemon, just as
+it could drive the agent CLIs directly. The same applies to a host.
+
+The editor role is exclusive, but that is routing, not authorization. MCP
+connections are bound to one session and may only list and call tools;
+usage connections may only use usage methods. The session id is not a
+secret. Editor calls can only be answered by the attached editor; Emacs
+derives the caller's root and place locally and does not trust wire text.
+The daemon injects MCP only into its own agent processes.
+
+The `config_*` tools are confined to the Emacs configuration checkout
+outside `.git`, with symlink resolution through the deepest existing
+ancestor, exact replacement checks, numbered reads, unsaved-buffer refusal
+and visiting-buffer refresh. This is a guardrail against editing the wrong
+host's files, not a sandbox: `eval` is unrestricted.
+
+Host installs and forwarded sockets are owner-only. The host config may
+override only executables. Agent credentials never pass through emx; they
+stay in each CLI's own credential store.
+
+## Localization
+
+Agent-facing text is English: replies, tool names and output, prompts,
+errors returned to agents, and MCP descriptions. UI text is Chinese.
+
+The daemon does not render conversation text. Notices and tool views are
+structured: `{kind: "effort-after-turn"}`, `{kind: "restart-for-external"}`,
+a tool view with `kind: "plan"`, and the like. Emacs maps notice kinds to
+its own strings (`agent-emx-notice-formats`) and falls back to showing an
+unknown kind dimly. Tool titles are the agent's own command, path or query;
+Emacs words the few it knows (`todo_write` / `TodoWrite`, `exit_plan_mode`,
+`skill`) in Chinese. The short UI labels the daemon does build (quota window
+labels such as `5h` and `周`, and collaboration confirmation titles) are
+Chinese. Errors the daemon returns to agents stay English.
 
 ## Code layout
 
 ```
-bin/emx                  entry: CLI, `emx mcp`, `emx daemon`, `emx connect`
+bin/emx                  entry: CLI, `emx mcp`, `emx daemon`, build on demand
 emx/config.json          tracked configuration
-emx/daemon/              socket server, sessions, events, editor calls
-emx/backends/            claude.ts, codex.ts, dsh.ts
-emx/daemon/collab.ts     children, mailbox, session_* tools
-emx/usage/               ledger, quota polls, forecasts and turn accounting
-emx/remote/              durable host usage outbox
-lisp/agent/backend/dsh/  the dsh plugin, unchanged in place
-test/emx/                node --test suites, with fake CLIs
+emx/config.ts            validation, merge, push, watched reloads
+emx/daemon/              socket server, sessions, events, editor calls, locks
+emx/daemon/collab.ts     children, naming, mailbox, session_* tools
+emx/daemon/config-files.ts  local checkout file tools for host daemons
+emx/backends/            backend interface; claude.ts, codex.ts, dsh.ts;
+                         history.ts for native past-session discovery
+emx/usage/               ledger, quotas, forecasts, polls and turn accounting
+emx/remote/              project environments and durable host usage outbox
+emx/mcp.ts               stdio MCP facade over the daemon socket
 emx/package.json         pinned local TypeScript and Node types
-emx/tsconfig.build.json   ESM build with rewritten imports
-emx/dist/                generated runtime, only this tree is shipped
+emx/tsconfig.json        check-only config, including the TypeScript tests
+emx/tsconfig.build.json  ESM build with rewritten imports
+emx/dist/                generated runtime; only the manifest's files ship
+lisp/agent/agent-emx.el  daemon client, session views, editor-call handling
+lisp/agent/agent-emx-remote.el  host install, forwarding, config and usage
+lisp/agent/agent-emx-config.el  cached display policy
+lisp/agent/agent-collab.el  mention enrichment and child progress in the UI
+lisp/agent/agent-usage.el   quota display and durable usage producer
+lisp/agent/agent-ui.el      editor methods, deferred results, tool catalog
+lisp/agent/backend/agent-{claude,codex,dsh}.el  enabled-agent registration
+lisp/agent/backend/dsh/emacs-bridge.mjs  the dsh plugin; emacs.yml,
+                         no-subagents.yml
+test/emx/                node --test suites, with fake CLIs
+test/agent-emx-*.el      ERT suites: daemon client, host simulation, smoke
 ```
 
-## Migration
+## Known limitations and open questions
 
-Each phase keeps every existing session type working and ends with green
-ERT, `node --test` and a clean compile. Lisp backends are removed only at
-the end.
-
-1. **Skeleton.** `emx daemon` with socket, `hello`, sessions table, event
-   log, attach and replay; a fake backend that echoes. In Lisp a generic
-   `emx` backend renders the events into today's session buffer. ERT runs
-   against a daemon started on a temp socket, node tests against fake
-   clients.
-2. **dsh** through the daemon, behind `agent-emx-agents` (default nil),
-   old path still available. Implemented for local roots; real-daemon tests
-   use a fake dsh peer without contacting the API.
-3. **Editor calls and `emx mcp` over the daemon** (implemented); stamp
-   files remain for the legacy path until its cut-over.
-4. **Claude**, then **Codex**.
-5. **Collab**: profiles from config, `session_*` tools, mailbox,
-   children's lifecycle and limits, the approval policy above.
-6. **Usage** (implemented): the daemon owns the ledger, quota polls and
-   accounting; Lisp backends send records to the same writer.
-7. **Remote**: install and `--ensure`, the `-L` forward, disconnect and
-   reattach by `seq`, `config_*` through the local daemon, usage outbox,
-   same-daemon collaboration (cross-daemon list/read/ask deferred as above).
-   Keep the keeper and relay for non-opted-in agents until phase 8.
-8. **Cut over** (implemented): all agents register with emx; remove Lisp
-   protocol adapters, keeper/relay, reverse forwards, opt-in switches, legacy
-   MCP and filesystem tool stamps. `agent-session` removes process and renames
-   state to client in one `restart_required` change.
-
-## Phase 6: daemon-owned usage
-
-`emx/usage/service.ts` ports the former `bin/emx-usage.js` algorithms;
-`types.ts` describes its files and `accounting.ts` consumes original
-backend events. The daemon initializes it only after acquiring its var-dir
-lock. Ledger and quota paths are always `<var>/agent-usage.jsonl` and
-`<var>/agent-quota.json`; socket clients cannot redirect them. The JSONL
-records, quota histories, calendar bucketing, forecasts, stale-source
-skipping, failure backoff and CLI commands are unchanged. `emx serve` and
-its JavaScript module are removed because no callers remain.
-
-Each daemon session sends its live accounting events to Accounting before
-any editor event is logged. Calls sum by model until usage/end; the first
-nonempty model counts the turn. Exit flushes a partial turn exactly once.
-ClaudeTotals keeps its existing proof of the first resumed baseline,
-falls back to the turn's own counters when ambiguous, and forgets the
-baseline after external-client writes. Adapter history filtering stays in
-place. Attach, catch-up, earlier history and reconnect cannot charge usage.
-Accounting continues while Emacs is disconnected. Handles are supplied on
-open and before sends so ledger session names retain the editor's handle;
-root abbreviation and child markers match the Lisp records.
-
-`agent-usage.el` retains accounting for Lisp backends, but sends their
-records and quota readings over agent-emx's shared local connection. It
-uses the same asynchronous ensure/hello path even when no daemon backend
-is selected. On hello Emacs supplies agent display order, the polling
-interval and the existing registered poller commands. The daemon stores
-those in `<var>/emx/usage.json`, retaining polls after editor disconnect or
-daemon restart. `agent-emx-var-directory` selects this single writer;
-legacy usage file variables describe its standard paths. The old `.eld`
-migration remains a one-time pre-start conversion. Batch Emacs only uses
-an explicitly started isolated daemon.
-
-Global `usage/quotas` snapshots decode to the same Lisp lists the echo
-line and page already draw. `usage/changed` schedules the page's existing
-idle refetch. Report filters, cache toggle, refresh behavior, clear's
-confirmation, and visible wording are unchanged. The old
-`agent-usage-restart-service` command now reconnects and reapplies poll
-settings, without stopping live sessions; code updates use the daemon's
-lifecycle rather than a separate usage subprocess.
-
-Verification uses the unchanged `test/fixtures/usage/` data in
-`test/emx/usage.test.ts`, plus socket/accounting/restart tests in
-`usage-daemon.test.ts`. Fake quota peers cover all three CLI poll protocols
-without credentials or model calls. ERT still renders the same page and
-echo line from those fixtures over an isolated daemon socket.
-
-Phase 6 verification (2026-10-20): `tsc -p emx` passes; `node --test
-test/emx/ test/emx-mcp-test.js` passes all 118 tests. The full AGENTS ERT
-suite passes 254 tests with one environment-dependent scroll test skipped
-(255 total, no unexpected results), using the live checkout's package
-directory but only worktree source and temporary daemon state. Evil-on and
-evil-off byte compilation each report only the two existing `lang-agda.el`
-slot warnings. Bridge and dsh plugin syntax checks pass. No real model or
-quota calls, live Emacs server, default daemon or reload was used.
-
-## Open questions
-
-1. Config format: JSON as proposed, or something with comments?
-2. Default durations: `daemon.idleExit` 15 minutes, `sessions.hibernateAfter`
-   2 hours.
-
-### Usage delivery recovery (phase 6 review)
-
-`usage/hello` and editor `hello` advertise `capabilities.usage = 1` for the
-acknowledged protocol. Lisp usage uses a dedicated connection and never sends
-records to a daemon without that capability. Each record stays in an Emacs
-in-memory outbox under a stable id until `usage/record` replies with that id.
-Quota readings use `usage/quota` with an id and retain the latest per agent/host.
-Failed ensure, socket loss and uncertain replies retain entries for retry.
-Phase 7 review replaces the original bounded receipt caches with durable
-producer sequence watermarks (see Remote projects above). Legacy receipt ids
-remain in ledger appends for migration, and legacy notifications remain
-supported for attached older editors.
-
-While usage monitoring is active, failures schedule asynchronous ensure/connect
-with 2–60 second exponential backoff. A successful usage handshake resets the
-backoff, reapplies poll settings and flushes retained entries. Disabling the echo
-monitor cancels its pending reconnect timer. The outbox survives daemon restarts
-and producing Emacs restarts through the persisted editor outbox.
-
-## Phase 7 verification
-
-`test/emx/remote.test.ts` installs only the runtime into a temporary HOME,
-checks the hash, plugin inclusion and stale/live versus idle replacement,
-starts a second daemon through `--ensure --client`, holds a fake Codex
-turn through editor disconnect, and replays only events after its cursor.
-It exercises editor calls, remote -> editor -> local-daemon config tools,
-config push/host overrides, durable usage and duplicate receipts. No SSH,
-real account or model is used.
-
-`test/agent-emx-remote-test.el` uses a local file handler and remote-process
-stub to execute the actual ensure shell command in that temporary HOME;
-the forwarding stub returns the host socket directly. Other tests stub
-ControlMaster/ssh and verify private directories, forward reuse/replacement,
-Node in the single program lookup, timer guards, path mapping, JSON types,
-missing-install retry and local-before-remote acknowledgement order.
-The legacy keeper and relay tests continue to cover the unswitched path.
-
-### Proposed real-host check (requires separate approval)
-
-Use a disposable host account/project and a dedicated Emacs server/config
-var directory; do not attach the user's usual Emacs or its daemon, or
-change executable overrides for an account running production daemons.
-For example, after writing a fake-only config to `/tmp/emx-phase7-var/emx/config.json`:
-
-```sh
-emacs -Q --daemon=emx-phase7-check \
-  --eval '(setq user-emacs-directory "/ABS/WORKTREE/" package-user-dir "/ABS/ELPA/" agent-emx-var-directory "/tmp/emx-phase7-var/" my/use-evil nil)' \
-  -l /ABS/WORKTREE/init.el
-emacsclient -s emx-phase7-check -c
-```
-
-First choose the disposable host,
-project, installed Node path and a test client id with the user. Install
-only this runtime through `agent-emx-remote--install` in that isolated
-Emacs. Copy a fake CLI separately to the disposable host test directory
-(the production runtime installer intentionally excludes fixtures). Push
-a test config with all executables pointing to fake CLIs, polling disabled,
-`collab.handleCommand: []`, and `collab.agentHandleCommands: {}`. This
-checks actual tramp-rpc/sshd without model calls.
-
-1. In isolated Emacs open `/rpc:HOST:/TEST/PROJECT/`, call
-   `agent-session-check-programs`, and inspect the cached `:node` value.
-   It must be 18.17+ (or 20.3+) and lookup must issue only one `process-file`.
-2. Through that file handler install the runtime, then run on the host:
-   `node ~/.cache/emacs-agent/emx/VERSION/bin/emx daemon --client ID --ensure`.
-   Check the JSON version/socket, a second ensure's identical pid, and
-   `stat` of `~/.cache/emacs-agent/emx/run` and `state/ID` (0700).
-3. From the local machine, using the test tramp-rpc ControlMaster:
-   `mkdir -m 700 /tmp/emx-realhost-ID` and
-   `ssh -S CONTROL -O forward -L /tmp/emx-realhost-ID/emx.sock:REMOTE_SOCKET HOST`.
-   Connect the isolated client to that socket. A fake echo/Codex session
-   should attach, render, answer an approval and map `/TEST/PROJECT/a.el`
-   to `/rpc:HOST:/TEST/PROJECT/a.el` for an editor `open` call.
-4. Hold a fake turn, record its epoch/seq, then close only this test master
-   (`ssh -S CONTROL -O exit HOST`). The view must become disconnected;
-   the host daemon/fake CLI must remain alive. Wait past the reconnect
-   timer: it must not establish SSH. Reopen the test tramp-rpc connection;
-   a new master/forward must reattach with the cursor and no duplicate
-   blocks or pending approvals. With the host connection still open, stop only
-   the test daemon: another timer tick must use only local SSH forwarding and
-   leave sessions disconnected, with no host ensure or file copy. A manual
-   reconnect should then ensure and reattach again.
-5. Write/read/edit a disposable `var/phase7-realhost.el` using remote
-   `config_*`, confirm that only the isolated local checkout changes,
-   and test refusal while its visiting buffer is modified. Change the
-   isolated local config, confirm the host receives it, and confirm an
-   executable-only host override survives the push.
-6. Finish a fake turn while detached and inspect the host outbox. Reattach,
-   verify one combined local ledger record and a cleared remote outbox;
-   interrupt again between local receipt and remote ack and verify retry
-   still leaves one record. Check host-labelled quota readings too.
-7. Open two allowed direnv projects with different fake CLI PATHs, including
-   `/rpc:HOST:~/PROJECT/` for one. Check both lookup and actual CLI/MCP
-   environments, then edit `.envrc`/`.direnv` and launch again. Paste an image
-   and check send/steer receives a readable host path. Race two installers and
-   interrupt one copy; only a fully verified version may appear at the target.
-   Repeat a backlog over 10,000 records across an apply-before-ack restart,
-   checking source watermarks and unchanged combined counts. Try a long HOME
-   and verify the shortened socket directory's ownership and mode.
-8. Stop only the test daemon with
-   `node ~/.cache/emacs-agent/emx/VERSION/bin/emx daemon --client ID --stop`,
-   cancel the test forward using `ssh -S CONTROL -O cancel -L LOCAL:REMOTE HOST`,
-   and remove the disposable directories/config-file fixture.
-
-The open real-host risks are tramp-rpc's process environment/detachment,
-sshd stream-local forwarding policy, socket-path limits on that host,
-and ControlMaster close/reopen behavior. The `emx connect` pipe fallback
-remains deferred until a host actually requires it.
-
-### Verification output (2026-10-20)
-
-All commands ran from this worktree. Socket/process tests used only temp
-var/HOME directories, fake CLIs and local host simulation. No live reload,
-default Emacs server/daemon, real SSH host or real model was used.
-
-```text
-tsc -p emx                                      exit 0
-node --test test/emx/ test/emx-mcp-test.js        155 passed, 0 failed
-full ERT (AGENTS.md, shared package-user-dir)    277 tests; 276 passed, 0 unexpected, 1 skipped
-  skipped: init-base-scroll-with-point
-byte compile, my/use-evil=nil and t              exit 0 in each mode
-  only known lang-agda.el:114 adjust-face / :116 protect-font-lock warnings
-python3 test/agent-keeper-test.py                all passed
-python3 test/agent-remote-relay-test.py           all passed
-node --check bin/emx                            exit 0
-git diff --check                                clean
-```
-
-### Phase 7 review fixes verification (2026-10-20)
-
-Final verification used this worktree, fake CLIs and temporary daemon state;
-no remote host, default Emacs server, reload or model call was used for these
-fixes. A preliminary keeper test used its default cache and reported complete
-cleanup; the final keeper/relay runs both used a temporary HOME.
-
-- `tsc -p emx`, `node --check bin/emx`, and the dsh bridge syntax check passed.
-- `node --test test/emx/ test/emx-mcp-test.js`: 159 passed, 0 failed.
-- Full AGENTS ERT with the shared package directory and remote tests:
-  290 total, 289 passed, 0 unexpected, 1 skipped (`init-base-scroll-with-point`).
-- Byte compilation with evil on and off: only the two known `lang-agda.el`
-  unknown-slot warnings (`adjust-face`, `protect-font-lock`) in each run.
-- Keeper and relay Python suites: all passed with a temporary HOME.
-
-Regression runs against the preceding implementations reproduced the timer,
-copy verification/publication, image/root, per-project PATH and large-outbox
-failures. In particular, the old usage cache replay wrote 20,002 records from
-10,001 deliveries; sequence watermarks preserve 10,001 across both restarts.
-The existing Node-warning ensure parser fix remains intact. The proposed
-real-host check above is still needed for actual tramp direnv behavior, atomic
-file-handler renames, stream-local forwarding and ControlMaster replacement.
-
-### Compiled runtime verification (2026-10-20)
-
-All work ran in this worktree. Daemons used temporary `--var` and HOME;
-model commands were fixtures and collaboration naming was disabled in the
-new build fixtures. No real host, model, default Emacs daemon/server or
-reload was used.
-
-- `npm install --prefix emx`: pinned TypeScript 7.0.2 installed; zero audit
-  vulnerabilities. Both `emx/node_modules/.bin/tsc -p emx` and bridge/plugin
-  `node --check` commands passed.
-- Removed dist in this worktree: first ensure built and started in 0.461 s;
-  the second retained both PID and generation. Touching a source followed by
-  two concurrent ensure calls produced exactly one generation; the unchanged
-  runtime version retained the idle daemon. The isolated daemon stopped cleanly.
-- Build regressions also cover a dead build-lock owner, compiler errors
-  retaining the previous generation, source-only comments retaining the
-  runtime hash, emitted code/config changing it, and source-free host installs.
-- `EMX_NODE_MIN=/path/to/node-v18.17.0 node --test test/emx/ test/emx-mcp-test.js`:
-  164 passed, zero failures/skips. The official Node 18.17.0 macOS arm64 binary
-  loaded every emitted module and ran a source-free daemon, configuration,
-  echo session and stdio MCP. The static target/API inventory runs even when
-  `EMX_NODE_MIN` is absent. The Node guard also rejects 18.16, 19 and 20.0–20.2.
-- Full AGENTS ERT, including remote tests and shared `package-user-dir`:
-  290 total, 289 passed, zero unexpected, one existing environment skip
-  (`init-base-scroll-with-point`). Evil off/on byte compilation passed with
-  only the two known Agda slot warnings in each mode.
-- Keeper and relay Python suites passed with temporary HOME; `git diff --check`
-  was clean.
-
-No-op cost on this machine (Node 26.9.0): after one warm build, 100 sequential
-calls to the entry's exported `ensureBuild()` had median 0.81 ms, P95 1.09 ms.
-Twenty fresh `node bin/emx daemon --manifest` processes had median 109 ms,
-P95 143 ms including Node startup, module imports and manifest hashing.
-Only the source freshness check is on the no-op build path; no compiler is
-started. Old immutable generations are deliberately retained until processes
-using them have exited.
-
-## Phase 8a parity audit
-
-Before the cut-over, these were the remaining Lisp-only responsibilities:
-
-- Native history discovery (the sidebar and resume picker): Claude JSONL
-  title/head/tail reads and Desktop/deleted worktrees, Codex `thread/list`,
-  dsh `sessions/list`. `sessions/history {agent, root}` now runs discovery
-  on the owning daemon, including git worktrees, newest titles and resume
-  roots; the editor maps host roots back through its transport.
-- Local quota launch commands were registered by the Lisp backends. Both
-  local and host daemons now derive them from effective agent executable
-  configuration on startup/reload; stale editor overrides cannot win.
-- `agent-session-list` called backend history generics, which cannot
-  distinguish three agents sharing `emx`. Its daemon path now names the
-  agent explicitly. The resume picker uses the same agent-specific request.
-- Host project profiles were still filtered against the daemon baseline PATH.
-  Resolve direnv before adapter startup, use the cached root environment for
-  descriptions and start validation, and refresh that root's MCP clients on
-  explicit startup. Parent/child definitions stay identical; no timer probes.
-- `agent-collab` still has naming subprocesses, session tools, text handoff,
-  fork dispatch and a mailbox for legacy sessions. All already have daemon
-  equivalents in `emx/daemon/collab.ts`; only child-tool linking and footer
-  display remain editor work. Mention expansion remains input enrichment in the editor.
-- `agent-usage` uses session process/state for legacy turn accounting;
-  `emx/usage/accounting.ts` already covers these boundaries and replay rules.
-  Its durable editor producer remains useful for forwarding host usage.
-- `agent-ui` still publishes filesystem tool stamps for legacy MCP;
-  `editor/tools` already transports changed definitions and classification.
-- `init-agent` loads enabled registration modules and wires display/keys;
-  no protocol dependency remains there. Agent registration macros preserve
-  the commands and public UI API used by canvas, review and session lists.
-- Old pure-protocol ERT tests call backend-private helpers. Their subjects
-  are covered in the daemon's Claude/Codex/dsh/accounting/collaboration tests;
-  cut-over removes those duplicates together with their implementation.
-
-History regression tests use temporary git repositories, transcripts and
-short-lived fake protocol peers, never model or account calls.
-
-
-## Phase 8 cut-over
-
-The three `backend/agent-NAME.el` registration modules remain separate so
-`my/agents` controls loading and generated UI commands. They contain no
-process, protocol or policy implementation. The shared `emx` backend is
-required for all three, locally and on host daemons.
-
-Removed: legacy Lisp adapters and quota registrations; keeper and relay
-Python programs/tests; reverse SSH bridge; byte-offset reattach and process
-JSON dispatch; Lisp collaboration tools, naming commands, mailbox and offline
-policy defaults; `agent-emx-agents`/`agent-emx-offer`; filesystem stamps and
-their repeating timer; emacsclient-based stdio MCP. The old pure-protocol ERT
-subjects were removed with their implementations; daemon suites cover them.
-
-Kept: the session UI API and generic view boundary (also used by fake UI
-backends), canvas/review/editor tools, child progress and mirrored asks,
-three registration modules, ControlMaster lookup/upload helpers, and bare
-command-line emx operations via emacsclient. Tool changes now publish on
-method registration and module loading, with no stamp files. Durable editor
-usage state remains for pending pre-cut-over entries and host delivery; no
-editor code computes model usage anymore.
-
-The `agent-session` struct drops `process` and renames `state` to `client`.
-All native backend state lives in the daemon; the remaining client plist
-holds connection, cursor, attach and rendering data. **Restart required**:
-loading the changed struct into a live Emacs is unsupported. No live reload
-was used during this worktree migration.
-
-### Phase 8 verification (2026-10-20)
-
-All verification ran in the worktree, with temporary HOME/var directories,
-fake executables, naming disabled (`collab.handleCommand: []` and
-`collab.agentHandleCommands: {}`), and fake-only quota fixtures. No live
-reload, default editor server/daemon, real host or real model was used.
-The branch was neither merged nor pushed.
-
-```text
-emx/node_modules/.bin/tsc -p emx             exit 0
-node --test test/emx/ test/emx-mcp-test.js   165 total; 164 passed, 0 failed, 1 skipped
-  skip: optional EMX_NODE_MIN binary was not supplied
-full updated AGENTS ERT                     222 total; 221 expected, 0 unexpected, 1 skipped
-  package-user-dir: shared checkout's elpa (read only)
-  skip: init-base-scroll-with-point
-byte compile, evil nil and t                exit 0 in both modes
-  only lang-agda.el:114 adjust-face / :116 protect-font-lock slot warnings
-node --check                               all 8 tracked JS/MJS files and bin entry passed
-git diff --check                            clean
-```
-
-The ERT suite includes `agent-emx-smoke-test.el`, also run standalone:
-all three real registration modules opened sessions using config-supplied
-fake CLIs, sent a message, displayed and answered an approval, started a
-fake child through stdio MCP, linked the child's view to its parent, and
-listed native past sessions through `sessions/history`. Claude used a
-synthetic JSONL transcript; Codex and dsh used short-lived protocol peers.
-The smoke completed in 1.33 seconds standalone. The final full ERT run
-completed in 26.87 seconds; the Node suite in 12.36 seconds.
-
-The additional project-PATH regression simulates two host roots locally:
-one can discover and start a project-only dsh profile, the other cannot.
-Parent/child definitions match. A direnv refresh updates only that root's
-MCP clients. This closes the last Lisp profile-discovery dependency before
-removal. Actual SSH/ControlMaster behavior still has the phase-7 real-host
-verification limitation described above.
+- **Stale daemons with live agents restart manually.** Automatic restart once
+  every agent is idle is not implemented; `M-x agent-emx-restart-daemon` is
+  the supported path.
+- **`session/open.fork` is rejected.** Native forks exist only through
+  `session_start context=fork`, and only for a caller with a live native
+  conversation.
+- **Real-host transport is simulated in tests.** The remote path is covered
+  by a temporary home, stubbed tramp/SSH and a local host simulation. Actual
+  tramp-rpc/sshd behavior, stream-local forwarding policy, socket-path limits
+  and ControlMaster replacement still need confirming on a real host. The
+  `emx connect` pipe fallback for hosts that disable stream-local forwarding
+  is not built.
+- **Children do not survive a daemon crash.** They are not resumable and are
+  deliberately left out of the restored session table.
+- **Usage counts only daemon sessions.** Work in a terminal or another
+  client is not counted, and the ledger has no prices, since the accounts are
+  subscription plans.
+- **Configuration is JSON without comments.** Whether the configuration
+  format needs comments, and whether the stale-daemon restart should become
+  automatic, remain open.

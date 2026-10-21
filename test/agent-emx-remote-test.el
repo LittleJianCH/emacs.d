@@ -53,12 +53,12 @@
     (cl-letf (((symbol-function 'process-file)
                (lambda (_program _input _buffer _display &rest args)
                  (push args calls)
-                 (should (string-match-p "node --version" (nth 1 args)))
-                 (insert "1\nv22.18.0\n") 0)))
+                 (should-not (string-match-p "node --version" (nth 1 args)))
+                 (insert "1\n") 0)))
       (agent-session-check-programs "/rpc:phase7:/project/")
       (should (= (length calls) 1))
       (let ((known (gethash "/rpc:phase7:/project/" agent-session--remote-programs)))
-        (should (equal (plist-get known :node) "v22.18.0"))
+        (should-not (plist-get known :node))
         (should (equal (plist-get known :programs) '(("fake-agent" . t))))))))
 
 (ert-deftest agent-emx-remote-install-is-content-addressed-and-complete ()
@@ -78,16 +78,21 @@
           (agent-emx-remote--install root manifest)
           (should (= count (length (plist-get manifest :files))))
           (let* ((dir (expand-file-name (concat ".cache/emacs-agent/emx/"
-                                                (plist-get manifest :version))
+                                                (plist-get manifest :version) ".current")
 					agent-emx-remote-test--home))
-                 (marker (expand-file-name ".complete" dir)))
+                 (marker (expand-file-name ".complete" (file-truename dir))))
             (should (file-exists-p (expand-file-name "lisp/agent/backend/dsh/emacs-bridge.mjs" dir)))
             (should-not (file-exists-p (expand-file-name "emx/node_modules" dir)))
             (agent-emx-remote--install root manifest)
             (should (= count (length (plist-get manifest :files))))
             ;; A bad/incomplete marker forces a complete retry.
             (with-temp-file marker (insert "old-version"))
-            (agent-emx-remote--install root manifest)
+            (let ((fresh (agent-emx-remote--install root manifest)))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents (concat fresh ".complete"))
+                               (buffer-string)) (plist-get manifest :version)))
+              (should (equal (with-temp-buffer (insert-file-contents marker)
+                                                (buffer-string)) "old-version")))
             (should (= count (* 2 (length (plist-get manifest :files)))))))
       (delete-directory agent-emx-remote-test--home t))))
 
@@ -264,7 +269,7 @@
          (file-name-handler-alist (cons '("\\`/rpc:phase7:" . agent-emx-remote-test--handler)
 					file-name-handler-alist))
          (root "/rpc:phase7:/project/")
-         (master "1") (ensures 0) (forwards 0) remote local)
+         (master "1") (ensures 0) (forwards 0) remote local local-view)
     (puthash root '(:node "v26.9.0") agent-session--remote-programs)
     (cl-letf (((symbol-function 'agent-emx-remote--process)
                (lambda (_root command buffer)
@@ -307,6 +312,42 @@
              (let ((ask (car (hash-table-keys (agent-emx--table session :emx-asks)))))
                (agent-emx--request remote "session/answer" (list :id id :ask ask :choice "allow")))
              (agent-emx-remote-test--wait (lambda () (string-match-p "allowed" (agent-emx-test--transcript session)))))
+           ;; Real editor hub, two daemons; only the host transport is simulated.
+           (agent-session-set-handle session "hub-target")
+           (agent-session-send session "hub seed")
+           (agent-emx-remote-test--wait (lambda () (eq (agent-session-status session) 'idle)))
+           (setq local-view
+                 (buffer-local-value
+                  'agent-session--current
+                  (agent-session-open 'test-emx agent-emx-var-directory)))
+           (agent-emx-remote-test--wait (lambda () (eq (agent-session-status local-view) 'idle)))
+           (agent-session-set-handle local-view "hub-source")
+           (agent-session-send local-view "ask hold source")
+           (agent-emx-remote-test--wait (lambda () (agent-session--pending-asks local-view)))
+           (let* ((listed (agent-emx-test--mcp local local-view "tools/call" '(:name "sessions")))
+                  (text (plist-get (aref (plist-get listed :content) 0) :text)))
+             (should-not (plist-get listed :isError))
+             (should (string-match-p "hub-target" text))
+             (should (string-match-p "phase7" text))
+             (let* ((data (json-parse-string text :object-type 'plist))
+                    (target (seq-find (lambda (row) (equal (plist-get row :handle) "@hub-target"))
+                                      (plist-get data :sessions))))
+               (should (string-prefix-p "@hub-target#" (plist-get target :id)))))
+           (let ((sent (agent-emx-test--mcp
+                        local local-view "tools/call"
+                        '(:name "session_ask" :arguments (:session "@hub-target" :prompt "hub question")))))
+             (should-not (plist-get sent :isError)))
+           (agent-emx-remote-test--wait
+            (lambda () (string-match-p "echo: hub question" (agent-emx-test--transcript session))))
+           (let ((read (agent-emx-test--mcp
+                        local local-view "tools/call"
+                        '(:name "session_read" :arguments (:session "@hub-target")))))
+             (should-not (plist-get read :isError))
+             (should (string-match-p "hub question"
+                                     (plist-get (aref (plist-get read :content) 0) :text))))
+           (agent-session--answer local-view (car (agent-session--pending-asks local-view)) 'allow)
+           (agent-emx-remote-test--wait
+            (lambda () (string-match-p "Reply from.*hub-target" (agent-emx-test--transcript local-view))))
            ;; Config-file calls make the remote -> Emacs -> local-daemon trip.
            (let ((path (concat "var/phase7-ert-" (number-to-string (emacs-pid)) ".el")) done result)
              (unwind-protect
@@ -324,6 +365,8 @@
                    (should (string-match-p "phase7 fixture" result)))
                (ignore-errors (delete-file (expand-file-name path agent-emx--checkout))))))
         (when (timerp agent-emx-remote--timer) (cancel-timer agent-emx-remote--timer))
+        (when (and local-view (buffer-live-p (agent-session-buffer local-view)))
+          (agent-session-kill-quietly (agent-session-buffer local-view)))
         (maphash (lambda (_ c)
                    (when (process-live-p (agent-emx--connection-process c))
                      (delete-process (agent-emx--connection-process c))))
@@ -334,7 +377,7 @@
             (call-process "node" nil nil nil
                           (expand-file-name (concat ".cache/emacs-agent/emx/"
                                                     (plist-get (agent-emx-remote--manifest) :version)
-                                                    "/bin/emx") agent-emx-remote-test--home)
+                                                    ".current/bin/emx") agent-emx-remote-test--home)
                           "daemon" "--client" (agent-emx-remote-client-id) "--stop"))
           (ignore-errors
             (call-process "node" nil nil nil (expand-file-name "bin/emx" agent-emx--checkout)
@@ -404,7 +447,7 @@
           (should-error (agent-emx-remote--install "/rpc:phase7:/project/" manifest))
           (should-not (file-exists-p
                        (expand-file-name (concat ".cache/emacs-agent/emx/"
-                                                 (plist-get manifest :version) "/.complete")
+                                                 (plist-get manifest :version) ".current/.complete")
                                          agent-emx-remote-test--home)))
           (should-not (directory-files
                        (expand-file-name ".cache/emacs-agent/emx" agent-emx-remote-test--home)
@@ -433,7 +476,7 @@
             (should-not (directory-files (file-name-directory (directory-file-name dir)) nil "stage-"))))
       (delete-directory agent-emx-remote-test--home t))))
 
-(ert-deftest agent-emx-remote-ensure-repairs-a-broken-install-once ()
+(ert-deftest agent-emx-remote-ensure-surfaces-ordinary-errors ()
   (let ((connection (agent-emx--make-connection :place "/rpc:phase7:/project/"))
         (runs 0) (copies 0) failure)
     (cl-letf (((symbol-function 'agent-emx-remote--manifest) (lambda () '(:version "v")))
@@ -443,7 +486,7 @@
                (lambda (_root _manifest force) (should force) (cl-incf copies)))
               ((symbol-function 'agent-emx--lost) (lambda (_ error) (setq failure error))))
       (agent-emx-remote--ensure connection)
-      (should failure) (should (= runs 2)) (should (= copies 1)))))
+      (should failure) (should (= runs 1)) (should (= copies 0)))))
 
 (ert-deftest agent-emx-remote-images-upload-before-send-and-steer ()
   (agent-emx-test--with-session
@@ -505,7 +548,7 @@
        (should copied)
        (setq async t)
        (funcall callback connection)
-       (should (equal (plist-get (plist-get opened :codex) :skillsRoot) "/host/skills"))))))
+       (should (equal (plist-get (plist-get opened :skills) :skillsDir) "/host/skills"))))))
 
 (ert-deftest agent-emx-remote-timer-never-opens-new-sessions ()
   (agent-emx-test--with-session
@@ -538,6 +581,84 @@
                (lambda (&rest _)
                  (should (equal default-directory "/rpc:phase7:~/")) 0)))
       (should (= (agent-emx-remote--process root '("sh" "-c" "true") nil) 0)))))
+
+(ert-deftest agent-emx-remote-repair-keeps-published-files ()
+  (let* ((agent-emx-remote-test--home (make-temp-file "emx-repair-" t))
+         (file-name-handler-alist (cons '("\\`/rpc:phase7:" . agent-emx-remote-test--handler)
+                                        file-name-handler-alist))
+         (manifest (agent-emx-remote--manifest))
+         (root "/rpc:phase7:/project/"))
+    (unwind-protect
+        (let ((original (agent-emx-remote--install root manifest)))
+          (with-temp-file (concat original "in-use") (insert "live daemon"))
+          (let ((fresh (agent-emx-remote--install root manifest t)))
+            (should-not (equal original fresh))
+            (should (file-exists-p (concat original "in-use")))
+            (should (file-exists-p (concat fresh "bin/emx")))
+            (should (equal (file-truename fresh)
+                           (file-truename (concat original "../"
+                                                  (plist-get manifest :version) ".current/"))))))
+      (delete-directory agent-emx-remote-test--home t))))
+
+(ert-deftest agent-emx-remote-bootstrap-classifies-missing-corrupt-and-node ()
+  (let* ((home (make-temp-file "emx-bootstrap-" t))
+         (default-directory home)
+         (process-environment (cons (concat "HOME=" home) process-environment))
+         (manifest '(:version "test" :integrity [(:file "bin/emx" :size 1 :sha256 "bad")]))
+         (command (agent-emx-remote--bootstrap "runtime" manifest)))
+    (unwind-protect
+        (with-temp-buffer
+          (should (= (apply #'call-process (car command) nil t nil (cdr command)) 44))
+          (make-directory (expand-file-name "runtime" home))
+          (make-symbolic-link "runtime" (expand-file-name "runtime.current" home))
+          (with-temp-file (expand-file-name "runtime/.complete" home) (insert "test"))
+          (should (= (apply #'call-process (car command) nil t nil (cdr command)) 45))
+          ;; An unreadable file is not proof of corruption and must not repair.
+          (make-directory (expand-file-name "runtime/bin" home))
+          (with-temp-file (expand-file-name "runtime/bin/emx" home) (insert "x"))
+          (set-file-modes (expand-file-name "runtime/bin/emx" home) #o000)
+          (erase-buffer)
+          (should (= (apply #'call-process (car command) nil t nil (cdr command)) 1))
+          (should (string-match-p "EACCES" (buffer-string)))
+          (set-file-modes (expand-file-name "runtime/bin/emx" home) #o600)
+          ;; The bootstrap Node is checked even before inspecting the install.
+          (make-directory (expand-file-name "bin" home))
+          (with-temp-file (expand-file-name "old-node.cjs" home)
+            (insert "Object.defineProperty(process.versions,'node',{value:'16.0.0'});"))
+          (with-temp-file (expand-file-name "bin/node" home)
+            (insert "#!/bin/sh\nexec " (shell-quote-argument (executable-find "node"))
+                    " --require " (shell-quote-argument (expand-file-name "old-node.cjs" home))
+                    " \"$@\"\n"))
+          (set-file-modes (expand-file-name "bin/node" home) #o700)
+          (let ((process-environment (cons (concat "PATH=" (expand-file-name "bin" home)
+                                                   ":" (getenv "PATH")) process-environment)))
+            (erase-buffer)
+            (should (= (apply #'call-process (car command) nil t nil (cdr command)) 46))
+            (should (string-match-p "got v" (buffer-string)))))
+      (delete-directory home t))))
+
+(ert-deftest agent-emx-remote-queues-during-local-startup ()
+  (let ((agent-emx--connections (make-hash-table :test #'equal))
+        (agent-emx-remote--timer t) (runs 0) (failures 0) local-failure)
+    (cl-letf (((symbol-function 'agent-emx-remote--manifest) (lambda () '(:version "v")))
+              ((symbol-function 'agent-emx-remote--process)
+               (lambda (_root _command buffer)
+                 (cl-incf runs)
+                 (with-current-buffer buffer (insert "{\"version\":\"v\",\"socket\":\"/remote\"}\n")) 0))
+              ((symbol-function 'agent-emx-remote--forward)
+               (lambda (&rest _) '(:socket "/local")))
+              ((symbol-function 'agent-emx--local-connection)
+               (lambda (_callback failure &rest _) (setq local-failure failure)))
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+      (let* ((error-callback (lambda (_) (cl-incf failures)))
+             (connection (agent-emx-remote-connection "/rpc:phase7:/project/" #'ignore error-callback)))
+        (agent-emx-remote-connection "/rpc:phase7:/other/" #'ignore error-callback)
+        (should (= runs 1))
+        (should (= (length (agent-emx--connection-waiters connection)) 2))
+        (funcall local-failure '(:message "local startup failed"))
+        (should (= failures 2))
+        (agent-emx-remote-connection "/rpc:phase7:/project/" #'ignore error-callback)
+        (should (= runs 2))))))
 
 (provide 'agent-emx-remote-test)
 ;;; agent-emx-remote-test.el ends here

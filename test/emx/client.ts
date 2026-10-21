@@ -200,6 +200,13 @@ export class SocketClient implements DaemonClient {
       return
     }
     if (message === null || typeof message !== 'object') return
+    // This fixture represents an editor attached to one daemon. Cross-daemon
+    // integration tests use full bidirectional peers or the actual Emacs hub.
+    if (message.id !== undefined && message.method === 'editor/call'
+      && message.params?.method === '_collab_sessions') {
+      this.#write({ jsonrpc: '2.0', id: message.id, result: { ok: true, result: [] } })
+      return
+    }
     if (typeof message.method === 'string') {
       const notification: Notification = {
         method: message.method,

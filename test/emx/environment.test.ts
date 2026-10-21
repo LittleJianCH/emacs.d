@@ -132,3 +132,28 @@ console.log(JSON.stringify({PATH:(fs.existsSync('disabled')?'/missing':path.join
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('environment fingerprint ignores deep direnv trees and reports filesystem errors as fallback', async () => {
+  const dir = mkdtempSync('/tmp/emx-env-fingerprint-'), savedPath = process.env.PATH
+  const bin = join(dir, 'bin'), root = join(dir, 'project')
+  mkdirSync(bin); mkdirSync(join(root, '.direnv/deep/tree'), { recursive: true })
+  const counter = join(dir, 'exports')
+  writeFileSync(join(bin, 'direnv'), `#!${process.execPath}
+import fs from 'node:fs'; fs.appendFileSync(${JSON.stringify(counter)}, 'x'); console.log('{"VIRTUAL_ENV":"cached"}');
+`, { mode: 0o700 })
+  process.env.PATH = bin + ':' + savedPath
+  const environments = new ProjectEnvironments()
+  try {
+    assert.equal((await environments.get(root)).VIRTUAL_ENV, 'cached')
+    writeFileSync(join(root, '.direnv/deep/tree/leaf'), 'new dependency cache')
+    assert.equal((await environments.get(root)).VIRTUAL_ENV, 'cached')
+    assert.equal(readFileSync(counter, 'utf8'), 'x', 'deep dependency trees must not invalidate or be walked')
+    const invalid = join(dir, 'not-a-directory'); writeFileSync(invalid, 'file')
+    const notices: string[] = []
+    const env = await environments.get(invalid, (message: string) => notices.push(message))
+    assert.equal(env.PATH, process.env.PATH)
+    assert.equal(env.VIRTUAL_ENV, undefined)
+    assert.equal(notices.length, 1)
+    assert.match(notices[0], /ENOTDIR/)
+  } finally { process.env.PATH = savedPath; rmSync(dir, { recursive: true, force: true }) }
+})

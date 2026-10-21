@@ -50,10 +50,10 @@ export class Editor {
   }
 
   async call(method: string, params: Record<string, unknown>, caller: EditorCall['caller'],
-    cancelled: AbortSignal): Promise<unknown> {
+    cancelled: AbortSignal, privateCall = false): Promise<unknown> {
     const editor = this.connection
     if (!editor || editor.closed) throw new Error('Emacs is not attached')
-    if (!this.tools.tools.some((tool) => tool.name === method)) throw new Error(`Unknown editor tool: ${method}`)
+    if (!privateCall && !this.tools.tools.some((tool) => tool.name === method)) throw new Error(`Unknown editor tool: ${method}`)
     const controller = new AbortController()
     this.#calls.add(controller)
     const signal = AbortSignal.any([cancelled, controller.signal])

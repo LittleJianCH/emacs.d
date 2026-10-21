@@ -54,6 +54,7 @@ export function toolView(root: string, name: string, args: any): ToolView {
 
 export class DshBackend implements Backend {
   readonly host: SessionHost
+  #lifecycle?: Promise<void>
   #process: ChildProcessWithoutNullStreams | undefined
   #pending = new Map<number, { resolve: (value: any) => void, reject: (error: Error) => void,
     timer: NodeJS.Timeout }>()
@@ -91,7 +92,17 @@ export class DshBackend implements Backend {
     this.host.addBlock({ id: this.host.newId('notice'), type: 'notice', notice: { kind, args, level } })
   }
 
-  async start(resume?: string): Promise<void> {
+  start(resume?: string): Promise<void> {
+    if (this.#lifecycle) return this.#lifecycle
+    if (this.alive()) return Promise.resolve()
+    const task = this.#start(resume).finally(() => {
+      if (this.#lifecycle === task) this.#lifecycle = undefined
+    })
+    this.#lifecycle = task
+    return task
+  }
+
+  async #start(resume?: string): Promise<void> {
     if (!isAbsolute(this.host.root) || /^\/[^/]+:/.test(this.host.root)) {
       throw new Error('dsh daemon sessions require a local absolute root; remote projects are not supported')
     }
@@ -102,10 +113,12 @@ export class DshBackend implements Backend {
     if (mode !== 'plan') this.#beforePlan = mode
     // An executable override supports installations outside PATH and protocol fixtures.
     const config = this.host.agentConfig?.()
+    const env = await this.host.environment?.()
+    if (this.#stopping) return
     const child = spawn(process.env.EMX_DSH_EXECUTABLE ?? config?.executable ?? 'dsh',
       ['--profile', 'sdk', '--patch', patch,
         ...config?.nativeSubagents ? [] : ['--patch', noSubagents], ...(config?.extraArgs ?? [])],
-      { cwd: this.host.root, env: await this.host.environment?.(), stdio: 'pipe' })
+      { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
     child.stderr.resume()
@@ -338,7 +351,7 @@ export class DshBackend implements Backend {
   async stop(): Promise<void> {
     this.#stopping = true
     const child = this.#process
-    if (!child) return
+    if (!child) { await this.#lifecycle?.catch(() => {}); return }
     const closed = once(child, 'close').catch(() => {})
     child.kill('SIGTERM')
     const timer = setTimeout(() => child.kill('SIGKILL'), 1000)

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path'
 
 export interface Delivery {
-  id: string // Retained for migration from legacy receipt ids.
+  id: string // Correlates in-flight transport requests.
   source: string
   sequence: number
   method: 'record' | 'quota'
@@ -21,13 +21,8 @@ export class Outbox {
     // Corrupt state must fail startup rather than silently discard usage.
     if (!existsSync(this.file)) return
     const state = JSON.parse(readFileSync(this.file, 'utf8'))
-    if (Array.isArray(state)) {
-      this.entries = state.map((entry) => ({ ...entry, source: this.source, sequence: ++this.sequence }))
-      this.#save() // Persist the migration before anything can be delivered.
-    } else {
-      if (typeof state.source !== 'string' || !Number.isSafeInteger(state.sequence) || !Array.isArray(state.entries)) throw new Error('Invalid usage outbox')
-      this.source = state.source; this.sequence = state.sequence; this.entries = state.entries
-    }
+    if (typeof state.source !== 'string' || !Number.isSafeInteger(state.sequence) || !Array.isArray(state.entries)) throw new Error('Invalid usage outbox')
+    this.source = state.source; this.sequence = state.sequence; this.entries = state.entries
   }
   #save(): void {
     mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })
@@ -39,10 +34,8 @@ export class Outbox {
     this.#save()
     this.changed()
   }
-  ack(source: string, sequence?: number): void {
-    // Legacy peers can still acknowledge an individual receipt during migration.
-    this.entries = this.entries.filter((entry) => sequence === undefined ? entry.id !== source
-      : entry.source !== source || entry.sequence > sequence)
+  ack(source: string, sequence: number): void {
+    this.entries = this.entries.filter((entry) => entry.source !== source || entry.sequence > sequence)
     this.#save()
   }
 }

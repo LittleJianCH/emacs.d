@@ -1,3 +1,4 @@
+import { sessionSkills } from './backend.ts'
 // codex.ts --- local Codex app-server peer; no editor process or socket access.
 
 import { spawn } from 'node:child_process'
@@ -60,7 +61,7 @@ export function itemView(root: string, item: any): ToolView | undefined {
 /** JSON strings are TOML basic strings too; each table key is emitted once. */
 export function launchArgs(host: SessionHost): string[] {
   const config = codexConfig(host)
-  const context = host.info.codex as { skillsRoot?: string, supersededSkills?: string[] } | undefined
+  const context = sessionSkills(host)
   const overrides: Record<string, unknown> = {
     'mcp_servers.emacs.command': process.execPath,
     'mcp_servers.emacs.args': [join(checkoutRoot, 'bin/emx'), 'mcp'],
@@ -89,6 +90,7 @@ function codexConfig(host?: SessionHost): { executable?: string, nativeSubagents
 
 export class CodexBackend implements Backend {
   readonly host: SessionHost
+  #lifecycle?: Promise<void>
   #process?: ChildProcessWithoutNullStreams
   #pending = new Map<number, { resolve: (value: any) => void, reject: (error: Error) => void, timer: NodeJS.Timeout }>()
   #next = 0
@@ -125,7 +127,17 @@ export class CodexBackend implements Backend {
       notice: { kind, ...(message === undefined ? {} : { args: { message }, level: 'error' }) } })
   }
 
-  async start(resume?: string): Promise<void> {
+  start(resume?: string): Promise<void> {
+    if (this.#lifecycle) return this.#lifecycle
+    if (this.alive()) return Promise.resolve()
+    const task = this.#start(resume).finally(() => {
+      if (this.#lifecycle === task) this.#lifecycle = undefined
+    })
+    this.#lifecycle = task
+    return task
+  }
+
+  async #start(resume?: string): Promise<void> {
     if (!isAbsolute(this.host.root) || /^\/[^/]+:/.test(this.host.root)) {
       throw new Error('Codex daemon sessions require a local absolute root; remote projects are not supported')
     }
@@ -134,8 +146,10 @@ export class CodexBackend implements Backend {
     this.#completedTurn = undefined
     this.#usageTotal = undefined
     this.#tools = structuredClone(this.host.editorTools())
+    const env = await this.host.environment?.()
+    if (this.#stopping) return
     const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host),
-      { cwd: this.host.root, env: await this.host.environment?.(), stdio: 'pipe' })
+      { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
     child.stderr.resume()
@@ -167,8 +181,8 @@ export class CodexBackend implements Backend {
         name: m.displayName, description: m.description,
         efforts: (m.supportedReasoningEfforts ?? []).map((e: any) => e.reasoningEffort),
         defaultEffort: m.defaultReasoningEffort })) } })
-    const context = this.host.info.codex as { skillsRoot?: string } | undefined
-    if (context?.skillsRoot) await this.#request('skills/extraRoots/set', { extraRoots: [join(context.skillsRoot, '.claude/skills')] })
+    const context = sessionSkills(this.host)
+    if (context?.skillsDir) await this.#request('skills/extraRoots/set', { extraRoots: [join(context.skillsDir, '.claude/skills')] })
     let instructions: string | undefined
     try { instructions = developerInstructions(await this.#request('config/read', { cwd: this.host.root })) }
     catch (error) { this.#notice('codex-config-read-failed', (error as Error).message) }
@@ -420,7 +434,7 @@ export class CodexBackend implements Backend {
   async stop(): Promise<void> {
     this.#stopping = true
     const child = this.#process
-    if (!child) return
+    if (!child) { await this.#lifecycle?.catch(() => {}); return }
     const closed = once(child, 'close').catch(() => {})
     child.kill('SIGTERM')
     const timer = setTimeout(() => child.kill('SIGKILL'), 1000)

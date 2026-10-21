@@ -69,8 +69,10 @@ All enabled sessions use the daemon. `emx/daemon/collab.ts` owns tools,
 children, naming, policy and the persisted mailbox; `emx/config.json` plus
 its runtime override is the sole policy source. Lisp only renders views,
 links child progress and mirrors asks. Children outlive editor disconnects
-but not daemon crashes. Collaboration targets sessions in the same daemon;
-cross-daemon list/read/ask remains deferred.
+but not daemon crashes. Children start in their parent's daemon; `sessions`,
+`session_read` and `session_ask` reach sessions of other daemons (other
+hosts, or this machine from a host) through the attached Emacs, and work
+only while it is attached (see doc/emx-daemon.md, Collaboration).
 
 The design below describes that daemon contract. Historical measurements
 were made through the earlier Lisp execution path; the protocols remain.

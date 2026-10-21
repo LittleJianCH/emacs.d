@@ -55,3 +55,8 @@ export const backends: Record<string, (host: SessionHost) => Backend> = {
   claude: (host) => new ClaudeBackend(host),
   codex: (host) => new CodexBackend(host),
 }
+
+/** Read backend-neutral editor skill context. */
+export function sessionSkills(host: SessionHost): import('../daemon/protocol.ts').SkillsContext | undefined {
+  return host.info.skills as import('../daemon/protocol.ts').SkillsContext | undefined
+}

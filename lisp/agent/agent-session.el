@@ -138,19 +138,17 @@ shows once a session opens on it again."
                      (let ((default-directory root))
                        (when (zerop (apply #'process-file "sh" nil t nil "-c"
                                            "for p; do if command -v \"$p\" >/dev/null 2>&1; \
-then echo 1; else echo 0; fi; done; node --version 2>/dev/null || echo missing"
+then echo 1; else echo 0; fi; done"
                                            "sh" programs))
                          (let ((found (split-string (buffer-string) "\n" t)))
-                           (when (= (length found) (1+ (length programs)))
-                             (list :node (car (last found))
-                                   :programs
+                           (when (= (length found) (length programs))
+                             (list :programs
                                    (cl-mapcar (lambda (program line)
                                                 (cons program (equal line "1")))
-                                              programs (butlast found)))))))))
+                                              programs found))))))))
                  ;; Unreachable: keep what was known, and don't wait for it
                  ;; again soon.
-                 (list :node (plist-get (gethash place agent-session--remote-programs) :node)
-                       :programs (plist-get (gethash place agent-session--remote-programs)
+                 (list :programs (plist-get (gethash place agent-session--remote-programs)
                                             :programs)
                        :failed (float-time)))
              agent-session--remote-programs)))
@@ -418,11 +416,15 @@ An alist (NAME DIRECTORY . SUPERSEDED): the directory holding the skill's
 SKILL.md, and the names of installed skills it replaces, which those
 agents don't get.  Add entries with `agent-session-add-skill'.")
 
+(defvar agent-session-skills-change-functions nil
+  "Hook run after editor skill registration changes.")
+
 (defun agent-session-add-skill (name directory &rest superseded)
   "Give the agents Emacs starts the skill NAME, whose files are in DIRECTORY.
 They no longer get the installed skills named SUPERSEDED."
   (setf (alist-get name agent-session-skills nil nil #'equal)
-        (cons (file-name-as-directory directory) superseded)))
+        (cons (file-name-as-directory directory) superseded))
+  (run-hooks 'agent-session-skills-change-functions))
 
 (defun agent-session-superseded-skills ()
   "Names of the installed skills replaced by those Emacs gives its agents."
@@ -2832,11 +2834,23 @@ the next message.  ROOT defaults to the current project root."
         (goto-char (point-max))
         buffer))))
 
+(defvar agent-session-opening-view nil
+  "Non-nil while restoring a view of an already-running daemon session.
+Restoring a view must not run project program probes from a process filter.")
+
 (defun agent-session-open (agent root &optional resume settings info)
   "Start an AGENT session in ROOT without showing it; return its buffer.
 RESUME is the id of a past session to resume.  SETTINGS defaults to the
 agent's latest settings; INFO is the initial info plist."
-  (let* ((buffer (generate-new-buffer
+  (or (and resume
+           (seq-find
+            (lambda (buffer)
+              (let ((session (buffer-local-value 'agent-session--current buffer)))
+                (and (eq agent (agent-session-agent session))
+                     (equal root (agent-session-root session))
+                     (equal resume (agent-session-resume-id session)))))
+            (agent-session-buffers)))
+      (let* ((buffer (generate-new-buffer
                   (format "*%s@%s*" agent (file-name-nondirectory (directory-file-name root)))))
          (session (agent-session--make
                    :agent agent
@@ -2878,9 +2892,10 @@ agent's latest settings; INFO is the initial info plist."
                 nil t)
       (goto-char (point-max)))
     ;; Its agent may start sessions of the agents installed where it runs.
-    (agent-session-refresh-programs root)
+    (unless agent-session-opening-view
+      (agent-session-refresh-programs root))
     (agent-session-backend-start (agent-session-backend session) session)
-    buffer))
+    buffer)))
 
 ;;;###autoload
 (defun agent-session-create (&optional choose)

@@ -119,6 +119,7 @@ export interface HelloParams {
   tools?: EditorTools
 }
 export interface HelloResult {
+  sessions?: SessionSummary[]
   config?: import('../config.ts').Config
   capabilities?: { usage: number, stopIfIdle?: number }
   liveAgents?: number
@@ -128,6 +129,7 @@ export interface HelloResult {
 }
 
 export interface SessionSummary {
+  creationId?: string
   id: SessionId
   agent: string
   root: string
@@ -164,12 +166,16 @@ export interface Usage {
   output: number
 }
 
+export interface SkillsContext { skillsDir?: string, supersededSkills?: string[] }
+
 export interface OpenParams {
+  /** Client identity reused when an open reply is lost. */
+  creationId?: string
+  /** Backend-neutral editor context, inherited by every child. */
+  skills?: SkillsContext
   handle?: string
   agent: string
   root: string
-  /** Claude's editor-installed skills; retained for effort/external restarts. */
-  claude?: { skillsDir?: string, supersededSkills?: string[] }
   settings?: Settings
   /** A session to resume, in the agent's own terms. */
   resume?: string
@@ -177,8 +183,6 @@ export interface OpenParams {
   fork?: SessionId
   /** The session whose agent starts this one. */
   parent?: SessionId
-  /** Editor-provided skill roots for Codex; persisted for process restarts. */
-  codex?: { skillsRoot?: string, supersededSkills?: string[] }
 }
 
 /**
@@ -258,7 +262,7 @@ export interface SendParams {
 export interface Requests {
   'config/push': [{ config: import('../config.ts').Config }, { config: import('../config.ts').Config, errors: string[] }]
   'config/call': [{ method: string, arguments: Record<string, unknown> }, string]
-  'usage/ack': [{ id: string }, {}]
+  'usage/ack': [{ source: string, sequence: number }, {}]
   /** Whether a daemon answers, and which: never takes over (see hello). */
   'ping': [{}, HelloResult]
   /** Makes this connection the daemon's Emacs; a previous one gets `replaced`. */
@@ -269,6 +273,14 @@ export interface Requests {
   'config/get': [{}, { config: import('../config.ts').Config, errors: string[] }]
   'config/reload': [{}, { config: import('../config.ts').Config, errors: string[] }]
   'sessions/history': [{ agent: string, root: string }, { items: import('../backends/history.ts').HistoryItem[] }]
+  /** Private editor hub methods; MCP peers cannot call these directly. */
+  'collab/list': [{}, { sessions: object[] }]
+  'collab/read': [{ id: string, last?: number, before?: number, tools?: string }, string]
+  'collab/ask': [{ id: string, prompt: string, route: import('./collab.ts').RemoteRoute,
+    origin: { handle: string, agent: string } }, string]
+  'collab/deliver': [{ id: string, route: import('./collab.ts').RemoteRoute,
+    mail: { handle: string, text: string } }, {}]
+  'collab/retry': [{}, {}]
   'sessions/list': [{ root?: string }, { sessions: SessionSummary[] }]
   'session/open': [OpenParams, { id: SessionId }]
   'session/attach': [AttachParams, AttachResult]
@@ -276,13 +288,14 @@ export interface Requests {
   'session/send': [SendParams, { queued: boolean }]
   'session/steer': [SendParams, { accepted: boolean }]
   'session/interrupt': [{ id: SessionId }, {}]
+  'session/context': [{ id: SessionId, skills: SkillsContext }, {}]
   'session/configure': [{ id: SessionId } & Settings, {}]
   'session/answer': [{ id: SessionId, ask: string } & Answer, { stale: boolean }]
   'session/earlier': [EarlierParams, { earlier: boolean }]
   'session/stop': [{ id: SessionId }, {}]
   'usage/hello': [{}, HelloResult]
-  'usage/record': [{id: string, record: Partial<UsageRecord>}, {id: string}]
-  'usage/quota': [{id: string, reading: QuotaReading}, {id: string}]
+  'usage/record': [{id: string, source: string, sequence: number, record: Partial<UsageRecord>}, {id: string, source: string, sequence: number}]
+  'usage/quota': [{id: string, source: string, sequence: number, reading: QuotaReading}, {id: string, source: string, sequence: number}]
   'usage/configure': [Partial<Pick<UsageConfig, 'agents' | 'pollInterval' | 'pollers'>>, ReturnType<UsageService['configure']>]
   'usage/report': [ReportParams, ReturnType<UsageService['report']>]
   'usage/refresh': [{force?: boolean}, {}]

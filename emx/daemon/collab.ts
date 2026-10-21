@@ -1,3 +1,4 @@
+import { sessionSkills } from '../backends/backend.ts'
 // collab.ts --- daemon-owned tools, children, mailbox and task context.
 import { spawn } from 'node:child_process'
 import { accessSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -74,11 +75,14 @@ export function formatTurn(n: number, turn: Block[], tools: string, running: boo
   flush()
   return parts.join('\n\n')
 }
-interface Pending { target: string, asker: string, block: string, handle?: string }
+export interface RemoteRoute { daemon: string, session: string }
+interface Pending { target: string, asker: string, block: string, handle?: string, route?: RemoteRoute }
+interface Outgoing { id: string, route: RemoteRoute, mail: Mail }
 interface Mail { handle: string, text: string }
 export interface CollabHost {
   sessions: Map<string, Session>
   config(): Config
+  hub?(caller: { id: string, root: string }, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
   environment?(root: string): NodeJS.ProcessEnv
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
@@ -92,6 +96,8 @@ export class Collaboration {
   enabled?: string[]
   pending: Pending[] = []
   mailbox = new Map<string, Mail[]>()
+  outgoing: Outgoing[] = []
+  receipts = new Set<string>()
   #handoffs = new Map<string, { turn: string, text: string }>()
   #reservations = new Map<string, number>()
   #closing = new WeakSet<Session>()
@@ -111,7 +117,7 @@ export class Collaboration {
   #target(name: unknown): Session {
     if (typeof name !== 'string') throw new Error('Name a session by its @handle; list them with sessions')
     const s = [...this.host.sessions.values()].find((s) => this.#handle(s) === name.replace(/^@/, '') || s.id === name)
-    if (!s) throw new Error(`No agent session called ${name} in this daemon; list them with sessions. Cross-daemon collaboration is not supported`)
+    if (!s) throw new Error(`No agent session called ${name} in this daemon; list them with sessions`)
     return s
   }
   unique(name: string, current?: Session): string {
@@ -162,11 +168,22 @@ export class Collaboration {
   async call(caller: Session, name: string, p: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted()
     switch (name) {
-      case 'sessions': return { sessions: [...this.host.sessions.values()].map((s) => ({ id: '@' + this.#handle(s), agent: s.agent,
-        title: s.info.title ?? this.#handle(s), project: s.root, status: this.#status(s), turns: turns(s).length,
-        yours: s === caller, parent: this.host.sessions.has(String(s.info.parent)) ? '@' + this.#handle(this.host.sessions.get(String(s.info.parent))!) : null,
-        children: [...this.host.sessions.values()].filter((c) => c.info.parent === s.id).map((c) => '@' + this.#handle(c)) })) }
-      case 'session_read': return this.read(this.#target(p.session), p)
+      case 'sessions': {
+        const sessions = this.list(caller)
+        try {
+          const peers = this.host.hub ? await this.host.hub(caller, '_collab_sessions', {}, signal) as object[] : []
+          return { sessions: [...sessions, ...peers] }
+        } catch (error) {
+          signal.throwIfAborted()
+          return { sessions, note: `Other daemons are unavailable: ${(error as Error).message}` }
+        }
+      }
+      case 'session_read': {
+        const local = this.find(p.session)
+        if (local) return this.read(local, p)
+        if (!this.host.hub) return this.read(this.#target(p.session), p)
+        return this.host.hub(caller, '_collab_read', p, signal)
+      }
       case 'session_ask': this.assertOpen(caller); return this.#ask(caller, p, signal)
       case 'session_start': {
         this.assertOpen(caller)
@@ -188,6 +205,34 @@ export class Collaboration {
       }
       default: throw new Error(`Unknown collaboration tool: ${name}`)
     }
+  }
+  find(name: unknown): Session | undefined {
+    if (typeof name !== 'string') throw new Error('Name a session by its @handle; list them with sessions')
+    return [...this.host.sessions.values()].find((s) => this.#handle(s) === name.replace(/^@/, '') || s.id === name)
+  }
+  list(caller?: Session) {
+    return [...this.host.sessions.values()].map((s) => ({ id: '@' + this.#handle(s), session: s.id,
+      agent: s.agent, place: 'here', title: s.info.title ?? this.#handle(s), project: s.root,
+      status: this.#status(s), turns: turns(s).length, yours: s === caller,
+      parent: this.host.sessions.has(String(s.info.parent)) ? '@' + this.#handle(this.host.sessions.get(String(s.info.parent))!) : null,
+      children: [...this.host.sessions.values()].filter((c) => c.info.parent === s.id).map((c) => '@' + this.#handle(c)) }))
+  }
+  /** Editor-only ingress; confirmation belongs to the asking daemon. */
+  remoteAsk(target: Session, prompt: string, route: RemoteRoute, origin: { handle: string, agent: string }): string {
+    if (target.info.parent) throw new Error('Task sessions take no messages; start another session')
+    if (target.status !== 'idle' || this.pending.some((e) => e.target === target.id)) throw new Error(`@${this.#handle(target)} is busy; try later`)
+    const block = target.newId('user')
+    this.pending.push({ target: target.id, asker: route.session, block, handle: this.#handle(target), route })
+    this.save()
+    target.sendMessage(prompt, '@' + origin.handle, this.#prompt('messageNote', origin.agent, origin.handle), block)
+    return this.#prompt('sent', this.#handle(target))
+  }
+  receive(id: string, route: RemoteRoute, mail: Mail): void {
+    if (this.receipts.has(id)) return
+    this.receipts.add(id)
+    if (this.host.sessions.has(route.session)) this.mailbox.set(route.session,
+      [...this.mailbox.get(route.session) ?? [], mail])
+    this.save(); this.schedule()
   }
   read(s: Session, p: Record<string, unknown>): string {
     const tools = p.tools ?? 'summary'
@@ -250,7 +295,19 @@ export class Collaboration {
     return p.prompt
   }
   async #ask(caller: Session, p: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-    const prompt = this.#text(p), target = this.#target(p.session)
+    const prompt = this.#text(p)
+    if (caller.info.parent) throw new Error("A session started for a task reports through its final reply; it doesn't ask other sessions")
+    const local = this.find(p.session)
+    if (!local && this.host.hub) {
+      if (this.config.collab.confirm) {
+        await this.host.hub(caller, '_collab_sessions', {}, signal)
+        await this.#confirm(caller, `向 ${String(p.session)} 发送消息`, prompt, signal)
+      }
+      signal.throwIfAborted(); this.assertOpen(caller)
+      return this.host.hub(caller, '_collab_ask', { ...p,
+        origin: { handle: this.#handle(caller), agent: this.#title(caller) } }, signal) as Promise<string>
+    }
+    const target = local ?? this.#target(p.session)
     const check = () => {
       this.assertOpen(caller)
       if (target === caller) throw new Error('That is your own session')
@@ -306,7 +363,7 @@ export class Collaboration {
       child = this.host.create(profile.agent, caller.root, settings, { parent: caller.id,
         parentSession: caller.resumeId(), profile: name, named: true, title: p.title ?? prompt.slice(0, 80),
         handle: this.unique(cleanHandle(String(p.handle ?? '')) ?? name), ...(fork ? { forkFrom: fork } : {}),
-        ...(caller.info.claude ? { claude: caller.info.claude } : {}), ...(caller.info.codex ? { codex: caller.info.codex } : {}) })
+        skills: sessionSkills(caller) })
       // The registered starting session now owns the concurrency slot.
       release()
       await this.host.view(child)
@@ -346,7 +403,7 @@ export class Collaboration {
         const target = this.host.sessions.get(entry.target), asker = this.host.sessions.get(entry.asker)
         if (target && (this.#working(target) || target.queue.length)) continue
         this.pending = this.pending.filter((e) => e !== entry)
-        if (!asker) continue
+        if (!asker && !entry.route) continue
         const turn = target && turns(target).find((t) => t[0].id === entry.block)
         const text = turn?.findLast((b) => b.type === 'text' && b.kind !== 'thinking') as Extract<Block, {type: 'text'}> | undefined
         const handle = target ? this.#handle(target) : entry.handle ?? entry.target
@@ -355,12 +412,21 @@ export class Collaboration {
         const summary = tools.length ? 'What it did:\n' + tools.slice(0, 12).join('\n') + (tools.length > 12 ? `\n- … ${tools.length - 12} more` : '') + '\n\n' : ''
         reply = target ? this.#prompt('reply', handle, this.#title(target), target.status === 'exited' ? ', which then exited' : '', reply,
           target.info.parent ? summary + this.#prompt('childFollowup') : this.#prompt('followup', handle)) : `"@${handle}" ended without replying: it was closed before it replied`
-        this.mailbox.set(asker.id, [...this.mailbox.get(asker.id) ?? [], { handle, text: reply }])
+        if (entry.route) this.outgoing.push({ id: entry.block, route: entry.route, mail: { handle, text: reply } })
+        else this.mailbox.set(asker!.id, [...this.mailbox.get(asker!.id) ?? [], { handle, text: reply }])
         this.save()
-        if (target?.info.parent === asker.id && target.status === 'idle' && this.config.collab.closeFinished
+        if (asker && target?.info.parent === asker.id && target.status === 'idle' && this.config.collab.closeFinished
           && !turn?.some((b) => b.type === 'notice' && b.notice.level === 'error') && !await this.host.visible(target)) {
           await this.host.close(target)
         }
+      }
+      for (const entry of [...this.outgoing]) {
+        try {
+          if (!this.host.hub) continue
+          await this.host.hub({ id: '', root: '' }, '_collab_deliver', { ...entry }, AbortSignal.timeout(5000))
+          this.outgoing = this.outgoing.filter((e) => e !== entry)
+          this.save()
+        } catch { /* Keep durable mail until both daemon connections are attached. */ }
       }
       for (const [id, mail] of this.mailbox) {
         const s = this.host.sessions.get(id)
@@ -387,7 +453,7 @@ export class Collaboration {
   save(): void {
     const file = join(this.host.varDir, 'emx', 'collab.json')
     mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
-    writeFileSync(file + '.tmp', JSON.stringify({ enabled: this.enabled, pending: this.pending, mailbox: [...this.mailbox] }), { mode: 0o600 })
+    writeFileSync(file + '.tmp', JSON.stringify({ enabled: this.enabled, pending: this.pending, mailbox: [...this.mailbox], outgoing: this.outgoing, receipts: [...this.receipts] }), { mode: 0o600 })
     renameSync(file + '.tmp', file)
     this.host.changed()
   }
@@ -399,6 +465,8 @@ export class Collaboration {
       this.enabled = data.enabled
       this.pending = data.pending
       this.mailbox = new Map(data.mailbox)
+      this.outgoing = data.outgoing ?? []
+      this.receipts = new Set(data.receipts ?? [])
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
     this.schedule()
   }

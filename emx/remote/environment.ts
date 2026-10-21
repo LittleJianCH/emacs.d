@@ -12,7 +12,7 @@ const essential = new Set(['PATH', 'LD_LIBRARY_PATH', 'LIBRARY_PATH', 'CARGO_HOM
   'NIX_CFLAGS_COMPILE', 'NIX_LDFLAGS', 'GOPATH', 'GOROOT', 'PYTHONPATH',
   'VIRTUAL_ENV', 'NODE_PATH', 'NPM_CONFIG_PREFIX'])
 
-/** Include parent .envrc files and .direnv contents; never follow symlinks. */
+/** Include parent .envrc and shallow .direnv metadata; never walk dependencies. */
 async function fingerprint(root: string): Promise<string> {
   const hash = createHash('sha256')
   const visit = async (file: string): Promise<void> => {
@@ -20,7 +20,10 @@ async function fingerprint(root: string): Promise<string> {
       const stat = await lstat(file)
       hash.update(file + ':' + stat.mtimeMs + ':' + stat.size)
       if (stat.isDirectory()) {
-        for (const name of (await readdir(file)).sort()) await visit(join(file, name))
+        for (const name of (await readdir(file)).sort()) {
+          const child = await lstat(join(file, name))
+          hash.update(name + ':' + child.mtimeMs + ':' + child.size)
+        }
       } else if (stat.isFile() && file.endsWith('/.envrc')) hash.update(await readFile(file))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -41,9 +44,11 @@ export class ProjectEnvironments {
   peek(root: string): NodeJS.ProcessEnv {
     return this.#cache.get(resolve(root))?.env ?? this.base
   }
-  async get(root: string): Promise<NodeJS.ProcessEnv> {
+  async get(root: string, notice: (message: string) => void = () => {}): Promise<NodeJS.ProcessEnv> {
     root = resolve(root)
-    const stamp = await fingerprint(root)
+    let stamp: string
+    try { stamp = await fingerprint(root) }
+    catch (error) { notice(String(error)); return { ...this.base } }
     const old = this.#cache.get(root)
     if (old?.stamp === stamp && Date.now() - old.at < 300_000) return { ...old.env }
     const env = { ...this.base }
@@ -58,7 +63,7 @@ export class ProjectEnvironments {
         if (value === null) delete env[key]
         else if (typeof value === 'string') env[key] = value
       }
-    } catch { /* Unavailable, blocked or invalid direnv: use the baseline, like tramp. */ }
+    } catch (error) { notice(String(error)) }
     this.#cache.set(root, { stamp, at: Date.now(), env })
     return { ...env }
   }

@@ -27,6 +27,7 @@ import { Session } from './session.ts'
 import type { Transcript } from './session.ts'
 
 interface SavedSession {
+  creationId?: string
   id: string
   agent: string
   root: string
@@ -78,6 +79,15 @@ function integer(value: unknown, name: string, minimum: number): number | undefi
     invalid(`Expected an integer >= ${minimum}: ${name}`)
   }
   return value
+}
+
+function skillContext(value: unknown): import('./protocol.ts').SkillsContext {
+  const context = object(value)
+  const supersededSkills = context.supersededSkills
+  if (supersededSkills !== undefined && (!Array.isArray(supersededSkills)
+    || !supersededSkills.every((s) => typeof s === 'string'))) invalid('Expected string[]: supersededSkills')
+  return { skillsDir: context.skillsDir == null ? undefined : optionalString(context.skillsDir, 'skillsDir'),
+    supersededSkills: supersededSkills as string[] | undefined }
 }
 
 export class DaemonServer {
@@ -139,6 +149,8 @@ export class DaemonServer {
     this.accounting = new Accounting(this.usage)
     this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir,
       config: () => this.configuration.value,
+      hub: (caller, method, params, signal) => this.editor.call(method, params,
+        { session: caller.id, root: caller.root, place: null }, signal, true),
       environment: this.environments ? (root) => this.environments!.peek(root) : undefined, changed: () => this.#changed(false),
       create: (agent, root, settings, info) => {
         const s = this.#make({ id: `session-${randomUUID()}`, agent, root, settings, info })
@@ -162,13 +174,8 @@ export class DaemonServer {
       this.#connections.add(connection)
       connection.onRequest = (method, params, id) => this.#request(connection, method, params, id)
       connection.onNotification = (method, params) => {
-        if ((method === 'usage/record' || method === 'usage/quota') && connection === this.client) {
-          try {
-            if (method === 'usage/record') this.usage.record({ record: object(object(params).record) })
-            else this.usage.quota({ ...object(params), agent: string(params.agent, 'agent') })
-          } catch (error) { this.#log(`Usage notification failed: ${error}`) }
-        }
         if (method === 'editor/tools' && connection === this.client) this.#tools(params)
+        if (method === 'collab/retry' && connection === this.client) this.collab.schedule()
         if (method === 'notifications/cancelled') this.#calls.get(connection)?.get(params.requestId)?.abort(new Error('Cancelled'))
       }
       connection.onClose = () => {
@@ -255,11 +262,15 @@ export class DaemonServer {
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, environment: this.environments ? async () => {
-      const env = await this.environments!.get(saved.root)
+    const session = new Session({ ...saved, restored, transcript, daemonSocket: this.socket, environment: this.environments ? async () => {
+      const env = await this.environments!.get(saved.root, (message) => session.addBlock({
+        id: session.newId('notice'), type: 'notice',
+        notice: { kind: 'environment-fallback', args: { message }, level: 'warning' },
+      }))
       this.#refreshRootTools(saved.root)
       return env
     } : undefined, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    return session
   }
 
   /** Refresh only on explicit startup/environment resolution, never on a timer. */
@@ -292,6 +303,7 @@ export class DaemonServer {
         const agent = string(record.agent, 'agent')
         if (!Object.hasOwn(backends, agent)) throw new Error(`Unknown agent: ${agent}`)
         const saved: SavedSession = { id: string(record.id, 'id'), agent,
+          creationId: optionalString(record.creationId, 'creationId'),
           root: string(record.root, 'root'), info: object(record.info ?? {}),
           settings: settings(record.settings ?? {}), resume: optionalString(record.resume, 'resume') }
         // Children have no resumable native transcript after a crash.
@@ -322,7 +334,7 @@ export class DaemonServer {
     const records: SavedSession[] = []
     for (const session of this.sessions.values()) {
       if (session.info.parent) continue
-      records.push({ id: session.id, agent: session.agent, root: session.root,
+      records.push({ id: session.id, creationId: session.creationId, agent: session.agent, root: session.root,
         info: session.info, settings: session.settings, resume: session.resumeId() })
       files.set(this.#transcriptFile(session.id), JSON.stringify(session.transcript()) + '\n')
     }
@@ -478,10 +490,11 @@ export class DaemonServer {
         this.client = connection
         this.editor.connection = connection
         this.#checkIdle()
-        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value }, () => {
+        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value, sessions: this.#list() }, () => {
           connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas })
           if (this.outbox) connection.notify('usage/outbox', { entries: this.outbox.entries })
           connection.notify('sessions', { sessions: this.#list() })
+          this.collab.schedule()
         })
       }
       case 'config/call': {
@@ -490,8 +503,7 @@ export class DaemonServer {
       }
       case 'usage/ack': {
         if (!this.outbox) throw new Error('Only host daemons have a usage outbox')
-        this.outbox.ack(params.source === undefined ? string(params.id, 'id') : string(params.source, 'source'),
-          params.source === undefined ? undefined : integer(params.sequence, 'sequence', 1))
+        this.outbox.ack(string(params.source, 'source'), integer(params.sequence, 'sequence', 1) ?? invalid('Expected sequence'))
         return {}
       }
       case 'config/push': {
@@ -511,7 +523,7 @@ export class DaemonServer {
           if (!Array.isArray(params.agents) || !params.agents.every((a) => typeof a === 'string')) invalid('Expected string[]: agents')
           config.agents = params.agents
         }
-        // Legacy editors still send this field; cadence belongs to config.json.
+        // Cadence belongs to config.json.
         if (params.pollInterval !== undefined) integer(params.pollInterval, 'pollInterval', 0)
         config.pollInterval = this.configuration.value.usage.pollInterval
         if (params.pollers !== undefined) {
@@ -534,13 +546,13 @@ export class DaemonServer {
       case 'usage/record': {
         const id = string(params.id, 'id')
         return this.usage.record({ id, record: object(params.record),
-          ...(params.source === undefined ? {} : { source: string(params.source, 'source'), sequence: integer(params.sequence, 'sequence', 1) }) })
+          source: string(params.source, 'source'), sequence: integer(params.sequence, 'sequence', 1) ?? invalid('Expected sequence') })
       }
       case 'usage/quota': {
         const id = string(params.id, 'id')
         const reading = object(params.reading)
         return this.usage.quota({ ...reading, agent: string(reading.agent, 'agent') }, id,
-          optionalString(params.source, 'source'), params.source === undefined ? undefined : integer(params.sequence, 'sequence', 1))
+          string(params.source, 'source'), integer(params.sequence, 'sequence', 1) ?? invalid('Expected sequence'))
       }
       case 'usage/report': return this.usage.report(params)
       case 'usage/refresh': return this.usage.refresh(params)
@@ -552,40 +564,46 @@ export class DaemonServer {
         return history(agent, root, this.configuration.value.agents[agent],
           this.environments ? () => this.environments!.get(root) : undefined).then((items) => ({ items }))
       }
+      case 'collab/retry': this.collab.schedule(); return {}
+      case 'collab/list': return { sessions: this.collab.list() }
+      case 'collab/read': return this.collab.read(this.#session(params), params)
+      case 'collab/ask': {
+        const route = object(params.route), origin = object(params.origin)
+        return this.collab.remoteAsk(this.#session(params), string(params.prompt, 'prompt'),
+          { daemon: string(route.daemon, 'route.daemon'), session: string(route.session, 'route.session') },
+          { handle: string(origin.handle, 'origin.handle'), agent: string(origin.agent, 'origin.agent') })
+      }
+      case 'collab/deliver': {
+        const route = object(params.route), mail = object(params.mail)
+        this.collab.receive(string(params.id, 'id'),
+          { daemon: string(route.daemon, 'route.daemon'), session: string(route.session, 'route.session') },
+          { handle: string(mail.handle, 'mail.handle'), text: string(mail.text, 'mail.text') })
+        return {}
+      }
       case 'sessions/list': return { sessions: this.#list(optionalString(params.root, 'root')) }
       case 'session/open': {
+        const creationId = optionalString(params.creationId, 'creationId')
+        if (creationId) {
+          const existing = [...this.sessions.values()].find((s) => s.creationId === creationId)
+          if (existing) return { id: existing.id }
+        }
         const agent = string(params.agent, 'agent')
         if (!Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
         const root = string(params.root, 'root')
         const handle = optionalString(params.handle, 'handle')
         const resume = optionalString(params.resume, 'resume')
         const parent = optionalString(params.parent, 'parent')
-        // Claude needs the editor's installed skill replacements on each spawn.
-        let claude: import('./protocol.ts').OpenParams['claude']
-        if (params.claude !== undefined) {
-          const context = object(params.claude)
-          const supersededSkills = context.supersededSkills
-          if (supersededSkills !== undefined && (!Array.isArray(supersededSkills)
-            || !supersededSkills.every((s) => typeof s === 'string'))) invalid('Expected string[]: supersededSkills')
-          claude = { skillsDir: context.skillsDir == null ? undefined : optionalString(context.skillsDir, 'skillsDir'),
-            supersededSkills: supersededSkills as string[] | undefined }
+        if (resume && !parent) {
+          const live = [...this.sessions.values()].find((s) => !s.info.parent && s.agent === agent
+            && s.root === root && s.status !== 'exited' && s.resumeId() === resume)
+          if (live) return { id: live.id }
         }
-        // Codex needs the editor's installed skill replacements on every spawn.
-        let codex: import('./protocol.ts').OpenParams['codex']
-        if (params.codex !== undefined) {
-          const context = object(params.codex)
-          const supersededSkills = context.supersededSkills
-          if (supersededSkills !== undefined && (!Array.isArray(supersededSkills)
-            || !supersededSkills.every((s) => typeof s === 'string'))) invalid('Expected string[]: supersededSkills')
-          codex = { skillsRoot: optionalString(context.skillsRoot, 'skillsRoot'),
-            supersededSkills: supersededSkills as string[] | undefined }
-        }
-        // Native conversation forks are a later migration phase.
+        // Forks are created by collaboration rather than editor open requests.
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
-        const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
+        const session = this.#make({ id: `session-${randomUUID()}`, creationId, agent, root, resume,
           settings: settings(params.settings ?? {}),
           info: { handle: this.collab.unique(handle ?? agent), ...(parent ? { parent, parentSession: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
-            ...(codex ? { codex } : {}), ...(claude ? { claude } : {}) } })
+            ...(params.skills !== undefined ? { skills: skillContext(params.skills) } : {}) } })
         this.sessions.set(session.id, session)
         return (async () => {
           try {
@@ -633,6 +651,7 @@ export class DaemonServer {
         return { accepted: session.steer(message.text, message.images, message.block) }
       }
       case 'session/interrupt': this.#session(params).interrupt(); return {}
+      case 'session/context': this.#session(params).setInfo({ skills: skillContext(params.skills) }); return {}
       case 'session/configure': return this.#session(params).configure(settings(params)).then(() => ({}))
       case 'session/answer': {
         const session = this.#session(params)

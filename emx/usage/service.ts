@@ -613,7 +613,6 @@ class UsageService {
   pollers: Record<string, {command: string[]}> = {};
   records: UsageRecord[] = [];
   offset = 0;
-  legacyIds = new Set<string>();
   watermarks: Record<string, number> = {};
   watermarkFile!: string;
   quotas: QuotaEntry[] = [];
@@ -643,8 +642,7 @@ class UsageService {
     this.offset = 0;
     this.syncLedger();
     // Recover from the operation itself if the process died before saving its
-    // watermark or replying. Legacy ids are read from the entire ledger once.
-    this.legacyIds = new Set(this.records.filter((record) => !record._delivery).map((record) => record.id).filter((id) => typeof id === 'string'));
+    // watermark or replying.
     this.watermarkFile = this.usageFile + '.watermarks.json';
     this.watermarks = fs.existsSync(this.watermarkFile) ? JSON.parse(fs.readFileSync(this.watermarkFile, 'utf8')) : {};
     this.quotas = readQuotas(this.quotaFile);
@@ -710,39 +708,39 @@ class UsageService {
     return {id, ...(source === undefined ? {} : {source, sequence: this.watermarks[source] ?? 0})};
   }
 
+  // A watermark acknowledges a contiguous prefix, including mixed quota/records.
+  checkSequence(source?: string, sequence?: number) {
+    if (source === undefined && sequence === undefined) return;
+    if (source === undefined || sequence === undefined || !Number.isSafeInteger(sequence) || sequence < 1)
+      throw new Error('Invalid usage sequence');
+    const expected = (this.watermarks[source] ?? 0) + 1;
+    if (sequence > expected) throw new Error(`Usage sequence gap: expected ${expected}, received ${sequence}`);
+  }
+
   record(params: {record: Partial<UsageRecord>, id?: string, source?: string, sequence?: number}) {
     const {id, source, sequence} = params;
+    this.checkSequence(source, sequence);
     if (source !== undefined && sequence !== undefined && sequence <= (this.watermarks[source] ?? 0)) return this.receipt(id, source);
-    if (id && this.legacyIds.has(id)) {
-      this.advance(source, sequence);
-      return this.receipt(id, source);
-    }
     // Counters and delivery identity share one append, closing apply-before-ack.
     const record = {...params.record, ...(id ? {id} : {}),
       ...(source === undefined ? {} : {_delivery: {source, sequence}})};
     if (typeof record.time !== 'number') record.time = this.now();
     this.capture?.('record', {record});
     appendLedger(this.usageFile, record);
-    if (id && source === undefined) this.legacyIds.add(id);
     this.advance(source, sequence);
     this.send({method: 'changed', params: {}});
     return this.receipt(id, source);
   }
 
   quota(reading: QuotaReading, id?: string, source?: string, sequence?: number) {
+    this.checkSequence(source, sequence);
     if (source !== undefined && sequence !== undefined && sequence <= (this.watermarks[source] ?? 0)) return this.receipt(id, source);
     this.loadQuotas();
-    const previous = this.quotas.find((q) => q.agent === reading.agent && (q.host ?? null) === (reading.host ?? null));
-    if (id && previous?.receiptIds?.includes(id)) {
-      this.advance(source, sequence);
-      return this.receipt(id, source);
-    }
     const sampledAt = typeof reading.time === 'number' && Number.isFinite(reading.time) ? reading.time : this.now();
     this.capture?.('quota', {reading: {...reading, time: sampledAt}});
     const entry = mergeQuota(this.quotas, reading, sampledAt);
     // Every producer's latest sequence survives another producer's reading.
     if (source !== undefined && sequence !== undefined) entry._watermarks = {...entry._watermarks, [source]: sequence};
-    else if (id) entry.receiptIds = [...(entry.receiptIds || []), id];
     writeQuotas(this.quotaFile, this.quotas);
     this.advance(source, sequence);
     this.send({method: 'quotas', params: {quotas: snapshot(this.quotas, this.agents)}});

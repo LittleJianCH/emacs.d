@@ -231,7 +231,7 @@ test('the daemon answers usage requests over its socket', async () => {
     await client.request('hello', {client: 'usage-test', version: daemon.version});
     const init = await client.request('usage/configure', {agents: AGENTS, pollInterval: 0});
     assert.equal(init.quotas.length, 3);
-    client.notify('usage/record', {record: {
+    await client.request('usage/record', {id: 'fixture-append', source: 'editor', sequence: 1, record: {
       time: NOW, agent: 'dsh', root: '~/c/', model: 'm', turns: 1, input: 10,
       cache_read: 0, cache_write: 0, output: 0,
     }});

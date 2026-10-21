@@ -10,6 +10,7 @@ import type { Answer, Ask, AttachResult, Block, Cursor, EventParams, Info,
   Capabilities, SessionEvent, SessionSummary, Settings, Status } from './protocol.ts'
 
 export interface SessionOptions {
+  creationId?: string
   id: string
   agent: string
   root: string
@@ -42,6 +43,7 @@ interface Message {
 }
 
 export class Session implements SessionHost {
+  readonly creationId?: string
   readonly id: string
   readonly agent: string
   readonly root: string
@@ -70,12 +72,14 @@ export class Session implements SessionHost {
   #queued: Message[] = []
   #active = false
   #generation = 0
+  #starting?: Promise<void>
   #hibernateAfter: () => number
   #hibernateTimer?: NodeJS.Timeout
   #hibernating?: Promise<void>
   #projectEnvironment: boolean
 
   constructor(options: SessionOptions) {
+    this.creationId = options.creationId
     this.id = options.id
     this.agent = options.agent
     this.root = options.root
@@ -103,8 +107,8 @@ export class Session implements SessionHost {
   }
 
   summary(): SessionSummary {
-    return { id: this.id, agent: this.agent, root: this.root,
-      status: this.status, info: structuredClone(this.info) }
+    return { id: this.id, creationId: this.creationId, agent: this.agent, root: this.root,
+      status: this.status, info: { ...structuredClone(this.info), ...(this.resumeId() ? { sessionId: this.resumeId() } : {}) } }
   }
 
   /** Includes asynchronous send preparation before a backend publishes running. */
@@ -116,14 +120,31 @@ export class Session implements SessionHost {
     return this.backend.resumeId() ?? this.#resume
   }
 
-  async start(): Promise<void> {
-    // Resolve project PATH before adapters capture their caller-independent tools.
-    if (this.#projectEnvironment) await this.environment()
-    await this.backend.start(this.resumeId())
-    await this.backend.configure(this.settings)
-    this.#onChange(false)
-    this.#drain()
-    this.refreshHibernate()
+  start(): Promise<void> {
+    if (this.#starting) return this.#starting
+    const generation = this.#generation
+    const task = this.#start(generation).finally(() => {
+      if (this.#starting === task) this.#starting = undefined
+    })
+    this.#starting = task
+    return task
+  }
+
+  async #start(generation: number): Promise<void> {
+    try {
+      // Resolve project PATH before adapters capture caller-independent tools.
+      if (this.#projectEnvironment) await this.environment()
+      if (generation !== this.#generation) return
+      await this.backend.start(this.resumeId())
+      if (generation !== this.#generation) return
+      await this.backend.configure(this.settings)
+      if (generation !== this.#generation) return
+      this.#onChange(false)
+      this.#drain()
+      this.refreshHibernate()
+    } catch (error) {
+      if (generation === this.#generation) throw error
+    }
   }
 
   newId(prefix: string): string {
@@ -314,8 +335,9 @@ export class Session implements SessionHost {
 
   async stop(): Promise<void> {
     clearTimeout(this.#hibernateTimer)
-    if (this.#hibernating) await this.#hibernating
     this.#generation++
+    this.#starting = undefined
+    if (this.#hibernating) await this.#hibernating
     this.#resume = this.resumeId()
     this.#queued = []
     if (this.queue.length) this.emit({ type: 'queue', items: [] })
@@ -353,7 +375,7 @@ export class Session implements SessionHost {
     const blocks = replay ? [] : this.#lastTurns(this.blocks.length, turns)
     const earlier = !replay && (blocks.length < this.blocks.length || !!this.backend.hasEarlier?.())
     const result: AttachResult = { epoch: this.epoch, seq: this.seq, replay: replay ? 'events' : 'fresh',
-      status: this.status, info: structuredClone(this.info), settings: { ...this.settings },
+      status: this.status, info: { ...structuredClone(this.info), ...(this.resumeId() ? { sessionId: this.resumeId() } : {}) }, settings: { ...this.settings },
       queue: [...this.queue], asks: [...this.asks.values()].map(({ ask }) => structuredClone(ask)),
       earlier, capabilities: structuredClone(this.capabilities) }
     return { result, afterWrite: () => {

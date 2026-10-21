@@ -54,7 +54,7 @@ const transcript = (count: number) => Array.from({ length: count }, (_, i) => [
 
 test('launch flags, daemon MCP, skills, choices and child lifetime', async (t) => {
   const { calls, daemon, id, attached } = await setup(t, { parent: 'parent', settings: { model: 'haiku', effort: 'low', mode: 'auto' },
-    claude: { skillsDir: '/tmp/skills', supersededSkills: ['atomic-review'] } })
+    skills: { skillsDir: '/tmp/skills', supersededSkills: ['atomic-review'] } })
   const argv = (await calls()).find((m) => m.type === 'spawn').argv
   const value = (s: string) => argv[argv.indexOf(s) + 1]
   assert.equal(value('--permission-mode'), 'auto')

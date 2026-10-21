@@ -42,22 +42,22 @@
 
 (defun agent-emx-remote--install (root manifest &optional force)
   "Verify MANIFEST in a private staging directory, then publish atomically.
-FORCE replaces a broken published installation after a failed ensure."
+FORCE publishes a fresh generation without removing any published files."
   (when agent-emx-remote--automatic
     (error "Automatic reconnect cannot install host files"))
   (let* ((version (plist-get manifest :version))
          (parent (concat (file-remote-p root) "~/.cache/emacs-agent/emx/"))
-         (dir (concat parent version "/"))
-         (marker (concat dir ".complete"))
+         (pointer (concat parent version ".current"))
+         (dir (concat pointer "/"))
          (complete (lambda ()
-                     (and (file-exists-p marker)
-                          (equal (with-temp-buffer (insert-file-contents marker)
+                     (and (file-exists-p (concat dir ".complete"))
+                          (equal (with-temp-buffer (insert-file-contents (concat dir ".complete"))
                                                    (buffer-string)) version)))))
     (unless (and (not force) (funcall complete))
       (make-directory parent t)
-      ;; Never copy into the published directory.  Only user-triggered repair
-      ;; removes a broken install; competing completed publications stay intact.
-      (when (file-exists-p dir) (delete-directory dir t))
+      ;; Existing daemons may still import from any published directory.
+      (setq dir (concat parent version ".install-"
+                        (format "%s-%s/" (emacs-pid) (random most-positive-fixnum))))
       (let ((staging (concat parent version ".stage-"
                              (format "%s-%s" (emacs-pid) (random most-positive-fixnum)) "/")))
         (make-directory staging)
@@ -80,7 +80,14 @@ FORCE replaces a broken published installation after a failed ensure."
               (condition-case err
                   (rename-file (directory-file-name staging) (directory-file-name dir))
                 (file-already-exists
-                 (unless (funcall complete) (signal (car err) (cdr err))))))
+                 (unless (funcall complete) (signal (car err) (cdr err)))))
+              (let ((link (concat (directory-file-name staging) ".link")))
+                (unwind-protect
+                    (progn
+                      (make-symbolic-link (file-name-nondirectory
+                                           (directory-file-name dir)) link)
+                      (rename-file link pointer t))
+                  (when (file-symlink-p link) (delete-file link)))))
           (when (file-exists-p staging) (delete-directory staging t)))))
     dir))
 
@@ -92,6 +99,32 @@ of the host's Node, before its result."
                                          (split-string output "\n" t))))))
       (agent-emx--parse line)
     (error "No result from the host daemon: %s" (string-trim output))))
+
+(defun agent-emx-remote--bootstrap (relative manifest)
+  "Build one host command checking the actual bootstrap Node and MANIFEST.
+Exit 44 means absent or mismatched marker; 45 means verified corrupt files.
+Other failures must never trigger an install."
+  (let ((script
+         (concat
+          "const fs=require('node:fs'),p=require('node:path'),c=require('node:crypto');"
+          "const [major,minor]=process.versions.node.split('.').map(Number);"
+          "if(!(major>20||major===20&&minor>=3||major===18&&minor>=17)){"
+          "console.error('Remote emx requires Node 18.17+ or >=20.3; got '+process.version);process.exit(46)}"
+          "const base=process.argv[1];"
+          "const manifest=" (json-serialize manifest) ";"
+          "try{if(fs.readFileSync(p.join(base,'.complete'),'utf8')!==manifest.version)process.exit(44)}"
+          "catch(e){if(e.code==='ENOENT')process.exit(44);throw e}"
+          "try{for(const f of manifest.integrity){const b=fs.readFileSync(p.join(base,f.file));"
+          "if(b.length!==f.size||c.createHash('sha256').update(b).digest('hex')!==f.sha256)"
+          "throw Error('Host runtime verification failed: '+f.file)}}"
+          "catch(e){if(e.code&&!['ENOENT','EISDIR','ENOTDIR'].includes(e.code))throw e;"
+          "console.error(String(e));process.exit(45)}"
+          "const child=require('node:child_process').spawnSync(process.execPath,"
+          "[p.join(base,'bin/emx'),'daemon','--client','" (agent-emx-remote-client-id)
+          "','--ensure'],{stdio:'inherit'});"
+          "if(child.error)console.error(String(child.error));process.exit(child.status??1);")))
+    (list "sh" "-c" (concat "exec node -e " (shell-quote-argument script)
+                              " \"$HOME/" relative ".current\""))))
 
 (defun agent-emx-remote--process (root command buffer)
   "Run ensure COMMAND on ROOT's host into BUFFER, on user action only."
@@ -155,13 +188,10 @@ Reuse OLD only if the ControlMaster is unchanged.  Return transport data."
                 (let* ((manifest (agent-emx-remote--manifest))
                        (version (plist-get manifest :version))
                        (relative (concat ".cache/emacs-agent/emx/" version))
-                       (command (list "sh" "-c"
-                                      (format (concat "if test \"$(cat \"$HOME/%s/.complete\" 2>/dev/null)\" = %s; then exec node \"$HOME/%s/bin/emx\" "
-                                                      "daemon --client %s --ensure; else exit 44; fi")
-                                              relative version relative (agent-emx-remote-client-id)))))
+                       (command (agent-emx-remote--bootstrap relative manifest)))
                   (with-temp-buffer
                     (let ((status (agent-emx-remote--process root command (current-buffer))))
-                      (unless (zerop status)
+                      (when (memq status '(44 45))
                         (agent-emx-remote--install root manifest t)
                         (erase-buffer)
                         (setq status (agent-emx-remote--process root command (current-buffer))))
@@ -202,22 +232,20 @@ ERROR-CALLBACK receives failures.  One connection per host prefix shares
 all its project views, since one host daemon has one editor attachment."
   (unless (string-prefix-p "/rpc:" root)
     (error "Remote emx sessions require /rpc: roots"))
-  (let* ((place (agent-session-place root))
-         (node (plist-get (gethash place agent-session--remote-programs) :node))
-         (key (cons (file-remote-p root) (expand-file-name agent-emx-var-directory)))
+  (let* ((key (cons (file-remote-p root) (expand-file-name agent-emx-var-directory)))
          (connection (or (gethash key agent-emx--connections)
                          (puthash key (agent-emx--make-connection :place root)
                                   agent-emx--connections))))
-    (unless (agent-emx-remote--node-p node)
-      (error "Remote emx requires Node 18.17+ or >= 20.3; program lookup reported %s" node))
     (if (and (agent-emx--connection-ready connection)
              (process-live-p (agent-emx--connection-process connection)))
         (funcall callback connection)
       (setf (agent-emx--connection-waiters connection)
             (append (agent-emx--connection-waiters connection)
                     (list (cons callback error-callback))))
-      (unless (or (process-live-p (agent-emx--connection-starter connection))
+      (unless (or (agent-emx--connection-starting connection)
+                  (process-live-p (agent-emx--connection-starter connection))
                   (process-live-p (agent-emx--connection-process connection)))
+        (setf (agent-emx--connection-starting connection) t)
         (agent-emx-remote--ensure connection)))
     (unless (timerp agent-emx-remote--timer)
       (setq agent-emx-remote--timer (run-at-time 10 10 #'agent-emx-remote--reconnect)))
@@ -298,7 +326,9 @@ all its project views, since one host daemon has one editor attachment."
 
 (defun agent-emx-remote-usage (connection entries)
   "Relay durable usage ENTRIES from CONNECTION; acknowledge after local receipt."
-  (seq-doseq (entry entries)
+  (seq-doseq (entry (sort (append entries nil)
+                         (lambda (a b) (< (or (plist-get a :sequence) 0)
+                                          (or (plist-get b :sequence) 0)))))
     (let* ((id (plist-get entry :id))
            (inflight (or (gethash connection agent-emx-remote--inflight)
                          (puthash connection (make-hash-table :test #'equal)
@@ -320,18 +350,15 @@ all its project views, since one host daemon has one editor attachment."
          (lambda (local)
            (agent-emx--request
             local (concat "usage/" method) (append (list :id id)
-                                   (when (plist-get entry :source)
-                                     (list :source (plist-get entry :source)
-                                           :sequence (plist-get entry :sequence))) params)
+                                   (list :source (plist-get entry :source)
+                                         :sequence (plist-get entry :sequence)) params)
             (lambda (ack)
               (remhash id inflight)
               (when (and (equal (plist-get ack :id) id)
                          (agent-emx--connection-ready connection))
                 (agent-emx--request connection "usage/ack"
-                                    (if (plist-get ack :source)
-                                        (list :source (plist-get ack :source)
-                                              :sequence (plist-get ack :sequence))
-                                      (list :id id)))))
+                                    (list :source (plist-get ack :source)
+                                          :sequence (plist-get ack :sequence)))))
             (lambda (_) (remhash id inflight))))
          (lambda (_) (remhash id inflight)))))))
 
