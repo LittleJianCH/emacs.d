@@ -101,7 +101,7 @@ test('fake quota poll commands persist and poll without an editor after restart'
   assert.deepEqual(daemon.usage.pollers.pi.command, [executables.pi.executable])
   const pi = (await client.request('usage/report', {range: 'all'})).quotas.find((q: any) => q.agent === 'pi')
   assert.ok(pi)
-  assert.equal(pi.plan, 'OpenCode Go')
+  assert.equal(pi.title, 'OpenCode'); assert.equal(pi.plan, 'Go')
   assert.deepEqual(pi.windows.map((w: any) => [w.label, w.used]), [['5h', 0], ['周', 0], ['月', 0]])
   assert.ok(http.requests.length > 0)
   assert.ok(!readFileSync(join(dir, 'agent-quota.json'), 'utf8').includes('fake-go-key'))

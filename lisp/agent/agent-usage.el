@@ -435,6 +435,14 @@ Quotas are kept.  Deliberately bound to no key."
     (concat (or (agent-session--get agent :title) (symbol-name agent))
             (when host (concat "@" host)))))
 
+(defun agent-usage--quota-title (quota)
+  "Display name of QUOTA: its account title, else its agent's, with @host."
+  (let ((title (plist-get quota :title))
+        (host (plist-get quota :host)))
+    (if (stringp title)
+        (concat title (when (stringp host) (concat "@" host)))
+      (agent-usage--agent-title (plist-get quota :agent) (and (stringp host) host)))))
+
 (defun agent-usage-shown-quotas ()
   "The quotas to show, from the latest push: the duplicates left out."
   (cl-remove-if (lambda (quota) (plist-get quota :duplicate)) agent-usage--snapshot))
@@ -470,9 +478,7 @@ Quotas are kept.  Deliberately bound to no key."
                                                                 (plist-get quota :time))))
                    (plist-get quota :balance)))))
     (when parts
-      (concat (propertize (agent-usage--agent-title (plist-get quota :agent)
-                                                    (plist-get quota :host))
-                          'face 'bold)
+      (concat (propertize (agent-usage--quota-title quota) 'face 'bold)
               " " (string-join parts " · ")))))
 
 (defun agent-usage-echo-text ()
@@ -688,12 +694,10 @@ Not the selected window's: the page is also redrawn from elsewhere."
   (insert (propertize "额度" 'face 'agent-usage-heading) "\n")
   (let ((quotas (cl-remove-if (lambda (quota) (plist-get quota :duplicate)) quotas)))
     (if (null quotas)
-        (insert (propertize "    还没有额度读数：用一次 Claude、Codex、DeepSeek 或 Pi，或等 emx 查一次\n"
+        (insert (propertize "    还没有额度读数：用一次 Claude、Codex、DeepSeek 或 OpenCode，或等 emx 查一次\n"
                             'face 'agent-session-dim))
       (dolist (quota quotas)
-        (insert "  " (propertize (agent-usage--agent-title (plist-get quota :agent)
-                                                           (plist-get quota :host))
-                                 'face 'bold)
+        (insert "  " (propertize (agent-usage--quota-title quota) 'face 'bold)
                 (if-let* ((plan (plist-get quota :plan)))
                     (propertize (format " · %s" plan) 'face 'agent-session-dim)
                   ""))

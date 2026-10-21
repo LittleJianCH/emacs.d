@@ -31,7 +31,7 @@ test('Pi auth uses the fake CLI, trims the key and maps all Go windows', async (
   const {service} = serviceFor(t)
   const reading = await service.fetchers.pi(command, {spawn, now: () => NOW})
   assert.deepEqual(requests, [{method: 'GET', url: '/zen/go/v1/usage', authorization: `Bearer ${key}`}])
-  assert.deepEqual(reading, {agent: 'pi', host: null, plan: 'OpenCode Go', windows: [
+  assert.deepEqual(reading, {agent: 'pi', host: null, title: 'OpenCode', plan: 'Go', windows: [
     {id: '300', label: '5h', minutes: 300, used: 0, resets: 1792584336, limited: false},
     {id: '10080', label: '周', minutes: 10080, used: 0, resets: 1792972800, limited: false},
     {id: 'monthly', label: '月', minutes: null, used: 0, resets: 1795197776, limited: false},

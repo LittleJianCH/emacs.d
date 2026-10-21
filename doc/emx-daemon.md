@@ -867,7 +867,10 @@ key only in memory for a Bearer request to the undocumented
 `EMX_PI_USAGE_URL` overrides the URL for local test servers. HTTP requests
 have a 15-second timeout; failures use the same quiet daemon log and backoff
 as missing executables. Keys and response bodies never enter errors or state.
-Its plan is `OpenCode Go`; rolling, weekly and monthly windows show as `5h`,
+The reading carries `title: "OpenCode"` and plan `Go`: the allowance belongs
+to the OpenCode account, so both UIs name it OpenCode rather than Pi (a
+quota's `title` overrides its agent's display title). Rolling, weekly and
+monthly windows show as `5h`,
 `周` and `月`. Non-`ok` status marks a window limited while preserving its used
 fraction. Monthly has no fixed duration (`minutes: null`) and no forecast;
 5h and weekly retain the usual forecasts. The echo line uses its configured

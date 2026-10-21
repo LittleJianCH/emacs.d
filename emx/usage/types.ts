@@ -29,6 +29,8 @@ export interface QuotaReading {
   windows?: UsageWindow[]
   balance?: {amount: number, currency: string}[]
   plan?: string
+  /** Account name shown instead of the agent's title, e.g. OpenCode for Pi. */
+  title?: string
   credits?: number | 'unlimited'
   [key: string]: any
 }

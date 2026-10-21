@@ -121,7 +121,7 @@
                       'agent-usage-low)))))))
 
 (ert-deftest agent-usage-test-pi-go-windows ()
-  "Pi's pushed Go quotas retain labels, plan and limited status in both UIs."
+  "Pi's Go quotas show as OpenCode with labels, plan and limited status."
   (agent-usage-test--with-files
     (let* ((agent-session-agents '((pi :title "Pi")))
            (agent-usage-echo-windows '("5h" "周"))
@@ -129,7 +129,7 @@
            (future (+ now 86400)))
       (agent-usage--receive-quotas
        (vector
-        (list :agent "pi" :host :null :time now :plan "OpenCode Go"
+        (list :agent "pi" :host :null :time now :title "OpenCode" :plan "Go"
               ;; Deliberately unordered: the page puts monthly last.
               :windows (vector
                         (list :id "monthly" :label "月" :minutes :null
@@ -139,7 +139,7 @@
                         (list :id "300" :label "5h" :minutes 300
                               :used 0.25 :limited :false :resets future)))))
       (let ((text (agent-usage-echo-text)))
-        (should (equal (substring-no-properties text) "Pi 5h 75% · 周 0%"))
+        (should (equal (substring-no-properties text) "OpenCode 5h 75% · 周 0%"))
         (should (eq (get-text-property (string-match "周 0%" text) 'face text)
                     'agent-usage-out)))
       (let ((agent-usage-echo-windows '("5h" "周" "月")))
@@ -147,7 +147,8 @@
       (with-temp-buffer
         (agent-usage--insert-quotas agent-usage--snapshot)
         (let ((text (buffer-string)))
-          (should (string-match-p "Pi · OpenCode Go" text))
+          (should (string-match-p "OpenCode · Go" text))
+          (should-not (string-match-p "Pi" text))
           (should (string-match-p "5h.*75%" text))
           (should (string-match-p "周.*0%" text))
           (should (string-match-p "月.*80%" text))

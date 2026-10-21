@@ -188,7 +188,7 @@ function mergeQuota(quotas: QuotaEntry[], reading: QuotaReading, now: number) {
   const host = reading.host ?? null;
   const index = quotas.findIndex((q) => q.agent === reading.agent && (q.host ?? null) === host);
   const entry: QuotaEntry = index >= 0 ? { ...quotas[index] } : { agent: reading.agent, host, windows: [] };
-  for (const key of ['windows', 'balance', 'plan', 'credits']) {
+  for (const key of ['windows', 'balance', 'plan', 'title', 'credits']) {
     const value = reading[key];
     if (value == null) continue;
     entry[key] = key === 'windows' ? mergeWindows(entry.windows || [], value, now) : value;
@@ -591,7 +591,8 @@ function piReading(body: Json): QuotaReading {
     return { id, label: key === 'monthly' ? '月' : windowLabel(minutes), minutes,
       used: window.percent / 100, resets, limited: window.status !== 'ok' };
   });
-  return { agent: 'pi', host: null, plan: 'OpenCode Go', windows };
+  // The allowance belongs to the OpenCode account, not to Pi the harness.
+  return { agent: 'pi', host: null, title: 'OpenCode', plan: 'Go', windows };
 }
 
 const FETCHERS: Record<string, Fetcher> = {
