@@ -114,7 +114,7 @@ console.log(JSON.stringify({PATH:(fs.existsSync('disabled')?'/missing':path.join
     const child = [...daemon.sessions.values()].find((s) => s.info.parent === parent.id)!
     assert.ok(child)
     assert.deepEqual(child.editorTools(), parent.editorTools())
-    await assert.rejects(daemon.collab.call(sessions[1], 'session_start', { profile: 'project-worker', prompt: 'unavailable' }, new AbortController().signal), /No profile/)
+    await assert.rejects(daemon.collab.call(sessions[1], 'session_start', { profile: 'project-worker', prompt: 'unavailable' }, new AbortController().signal), /No candidate available for profile project-worker: DeepSeek fake\/child: unavailable here/)
     writeFileSync(join(a, 'disabled'), '')
     writeFileSync(join(a, '.envrc'), 'changed')
     await editor.request('session/open', { agent: 'echo', root: a, settings: {} })

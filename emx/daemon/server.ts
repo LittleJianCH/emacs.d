@@ -154,7 +154,7 @@ export class DaemonServer {
         }
       } })
     this.accounting = new Accounting(this.usage)
-    this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir,
+    this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir, usage: this.usage,
       config: () => this.configuration.value,
       hub: (caller, method, params, signal) => this.editor.call(method, params,
         { session: caller.id, root: caller.root, place: null }, signal, true),

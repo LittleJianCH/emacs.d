@@ -671,9 +671,31 @@ the profiles available at the caller's place. Definitions depend on
 configuration and where the caller runs, never on who is calling: a forked
 session must see exactly its parent's tools to keep its prompt cache.
 
-Profiles are filtered by the enabled agents Emacs sends on `hello` and by
-whether their executable is runnable in that place's environment. They are
-sorted by `profileCost`, preserving configuration order within a tier.
+Profiles are roles with ordered `candidates` (`agent`, optional `model`, `mode`
+and `effort`), a static `cost` tier, `description`, optional `confirm`, and
+optional `preferOtherAgent`. Legacy top-level agent/model/mode/effort profiles
+remain a single candidate; top-level legacy overrides take precedence over an
+inherited candidates array. A role is listed if any candidate's agent is enabled
+by Emacs on `hello` and its executable is runnable in the caller root's
+environment. Lines are `- role: tier cost.  description`, without agents or
+models. Roles are sorted by `profileCost`, preserving configuration order within
+a tier. Quotas and caller identity never alter tool definitions.
+
+At each `session_start`, selection skips unavailable candidates and Pi models
+outside `agents.pi.models`, reusing `allowedModel`. It reads the daemon's current
+UsageService quota snapshot for that agent's local (`host: null`) entry only,
+ignoring duplicates. A candidate is strained if a window is `limited` or has
+`used >= collab.quotaSkip` (default `0.9`, range `0..1`), or a nonempty balance
+list has all amounts `<= 0`. Missing quotas are allowed. Available, non-strained
+candidates retain configuration order, with other agents first when
+`preferOtherAgent` is true. The shipped review role sets this flag. If all
+available candidates are strained, the first available still runs. If none is
+available, the error lists every candidate and reason.
+The receipt identifies the chosen agent/model and explains candidates skipped
+before it, using configurable `collab.prompts` text for unavailability, model
+filtering, quota use/limits, exhausted balances and vendor preference. Child
+`info.profile` remains the role; session agent and settings record the candidate.
+See [Profiles](subagents.md#profiles) for the configuration example and details.
 `mcp/hello` supplies a short cost-grouped profile summary for MCP instructions.
 MCP has no instructions-changed notification: this summary stays fixed for the MCP process lifetime while tool descriptions update via `tools/list_changed`.
 
@@ -777,12 +799,12 @@ The schema:
 | Section | Keys |
 |---|---|
 | `agents` | `title`, `executable`, `extraArgs`, `nativeSubagents`; Claude also `disallowedTools`, `historyTurns` |
-| `profiles` | `agent`, `model`, `effort`, `mode`, `cost`, `description`, `confirm` |
+| `profiles` | `cost`, `description`, `confirm`, `preferOtherAgent`, ordered `candidates` (`agent`, `model`, `effort`, `mode`); legacy top-level candidate fields remain valid |
 | `usage` | `pollInterval` (seconds) |
 | `daemon` | `idleExit` (seconds) |
 | `sessions` | `hibernateAfter` (seconds) |
 
-`collab` holds `startGuidance`, `maxActive`, `handoffLimit`, `closeFinished`,
+`collab` holds `startGuidance`, `quotaSkip`, `maxActive`, `handoffLimit`, `closeFinished`,
 `confirm`, `textLimit`, `replyLimit`, `confirmTimeout`, `handleTimeout`,
 `handleCommand`, `agentHandleCommands`, the five `tools` definitions, and
 `prompts` (task, handoff, mailbox and naming text).

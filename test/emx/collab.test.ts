@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Collaboration, definitions, profiles, profileCost, startSummary, cleanHandle, turns } from '../../emx/daemon/collab.ts'
+import { Collaboration, definitions, profiles, profileCandidates, profileCost, startSummary, cleanHandle, turns } from '../../emx/daemon/collab.ts'
 import { Session } from '../../emx/daemon/session.ts'
 import { checkoutRoot, emxRoot } from '../../emx/daemon/paths.ts'
 import { DaemonServer } from '../../emx/daemon/server.ts'
@@ -54,8 +54,8 @@ test('daemon config owns five caller-independent collaboration definitions', () 
   assert.equal(cleanHandle('Reply\n`Cache Test`'), 'cache-test')
   assert.equal(cleanHandle('123'), undefined)
   c.agents.dsh.executable = '/does/not/exist'
-  assert.ok(!profiles(c).some(([, p]) => p.agent === 'dsh'))
-  assert.ok(profiles(c, ['claude']).every(([, p]) => p.agent === 'claude'))
+  assert.ok(!profiles(c).some(([, p]) => profileCandidates(p).some((c) => c.agent === 'dsh')))
+  assert.ok(profiles(c, ['claude']).every(([, p]) => profileCandidates(p).some((c) => c.agent === 'claude')))
 })
 test('delegation guidance names no profiles and profile descriptions name no other profile', () => {
   const c = defaults()
@@ -74,9 +74,9 @@ test('descriptions and summary include only enabled and available profiles and f
   assert.match(description(), /\n  Claude, Codex, DeepSeek and Pi sessions can fork\.\n/)
   c.agents.pi.executable = '/does/not/exist'
   const start = description(), summary = startSummary(c, undefined, env)
-  for (const text of [start, summary]) assert.doesNotMatch(text, /coder-flash|explorer-flash|\bPi\b|\{forkAgents\}/)
+  for (const text of [start, summary]) assert.doesNotMatch(text, /\bPi\b|\{forkAgents\}/)
   assert.match(start, /\n  Claude, Codex and DeepSeek sessions can fork\.\n/)
-  assert.equal(summary, '- Subagent profiles here, cheapest first: explorer (low); coder (medium); reviewer, generalist (high); expert (premium).  session_start describes each.')
+  assert.equal(summary, '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); researcher, reviewer (high); expert (premium).  session_start describes each.')
   assert.match(description(['codex']), /\n  Codex sessions can fork\.\n/)
   assert.doesNotMatch(description(['pi']), /sessions can fork|\{forkAgents\}/)
   c.agents.claude.executable = c.agents.codex.executable = '/does/not/exist'
@@ -91,17 +91,19 @@ test('profiles, rendered lines and summary share stable cost order including unk
   for (const a of Object.values(c.agents)) a.executable = process.execPath
   const env = { PATH: '' }
   c.profiles.unpriced = { agent: 'codex' }
-  const expected = ['coder-flash', 'explorer-flash', 'explorer', 'coder', 'reviewer', 'generalist', 'expert', 'unpriced']
+  const expected = ['coder-flash', 'explorer-flash', 'explorer', 'coder', 'researcher', 'reviewer', 'expert', 'unpriced']
   const renderedNames = () => definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description
     .split(c.collab.prompts.profileHeader)[1].split('\n').map((line) => line.slice(2, line.indexOf(':')))
   assert.deepEqual(profiles(c, undefined, env).map(([name]) => name), expected)
   assert.deepEqual(renderedNames(), expected)
+  const lines = definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description.split(c.collab.prompts.profileHeader)[1]
+  assert.doesNotMatch(lines, /Claude|Codex|Pi|haiku|gpt-|opencode-go\//)
   assert.equal(profileCost('unpriced', c.profiles.unpriced), 'unknown')
-  assert.equal(startSummary(c, undefined, env), '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); reviewer, generalist (high); expert (premium); unpriced (unknown).  session_start describes each.')
+  assert.equal(startSummary(c, undefined, env), '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); researcher, reviewer (high); expert (premium); unpriced (unknown).  session_start describes each.')
   c.profiles.explorer.cost = 'premium'
-  assert.deepEqual(renderedNames(), ['coder-flash', 'explorer-flash', 'coder', 'reviewer', 'generalist', 'explorer', 'expert', 'unpriced'])
+  assert.deepEqual(renderedNames(), ['coder-flash', 'explorer-flash', 'coder', 'researcher', 'reviewer', 'explorer', 'expert', 'unpriced'])
   assert.match(startSummary(c, undefined, env), /explorer, expert \(premium\)/)
-  assert.match(definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description, /- explorer: Claude haiku, premium cost\./)
+  assert.match(definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description, /- explorer: premium cost\./)
 })
 test('every daemon collaboration tool works; origin and hidden notes survive separately; child closes after mailbox', async () => {
   const t = setup()

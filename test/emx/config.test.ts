@@ -23,11 +23,29 @@ test('config validates defaults and rejects malformed policy with a field path',
     { collab: { typo: true } }, { agents: { claude: { executable: '' } } }]) {
     assert.throws(() => validate(merge(defaults(), patch)), /config\./)
   }
-  for (const key of ['startSummary', 'forkAgents', 'failedReply', 'replyError', 'partialReply']) {
+  for (const key of ['startSummary', 'forkAgents', 'failedReply', 'replyError', 'partialReply', 'candidateSkipped', 'candidatesSkipped', 'candidateUnavailable', 'candidateModelExcluded', 'candidateQuotaUsed', 'candidateQuotaLimited', 'candidateBalanceExhausted', 'candidateSameAgent', 'noCandidate']) {
     const c = defaults()
     delete c.collab.prompts[key]
     assert.throws(() => validate(c), { message: `config.collab.prompts.${key}: expected string` })
   }
+})
+test('role candidates and legacy overrides validate; malformed candidates and quota thresholds fail', () => {
+  const c = defaults()
+  assert.equal(validate(c).collab.quotaSkip, 0.9)
+  assert.deepEqual(validate(c).profiles.coder.candidates, c.profiles.coder.candidates)
+  const legacy = { agent: 'claude', model: 'sonnet', mode: 'auto', effort: 'high', cost: 'medium' }
+  c.profiles.legacy = legacy
+  assert.deepEqual(validate(c).profiles.legacy, legacy)
+  assert.equal(validate(merge(defaults(), { profiles: { coder: legacy } })).profiles.coder.agent, 'claude')
+  for (const quotaSkip of [0, 0.3, 1]) assert.equal(validate(merge(c, { collab: { quotaSkip } })).collab.quotaSkip, quotaSkip)
+  for (const quotaSkip of [-0.01, 1.01, NaN, Infinity, '0.9', null]) {
+    assert.throws(() => validate(merge(c, { collab: { quotaSkip } })), /collab.quotaSkip/)
+  }
+  for (const candidates of [[], null, {}, [{ agent: 'missing' }], [{ agent: 'codex', mode: 'unsafe' }],
+    [{ agent: 'codex', cost: 'low' }], [{ agent: 'codex', model: 2 }], [{ agent: 'codex', effort: false }]]) {
+    assert.throws(() => validate(merge(c, { profiles: { coder: { candidates } } })), /profiles.coder.candidates/)
+  }
+  assert.throws(() => validate(merge(c, { profiles: { reviewer: { preferOtherAgent: 'yes' } } })), /preferOtherAgent/)
 })
 test('config reload retains last good config on JSON and validation errors; deletion resets override', () => {
   const dir = mkdtempSync(join(tmpdir(), 'emx-config-'))

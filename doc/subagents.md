@@ -111,32 +111,79 @@ between, newest first, noting what was left out.
 
 ### Profiles
 
-The model picks a profile, not a free harness and model pair: harness and model
-don't combine freely, model lists come from running processes, and a profile
-carries the permission mode, cost and confirmation the user set.
-`profiles` defaults to `coder-flash` (Pi, OpenCode Go DeepSeek V4.1 flash,
-auto), `explorer` (Claude haiku, plan; short, quick questions), `explorer-flash`
-(Pi, OpenCode Go DeepSeek V4.1 flash, plan: read, grep, find and ls pass,
-commands and edits are refused; simple questions that need long reading), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
-(Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
-(Claude Fable, plan, confirmed by the user each time: a fork only reaches the
-parent's own model); the tool description lists those whose agent is enabled
-and installed where the caller runs: children start where their parent runs, so
-an agent on this machine sees the agents installed here and one in a `/rpc:dev:`
-project those of that project on dev (per project, since tramp-rpc applies its
-direnv). The host daemon resolves the project's environment before startup,
-then uses its cached PATH for both MCP descriptions and profile validation.
-Children in that root see the same tools as their parent. Opening another
-session refreshes that root and announces changed definitions only to its MCP
-clients; no editor stamp or host lookup timer remains. A child that fails to
-start is closed and the error returned.
+The model picks a role, not a free harness and model pair. Each role has a
+static display `cost`, a `description`, optional `confirm` and
+`preferOtherAgent` flags, and an ordered, nonempty `candidates` array:
 
+```json
+"reviewer": {
+  "cost": "high",
+  "description": "Reviews substantive changes before delivery; reproduces what it finds and reports findings without editing files.",
+  "preferOtherAgent": true,
+  "candidates": [
+    { "agent": "codex", "model": "gpt-6-astra", "mode": "plan" },
+    { "agent": "claude", "model": "opus", "mode": "plan" },
+    { "agent": "pi", "model": "opencode-go/qwen3.8-max", "mode": "plan" }
+  ]
+}
+```
+
+Candidates carry `agent`, optional `model`, `mode` and `effort`, and no cost.
+Legacy profiles with top-level `agent`, `model`, `mode` and `effort` still mean
+one candidate. A legacy override's top-level agent takes precedence over an
+inherited candidates array, so old local overrides keep working.
+The shipped roles, in cost order, are `coder-flash` and `explorer-flash`
+(minimal), `explorer` (low), `coder` (medium), `researcher` (high;
+investigation written up as reports, design notes or pages), `reviewer`
+(high, prefers another agent), and `expert` (premium, confirmed each time).
+Each has fallbacks across subscriptions and an explicit reasoning effort per
+candidate, chosen from published effort/benchmark data (2026-10); the exact
+order lives in `emx/config.json`. Quota windows whose reading predates their
+reset, overage windows, and windows named after another model (Claude's
+`seven_day_fable`) do not mark a candidate strained. The role's description stays stable across candidate changes.
+
+The tool lists a role when at least one candidate's agent is enabled and its
+executable is installed in the caller root's environment. Lines contain only
+`- role: tier cost.  description`, without the selected agent or model.
+Children start where their parent runs: this machine or a remote project such
+as `/rpc:dev:`. The host daemon resolves the project's environment before
+startup, then uses its cached PATH for MCP descriptions and candidate checks.
+Opening another session refreshes that root and announces changed definitions
+only to its MCP clients; no editor stamp or host lookup timer remains.
+Definitions never depend on the caller's agent or on current quotas, so a
+child in the same root sees the same tools as its parent.
+
+On each `session_start`, emx walks the role's candidates in order. It skips
+disabled agents, missing executables and Pi models rejected by
+`agents.pi.models` (the same `allowedModel` filter as the backend, including
+its default model when omitted). It then skips strained subscriptions using
+this daemon's current UsageService quota snapshot: only the agent's `host: null`
+entry counts, and duplicate entries are ignored. A subscription is strained
+when any window is `limited` or its used fraction reaches `collab.quotaSkip`
+(default `0.9`, validated from `0` through `1`), or a nonempty balance list has
+all amounts at or below zero. Missing quota data does not exclude a candidate;
+remote readings and forecast values do not affect selection.
+
+`preferOtherAgent: true` puts available, non-strained candidates with a different
+agent from the caller first, preserving their relative order. The shipped
+review role uses this: a Codex caller normally gets Claude Opus, while a Claude
+caller gets Codex. If every available candidate is strained, emx still uses
+the first available candidate in configuration order. If none is available,
+the error lists every candidate and its reason. A backend startup failure closes
+the child and returns its error; selection does not retry after startup.
+
+The started receipt names the chosen title and model, as before, and appends
+reasons for candidates skipped before it, for example
+`Skipped candidates: Claude sonnet: 5h quota 93% used; DeepSeek: balance exhausted.`
+The wording, including unavailable/model-filter/quota/vendor-preference reasons
+and the no-candidate error, comes from `collab.prompts`. Child info keeps
+`profile` as the role name, with its actual agent and model in the existing
+session fields. Permission mode is still capped by the parent's mode.
 
 The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is
-named after its profile. An agent
-never picks a profile of its own agent and model: it forks instead, getting the
-same model with its context and prompt cache.
+named after its role. Use a fork when the task needs the caller's conversation
+and prompt cache; emx chooses a candidate when a role is requested.
 The shared MCP instructions in `emx/cli/main.ts` name `session_start` as the entry
 point for delegating independent work early. `mcp/hello` appends a short summary
 of available profiles grouped by cost, so agents see them before discovering
@@ -161,10 +208,8 @@ least costly profile likely to finish reliably, tell the user why, avoid
 duplicating the child's task, and verify the important claims in its report.
 
 Substantive changes get a separate review before final delivery, even when no
-commit was requested. Use a profile meant for review, or a second pass by a fork
-when that profile is the caller's own agent and model. Explicitly ask for findings, not edits:
-a fork inherits the caller's permissions and context, so it does not provide
-a fresh perspective or enforce the reviewer's plan mode. Children still do
+commit was requested. Use a profile meant for review; emx prefers another
+vendor for it. Explicitly ask for findings, not edits. Children still do
 only their assigned task and cannot delegate, including for review; this
 exception is explicit in the shared instructions and tool description.
 
@@ -183,8 +228,8 @@ MCP has no instructions-changed notification. Tool descriptions use the refresh
 mechanism below. Profiles are filtered by enabled agents and executable
 availability in the session root's environment, then sorted by cost: minimal,
 low, medium, high, premium and unknown, with configuration order within a tier.
-Both the tool description and the summary use `profileCost`, the single seam
-for future quota-based costs; profiles themselves remain in `emx/config.json`.
+Both the tool description and the summary use `profileCost` for the static
+role display tier; profiles themselves remain in `emx/config.json`.
 
 ### Rules
 

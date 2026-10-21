@@ -113,14 +113,14 @@ test('initialize uses enabled profiles in the bound session root environment bef
     return { PATH: '', EMX_CODEX_EXECUTABLE: process.execPath }
   } })
   const init = await request('initialize')
-  const summary = '- Subagent profiles here, cheapest first: coder (medium); reviewer (high).  session_start describes each.'
+  const summary = '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); researcher, reviewer (high); expert (premium).  session_start describes each.'
   assert.ok(init.instructions.endsWith('\n' + summary))
-  assert.doesNotMatch(init.instructions, /coder-flash|explorer|generalist|expert|DeepSeek/)
+  assert.doesNotMatch(init.instructions, /DeepSeek|\bPi\b|\bClaude\b/)
   assert.ok(roots.length > 0)
   assert.ok(roots.every((root) => root === dir))
   const start = (await request('tools/list')).tools.find((tool: any) => tool.name === 'session_start').description
   assert.match(start, /  Codex sessions can fork\./)
-  assert.doesNotMatch(start, /coder-flash|explorer|generalist|expert|DeepSeek/)
+  assert.doesNotMatch(start, /DeepSeek|\bPi\b|\bClaude\b/)
   await editor.request('hello', { client: 'test', version: daemon.version, tools, agents: [] })
   await wait((m) => m.method === 'notifications/tools/list_changed')
   assert.equal(daemon.collab.startSummary(dir), '')

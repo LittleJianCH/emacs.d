@@ -4,7 +4,9 @@ import { spawn } from 'node:child_process'
 import { accessSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { Config, Profile } from '../config.ts'
+import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
+import type { UsageService } from '../usage/service.ts'
+import type { Config, Profile, ProfileCandidate } from '../config.ts'
 import type { Block, EditorTools, SessionEvent, Settings } from './protocol.ts'
 import type { Session } from './session.ts'
 
@@ -29,17 +31,23 @@ export function agentExecutable(c: Config, agent: string, env: NodeJS.ProcessEnv
 function availableAgent(c: Config, agent: string, enabled: string[] | undefined, env: NodeJS.ProcessEnv): boolean {
   return !!c.agents[agent] && (!enabled || enabled.includes(agent)) && executable(agentExecutable(c, agent, env), env)
 }
-/** Single seam for future quota-based profile costs. */
+/** Model names that quota window ids may carry to scope a window to one model. */
+const scopedModels = ['fable', 'opus', 'sonnet', 'haiku']
+/** Static role display tier, shared by descriptions and summaries. */
 export function profileCost(name: string, profile: Profile): string {
   return profile.cost ?? 'unknown'
 }
+/** A legacy override takes precedence over an inherited candidates array. */
+export function profileCandidates(p: Profile): ProfileCandidate[] {
+  return p.agent ? [{ agent: p.agent, model: p.model, mode: p.mode, effort: p.effort }] : p.candidates!
+}
 export function profiles(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): [string, Profile][] {
   const rank = ([name, p]: [string, Profile]) => costRanks[profileCost(name, p)] ?? costRanks.unknown
-  return Object.entries(c.profiles).filter(([, p]) => availableAgent(c, p.agent, enabled, env))
+  return Object.entries(c.profiles).filter(([, p]) => profileCandidates(p).some((candidate) => availableAgent(c, candidate.agent, enabled, env)))
     .sort((a, b) => rank(a) - rank(b))
 }
-function profileLines(c: Config, available: [string, Profile][]): string {
-  return available.map(([name, p]) => `- ${name}: ${c.agents[p.agent].title}${p.model ? ' ' + p.model : ''}, ${profileCost(name, p)} cost.  ${p.description ?? ''}`).join('\n')
+function profileLines(available: [string, Profile][]): string {
+  return available.map(([name, p]) => `- ${name}: ${profileCost(name, p)} cost.  ${p.description ?? ''}`).join('\n')
 }
 export function startSummary(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): string {
   const groups = new Map<string, string[]>()
@@ -61,7 +69,7 @@ export function definitions(c: Config, enabled?: string[], env: NodeJS.ProcessEn
       titles.length ? format(c.collab.prompts.forkAgents, joined) + '\n' : '')
     return { ...tool, description: description + '\n\n'
       + (c.collab.startGuidance ? c.collab.startGuidance + '\n\n' : '') + c.collab.prompts.profileHeader
-      + profileLines(c, profiles(c, enabled, env)) }
+      + profileLines(profiles(c, enabled, env)) }
   })
 }
 export function cleanHandle(value: string): string | undefined {
@@ -116,6 +124,7 @@ export interface CollabHost {
   config(): Config
   hub?(caller: { id: string, root: string }, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
   environment?(root: string): NodeJS.ProcessEnv
+  usage?: Pick<UsageService, 'quotas'>
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
   close(session: Session): Promise<void>
@@ -371,13 +380,51 @@ export class Collaboration {
     this.#send(target, caller, prompt, this.#prompt('messageNote', this.#title(caller), this.#handle(caller)))
     return this.#prompt('sent', this.#handle(target))
   }
+  #select(caller: Session, name: string, role: Profile): { candidate: ProfileCandidate, note: string } {
+    const env = this.host.environment?.(caller.root) ?? process.env
+    const candidates = profileCandidates(role).map((candidate) => {
+      const { agent, model } = candidate
+      const label = (this.config.agents[agent]?.title ?? agent) + (model ? ' ' + model : '')
+      let unavailable: string | undefined, strained: string | undefined
+      if (!availableAgent(this.config, agent, this.enabled, env)) unavailable = this.#prompt('candidateUnavailable')
+      else if (agent === 'pi' && !allowedModel(model || this.config.agents.pi.defaultModel || piDefaultModel, this.config.agents.pi)) {
+        unavailable = this.#prompt('candidateModelExcluded')
+      }
+      // Only this daemon's local account matters, including on a host daemon.
+      const quota = this.host.usage?.quotas.find((q) => q.agent === agent && q.host == null && !q.duplicate)
+      if (quota) {
+        const now = Date.now() / 1000
+        // A reading from before its reset no longer applies; overage windows are
+        // extra credit, not the allowance; a window named after a model (Claude's
+        // seven_day_fable) limits only that model.
+        const applies = (w: { id: string, resets?: number | null }) => !(w.resets != null && w.resets <= now)
+          && !/overage/.test(w.id)
+          && ((scope) => !scope || (model ?? '').includes(scope))(scopedModels.find((m) => w.id.includes(m)))
+        const window = quota.windows.find((w) => applies(w) && (w.limited || (w.used ?? -1) >= this.config.collab.quotaSkip))
+        // Window labels belong to the Chinese UI; ids keep agent notes in English.
+        if (window) strained = window.limited
+          ? this.#prompt('candidateQuotaLimited', window.id)
+          : this.#prompt('candidateQuotaUsed', window.id, Math.round(window.used! * 100))
+        else if (quota.balance?.length && quota.balance.every((b) => b.amount <= 0)) strained = this.#prompt('candidateBalanceExhausted')
+      }
+      return { candidate, label, unavailable, strained }
+    })
+    const available = candidates.filter((c) => !c.unavailable)
+    const healthy = available.filter((c) => !c.strained)
+    const chosen = (role.preferOtherAgent && healthy.find((c) => c.candidate.agent !== caller.agent)) || healthy[0] || available[0]
+    const reason = (c: typeof candidates[number]) => this.#prompt('candidateSkipped', c.label,
+      c.unavailable ?? c.strained ?? this.#prompt('candidateSameAgent'))
+    if (!chosen) throw new Error(this.#prompt('noCandidate', name, candidates.map(reason).join('; ')))
+    const skipped = candidates.slice(0, candidates.indexOf(chosen)).map(reason)
+    return { candidate: chosen.candidate, note: skipped.length ? this.#prompt('candidatesSkipped', skipped.join('; ')) : '' }
+  }
   async #start(caller: Session, p: Record<string, unknown>, signal: AbortSignal): Promise<string> {
     const prompt = this.#text(p), context = p.context ?? 'fresh'
     if (caller.info.parent) throw new Error("A session started by another session can't start sessions; do the task yourself")
     if (!['fresh', 'handoff', 'fork'].includes(String(context))) throw new Error(`context must be fresh, handoff or fork, not ${context}`)
     const count = [...this.host.sessions.values()].filter((s) => s.info.parent === caller.id && this.#working(s)).length + (this.#reservations.get(caller.id) ?? 0)
     if (count >= this.config.collab.maxActive) throw new Error(`${count} sessions you started are still working, the most at once; wait for one to finish`)
-    let name: string, profile: Profile, fork: string | undefined
+    let name: string, profile: ProfileCandidate, fork: string | undefined, confirm = false, note = ''
     if (context === 'fork') {
       if (p.profile !== undefined) throw new Error('A fork uses your own agent and model; omit profile')
       if (!forkAgents.includes(caller.agent)) throw new Error(`${this.#title(caller)} sessions can't fork; use handoff`)
@@ -385,9 +432,11 @@ export class Collaboration {
       if (!fork) throw new Error('Your session has no conversation to fork yet')
       name = this.#handle(caller) + '-fork'; profile = { agent: caller.agent, ...caller.settings }
     } else {
-      const entry = profiles(this.config, this.enabled, this.host.environment?.(caller.root)).find(([name]) => name === p.profile)
-      if (!entry) throw new Error(`${p.profile ? `No profile ${p.profile} here` : 'Name a profile'}; choose one of: ${profiles(this.config, this.enabled, this.host.environment?.(caller.root)).map(([n]) => n).join(', ')}`)
-      ;[name, profile] = entry
+      const role = typeof p.profile === 'string' && Object.hasOwn(this.config.profiles, p.profile) ? this.config.profiles[p.profile] : undefined
+      if (!role) throw new Error(`${p.profile ? `No profile ${p.profile} here` : 'Name a profile'}; choose one of: ${profiles(this.config, this.enabled, this.host.environment?.(caller.root)).map(([n]) => n).join(', ')}`)
+      name = String(p.profile)
+      const selected = this.#select(caller, name, role)
+      profile = selected.candidate; note = selected.note; confirm = !!role.confirm
     }
     this.#reservations.set(caller.id, (this.#reservations.get(caller.id) ?? 0) + 1)
     let reserved = true
@@ -400,7 +449,7 @@ export class Collaboration {
     }
     let child: Session | undefined
     try {
-      if (profile.confirm) await this.#confirm(caller, `启动子会话 ${name}`, prompt, signal)
+      if (confirm) await this.#confirm(caller, `启动子会话 ${name}`, prompt, signal)
       signal.throwIfAborted()
       this.assertOpen(caller)
       if (fork) await caller.backend.flush?.()
@@ -421,7 +470,7 @@ export class Collaboration {
       const history = context === 'handoff' ? this.#handoff(caller) : ''
       const text = (history ? this.#prompt('handoff', this.#handle(caller), this.#handle(caller), history) : '') + this.#prompt('task') + prompt
       this.#send(child, caller, text, fork ? this.#prompt('forkNote', this.#handle(caller)) : this.#prompt('taskNote', this.#title(caller), this.#handle(caller)))
-      return this.#prompt('started', this.#handle(child), this.#title(child), profile.model ? ' ' + profile.model : '', context)
+      return this.#prompt('started', this.#handle(child), this.#title(child), profile.model ? ' ' + profile.model : '', context) + note
     } catch (error) {
       if (child) await this.host.close(child)
       throw error

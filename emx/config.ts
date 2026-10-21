@@ -14,11 +14,15 @@ export interface AgentConfig {
   defaultModel?: string
   models?: { include: string[], exclude: string[] }
 }
-export interface Profile {
+export interface ProfileCandidate {
   agent: string
   model?: string | null
   effort?: string | null
   mode?: string | null
+}
+export interface Profile extends Partial<ProfileCandidate> {
+  candidates?: ProfileCandidate[]
+  preferOtherAgent?: boolean
   cost?: string
   description?: string
   confirm?: boolean
@@ -28,6 +32,7 @@ export interface Config {
   profiles: Record<string, Profile>
   collab: {
     startGuidance: string
+    quotaSkip: number
     maxActive: number
     handoffLimit: number
     closeFinished: boolean
@@ -101,23 +106,40 @@ export function validate(value: unknown): Config {
   }
   for (const [name, a] of Object.entries(obj(c.profiles, 'profiles'))) {
     const p = `profiles.${name}`
-    keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'confirm'], p)
-    str(a.agent, p + '.agent')
-    if (!c.agents[a.agent]) fail(p + '.agent', 'configured agent')
-    for (const k of ['model', 'effort', 'mode', 'cost', 'description']) if (a[k] != null) str(a[k], p + '.' + k)
-    if (a.mode != null && !['plan', 'ask', 'edits', 'auto', 'full'].includes(a.mode)) fail(p + '.mode', 'permission mode')
+    keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'confirm', 'preferOtherAgent', 'candidates'], p)
+    const candidate = (v: any, path: string) => {
+      obj(v, path)
+      str(v.agent, path + '.agent')
+      if (!c.agents[v.agent]) fail(path + '.agent', 'configured agent')
+      for (const k of ['model', 'effort', 'mode']) if (v[k] != null) str(v[k], path + '.' + k)
+      if (v.mode != null && !['plan', 'ask', 'edits', 'auto', 'full'].includes(v.mode)) fail(path + '.mode', 'permission mode')
+    }
+    if (a.candidates !== undefined) {
+      if (!Array.isArray(a.candidates) || !a.candidates.length) fail(p + '.candidates', 'nonempty candidate array')
+      a.candidates.forEach((v: any, i: number) => {
+        const path = `${p}.candidates.${i}`
+        keys(v, ['agent', 'model', 'effort', 'mode'], path)
+        candidate(v, path)
+      })
+    }
+    // Legacy overrides can inherit candidates through the recursive config merge.
+    if (a.candidates === undefined || ['agent', 'model', 'mode', 'effort'].some((k) => a[k] !== undefined)) candidate(a, p)
+    for (const k of ['cost', 'description']) if (a[k] != null) str(a[k], p + '.' + k)
+    if (a.preferOtherAgent !== undefined) bool(a.preferOtherAgent, p + '.preferOtherAgent')
     if (a.cost !== undefined && !['minimal', 'low', 'medium', 'high', 'premium'].includes(a.cost)) fail(p + '.cost', 'cost tier')
     if (a.confirm !== undefined) bool(a.confirm, p + '.confirm')
   }
   const collab = obj(c.collab, 'collab')
-  keys(collab, ['startGuidance', 'maxActive', 'handoffLimit', 'closeFinished', 'confirm', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout', 'handleCommand', 'agentHandleCommands', 'tools', 'prompts'], 'collab')
+  keys(collab, ['startGuidance', 'quotaSkip', 'maxActive', 'handoffLimit', 'closeFinished', 'confirm', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout', 'handleCommand', 'agentHandleCommands', 'tools', 'prompts'], 'collab')
   str(collab.startGuidance, 'collab.startGuidance')
+  if (typeof collab.quotaSkip !== 'number' || !Number.isFinite(collab.quotaSkip)
+    || collab.quotaSkip < 0 || collab.quotaSkip > 1) fail('collab.quotaSkip', 'number 0..1')
   for (const k of ['maxActive', 'handoffLimit', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout']) num(collab[k], 'collab.' + k, 1)
   for (const k of ['closeFinished', 'confirm']) bool(collab[k], 'collab.' + k)
   array(collab.handleCommand, 'collab.handleCommand')
   for (const [k, v] of Object.entries(obj(collab.agentHandleCommands, 'collab.agentHandleCommands'))) array(v, 'collab.agentHandleCommands.' + k)
   for (const [k, v] of Object.entries(obj(collab.prompts, 'collab.prompts'))) str(v, 'collab.prompts.' + k)
-  for (const k of ['handoff', 'forkNote', 'taskNote', 'messageNote', 'mailbox', 'reply', 'failedReply', 'replyError', 'partialReply', 'childFollowup', 'followup', 'started', 'sent', 'mention', 'profileHeader', 'forkAgents', 'startSummary', 'handlePrompt', 'task']) str(collab.prompts[k], 'collab.prompts.' + k)
+  for (const k of ['handoff', 'forkNote', 'taskNote', 'messageNote', 'mailbox', 'reply', 'failedReply', 'replyError', 'partialReply', 'childFollowup', 'followup', 'started', 'candidateSkipped', 'candidatesSkipped', 'candidateUnavailable', 'candidateModelExcluded', 'candidateQuotaUsed', 'candidateQuotaLimited', 'candidateBalanceExhausted', 'candidateSameAgent', 'noCandidate', 'sent', 'mention', 'profileHeader', 'forkAgents', 'startSummary', 'handlePrompt', 'task']) str(collab.prompts[k], 'collab.prompts.' + k)
   if (!Array.isArray(collab.tools) || collab.tools.length !== 5) fail('collab.tools', 'five tool definitions')
   for (const name of ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop']) {
     const t = collab.tools.find((t: any) => t.name === name)
