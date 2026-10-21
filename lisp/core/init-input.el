@@ -138,15 +138,17 @@ or the U.S. layout, and sis can only switch to an enabled one."
   (setq-local sis-prefix-override-buffer-disable-predicates nil)
   (sis-prefix-override-buffer-enable))
 
+(defvar sis-prefix-override-keys)
+(defvar sis-prefix-override-buffer-disable-predicates)
+(declare-function sis-ism-lazyman-config "sis")
+(declare-function sis-global-respect-mode "sis")
+
 (use-package sis
   :ensure t
-  :demand t
-  :if (and (eq system-type 'darwin)
-           (display-graphic-p)
-           (executable-find "macism"))
-  :defines (sis-prefix-override-keys
-            sis-prefix-override-buffer-disable-predicates)
-  :config
+  :defer t)
+
+(defun my/sis--configure ()
+  "Configure sis for macism; safe to run again on reload."
   (setq sis-prefix-override-keys '("C-c" "C-x" "C-h" "M-g" "M-s"))
   (sis-ism-lazyman-config (my/sis--english-source)
                          "com.apple.inputmethod.SCIM.Shuangpin" 'macism)
@@ -165,6 +167,22 @@ or the U.S. layout, and sis can only switch to an enabled one."
   (let ((my/sis--temporary t))
     (sis-global-respect-mode 1))
   (my/sis--restore-window))
+
+(defun my/sis--start (&optional frame)
+  "Set up sis once FRAME, or the selected frame, is graphical.
+A daemon has no graphical frame while it reads the init files, so it
+waits for the first one a client opens."
+  (when (and (eq system-type 'darwin)
+             (display-graphic-p frame)
+             (executable-find "macism"))
+    (remove-hook 'after-make-frame-functions #'my/sis--start)
+    (with-selected-frame (or frame (selected-frame))
+      (require 'sis)
+      (my/sis--configure))))
+
+(if (and (daemonp) (not (display-graphic-p)))
+    (add-hook 'after-make-frame-functions #'my/sis--start)
+  (my/sis--start))
 
 (provide 'init-input)
 ;;; init-input.el ends here

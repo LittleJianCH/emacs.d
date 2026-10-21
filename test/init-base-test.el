@@ -92,6 +92,23 @@ Scrolling needs a real display: run it in the running Emacs."
                  "com.apple.keylayout.ABC"))
   (should (equal (my/sis--english-source "()") "com.apple.keylayout.US")))
 
+(ert-deftest init-base-sis-waits-for-a-graphical-frame ()
+  "A daemon has no graphical frame during init: sis starts with the first."
+  (let ((graphic nil) (configured 0)
+        (after-make-frame-functions (list #'my/sis--start)))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _) graphic))
+              ((symbol-function 'executable-find) (lambda (&rest _) "/bin/macism"))
+              ((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'my/sis--configure) (lambda () (cl-incf configured))))
+      (let ((system-type 'darwin))
+        (run-hook-with-args 'after-make-frame-functions (selected-frame))
+        (should (= configured 0))
+        (should (memq #'my/sis--start after-make-frame-functions))
+        (setq graphic t)
+        (run-hook-with-args 'after-make-frame-functions (selected-frame))
+        (should (= configured 1))
+        (should-not (memq #'my/sis--start after-make-frame-functions))))))
+
 (ert-deftest init-base-sis-agent-prefixes ()
   "Keep prefix switching available in editable star-named conversations."
   (skip-unless (require 'sis nil t))
