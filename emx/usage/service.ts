@@ -29,7 +29,8 @@
 //
 // SNAPSHOT: the quota entries in display order (agents' order, this
 // machine first), without history; a remote entry on an account already
-// listed (same agent, same windows and reset times) has duplicate: true.
+// listed (same agent; shared windows reset together, or balances are
+// identical when there are no windows) has duplicate: true.
 //
 // REPORT: {range, since, total: SUM, groups: {agent|model|root: [{key,
 // ...SUM}]} (most tokens first), buckets: {start, step, count, sums:
@@ -199,9 +200,20 @@ function mergeQuota(quotas: QuotaEntry[], reading: QuotaReading, now: number) {
   return entry;
 }
 
-function account(entry: QuotaReading) {
-  if (!entry.windows || !entry.windows.length) return null;
-  return JSON.stringify(entry.windows.map((w) => [w.id, w.resets]).sort());
+// Whether two readings of one agent come from the same account.  Hosts read
+// an account at different times and may report extra windows or omit reset
+// times, so only windows both have with known resets are compared, and at
+// least one must match.  Balance-only readings match on identical balances.
+function sameAccount(a: QuotaReading, b: QuotaReading) {
+  if (a.agent !== b.agent) return false;
+  const shared = (a.windows || []).flatMap((w) => {
+    const other = (b.windows || []).find((o) => o.id === w.id);
+    return other && w.resets != null && other.resets != null ? [[w, other]] : [];
+  });
+  if (shared.length) return shared.every(([w, other]) => samePeriod(w, other));
+  if ((a.windows || []).length || (b.windows || []).length) return false;
+  const balance = (q: QuotaReading) => JSON.stringify((q.balance || []).map((x) => [x.currency, x.amount]).sort());
+  return Boolean(a.balance?.length) && balance(a) === balance(b);
 }
 
 // The entries in display order, remote duplicates marked; MAP turns each
@@ -213,9 +225,7 @@ function snapshot(quotas: QuotaEntry[], agents: string[], map: (window: UsageWin
     .map(([q]) => q);
   const shown: QuotaReading[] = [];
   return sorted.map((q) => {
-    const key = account(q);
-    const duplicate = Boolean(q.host && key &&
-      shown.some((other) => other.agent === q.agent && account(other) === key));
+    const duplicate = Boolean(q.host && shown.some((other) => sameAccount(other, q)));
     if (!duplicate) shown.push(q);
     const entry: Json = { ...q, windows: (q.windows || []).map(map) };
     if (duplicate) entry.duplicate = true;

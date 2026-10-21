@@ -124,6 +124,28 @@ test('the ledger skips broken lines and appends after a cut-short one', () => {
   }
 });
 
+test('remote readings of the same account are duplicates despite extra windows or missing resets', () => {
+  const w = (id: string, used: number, resets?: number) => ({ id, label: id, minutes: 10080, used, ...(resets != null ? { resets } : {}) });
+  const quotas: QuotaEntry[] = [];
+  // Measured shape: the host lacks one window and a reset time; dsh reports only a balance.
+  usage.mergeQuota(quotas, { agent: 'claude', host: null, windows: [w('five_hour', 0.07, 1000), w('seven_day', 0.31, 9000),
+    w('seven_day_fable', 0.01, 9000), w('seven_day_overage_included', 0.01, 9000)] }, 1);
+  usage.mergeQuota(quotas, { agent: 'dsh', host: null, balance: [{ amount: -0.01, currency: 'CNY' }] }, 1);
+  usage.mergeQuota(quotas, { agent: 'claude', host: 'dev', windows: [w('five_hour', 0.07, 1200), w('seven_day', 0.31, 9000),
+    w('seven_day_fable', 0.01)] }, 2);
+  usage.mergeQuota(quotas, { agent: 'dsh', host: 'dev', balance: [{ amount: -0.01, currency: 'CNY' }] }, 2);
+  // Different accounts: a shared window resets at another time, or another balance.
+  usage.mergeQuota(quotas, { agent: 'claude', host: 'other', windows: [w('five_hour', 0.5, 1000), w('seven_day', 0.2, 50000)] }, 3);
+  usage.mergeQuota(quotas, { agent: 'dsh', host: 'other', balance: [{ amount: 12, currency: 'CNY' }] }, 3);
+  // Nothing comparable: no shared window with resets on either side.
+  usage.mergeQuota(quotas, { agent: 'claude', host: 'bare', windows: [w('five_hour', 0.1)] }, 4);
+  const shown = usage.snapshot(quotas, AGENTS).map((q) => [q.agent, q.host, Boolean(q.duplicate)])
+  assert.deepEqual(shown.filter(([, host]) => host === 'dev'), [['claude', 'dev', true], ['dsh', 'dev', true]])
+  assert.deepEqual(shown.filter(([, host]) => host === 'other' || host === 'bare'),
+    [['claude', 'other', false], ['claude', 'bare', false], ['dsh', 'other', false]])
+  assert.ok(shown.filter(([, host]) => host === null).every(([, , duplicate]) => !duplicate))
+});
+
 test('quota readings merge, keep their period and round-trip', () => {
   const quotas: QuotaEntry[] = [];
   const window = (id: string, used: number, resets: number) => ({ id, label: id, minutes: 10080, used, resets });
