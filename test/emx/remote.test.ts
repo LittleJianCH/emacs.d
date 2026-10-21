@@ -76,11 +76,11 @@ test('host ensure, config push, live agent cursor replay, editor calls, and usag
     claude: { executable: join(checkoutRoot, 'test/emx/fixtures/bin/claude') },
     dsh: { executable: join(checkoutRoot, 'test/emx/fixtures/bin/dsh') },
   } }))
-  const localEnsure = spawnSync(process.execPath, [EMX, 'daemon', '--var', local, '--ensure'], { encoding: 'utf8' })
-  assert.equal(localEnsure.status, 0, localEnsure.stderr)
-  const localPeer = peer(JSON.parse(localEnsure.stdout).socket)
-  let editor: Connection | undefined, mcp: Connection | undefined
+  let localConnection: Connection | undefined, editor: Connection | undefined, mcp: Connection | undefined
   try {
+    const localEnsure = spawnSync(process.execPath, [EMX, 'daemon', '--var', local, '--ensure'], { encoding: 'utf8' })
+    assert.equal(localEnsure.status, 0, localEnsure.stderr)
+    const localPeer = localConnection = peer(JSON.parse(localEnsure.stdout).socket)
     // A second installed code version shares the client socket and state.
     const nextInstall = join(home, '.cache/emacs-agent/emx/staging')
     for (const file of runtimeFiles()) {
@@ -184,10 +184,12 @@ test('host ensure, config push, live agent cursor replay, editor calls, and usag
     assert.equal(effective.config.collab.maxActive, 7)
     persisted.socket.destroy()
   } finally {
-    editor?.socket.destroy(); mcp?.socket.destroy(); localPeer.socket.destroy()
-    command(home, hostEmx, ['--stop'])
-    spawnSync(process.execPath, [EMX, 'daemon', '--var', local, '--stop'])
-    fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(local, { recursive: true, force: true })
+    editor?.socket.destroy(); mcp?.socket.destroy(); localConnection?.socket.destroy()
+    try { command(home, EMX, ['--stop']) } finally {
+      const stopped = spawnSync(process.execPath, [EMX, 'daemon', '--var', local, '--stop'])
+      assert.equal(stopped.status, 0, String(stopped.stderr))
+      fs.rmSync(home, { recursive: true, force: true }); fs.rmSync(local, { recursive: true, force: true })
+    }
   }
 })
 

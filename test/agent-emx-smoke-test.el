@@ -4,6 +4,9 @@
 ;; No editor server, default daemon, real CLI or remote connection is used.
 
 ;;; Code:
+(require 'test-helper
+         (expand-file-name "test-helper.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'ert)
 (require 'agent-emx-test
          (expand-file-name "agent-emx-test.el"
@@ -13,7 +16,11 @@
 (require 'agent-dsh)
 
 (ert-deftest agent-emx-smoke-all-registrations-send-approve-child-and-history ()
-  (let* ((agent-emx-var-directory (agent-emx-test--var-directory "emx-cutover-"))
+  (let* (;; ERT may abbreviate the invoking buffer directory under the real HOME.
+         ;; Capture it before the fake CLIs receive a different HOME.
+         (default-directory (expand-file-name default-directory))
+         (agent-emx--checkout (expand-file-name agent-emx--checkout))
+         (agent-emx-var-directory (agent-emx-test--var-directory "emx-cutover-"))
          (home (make-temp-file "emx-cutover-home-" t))
          (root (file-name-as-directory (file-truename agent-emx-var-directory)))
          (projects (expand-file-name "projects" home))

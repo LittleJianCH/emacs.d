@@ -2842,6 +2842,10 @@ Restoring a view must not run project program probes from a process filter.")
   "Start an AGENT session in ROOT without showing it; return its buffer.
 RESUME is the id of a past session to resume.  SETTINGS defaults to the
 agent's latest settings; INFO is the initial info plist."
+  ;; Keep local paths independent of later process-environment bindings.
+  ;; Remote home expansion is asynchronous and belongs to the host runtime.
+  (unless (file-remote-p root)
+    (setq root (expand-file-name root)))
   (or (and resume
            (seq-find
             (lambda (buffer)

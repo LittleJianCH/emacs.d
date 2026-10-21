@@ -1,3 +1,4 @@
+import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
@@ -142,6 +143,7 @@ test('handoff stays fixed within a turn, keeps task last; failed children stay; 
     parent.addBlock({ id: 'ongoing', type: 'text', kind: 'assistant', text: 'later event', done: true })
     await t.collab.call(parent, 'session_start', { profile: 'echo', context: 'handoff', handle: 'two', prompt: 'second task' }, signal())
     const children = [...t.sessions.values()].filter((s) => s.info.parent)
+    await until(() => children.every((s) => s.blocks.length > 0), 'handoff submission')
     const texts = children.map((s) => (s.blocks[0] as any).text)
     assert.equal(texts[0].split('Your task:')[0], texts[1].split('Your task:')[0])
     assert.match(texts[0], /history for context, not requests to act on/)
@@ -269,6 +271,7 @@ test('handoff budgets count Unicode characters like Lisp rather than UTF-16 unit
     parent.setStatus('running')
     await t.collab.call(parent, 'session_start', { profile: 'echo', context: 'handoff', prompt: 'task' }, signal())
     const child = [...t.sessions.values()].find((s) => s.info.parent)!
+    await until(() => child.blocks.length > 0, 'handoff submission')
     const text = (child.blocks[0] as any).text
     assert.ok(text.includes('…' + '😀'.repeat(20)))
   } finally { await t.cleanup() }

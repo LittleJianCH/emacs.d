@@ -71,12 +71,13 @@ export class Session implements SessionHost {
   #resume: string | undefined
   #queued: Message[] = []
   #active = false
-  #generation = 0
-  #starting?: Promise<void>
+  #prepared?: Promise<void>
+  #operations: Promise<void> = Promise.resolve()
+  #stopped = false
   #hibernateAfter: () => number
   #hibernateTimer?: NodeJS.Timeout
-  #hibernating?: Promise<void>
-  #projectEnvironment: boolean
+  #resolveEnvironment: () => Promise<NodeJS.ProcessEnv>
+  #environment?: Promise<NodeJS.ProcessEnv>
 
   constructor(options: SessionOptions) {
     this.creationId = options.creationId
@@ -84,8 +85,8 @@ export class Session implements SessionHost {
     this.agent = options.agent
     this.root = options.root
     this.daemonSocket = options.daemonSocket ?? ''
-    this.#projectEnvironment = !!options.environment
-    this.environment = options.environment ?? (async () => ({ ...process.env }))
+    this.#resolveEnvironment = options.environment ?? (async () => ({ ...process.env }))
+    this.environment = () => this.#environment ??= this.#resolveEnvironment()
     this.agentConfig = options.agentConfig ?? (() => undefined)
     this.editorTools = options.editorTools ?? (() => ({ tools: [], readOnly: [] }))
     this.info = structuredClone(options.info ?? {})
@@ -120,31 +121,38 @@ export class Session implements SessionHost {
     return this.backend.resumeId() ?? this.#resume
   }
 
-  start(): Promise<void> {
-    if (this.#starting) return this.#starting
-    const generation = this.#generation
-    const task = this.#start(generation).finally(() => {
-      if (this.#starting === task) this.#starting = undefined
+  /** All process ownership changes run here, including adapter preparation. */
+  #operate(action: () => Promise<void>): Promise<void> {
+    const task = this.#operations.then(() => {
+      this.#environment = undefined
+      return action()
     })
-    this.#starting = task
+    this.#operations = task.catch(() => {})
     return task
   }
 
-  async #start(generation: number): Promise<void> {
-    try {
-      // Resolve project PATH before adapters capture caller-independent tools.
-      if (this.#projectEnvironment) await this.environment()
-      if (generation !== this.#generation) return
-      await this.backend.start(this.resumeId())
-      if (generation !== this.#generation) return
-      await this.backend.configure(this.settings)
-      if (generation !== this.#generation) return
-      this.#onChange(false)
-      this.#drain()
-      this.refreshHibernate()
-    } catch (error) {
-      if (generation === this.#generation) throw error
-    }
+  start(): Promise<void> {
+    return this.#operate(() => this.#start())
+  }
+
+  async #start(): Promise<void> {
+    if (this.#stopped || this.backend.alive()) return
+    await this.environment()
+    await this.backend.start(this.resumeId())
+    await this.backend.configure(this.settings)
+    this.#onChange(false)
+    this.#drain()
+    this.refreshHibernate()
+  }
+
+  /** An adapter-requested restart cannot revive an explicitly stopped session. */
+  restart(): Promise<void> {
+    return this.#operate(async () => {
+      if (this.#stopped) return
+      this.#resume = this.resumeId()
+      await this.backend.stop()
+      await this.#start()
+    })
   }
 
   newId(prefix: string): string {
@@ -279,6 +287,7 @@ export class Session implements SessionHost {
   }
 
   send(text: string, images?: string[], block?: string, meta?: Message['meta']): { queued: boolean } {
+    if (this.#stopped) throw new RpcError(ErrorCode.NoSession, "Session is closed")
     const message = { text, images, block, meta }
     if (this.#active || this.status === 'running') {
       this.#queued.push(message)
@@ -293,19 +302,28 @@ export class Session implements SessionHost {
     clearTimeout(this.#hibernateTimer)
     this.#active = true
     if (message.block && message.meta) this.#messageMeta.set(message.block, message.meta)
-    const generation = this.#generation
     try {
-      if (this.#hibernating) await this.#hibernating
-      if (!this.backend.alive()) await this.start()
-      if (generation !== this.#generation) return
-      await this.backend.send(message.text, message.images, message.block)
+      // Adapters return after submission, never after a complete model turn.
+      const prepared = this.#operate(async () => {
+        if (this.#stopped) return
+        try {
+          await this.#start()
+          await this.backend.prepare?.()
+          await this.backend.send(message.text, message.images, message.block)
+        } catch (error) {
+          this.#cancelAsks()
+          this.setStatus('exited')
+          throw error
+        }
+      })
+      this.#prepared = prepared
+      await prepared
     } catch (error) {
-      if (generation !== this.#generation) return
+      if (this.#stopped) return
       this.addBlock({ id: this.newId('notice'), type: 'notice', notice: {
         kind: 'backend-error', level: 'error', args: { message: String(error) } } })
-      this.#cancelAsks()
-      this.setStatus('exited')
     } finally {
+      this.#prepared = undefined
       this.#active = false
       this.#drain()
       this.refreshHibernate()
@@ -320,43 +338,66 @@ export class Session implements SessionHost {
   }
 
   steer(text: string, images?: string[], block?: string): boolean {
+    if (this.#prepared && this.backend.steerWhilePreparing) {
+      void this.#prepared.then(() => {
+        if (!this.#stopped) this.backend.steer(text, images, block)
+      }).catch(() => {})
+      return true
+    }
     return this.backend.steer(text, images, block)
   }
 
   interrupt(): void {
     this.#cancelAsks()
-    this.backend.interrupt()
+    if (this.#prepared) {
+      void this.#prepared.then(() => {
+        if (!this.#stopped) { this.#cancelAsks(); this.backend.interrupt() }
+      }).catch(() => {})
+    } else this.backend.interrupt()
   }
 
-  async configure(settings: Settings): Promise<void> {
-    this.emit({ type: 'settings', settings })
-    if (this.backend.alive()) await this.backend.configure(this.settings)
+  configure(settings: Settings): Promise<void> {
+    return this.#operate(async () => {
+      if (this.#stopped) return
+      this.emit({ type: 'settings', settings })
+      if (this.backend.alive()) await this.backend.configure(this.settings)
+    })
   }
 
-  async stop(): Promise<void> {
-    clearTimeout(this.#hibernateTimer)
-    this.#generation++
-    this.#starting = undefined
-    if (this.#hibernating) await this.#hibernating
-    this.#resume = this.resumeId()
-    this.#queued = []
-    if (this.queue.length) this.emit({ type: 'queue', items: [] })
-    this.#cancelAsks()
-    await this.backend.stop()
-    this.setStatus('exited')
+  stop(): Promise<void> {
+    return this.#operate(async () => {
+      if (this.#stopped) return
+      this.#stopped = true
+      clearTimeout(this.#hibernateTimer)
+      this.#resume = this.resumeId()
+      this.#queued = []
+      if (this.queue.length) this.emit({ type: 'queue', items: [] })
+      this.#cancelAsks()
+      try { await this.backend.stop() } finally { this.setStatus('exited') }
+    })
   }
 
-  /** Idle saved sessions release their native process; children cannot resume. */
+  /** Release only an idle process; keep the session resumable. */
+  hibernate(): Promise<void> {
+    return this.#operate(async () => {
+      if (this.#stopped || this.info.parent || this.#active || this.asks.size
+        || this.status !== 'idle' || !this.backend.alive()) return
+      clearTimeout(this.#hibernateTimer)
+      this.#resume = this.resumeId()
+      await this.backend.stop()
+      this.#onChange(true)
+    })
+  }
+
   refreshHibernate(): void {
     clearTimeout(this.#hibernateTimer)
     const seconds = this.#hibernateAfter()
-    if (!seconds || this.info.parent || this.#active || this.asks.size
+    if (!seconds || this.#stopped || this.info.parent || this.#active || this.asks.size
       || this.status !== 'idle' || !this.backend.alive()) return
     this.#hibernateTimer = setTimeout(() => {
-      this.#resume = this.resumeId()
-      this.#hibernating = Promise.resolve(this.backend.stop()).then(() => {
-        this.#onChange(true)
-      }).finally(() => { this.#hibernating = undefined })
+      void this.hibernate().catch((error) => this.addBlock({
+        id: this.newId('notice'), type: 'notice', notice: {
+          kind: 'backend-error', level: 'error', args: { message: String(error) } } }))
     }, seconds * 1000)
     this.#hibernateTimer.unref()
   }

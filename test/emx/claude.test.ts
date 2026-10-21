@@ -1,4 +1,5 @@
 // claude.test.ts --- stream-json protocol, history and lifecycle without API calls.
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { appendFile, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,14 +34,15 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
     collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
   }))
   const daemon = new DaemonServer({ varDir: dir })
-  await daemon.start()
-  const client = await SocketClient.connect(daemon.socket)
+  let client: Awaited<ReturnType<typeof SocketClient.connect>> | undefined
   t.after(async () => {
-    await daemon.stop(); await client.close()
+    await daemon.stop(); await client?.close()
     for (const key of Object.keys(process.env)) if (key.startsWith('EMX_CLAUDE_')) delete process.env[key]
     Object.assign(process.env, saved)
     await rm(dir, { recursive: true, force: true })
   })
+  await daemon.start()
+  client = await SocketClient.connect(daemon.socket)
   await client.request('hello', { client: 'claude-test', version: daemon.version,
     tools: editorTools })
   const { id } = await client.request('session/open', { agent: 'claude', root: dir, ...options })

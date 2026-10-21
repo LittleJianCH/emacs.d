@@ -1,5 +1,6 @@
 // server.test.ts --- persistence deadlines, coalescing and shutdown failures.
 
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -183,10 +184,15 @@ test('session/open retries share a creation id across pending startup, reconnect
     while (!daemon.sessions.size) await delay(1)
     const session = [...daemon.sessions.values()][0]
     const start = t.mock.method(session.backend, 'start')
-    const retry = await client.request('session/open', params)
+    let replied = false
+    const retry = client.request('session/open', params).then((result) => { replied = true; return result })
+    await delay(20)
+    assert.equal(replied, false)
+    const table = JSON.parse(fs.readFileSync(join(dir, 'emx/sessions.json'), 'utf8'))
+    assert.equal(table.creations[0][1].state, 'opening')
     release({ ...process.env })
     const opened = await first
-    assert.equal(retry.id, opened.id)
+    assert.equal((await retry).id, opened.id)
     assert.equal(start.mock.callCount(), 1)
     await client.close()
     client = await SocketClient.connect(daemon.socket)

@@ -18,7 +18,11 @@ export class EchoBackend implements Backend {
     this.host.setStatus('idle')
   }
 
-  async send(text: string, _images?: string[], block?: string): Promise<void> {
+  send(text: string, _images?: string[], block?: string): void {
+    void this.#send(text, _images, block)
+  }
+
+  async #send(text: string, _images?: string[], block?: string): Promise<void> {
     const generation = this.#generation
     this.host.setStatus('running')
     this.host.addBlock({ id: block ?? this.host.newId('u'), type: 'user', text })

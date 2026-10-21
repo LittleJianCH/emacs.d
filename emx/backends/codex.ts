@@ -95,7 +95,6 @@ function codexConfig(host?: SessionHost): { executable?: string, nativeSubagents
 
 export class CodexBackend implements Backend {
   readonly host: SessionHost
-  #lifecycle?: Promise<void>
   #process?: ChildProcessWithoutNullStreams
   #pending = new Map<number, { resolve: (value: any) => void, reject: (error: Error) => void, timer: NodeJS.Timeout }>()
   #next = 0
@@ -132,17 +131,7 @@ export class CodexBackend implements Backend {
       notice: { kind, ...(message === undefined ? {} : { args: { message }, level: 'error' }) } })
   }
 
-  start(resume?: string): Promise<void> {
-    if (this.#lifecycle) return this.#lifecycle
-    if (this.alive()) return Promise.resolve()
-    const task = this.#start(resume).finally(() => {
-      if (this.#lifecycle === task) this.#lifecycle = undefined
-    })
-    this.#lifecycle = task
-    return task
-  }
-
-  async #start(resume?: string): Promise<void> {
+  async start(resume?: string): Promise<void> {
     if (!isAbsolute(this.host.root) || /^\/[^/]+:/.test(this.host.root)) {
       throw new Error('Codex daemon sessions require a local absolute root; remote projects are not supported')
     }
@@ -151,7 +140,6 @@ export class CodexBackend implements Backend {
     this.#completedTurn = undefined
     this.#usageTotal = undefined
     const env = await this.host.environment?.()
-    if (this.#stopping) return
     const tools = structuredClone(this.host.editorTools())
     this.#tools = tools
     const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host, tools.readOnly),
@@ -238,14 +226,16 @@ export class CodexBackend implements Backend {
     return id
   }
 
-  async send(text: string, images?: string[], block?: string): Promise<void> {
-    // Cancellation belongs to this message, including its tools-change restart.
-    this.#interruptPending = false
+  async prepare(): Promise<void> {
     while (this.#resume && !this.host.info.parent && !isDeepStrictEqual(this.#tools, this.host.editorTools())) {
       this.#notice('codex-tools-changed')
       await this.stop()
       await this.start(this.#resume)
     }
+  }
+
+  async send(text: string, images?: string[], block?: string): Promise<void> {
+    this.#interruptPending = false
     this.#addUser(text, images, block)
     this.host.setStatus('running')
     const settings = this.host.settings, mode = modes[settings.mode ?? 'edits'] ?? modes.edits
@@ -440,7 +430,7 @@ export class CodexBackend implements Backend {
   async stop(): Promise<void> {
     this.#stopping = true
     const child = this.#process
-    if (!child) { await this.#lifecycle?.catch(() => {}); return }
+    if (!child) return
     const closed = once(child, 'close').catch(() => {})
     child.kill('SIGTERM')
     const timer = setTimeout(() => child.kill('SIGKILL'), 1000)

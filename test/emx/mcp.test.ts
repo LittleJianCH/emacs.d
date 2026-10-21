@@ -1,4 +1,5 @@
 // Real stdio MCP client + daemon socket + fake bidirectional editor.
+import './fixtures/environment.ts'
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -18,8 +19,10 @@ const tools = { tools: ['context', 'deferred', 'hold', 'error'].map(definition),
 async function setup(t: import('node:test').TestContext) {
   const dir = await mkdtemp(join(tmpdir(), 'emx-mcp-'))
   const daemon = new DaemonServer({ varDir: dir })
+  t.after(async () => { await daemon.stop(); await rm(dir, { recursive: true, force: true }) })
   await daemon.start()
   const editor = new Connection(createConnection(daemon.socket))
+  t.after(() => editor.socket.destroy())
   const calls: any[] = []
   editor.onRequest = (_method, params) => {
     assert.equal(_method, 'editor/call')
@@ -36,6 +39,7 @@ async function setup(t: import('node:test').TestContext) {
     env: { ...process.env, EMX_DAEMON_SOCKET: daemon.socket, EMX_SESSION: id,
       EMX_EMACSCLIENT: '/does-not-exist', EMX_REMOTE_AGENT: '1' }, stdio: 'pipe',
   })
+  t.after(() => { child.kill() })
   let next = 0
   const messages: any[] = []
   createInterface({ input: child.stdout }).on('line', (line) => messages.push(JSON.parse(line)))
@@ -53,12 +57,6 @@ async function setup(t: import('node:test').TestContext) {
     return { id, result: wait((m) => m.id === id).then((m) => m.result) }
   }
   const request = (method: string, params = {}) => send(method, params).result
-  t.after(async () => {
-    child.kill()
-    editor.socket.destroy()
-    await daemon.stop()
-    await rm(dir, { recursive: true, force: true })
-  })
   return { dir, daemon, editor, calls, child, wait, request, send, id }
 }
 

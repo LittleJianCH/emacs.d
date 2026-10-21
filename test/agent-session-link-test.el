@@ -1,5 +1,8 @@
 ;;; agent-session-link-test.el --- Transcript links -*- lexical-binding: t; -*-
 
+(require 'test-helper
+         (expand-file-name "test-helper.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'ert)
 (require 'cl-lib)
 (require 'agent-session)

@@ -1,4 +1,5 @@
 // Usage ownership, producer-only accounting, restart and fake quota polling.
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'

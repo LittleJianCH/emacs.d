@@ -1,5 +1,6 @@
 // lock.test.ts --- stale locks, ownership and cross-process exclusion.
 
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'

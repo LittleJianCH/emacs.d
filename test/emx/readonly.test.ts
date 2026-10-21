@@ -1,4 +1,5 @@
 // Public daemon entry points: place-specific approval flags and private metadata.
+import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'

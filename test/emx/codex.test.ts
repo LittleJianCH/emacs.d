@@ -1,4 +1,5 @@
 // codex.test.ts --- app-server protocol, exercised through isolated daemon sockets.
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,13 +34,14 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfi
     collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
   }))
   const daemon = new DaemonServer({ varDir: dir })
-  await daemon.start()
-  const client = await SocketClient.connect(daemon.socket)
+  let client: Awaited<ReturnType<typeof SocketClient.connect>> | undefined
   t.after(async () => {
-    await daemon.stop(); await client.close()
+    await daemon.stop(); await client?.close()
     for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key] }
     await rm(dir, { recursive: true, force: true })
   })
+  await daemon.start()
+  client = await SocketClient.connect(daemon.socket)
   await client.request('hello', { client: 'codex-test', version: daemon.version,
     tools: editorTools })
   const { id } = await client.request('session/open', { agent: 'codex', root: dir, ...options })

@@ -1,3 +1,4 @@
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises'

@@ -54,7 +54,6 @@ export function toolView(root: string, name: string, args: any): ToolView {
 
 export class DshBackend implements Backend {
   readonly host: SessionHost
-  #lifecycle?: Promise<void>
   #process: ChildProcessWithoutNullStreams | undefined
   #pending = new Map<number, { resolve: (value: any) => void, reject: (error: Error) => void,
     timer: NodeJS.Timeout }>()
@@ -65,7 +64,6 @@ export class DshBackend implements Backend {
   #stopping = false
   #confirmed: Settings = {}
   #beforePlan = 'edits'
-  #configuration: Promise<void> = Promise.resolve()
   #tools = new Map<string, string>()
   #texts = new Set<string>()
 
@@ -92,17 +90,7 @@ export class DshBackend implements Backend {
     this.host.addBlock({ id: this.host.newId('notice'), type: 'notice', notice: { kind, args, level } })
   }
 
-  start(resume?: string): Promise<void> {
-    if (this.#lifecycle) return this.#lifecycle
-    if (this.alive()) return Promise.resolve()
-    const task = this.#start(resume).finally(() => {
-      if (this.#lifecycle === task) this.#lifecycle = undefined
-    })
-    this.#lifecycle = task
-    return task
-  }
-
-  async #start(resume?: string): Promise<void> {
+  async start(resume?: string): Promise<void> {
     if (!isAbsolute(this.host.root) || /^\/[^/]+:/.test(this.host.root)) {
       throw new Error('dsh daemon sessions require a local absolute root; remote projects are not supported')
     }
@@ -114,7 +102,6 @@ export class DshBackend implements Backend {
     // An executable override supports installations outside PATH and protocol fixtures.
     const config = this.host.agentConfig?.()
     const env = await this.host.environment?.()
-    if (this.#stopping) return
     const child = spawn(process.env.EMX_DSH_EXECUTABLE ?? config?.executable ?? 'dsh',
       ['--profile', 'sdk', '--patch', patch,
         ...config?.nativeSubagents ? [] : ['--patch', noSubagents], ...(config?.extraArgs ?? [])],
@@ -186,14 +173,7 @@ export class DshBackend implements Backend {
     this.host.emit({ type: 'settings', settings })
   }
 
-  configure(settings: Settings): Promise<void> {
-    const desired = { ...settings }
-    const task = this.#configuration.then(() => this.#configure(desired))
-    this.#configuration = task.catch(() => {})
-    return task
-  }
-
-  async #configure(settings: Settings): Promise<void> {
+  async configure(settings: Settings): Promise<void> {
     const previous = this.#confirmed
     const changed = (['model', 'effort', 'mode'] as const).filter((key) => settings[key] !== previous[key])
     if (!changed.length) return
@@ -351,7 +331,7 @@ export class DshBackend implements Backend {
   async stop(): Promise<void> {
     this.#stopping = true
     const child = this.#process
-    if (!child) { await this.#lifecycle?.catch(() => {}); return }
+    if (!child) return
     const closed = once(child, 'close').catch(() => {})
     child.kill('SIGTERM')
     const timer = setTimeout(() => child.kill('SIGKILL'), 1000)

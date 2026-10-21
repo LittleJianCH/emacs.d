@@ -1,5 +1,6 @@
 // rpc.test.ts --- after-write replies must not be assimilated as promises.
 
+import './fixtures/environment.ts'
 import type { Socket } from 'node:net'
 
 import * as assert from 'node:assert/strict'

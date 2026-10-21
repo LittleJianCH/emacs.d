@@ -12,6 +12,9 @@
 
 ;;; Code:
 
+(require 'test-helper
+         (expand-file-name "test-helper.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'ert)
 (require 'agent-session)
 (require 'agent-usage)
@@ -394,10 +397,12 @@
 (ert-deftest agent-usage-test-capability-gate ()
   "An old hello cannot consume the usage outbox."
   (let ((agent-usage--outbox nil)
+        (agent-usage--outbox-loaded (agent-usage--outbox-file))
         (agent-usage--inflight (make-hash-table :test #'equal))
         (agent-usage--monitoring nil)
         (connection (agent-emx--make-connection)))
-    (cl-letf (((symbol-function 'agent-usage--with-connection) #'ignore)
+    (cl-letf (((symbol-function 'agent-usage--save-outbox) #'ignore)
+              ((symbol-function 'agent-usage--with-connection) #'ignore)
               ((symbol-function 'agent-emx--request)
                (lambda (&rest _) (ert-fail "Sent usage to an old daemon"))))
       (agent-usage--notify "record" '(:record (:input 3)))

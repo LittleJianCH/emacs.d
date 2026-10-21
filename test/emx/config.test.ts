@@ -1,3 +1,4 @@
+import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtempSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs'

@@ -1,4 +1,5 @@
 // codex-blocks.test.ts --- repeated backend blocks keep every session view equal.
+import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Session } from '../../emx/daemon/session.ts'

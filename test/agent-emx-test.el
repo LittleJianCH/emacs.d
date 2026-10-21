@@ -6,15 +6,11 @@
 
 ;;; Code:
 
+(require 'test-helper
+         (expand-file-name "test-helper.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'ert)
 (require 'agent-emx)
-
-;; Naming is daemon-owned too: keep every batch-test descendant off real CLIs.
-(when noninteractive
-  (let ((bin (expand-file-name "emx/fixtures/bin/"
-                               (file-name-directory (or load-file-name buffer-file-name)))))
-    (setenv "PATH" (concat bin path-separator (getenv "PATH")))
-    (add-to-list 'exec-path bin)))
 
 (defun agent-emx-test--var-directory (prefix)
   "Make an isolated daemon directory without naming or quota model calls."
@@ -1318,3 +1314,58 @@
         (should (eq (agent-emx--get session :emx-connection) new))
         (funcall (cadr callbacks) old)
         (should (eq (agent-emx--get session :emx-connection) new))))))
+
+(ert-deftest agent-emx-test-intentional-start-uses-a-fresh-creation ()
+  (agent-emx-test--with-session
+    (let ((connection (agent-emx--make-connection :ready t)) creations)
+      (agent-emx--set session :emx-id nil)
+      (agent-emx--set session :emx-connection connection)
+      (cl-letf (((symbol-function 'agent-emx--ready)
+                 (lambda (view &optional _) (agent-emx--attach view connection)))
+                ((symbol-function 'agent-emx--request)
+                 (lambda (_ method params &rest _)
+                   (when (equal method "session/open")
+                     (push (plist-get params :creationId) creations))))
+                ((symbol-function 'process-live-p) (lambda (_) nil)))
+        (agent-session-backend-start 'emx session)
+        (agent-session-backend-reconnect 'emx session)
+        (should (equal (car creations) (cadr creations)))
+        (agent-session-backend-stop 'emx session)
+        (agent-session-backend-start 'emx session)
+        (should-not (equal (car creations) (cadr creations)))
+        (should (member (cadr creations)
+                        (agent-emx--connection-pending-cancellations connection)))))))
+
+(ert-deftest agent-emx-test-hello-keeps-cancellation-snapshot-after-early-acks ()
+  (let* ((connection (agent-emx--make-connection
+                      :pending-stops '("stopped") :pending-cancellations '("cancelled")))
+         (agent-emx--connections (make-hash-table :test #'equal))
+         (agent-session-status-functions nil) (agent-session--list-refresh-function nil)
+         (root (make-temp-file "emx-no-recover-" t))
+         cancel done)
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-network-process) (lambda (&rest _) 'fake))
+                  ((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'agent-emx--request)
+                   (lambda (_ method _params &optional success &rest _)
+                     (pcase method
+                       ("hello"
+                        (funcall success
+                                 (list :sessions
+                                       (vector (list :id "stopped" :agent "test-emx" :root root
+                                                     :status "idle")
+                                               (list :id "cancelled-id" :creationId "cancelled"
+                                                     :agent "test-emx" :root root :status "idle")))))
+                       ("session/stop" (funcall success nil))
+                       ("session/cancel" (setq cancel success))))))
+          (setf (agent-emx--connection-waiters connection)
+                (list (cons (lambda (_) (setq done t)) nil)))
+          (agent-emx--connect connection '(:socket "unused" :version "v"))
+          (should-not done)
+          (should-not (agent-emx--connection-pending-stops connection))
+          (funcall cancel nil)
+          (should done)
+          (should-not (agent-emx--connection-pending-cancellations connection))
+          (should (= 0 (hash-table-count (agent-emx--connection-sessions connection)))))
+      (dolist (buffer (agent-session-buffers root)) (agent-session-kill-quietly buffer))
+      (delete-directory root t))))

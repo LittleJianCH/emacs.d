@@ -1,6 +1,9 @@
 ;;; agent-emx-remote-test.el --- Simulated host transport -*- lexical-binding: t; -*-
 
 ;;; Code:
+(require 'test-helper
+         (expand-file-name "test-helper.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'ert)
 (require 'agent-emx-test)
 

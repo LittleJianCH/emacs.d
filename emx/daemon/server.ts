@@ -17,7 +17,7 @@ import { backends } from '../backends/backend.ts'
 import { acquireLock } from './lock.ts'
 import { checkoutRoot, codeVersion, socketPath, stateDir } from './paths.ts'
 import { ErrorCode } from './protocol.ts'
-import type { Answer, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
+import type { Answer, CreationRecord, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
 import { Connection, Reply, RpcError } from './rpc.ts'
 import { Editor } from './editor.ts'
 import { UsageService } from '../usage/service.ts'
@@ -111,6 +111,8 @@ export class DaemonServer {
   #mcp = new Map<Connection, string>()
   #rootTools = new Map<string, string>()
   #calls = new Map<Connection, Map<unknown, AbortController>>()
+  #creations = new Map<string, CreationRecord>()
+  #opens = new Map<string, Promise<{ id: string }>>()
   #closing = new WeakMap<Session, Promise<void>>()
   #connections = new Set<Connection>()
   #idleExit: number
@@ -293,11 +295,29 @@ export class DaemonServer {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.#log(`Cannot load sessions: ${error}`)
       return
     }
-    if (!Array.isArray(data)) {
-      this.#log('Cannot load sessions: expected an array')
+    if (!data || typeof data !== 'object' || !Array.isArray((data as any).sessions)
+      || !Array.isArray((data as any).creations)) {
+      this.#log('Cannot load sessions: expected sessions and creations')
       return
     }
-    for (const entry of data) {
+    const table = data as { sessions: SavedSession[], creations: [string, CreationRecord][] }
+    for (const entry of table.creations) {
+      try {
+        if (!Array.isArray(entry) || entry.length !== 2) throw new Error('Invalid creation entry')
+        const [key, record] = entry
+        if (typeof key !== 'string' || !record || typeof record.id !== 'string'
+          || !['opening', 'open', 'failed', 'closed'].includes(record.state)
+          || !Number.isFinite(record.updated)) throw new Error('Invalid creation record')
+        // An interrupted opening has no successful result to replay.
+        if (record.state === 'opening') {
+          record.state = 'failed'
+          record.error = 'Daemon stopped during session creation'
+          record.updated = Date.now()
+        }
+        this.#creations.set(key, record)
+      } catch (error) { this.#log(`Ignoring invalid creation: ${error}`) }
+    }
+    for (const entry of table.sessions) {
       try {
         const record = object(entry)
         const agent = string(record.agent, 'agent')
@@ -306,6 +326,7 @@ export class DaemonServer {
           creationId: optionalString(record.creationId, 'creationId'),
           root: string(record.root, 'root'), info: object(record.info ?? {}),
           settings: settings(record.settings ?? {}), resume: optionalString(record.resume, 'resume') }
+        if (saved.creationId !== undefined && this.#creations.get(saved.creationId)?.state !== 'open') continue
         // Children have no resumable native transcript after a crash.
         if (saved.info.parent) continue
         // Session ids are also file names; reject paths in a damaged state table.
@@ -323,6 +344,14 @@ export class DaemonServer {
         this.#log(`Ignoring invalid saved session: ${error}`)
       }
     }
+    for (const record of this.#creations.values()) {
+      if (record.state === 'open' && !this.sessions.has(record.id)) {
+        record.state = 'failed'
+        record.error = 'Session was not restored'
+        record.updated = Date.now()
+      }
+    }
+    await this.persist()
   }
 
   #transcriptFile(id: string): string {
@@ -338,8 +367,14 @@ export class DaemonServer {
         info: session.info, settings: session.settings, resume: session.resumeId() })
       files.set(this.#transcriptFile(session.id), JSON.stringify(session.transcript()) + '\n')
     }
-    // Publish the table after its transcripts.
-    files.set(join(stateDir(this.varDir), 'sessions.json'), JSON.stringify(records) + '\n')
+    // Only terminal records expire; active keys must never be reused.
+    for (const [key, record] of this.#creations) {
+      if (['closed', 'failed'].includes(record.state) && !this.#opens.has(key)
+        && record.updated < Date.now() - 30 * 86400_000) this.#creations.delete(key)
+    }
+    // Publish creation records and their sessions atomically, after transcripts.
+    files.set(join(stateDir(this.varDir), 'sessions.json'),
+      JSON.stringify({ sessions: records, creations: [...this.#creations] }) + '\n')
     return files
   }
 
@@ -582,10 +617,14 @@ export class DaemonServer {
       }
       case 'sessions/list': return { sessions: this.#list(optionalString(params.root, 'root')) }
       case 'session/open': {
-        const creationId = optionalString(params.creationId, 'creationId')
-        if (creationId) {
-          const existing = [...this.sessions.values()].find((s) => s.creationId === creationId)
-          if (existing) return { id: existing.id }
+        const creationId = optionalString(params.creationId, 'creationId') ?? `creation-${randomUUID()}`
+        const existing = this.#creations.get(creationId)
+        if (existing) {
+          const opening = this.#opens.get(creationId)
+          if (opening && existing.state !== 'closed') return opening
+          if (existing.state === 'open') return { id: existing.id }
+          throw new RpcError(ErrorCode.NoSession,
+            `Session creation ${creationId} is ${existing.state}: ${existing.error ?? existing.id}`)
         }
         const agent = string(params.agent, 'agent')
         if (!Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
@@ -596,7 +635,10 @@ export class DaemonServer {
         if (resume && !parent) {
           const live = [...this.sessions.values()].find((s) => !s.info.parent && s.agent === agent
             && s.root === root && s.status !== 'exited' && s.resumeId() === resume)
-          if (live) return { id: live.id }
+          if (live) {
+            const initializing = live.creationId !== undefined ? this.#opens.get(live.creationId) : undefined
+            return this.#openCreation(creationId, live.id, async () => { await initializing })
+          }
         }
         // Forks are created by collaboration rather than editor open requests.
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
@@ -605,20 +647,29 @@ export class DaemonServer {
           info: { handle: this.collab.unique(handle ?? agent), ...(parent ? { parent, parentSession: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
             ...(params.skills !== undefined ? { skills: skillContext(params.skills) } : {}) } })
         this.sessions.set(session.id, session)
-        return (async () => {
-          try {
-            await session.start()
-            this.#refreshRootTools(root)
-          } catch (error) {
-            await session.stop()
+        return this.#openCreation(creationId, session.id, async () => {
+          await session.start()
+          this.#refreshRootTools(root)
+          this.#changed()
+        }, async () => {
+          try { await session.stop() } finally {
             this.sessions.delete(session.id)
             this.#changed()
-            throw error
           }
-          this.#changed()
-          await this.persist()
-          return { id: session.id }
-        })()
+        })
+      }
+      case 'session/cancel': {
+        const key = string(params.creationId, 'creationId')
+        let record = this.#creations.get(key)
+        if (!record) {
+          record = { id: `session-${randomUUID()}`, state: 'closed', updated: Date.now() }
+          this.#creations.set(key, record)
+        }
+        const session = this.sessions.get(record.id)
+        if (session) return this.#closeSession(session).then(() => ({}))
+        record.state = 'closed'
+        record.updated = Date.now()
+        return this.persist().then(() => ({}))
       }
       case 'session/attach': {
         const session = this.#session(params)
@@ -700,6 +751,42 @@ export class DaemonServer {
     }
   }
 
+  /** One durable outcome and one shared promise for every creation attempt. */
+  #openCreation(key: string, id: string, initialize: () => Promise<void>,
+    cleanup?: () => Promise<void>): Promise<{ id: string }> {
+    const record: CreationRecord = { id, state: 'opening', updated: Date.now() }
+    this.#creations.set(key, record)
+    const checkClosed = () => {
+      if (record.state === 'closed') throw new RpcError(ErrorCode.NoSession,
+        `Session creation ${key} is closed`)
+    }
+    // Publish the shared promise synchronously, before any persistence or spawn.
+    const task = Promise.resolve().then(async () => {
+      try {
+        await this.persist()
+        checkClosed()
+        await initialize()
+        checkClosed()
+        record.state = 'open'
+        record.updated = Date.now()
+        await this.persist()
+        checkClosed()
+        return { id }
+      } catch (error) {
+        if (record.state !== 'closed') {
+          record.state = 'failed'
+          record.error = String(error)
+          record.updated = Date.now()
+        }
+        try { await cleanup?.() } catch (failure) { this.#log(`Cannot clean up creation: ${failure}`) }
+        await this.persist()
+        throw error
+      }
+    }).finally(() => { this.#opens.delete(key) })
+    this.#opens.set(key, task)
+    return task
+  }
+
   #closeSession(session: Session): Promise<void> {
     let closing = this.#closing.get(session)
     if (!closing) {
@@ -710,7 +797,15 @@ export class DaemonServer {
   }
 
   async #finishCloseSession(session: Session): Promise<void> {
+    for (const record of this.#creations.values()) {
+      if (record.id === session.id) {
+        record.state = 'closed'
+        record.updated = Date.now()
+      }
+    }
     const starts = this.collab.beginClose(session)
+    // Record the cancellation before waiting for initialization to finish.
+    await this.persist()
     for (const [peer, owner] of this.#mcp) {
       if (owner !== session.id) continue
       for (const call of this.#calls.get(peer)?.values() ?? []) call.abort(new Error('Session stopped'))
@@ -760,6 +855,7 @@ export class DaemonServer {
     clearTimeout(this.#saveTimer)
     clearTimeout(this.#sessionsTimer)
     try {
+      await Promise.allSettled(this.#opens.values())
       await this.#saveChain.catch(() => {})
       // Preserve the queue before stopping backends cancels their pending work.
       // A restored session has a new epoch, no asks, and starts idle.

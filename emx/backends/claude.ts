@@ -219,15 +219,14 @@ function withJsonField(json: string, key: string, value: unknown): string {
 
 export class ClaudeBackend implements Backend {
   readonly host: SessionHost
+  readonly steerWhilePreparing = true
   #process: ChildProcessWithoutNullStreams | undefined
-  #lifecycle: Promise<void> | undefined
   #resume: string | undefined
   #running = false
   #restart = false
   #external = false
   #readOnly: string[] = []
   #confirmed: Settings = {}
-  #configuration: Promise<void> = Promise.resolve()
   #sending: Promise<void> = Promise.resolve()
   #pending = new Map<string, { resolve: (value: any) => void, reject: (error: Error) => void, timer: NodeJS.Timeout }>()
   #totals = new ClaudeTotals()
@@ -238,7 +237,6 @@ export class ClaudeBackend implements Backend {
   #source: string | undefined
   #syncing: Promise<void> = Promise.resolve()
   #stopped = false
-  #generation = 0
   #declined = new Set<string>()
   #rateLimits: Extract<SessionEvent, { type: 'quota/rate-limits' }>['rateLimits'] | undefined
 
@@ -264,21 +262,7 @@ export class ClaudeBackend implements Backend {
     return this.#resume ? join(process.env.EMX_CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude/projects'), encodePath(this.host.root), `${this.#resume}.jsonl`) : undefined
   }
 
-  start(resume?: string): Promise<void> {
-    if (this.#lifecycle) return this.#lifecycle
-    if (this.alive()) return Promise.resolve()
-    return this.#transition(() => this.#start(resume))
-  }
-
-  #transition(action: () => Promise<void>): Promise<void> {
-    const task = action().finally(() => {
-      if (this.#lifecycle === task) this.#lifecycle = undefined
-    })
-    this.#lifecycle = task
-    return task
-  }
-
-  async #start(resume?: string): Promise<void> {
+  async start(resume?: string): Promise<void> {
     if (!isAbsolute(this.host.root) || /^\/[^/]+:/.test(this.host.root)) throw new Error('Claude daemon sessions require a local absolute root; remote projects are not supported')
     if (resume && !/^[\w-]+$/.test(resume)) throw new Error('Invalid Claude resume id')
     this.#stopped = false
@@ -305,7 +289,6 @@ export class ClaudeBackend implements Backend {
     const readOnly = this.host.editorTools().readOnly
     if (readOnly.length) args.push('--allowedTools', readOnly.map((name) => `mcp__emacs__${name}`).join(','))
     const env = await this.host.environment?.()
-    if (this.#stopped) return
     const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     this.#readOnly = [...readOnly]
@@ -405,13 +388,7 @@ export class ClaudeBackend implements Backend {
     this.host.setInfo({ claudeSyncOffset: this.#offset })
   }
 
-  configure(settings: Settings): Promise<void> {
-    const desired = { ...settings }
-    const task = this.#configuration.then(() => this.#configure(desired))
-    this.#configuration = task.catch(() => {})
-    return task
-  }
-  async #configure(settings: Settings): Promise<void> {
+  async configure(settings: Settings): Promise<void> {
     const previous = { ...this.#confirmed }
     try {
       if ((settings.model ?? null) !== (previous.model ?? null)) {
@@ -440,15 +417,25 @@ export class ClaudeBackend implements Backend {
       throw error
     }
   }
-  #restartProcess(): Promise<void> {
-    if (this.#lifecycle) return this.#lifecycle
-    return this.#transition(async () => {
-      const generation = this.#generation
-      await this.#kill()
-      if (generation !== this.#generation) return
-      await this.#start(this.#resume)
-      this.#restart = false
-    })
+  async #restartProcess(): Promise<void> {
+    await this.#kill()
+    await this.start(this.#resume)
+    this.#restart = false
+  }
+
+  async prepare(): Promise<void> {
+    await this.#syncSoon()
+    if (this.#external) {
+      if (this.host.info.parent) throw new Error('Cannot resume a non-persistent Claude child')
+      this.#external = false
+      this.#totals.forget()
+      this.#notice('restart-for-external')
+      await this.#restartProcess()
+    }
+    while (!this.host.info.parent
+      && JSON.stringify(this.#readOnly) !== JSON.stringify(this.host.editorTools().readOnly)) {
+      await this.#restartProcess()
+    }
   }
   async #content(text: string, images?: string[]): Promise<any> {
     if (!images?.length) return text
@@ -473,21 +460,7 @@ export class ClaudeBackend implements Backend {
   }
 
   async #send(text: string, images?: string[], block?: string): Promise<void> {
-    await this.#configuration
-    await this.#lifecycle
-    await this.#syncSoon()
     const content = await this.#content(text, images)
-    if (this.#external) {
-      if (this.host.info.parent) throw new Error('Cannot resume a non-persistent Claude child')
-      this.#external = false
-      this.#totals.forget()
-      this.#notice('restart-for-external')
-      await this.#restartProcess()
-    }
-    while (!this.host.info.parent
-      && JSON.stringify(this.#readOnly) !== JSON.stringify(this.host.editorTools().readOnly)) {
-      await this.#restartProcess()
-    }
     this.#source = undefined
     this.host.addBlock({ id: block ?? this.host.newId('user'), type: 'user', text, images })
     if (!this.alive()) throw new Error('Claude exited while preparing the message')
@@ -588,10 +561,12 @@ export class ClaudeBackend implements Backend {
         this.#running = false
         void this.#watchFile()
         // Keep the session non-idle until the deferred restart has completed.
-        if (this.#restart) void this.#restartProcess().catch((error) => {
-          this.#notice('backend-error', { message: String(error) }, 'error'); this.host.setStatus('exited')
-        })
-        else this.host.setStatus('idle')
+        if (this.#restart) {
+          this.#restart = false
+          void this.host.restart().catch((error) => {
+            this.#notice('backend-error', { message: String(error) }, 'error'); this.host.setStatus('exited')
+          })
+        } else this.host.setStatus('idle')
         break
     }
   }
@@ -672,17 +647,14 @@ export class ClaudeBackend implements Backend {
     await closed; clearTimeout(timer)
   }
   async stop(): Promise<void> {
-    this.#generation++
     this.#stopped = true
     this.#watch?.close(); this.#watch = undefined
     if (this.#timer) clearTimeout(this.#timer)
     this.#timer = undefined
     await this.#syncing
     await this.#kill()
-    await this.#lifecycle?.catch(() => {})
     this.#running = false
   }
-  // A lifecycle transition owns the next process even while the old one exits.
-  alive(): boolean { return !!this.#lifecycle || !!this.#process && this.#process.exitCode === null && !this.#process.killed }
+  alive(): boolean { return !!this.#process && this.#process.exitCode === null && !this.#process.killed }
   resumeId(): string | undefined { return this.#resume }
 }

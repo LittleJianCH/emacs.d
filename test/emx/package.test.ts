@@ -1,4 +1,5 @@
 // Keep tooling manifests outside the dsh plugin's package ancestry.
+import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

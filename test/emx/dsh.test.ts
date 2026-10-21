@@ -1,4 +1,5 @@
 // dsh.test.ts --- local bridge adapter, exercised through a real daemon socket.
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -145,7 +146,7 @@ test('resume replays transcript once and excludes its usage; daemon MCP is rebui
   assert.equal(session.log.some((e) => e.type === 'usage/call'), false)
   assert.equal(client.notifications.some((e) => e.method === 'usage/call'), false)
   await daemon.persist()
-  const records = JSON.parse(await readFile(join(dir, 'emx/sessions.json'), 'utf8'))
+  const records = JSON.parse(await readFile(join(dir, 'emx/sessions.json'), 'utf8')).sessions
   assert.equal(records[0].mcpServers, undefined)
   await daemon.stop()
   await client.close()
@@ -242,10 +243,10 @@ test('restart after a crash resumes the latest native conversation', async (t) =
   assert.equal(initializations[1].params.resume, native)
   assert.ok(session.blocks.some((b) => b.type === 'user' && b.text === 'after-crash'))
   await daemon.persist()
-  const saved = JSON.parse(await readFile(join(dir, 'emx/sessions.json'), 'utf8'))
+  const saved = JSON.parse(await readFile(join(dir, 'emx/sessions.json'), 'utf8')).sessions
   assert.equal(saved[0].resume, native, 'persistence uses the same latest native id')
-  // stop/start is the same backend lifecycle as hibernation.
-  await session.stop()
+  // Hibernation releases the backend while preserving a resumable session.
+  await session.hibernate()
   await send('after-stop')
   assert.equal((await requests()).filter((r) => r.method === 'initialize').at(-1).params.resume, native)
 })
@@ -256,7 +257,7 @@ test('resume reconciles model and effort chosen before the restored backend star
     resume: 'saved-id', settings: { model: 'fake/new', effort: 'low' } })
   assert.equal(session.settings.model, 'fake/new')
   assert.equal(session.settings.effort, 'low')
-  await session.stop()
+  await session.hibernate()
   await client.request('session/configure', { id, model: 'fake/newer', effort: 'medium' })
   await send('pending-choices')
   const calls = await requests()

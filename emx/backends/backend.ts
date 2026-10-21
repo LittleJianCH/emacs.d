@@ -16,6 +16,7 @@ export interface SessionHost {
   readonly blocks: Block[]
   readonly id: string
   readonly daemonSocket: string
+  restart(): Promise<void>
   environment?(): Promise<NodeJS.ProcessEnv>
   agentConfig?(): import('../config.ts').AgentConfig | undefined
   editorTools(): import('../daemon/protocol.ts').EditorTools
@@ -33,7 +34,11 @@ export interface SessionHost {
 
 export interface Backend {
   start(resume?: string): void | Promise<void>
+  /** Process-changing send preparation; called inside the session queue. */
+  prepare?(): Promise<void>
+  /** Resolve after submission, without waiting for the model turn or asks. */
   send(text: string, images?: string[], block?: string): void | Promise<void>
+  readonly steerWhilePreparing?: boolean
   steer(text: string, images?: string[], block?: string): boolean
   interrupt(): void
   configure(settings: Settings): void | Promise<void>

@@ -1,4 +1,5 @@
 // session.test.ts --- backend-independent session state transitions.
+import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Session } from '../../emx/daemon/session.ts'

@@ -4,6 +4,7 @@
 // socket protocol (emx/daemon/protocol.ts), never through its internals:
 // every test gets its own --var directory and stops its daemon.
 
+import './fixtures/environment.ts'
 import type { ChildProcess } from 'node:child_process'
 import type { TestContext } from 'node:test'
 import type { AttachResult, Cursor } from '../../emx/daemon/protocol.ts'
@@ -86,19 +87,34 @@ function stop(varDir: string): void {
   )
 }
 
-function stopQuietly(varDir: string): void {
+async function stopAndWait(varDir: string): Promise<void> {
+  const lock = path.join(varDir, 'emx', 'daemon.lock')
+  const pid = fs.existsSync(lock) ? JSON.parse(fs.readFileSync(lock, 'utf8')).pid : undefined
   try {
-    emx(['daemon', '--var', varDir, '--stop'])
-  } catch {
-    // Cleanup must not hide the test's own failure.
+    stop(varDir)
+  } finally {
+    if (pid) {
+      const gone = () => {
+        try { process.kill(pid, 0); return false } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
+          throw error
+        }
+      }
+      try { await waitUntil(gone, WAIT_MS, 'test daemon exit') } catch (error) {
+        // Only this temp directory's recorded owner can be terminated here.
+        if (!gone()) process.kill(pid, 'SIGKILL')
+        await waitUntil(gone, WAIT_MS, 'forced test daemon exit')
+        throw error
+      }
+    }
   }
 }
 
 /** A temp --var dir, stopped and removed after the test. */
 function varDir(t: TestContext, base = os.tmpdir(), prefix = 'emx-test-'): string {
   const dir = fs.mkdtempSync(path.join(base, prefix))
-  t.after(() => {
-    stopQuietly(dir)
+  t.after(async () => {
+    await stopAndWait(dir)
     fs.rmSync(dir, { recursive: true, force: true })
   })
   return dir
@@ -643,8 +659,8 @@ test('a var path too long for a Unix socket uses the OS temp directory', async (
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'emx-long-'))
   const dir = path.join(base, 'a'.repeat(80), 'b'.repeat(40))
   fs.mkdirSync(dir, { recursive: true })
-  t.after(() => {
-    stopQuietly(dir)
+  t.after(async () => {
+    await stopAndWait(dir)
     fs.rmSync(base, { recursive: true, force: true })
   })
 

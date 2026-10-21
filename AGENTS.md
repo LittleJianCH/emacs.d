@@ -179,8 +179,11 @@ clients cannot take over the editor role.
 ## Verifying changes
 
 Run from the repo root. For an isolated worktree, set `package-user-dir`
-to the existing checkout's elpa directory before loading init.el; keep HOME
-and daemon var directories temporary and use fake CLIs in integration tests.
+to the existing checkout's elpa directory before loading init.el. Run with the
+caller's real HOME: every ERT file loads test/test-helper.el, which isolates
+daemon/usage state and native history, supplies fake CLIs, disables background
+auto-revert polling, and checks that var/emx stays empty. Integration tests that
+rebind HOME must capture expanded local paths before doing so.
 
 Tests (ERT, about half a minute). They exercise the native Emacs keys, so turn
 evil off first (it is on by default and its normal state would eat typed keys):
@@ -246,7 +249,8 @@ daemons only on temp var dirs, never the default one. Quota poll tests use only
 fake CLIs; batch Emacs integration tests set `usage.pollInterval` to 0 in temp config.
 
 Add or update a regression test for every bug fix and UI behavior change. Backend protocol tests live under `test/emx/` and use fake CLIs only.
-Use temporary HOME/var directories, disable naming with
+Use temporary var/history directories and fake CLIs. Keep the caller's HOME
+except in tests specifically simulating a host or CLI home. Disable naming with
 `collab.handleCommand: []` and `collab.agentHandleCommands: {}`, and set
 `usage.pollInterval: 0` unless testing fake quota peers.
 

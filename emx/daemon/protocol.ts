@@ -15,6 +15,14 @@ import type { UsageConfig, UsageService } from '../usage/service.ts'
 /** A session's id, assigned by the daemon. */
 export type SessionId = string
 
+/** Durable idempotency key; terminal records are retained for 30 days. */
+export interface CreationRecord {
+  id: SessionId
+  state: 'opening' | 'open' | 'failed' | 'closed'
+  updated: number
+  error?: string
+}
+
 export type Status = 'starting' | 'idle' | 'running' | 'disconnected' | 'exited'
 
 /** The user's choices for a session; null means the agent's default. */
@@ -283,6 +291,8 @@ export interface Requests {
   'collab/retry': [{}, {}]
   'sessions/list': [{ root?: string }, { sessions: SessionSummary[] }]
   'session/open': [OpenParams, { id: SessionId }]
+  /** Cancel an uncertain open, including one whose reply was lost. */
+  'session/cancel': [{ creationId: string }, {}]
   'session/attach': [AttachParams, AttachResult]
   'session/detach': [{ id: SessionId }, {}]
   'session/send': [SendParams, { queued: boolean }]

@@ -183,6 +183,23 @@ A session record holds what the session UI needs, minus the buffer: agent,
 root, status, info, settings, capabilities, queue, transcript, pending asks,
 children, and backend state. The daemon assigns the id.
 
+Each session has one operation queue. Start, stop, restart, hibernate,
+configuration and process-changing send preparation run in request order;
+each checks the current state when it begins. Environment resolution is part
+of start. Stop is terminal: a later start or adapter restart cannot revive
+the session. Hibernate only releases an idle process and the next send
+resumes it. Model turns and their pending asks run outside the operation queue.
+
+`session/open.creationId` identifies one creation attempt. Before resolving
+the environment or starting a backend, the daemon atomically saves an
+`opening` creation record alongside the session table. Concurrent retries
+wait for the same initialization and final persistence. Success becomes
+`open`; failure and explicit stop become `failed` and `closed` tombstones.
+Retries of terminal keys fail rather than creating a new backend. A daemon
+crash turns unfinished openings into failures. Intentional new opens use
+fresh keys; only transport retries reuse one. Terminal records expire after
+30 days, while active records do not expire.
+
 Statuses are `starting`, `idle`, `running`, `disconnected` and `exited`.
 `disconnected` is an editor-side condition for a remote session whose
 transport is down; the agent itself keeps running under its daemon.
@@ -207,8 +224,8 @@ A tool block carries a normalized view computed by the backend adapter:
 `command`, `path`, a unified `diff`, or plan `items`. The daemon never writes
 UI prose: see Localization.
 
-Sessions persist as `<var>/emx/sessions.json` (id, agent, root, info,
-settings, resume id) and one `<var>/emx/sessions/<id>.json` per transcript
+Sessions persist as `<var>/emx/sessions.json` (`sessions`: id, agent, root,
+info, settings, resume id; `creations`: key, id, state, update time, error) and one `<var>/emx/sessions/<id>.json` per transcript
 (blocks, queue, capabilities). Writes are debounced and atomic. Children are
 not persisted: after a daemon crash they have no resumable native
 transcript, so the restored table contains only top-level sessions. A
@@ -937,7 +954,7 @@ an explicit session start refreshes that root's MCP clients, not a timer.
 ## Recovery after an Emacs restart
 
 `hello` returns the session summaries before new session requests are
-processed. Emacs rebuilds live top-level views by daemon id, then adopts
+processed. Emacs rebuilds live top-level views by creation id and daemon id, then adopts
 their children; a fresh `session/attach` replays transcripts and pending
 asks into those views. This path is shared by local and host connections.
 An existing view is reused when its daemon id or its native resume id, agent
@@ -946,6 +963,13 @@ and root match, so a restart does not open a second CLI.
 Each editor start has a distinct identity token, so a late `session/open`
 reply after switching agents is stopped rather than attached to a new view.
 Stops that could not be delivered are retained and sent after the next hello.
+Closing a view before its open reply arrives retains its creation id on the
+connection, even after the buffer dies. After hello, `session/cancel` uses
+the durable creation record to stop that attempt (or tombstone an opening
+that has not arrived yet), before recovery runs. Cancelled summaries are
+excluded from that hello's recovery. Recovery and attach choose one existing
+view by creation id or daemon id and kill duplicates without stopping the
+shared daemon session or letting the last attach steal its event route.
 
 Skill roots travel as backend-neutral session context on `session/open` and
 `session/context`, including for dsh parents; children inherit it, and Claude
@@ -1027,6 +1051,13 @@ test/agent-emx-*.el      ERT suites: daemon client, host simulation, smoke
 ```
 
 ## Known limitations and open questions
+
+- **Lifecycle operations wait in order.** A stuck environment lookup,
+  backend initialization or submission RPC (including a dsh slash command)
+  delays later stop requests until that operation settles; the queue does not interrupt an in-flight operation. Adapter RPC
+  timeouts still apply. Terminal creation keys are retained for 30 days;
+  replay after expiry may create a new session. Atomic file replacement
+  covers process crashes, not power-loss durability (no fsync).
 
 - **Stale daemons with live agents restart manually.** Automatic restart once
   every agent is idle is not implemented; `M-x agent-emx-restart-daemon` is

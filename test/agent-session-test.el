@@ -10,6 +10,9 @@
 
 ;;; Code:
 
+(require 'test-helper
+         (expand-file-name "test-helper.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'ert)
 (require 'agent-session)
 (require 'agent-session-list)
@@ -95,6 +98,17 @@
 In batch mode `format-mode-line' does not evaluate :eval, so call the
 generating function directly."
   (substring-no-properties (agent-session--mode-line agent-session--current)))
+
+(ert-deftest agent-session-test-root-survives-home-change ()
+  "A local session retains its expanded root when subprocess HOME changes."
+  (agent-session-test--with-session
+   (let* ((root (expand-file-name "~/"))
+          (buffer (agent-session-open 'test-echo "~/"))
+          (session (buffer-local-value 'agent-session--current buffer))
+          (process-environment (cons "HOME=/nonexistent-test-home" process-environment)))
+     (should (equal (agent-session-root session) root))
+     (should (equal (buffer-local-value 'default-directory buffer) root))
+     (should (equal (agent-session-process-directory (agent-session-root session)) root)))))
 
 (ert-deftest agent-session-test-multiple-messages ()
   "Several messages can be sent in a row; the conversation appends them in order."

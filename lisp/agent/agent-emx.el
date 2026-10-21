@@ -74,7 +74,7 @@ accepting the args plist.  Unknown kinds are displayed dimly as-is."
   (next-id 0)
   (pending (make-hash-table :test #'eql))
   (sessions (make-hash-table :test #'equal))
-  pending-stops role capabilities remote starting)
+  pending-stops pending-cancellations role capabilities remote starting)
 
 (defvar agent-emx--connections (make-hash-table :test #'equal)
   "Connections keyed by (PLACE . VAR-DIRECTORY), for future remote use.")
@@ -201,66 +201,101 @@ Daemon events keep their distinct false value; only tool arguments use nil."
    ((vectorp value) (apply #'vector (mapcar #'agent-emx--editor-params value)))
    (t value)))
 
+(defun agent-emx--cancelled-p (connection summary)
+  "Return non-nil when SUMMARY has a pending cancellation on CONNECTION."
+  (or (member (plist-get summary :id)
+              (agent-emx--connection-pending-stops connection))
+      (member (plist-get summary :creationId)
+              (agent-emx--connection-pending-cancellations connection))))
+
+(defun agent-emx--canonical-view (connection summary)
+  "Return one view for SUMMARY on CONNECTION and discard duplicate views."
+  (let* ((id (plist-get summary :id))
+         (creation (plist-get summary :creationId))
+         (info (plist-get summary :info))
+         (mapped (gethash id (agent-emx--connection-sessions connection)))
+         matches)
+    (when (and mapped (buffer-live-p (agent-session-buffer mapped))
+               (not (agent-emx--get mapped :emx-stopped)))
+      (push mapped matches))
+    (dolist (buffer (agent-session-buffers))
+      (let ((view (buffer-local-value 'agent-session--current buffer)))
+        (when (and (eq connection (agent-emx--get view :emx-connection))
+                   (not (agent-emx--get view :emx-stopped))
+                   (or (equal id (agent-emx--get view :emx-id))
+                       (and creation (equal creation (agent-emx--get view :emx-creation-id)))))
+          (cl-pushnew view matches))))
+    ;; Native resume ids are only a fallback for unbound top-level views.
+    ;; Children may share a fixture/native id and still be distinct sessions.
+    (unless (or matches (plist-get info :parent) (not (plist-get info :sessionId)))
+      (setq matches
+            (seq-keep
+             (lambda (buffer)
+               (let ((view (buffer-local-value 'agent-session--current buffer)))
+                 (and (eq connection (agent-emx--get view :emx-connection))
+                      (not (agent-emx--get view :emx-stopped))
+                      (not (agent-emx--get view :emx-id))
+                      (not (agent-session-child-p view))
+                      (equal (plist-get info :sessionId) (agent-session-resume-id view))
+                      (equal (plist-get summary :agent)
+                             (or (agent-session--get (agent-session-agent view) :emx-agent)
+                                 (symbol-name (agent-session-agent view))))
+                      (equal (agent-session-root view)
+                             (agent-emx-remote-path connection (plist-get summary :root)))
+                      view)))
+             (agent-session-buffers))))
+    (let ((canonical (if (memq mapped matches) mapped (car (last matches)))))
+      (dolist (duplicate (delq canonical matches))
+        ;; Preserve children when removing only their duplicate parent view.
+        (dolist (child (agent-session-children duplicate))
+          (setf (agent-session-info child)
+                (plist-put (agent-session-info child) :parent
+                           (agent-session-buffer canonical))))
+        ;; The duplicate owns only a view, never the daemon session's lifetime.
+        (agent-emx--set duplicate :emx-id nil)
+        (agent-emx--set duplicate :emx-creation-id nil)
+        (agent-emx--set duplicate :emx-connection nil)
+        (agent-emx--set duplicate :emx-generation (make-symbol "duplicate"))
+        (agent-emx--set duplicate :emx-stopped t)
+        (agent-session-kill-quietly (agent-session-buffer duplicate)))
+      canonical)))
+
 (defun agent-emx--adopt (connection summary)
   "Create a view for daemon SUMMARY on CONNECTION, without a new CLI."
   (let* ((id (plist-get summary :id))
          (info (plist-get summary :info))
          (parent (gethash (plist-get info :parent)
                           (agent-emx--connection-sessions connection))))
-    (or (when-let* ((existing
-                     (or (gethash id (agent-emx--connection-sessions connection))
-                         (and (plist-get summary :creationId)
-                              (seq-some
-                               (lambda (buffer)
-                                 (let ((view (buffer-local-value 'agent-session--current buffer)))
-                                   (and (eq connection (agent-emx--get view :emx-connection))
-                                        (not (agent-emx--get view :emx-stopped))
-                                        (equal (plist-get summary :creationId)
-                                               (agent-emx--get view :emx-creation-id))
-                                        view)))
-                               (agent-session-buffers)))
-                         (and (plist-get info :sessionId)
-                              (seq-some
-                               (lambda (buffer)
-                                 (let ((view (buffer-local-value 'agent-session--current buffer)))
-                                   (and (eq connection (agent-emx--get view :emx-connection))
-                                        (equal (plist-get info :sessionId)
-                                               (agent-session-resume-id view))
-                                        (equal (plist-get summary :agent)
-                                               (or (agent-session--get
-                                                    (agent-session-agent view) :emx-agent)
-                                                   (symbol-name (agent-session-agent view))))
-                                        (equal (agent-session-root view)
-                                               (agent-emx-remote-path connection
-                                                                      (plist-get summary :root)))
-                                        view)))
-                               (agent-session-buffers))))))
-          (agent-emx--set existing :emx-id id)
-          (puthash id existing (agent-emx--connection-sessions connection))
-          (when (and (eq (agent-session-status existing) 'disconnected)
-                     (not (agent-emx--get existing :emx-attaching)))
-            (agent-emx--set existing :emx-attaching t)
-            (agent-emx--attach existing connection))
-          existing)
-        (when (or parent (not (plist-get info :parent)))
-          (let* ((agent (intern (plist-get summary :agent)))
-                 (entry (copy-sequence (cdr (assq agent agent-session-agents))))
-                 (agent-session-agents
-                  (cons (cons agent (plist-put entry :backend 'emx))
-                        (assq-delete-all agent (copy-sequence agent-session-agents))))
-                 (agent-emx--adopting (cons connection summary))
-                 (agent-session-opening-view t)
-                 (buffer (agent-session-open
-                          agent (agent-emx-remote-path connection (plist-get summary :root)) nil nil
-                          (if parent
-                              (plist-put (copy-sequence info) :parent
-                                         (agent-session-buffer parent))
-                            (copy-sequence info))))
-                 (child (buffer-local-value 'agent-session--current buffer)))
-            (agent-session-set-handle child (plist-get info :handle))
-            (when (and parent (fboundp 'agent-collab--link-tool))
-              (agent-collab--link-tool parent child))
-            child)))))
+    (unless (agent-emx--cancelled-p connection summary)
+      (or (when-let* ((existing
+                       (agent-emx--canonical-view connection summary)))
+            (agent-emx--set existing :emx-id id)
+            (agent-emx--set existing :emx-creation-id (plist-get summary :creationId))
+            (puthash id existing (agent-emx--connection-sessions connection))
+            (when (and (eq (agent-session-status existing) 'disconnected)
+                       (not (agent-emx--get existing :emx-attaching)))
+              (agent-emx--set existing :emx-attaching t)
+              (agent-emx--attach existing connection))
+            existing)
+          (when (or parent (not (plist-get info :parent)))
+            (let* ((agent (intern (plist-get summary :agent)))
+                   (entry (copy-sequence (cdr (assq agent agent-session-agents))))
+                   (agent-session-agents
+                    (cons (cons agent (plist-put entry :backend 'emx))
+                          (assq-delete-all agent (copy-sequence agent-session-agents))))
+                   (agent-emx--adopting (cons connection summary))
+                   (agent-session-opening-view t)
+                   (buffer (agent-session-open
+                            agent (agent-emx-remote-path connection (plist-get summary :root)) nil nil
+                            (if parent
+				(plist-put (copy-sequence info) :parent
+                                           (agent-session-buffer parent))
+                              (copy-sequence info))))
+                   (child (buffer-local-value 'agent-session--current buffer)))
+              (agent-session-set-handle child (plist-get info :handle))
+              (when (and parent (fboundp 'agent-collab--link-tool))
+		(agent-collab--link-tool parent child))
+              child))))))
 
 (defun agent-emx--recover (connection summaries)
   "Recover live root views on CONNECTION before their child SUMMARIES."
@@ -608,36 +643,71 @@ Daemon events keep their distinct false value; only tool arguments use nil."
      connection (if usage "usage/hello" "hello")
      (if usage (make-hash-table)
        (append (list :client "emacs" :version (plist-get result :version) :tools tools
-             :agents (vconcat (mapcar (lambda (a) (symbol-name (car a)))
-                                      agent-session-agents)))
+		     :agents (vconcat (mapcar (lambda (a) (symbol-name (car a)))
+					      agent-session-agents)))
                (when (agent-emx--connection-place connection)
                  (list :config (or agent-emx-config--wire agent-emx-config--value)))))
      (lambda (hello)
-       (setf (agent-emx--connection-capabilities connection) (plist-get hello :capabilities))
-       (if (and usage (not (agent-usage--capable-p connection)))
-           (progn
-             (agent-emx--lost connection '(:message "Daemon does not support acknowledged usage"))
-             (delete-process (agent-emx--connection-process connection)))
-         (unless (agent-emx--connection-place connection)
-           (agent-emx--receive-config (plist-get hello :config)))
-         (unless usage
-           (puthash connection signature agent-emx--tools-signatures)
-           (agent-emx--flush-stops connection))
-         (setf (agent-emx--connection-ready connection) t)
-         (unless (agent-emx--connection-place connection)
-           (agent-emx-remote-push-config))
-         (when (agent-emx--connection-place connection)
-           (agent-emx-remote-configure-usage connection))
-         (unless usage
-           (agent-emx--recover connection (plist-get hello :sessions))
-           (dolist (peer (agent-emx--hub-connections))
-             (agent-emx--request peer "collab/retry" nil)))
-         (let ((waiters (agent-emx--connection-waiters connection)))
-           (setf (agent-emx--connection-waiters connection) nil)
-           (dolist (pair waiters) (funcall (car pair) connection)))))
+       (let* ((cancelled (copy-sequence
+                          (agent-emx--connection-pending-cancellations connection)))
+              (stopped (append
+                        (copy-sequence (agent-emx--connection-pending-stops connection))
+                        (seq-keep (lambda (summary)
+                                    (when (member (plist-get summary :creationId) cancelled)
+                                      (plist-get summary :id)))
+                                  (plist-get hello :sessions)))))
+	 (setf (agent-emx--connection-capabilities connection) (plist-get hello :capabilities))
+	 (if (and usage (not (agent-usage--capable-p connection)))
+             (progn
+               (agent-emx--lost connection '(:message "Daemon does not support acknowledged usage"))
+               (delete-process (agent-emx--connection-process connection)))
+           (unless (agent-emx--connection-place connection)
+             (agent-emx--receive-config (plist-get hello :config)))
+           (unless usage
+             (puthash connection signature agent-emx--tools-signatures)
+             (agent-emx--flush-stops connection))
+           (setf (agent-emx--connection-ready connection) t)
+           (unless (agent-emx--connection-place connection)
+             (agent-emx-remote-push-config))
+           (when (agent-emx--connection-place connection)
+             (agent-emx-remote-configure-usage connection))
+           (agent-emx--flush-cancellations
+            connection
+            (lambda ()
+              (unless usage
+                (agent-emx--recover
+                 connection
+                 (seq-remove (lambda (summary)
+                               (or (member (plist-get summary :id) stopped)
+                                   (member (plist-get (plist-get summary :info) :parent) stopped)
+                                   (member (plist-get summary :creationId) cancelled)))
+                             (plist-get hello :sessions)))
+                (dolist (peer (agent-emx--hub-connections))
+                  (agent-emx--request peer "collab/retry" nil)))
+              (let ((waiters (agent-emx--connection-waiters connection)))
+                (setf (agent-emx--connection-waiters connection) nil)
+                (dolist (pair waiters) (funcall (car pair) connection))))))))
      (lambda (error)
        (agent-emx--lost connection error)
        (delete-process (agent-emx--connection-process connection))))))
+
+(defun agent-emx--flush-cancellations (connection &optional done)
+  "Cancel uncertain opens on CONNECTION before invoking DONE for recovery."
+  (let* ((pending (copy-sequence
+                   (agent-emx--connection-pending-cancellations connection)))
+         (remaining (length pending))
+         (finish (lambda ()
+                   (cl-decf remaining)
+                   (when (and (= remaining 0) done) (funcall done)))))
+    (if (null pending) (when done (funcall done))
+      (dolist (creation pending)
+        (agent-emx--request
+         connection "session/cancel" (list :creationId creation)
+         (lambda (_)
+           (setf (agent-emx--connection-pending-cancellations connection)
+                 (delete creation (agent-emx--connection-pending-cancellations connection)))
+           (funcall finish))
+         (lambda (_) (funcall finish)))))))
 
 (defun agent-emx--flush-stops (connection)
   "Send CONNECTION's pending stops, retaining them until acknowledged."
@@ -1212,11 +1282,18 @@ The daemon parent id is not an Emacs buffer."
 
 (defun agent-emx--attach (session connection)
   "Attach SESSION on ready CONNECTION, opening it first if necessary."
+  (agent-emx--set session :emx-connection connection)
   (let ((id (agent-emx--get session :emx-id))
         (generation (or (agent-emx--get session :emx-generation)
                         (agent-emx--set session :emx-generation (make-symbol "start")))))
     (if id
         (progn
+          (let ((canonical (agent-emx--canonical-view
+                            connection (list :id id :creationId
+                                             (agent-emx--get session :emx-creation-id)))))
+            (when (and canonical (not (eq canonical session)))
+              (setq session canonical
+                    generation (agent-emx--get canonical :emx-generation))))
           (puthash id session (agent-emx--connection-sessions connection))
           (agent-emx--request
            connection "session/attach"
@@ -1256,7 +1333,8 @@ The daemon parent id is not an Emacs buffer."
            (if (or (not (eq generation (agent-emx--get session :emx-generation)))
                    (agent-emx--get session :emx-stopped)
                    (not (buffer-live-p (agent-session-buffer session))))
-               (agent-emx--stop connection id)
+               (unless (gethash id (agent-emx--connection-sessions connection))
+                 (agent-emx--stop connection id))
              (agent-emx--set session :emx-id id)
              (agent-emx--attach session connection))))
        (lambda (error)
@@ -1346,6 +1424,7 @@ The daemon parent id is not an Emacs buffer."
 
 (cl-defmethod agent-session-backend-start ((_ (eql emx)) session)
   (agent-emx--set session :emx-generation (make-symbol "start"))
+  (agent-emx--set session :emx-creation-id nil)
   (agent-emx--set session :emx-stopped nil)
   (when agent-emx--adopting
     (agent-emx--info session (plist-get (cdr agent-emx--adopting) :info))
@@ -1401,11 +1480,18 @@ The daemon parent id is not an Emacs buffer."
   (agent-emx--set session :emx-attaching nil)
   (agent-emx--set session :emx-replay nil)
   (agent-emx--set session :emx-waiters nil)
-  (when-let* ((connection (agent-emx--get session :emx-connection))
-              (id (agent-emx--get session :emx-id)))
-    (agent-emx--cancel-deferred connection id)
-    (remhash id (agent-emx--connection-sessions connection))
-    (agent-emx--stop connection id))
+  (when-let* ((connection (agent-emx--get session :emx-connection)))
+    (if-let* ((id (agent-emx--get session :emx-id)))
+        (progn
+          (agent-emx--cancel-deferred connection id)
+          (remhash id (agent-emx--connection-sessions connection))
+          (agent-emx--stop connection id))
+      (when-let* ((creation (agent-emx--get session :emx-creation-id)))
+        (cl-pushnew creation (agent-emx--connection-pending-cancellations connection)
+                    :test #'equal)
+        (when (and (agent-emx--connection-ready connection)
+                   (process-live-p (agent-emx--connection-process connection)))
+          (agent-emx--flush-cancellations connection)))))
   (agent-emx--set session :emx-id nil))
 
 (cl-defmethod agent-session-backend-reconnect ((_ (eql emx)) session)

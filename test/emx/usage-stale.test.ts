@@ -1,4 +1,5 @@
 // Stale upgrades require an atomic, capability-gated stop without editor takeover.
+import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
