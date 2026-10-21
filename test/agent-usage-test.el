@@ -187,7 +187,9 @@
           (with-temp-buffer
             (agent-usage-mode)
             (setq agent-usage--report report)
-            (cl-letf (((symbol-function 'agent-usage--width) (lambda () 100))
+            ;; Render at the report's fixture time, before its quota resets.
+            (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 1792555200))
+                      ((symbol-function 'agent-usage--width) (lambda () 100))
                       ((symbol-function 'agent-usage--fetch) #'ignore))
               (agent-usage--render)
               (let ((page (buffer-string)))
