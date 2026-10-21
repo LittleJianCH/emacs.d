@@ -6,7 +6,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const state = path.join(__dirname, '../var/emx');
-test.afterEach(() => assert.deepEqual(fs.existsSync(state) ? fs.readdirSync(state) : [], [],
+// The live daemon of the checkout Emacs runs from keeps its state there.
+const stateNames = () => fs.existsSync(state) ? fs.readdirSync(state) : [];
+const stateBefore = new Set(stateNames());
+test.afterEach(() => assert.deepEqual(stateNames().filter((name) => !stateBefore.has(name)), [],
   'Tests must not write to the checkout default var/emx directory'));
 
 test('MCP refuses the removed emacsclient transport without a daemon binding', () => {

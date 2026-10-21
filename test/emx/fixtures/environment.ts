@@ -23,12 +23,15 @@ process.env.EMX_EMACSCLIENT = '/does-not-exist'
 process.env.EMX_CLAUDE_PROJECTS_DIR = join(dir, 'projects')
 mkdirSync(process.env.EMX_CLAUDE_PROJECTS_DIR)
 
-function assertDefaultStateEmpty() {
-  assert.deepEqual(existsSync(state) ? readdirSync(state) : [], [],
+// In the checkout the user's Emacs runs from, var/emx holds the live
+// daemon's state, which keeps changing: only entries the tests add count.
+const stateNames = () => existsSync(state) ? readdirSync(state) : []
+const stateBefore = new Set(stateNames())
+function assertDefaultStateUnchanged() {
+  assert.deepEqual(stateNames().filter((name) => !stateBefore.has(name)), [],
     'Tests must not write to the checkout default var/emx directory')
 }
-assertDefaultStateEmpty()
-afterEach(assertDefaultStateEmpty)
+afterEach(assertDefaultStateUnchanged)
 after(() => {
-  try { assertDefaultStateEmpty() } finally { rmSync(dir, { recursive: true, force: true }) }
+  try { assertDefaultStateUnchanged() } finally { rmSync(dir, { recursive: true, force: true }) }
 })
