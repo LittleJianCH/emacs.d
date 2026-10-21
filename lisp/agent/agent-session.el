@@ -146,17 +146,19 @@ shows once a session opens on it again."
                      (let ((default-directory root))
                        (when (zerop (apply #'process-file "sh" nil t nil "-c"
                                            "for p; do if command -v \"$p\" >/dev/null 2>&1; \
-then echo 1; else echo 0; fi; done"
+then echo 1; else echo 0; fi; done; node --version 2>/dev/null || echo missing"
                                            "sh" programs))
                          (let ((found (split-string (buffer-string) "\n" t)))
-                           (when (= (length found) (length programs))
-                             (list :programs
+                           (when (= (length found) (1+ (length programs)))
+                             (list :node (car (last found))
+                                   :programs
                                    (cl-mapcar (lambda (program line)
                                                 (cons program (equal line "1")))
-                                              programs found))))))))
+                                              programs (butlast found)))))))))
                  ;; Unreachable: keep what was known, and don't wait for it
                  ;; again soon.
-                 (list :programs (plist-get (gethash place agent-session--remote-programs)
+                 (list :node (plist-get (gethash place agent-session--remote-programs) :node)
+                       :programs (plist-get (gethash place agent-session--remote-programs)
                                             :programs)
                        :failed (float-time)))
              agent-session--remote-programs)))

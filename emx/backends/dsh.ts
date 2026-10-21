@@ -106,7 +106,7 @@ export class DshBackend implements Backend {
     const child = spawn(process.env.EMX_DSH_EXECUTABLE ?? config?.executable ?? 'dsh',
       ['--profile', 'sdk', '--patch', patch,
         ...config?.nativeSubagents ? [] : ['--patch', noSubagents], ...(config?.extraArgs ?? [])],
-      { cwd: this.host.root, stdio: 'pipe' })
+      { cwd: this.host.root, env: await this.host.environment?.(), stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
     child.stderr.resume()

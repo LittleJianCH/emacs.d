@@ -37,10 +37,11 @@ export async function serve(instructions: string, version: string): Promise<void
     if (method === 'tools/call') running.set(id, controller)
     active++
     void (async () => {
-      await hello
+      const host = await hello as { remote?: boolean }
       switch (method) {
         case 'initialize': return { protocolVersion: params.protocolVersion ?? '2025-06-18',
-          capabilities: { tools: { listChanged: true } }, serverInfo: { name: 'emacs', version }, instructions }
+          capabilities: { tools: { listChanged: true } }, serverInfo: { name: 'emacs', version }, instructions: instructions + (host.remote
+            ? '\nYour shell and file tools run on the project host. Emacs and its configuration live on the user machine; use config_read, config_edit and config_write for that checkout (read its AGENTS.md first), then reload.' : '') }
         case 'ping': return {}
         case 'tools/list': return connection.request('mcp/tools', {})
         case 'tools/call':

@@ -1,5 +1,9 @@
+import { ProjectEnvironments } from '../remote/environment.ts'
 // server.ts --- one socket, one editor client, and a persistent session table.
 
+import { ConfigFiles, configNames, configTools } from './config-files.ts'
+import { Outbox } from '../remote/outbox.ts'
+import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { Configuration } from '../config.ts'
 import { Collaboration, toolNames } from './collab.ts'
@@ -10,7 +14,7 @@ import type { Server } from 'node:net'
 import { join, resolve } from 'node:path'
 import { backends } from '../backends/backend.ts'
 import { acquireLock } from './lock.ts'
-import { codeVersion, socketPath, stateDir } from './paths.ts'
+import { checkoutRoot, codeVersion, socketPath, stateDir } from './paths.ts'
 import { ErrorCode } from './protocol.ts'
 import type { Answer, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
 import { Connection, Reply, RpcError } from './rpc.ts'
@@ -32,6 +36,8 @@ interface SavedSession {
 
 export interface ServerOptions {
   varDir: string
+  socket?: string
+  remote?: boolean
   idleExit?: number
   configFile?: string
   log?: (message: string) => void
@@ -86,6 +92,10 @@ export class DaemonServer {
   readonly editor: Editor
   readonly configuration: Configuration
   readonly collab: Collaboration
+  readonly environments?: ProjectEnvironments
+  readonly outbox?: Outbox
+  readonly configFiles: ConfigFiles
+  #outboxTimer?: NodeJS.Timeout
   #usageClients = new Set<Connection>()
   #mcp = new Map<Connection, string>()
   #calls = new Map<Connection, Map<unknown, AbortController>>()
@@ -105,12 +115,20 @@ export class DaemonServer {
 
   constructor(options: ServerOptions) {
     this.varDir = resolve(options.varDir)
-    this.socket = socketPath(this.varDir)
+    this.socket = options.socket ?? socketPath(this.varDir)
     this.editor = new Editor(stateDir(this.varDir))
-    this.configuration = new Configuration(this.varDir, options.configFile)
+    this.configuration = new Configuration(this.varDir, options.configFile, options.remote ? join(homedir(), '.config/emx/config.json') : undefined)
+    if (options.remote) this.environments = new ProjectEnvironments()
+    if (options.remote) this.outbox = new Outbox(join(stateDir(this.varDir), 'usage-outbox.json'))
+    this.configFiles = new ConfigFiles(async (method, file) => {
+      if (!this.client) throw new Error('Emacs is not attached')
+      const out = await this.client.request('editor/call', { method, params: { path: file } }, AbortSignal.timeout(5000)) as any
+      if (!out.ok) throw new Error(out.error ?? 'Editor call failed')
+      return out.result
+    })
     this.#idleExit = options.idleExit ?? this.configuration.value.daemon.idleExit
     this.#log = options.log ?? (() => {})
-    this.usage = new UsageService({ log: (message) => this.#log(message),
+    this.usage = new UsageService({ capture: this.outbox ? (method, params) => this.outbox!.add(method, params) : undefined, log: (message) => this.#log(message),
       send: (message) => {
         for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
           peer.notify('usage/' + message.method, message.params)
@@ -180,8 +198,18 @@ export class DaemonServer {
       await this.editor.restore().catch((error) => this.#log(`Cannot load tools: ${error}`))
       let usageConfig = {}
       try { usageConfig = JSON.parse(await readFile(join(dir, 'usage.json'), 'utf8')) } catch { /* First start. */ }
+      this.outbox?.restore()
+      if (this.outbox) {
+        const deliver = () => {
+          if (this.outbox!.entries.length) this.client?.notify('usage/outbox', { entries: this.outbox!.entries })
+        }
+        this.outbox.changed = deliver
+        this.#outboxTimer = setInterval(deliver, 5000)
+        this.#outboxTimer.unref()
+      }
       this.usage.initialize({ ...usageConfig, pollInterval: this.configuration.value.usage.pollInterval, usageFile: join(this.varDir, 'agent-usage.jsonl'),
         quotaFile: join(this.varDir, 'agent-quota.json') })
+      if (this.outbox) this.usage.configure({ pollers: this.#hostPollers() })
       this.configuration.watch((result) => this.#configChanged(result))
       await this.#restore()
       this.collab.restore()
@@ -225,7 +253,7 @@ export class DaemonServer {
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, environment: this.environments ? () => this.environments!.get(saved.root) : undefined, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
   }
 
   async #restore(): Promise<void> {
@@ -336,7 +364,8 @@ export class DaemonServer {
     clearTimeout(this.#idleTimer)
     this.#idleTimer = undefined
     this.#checkIdle()
-    this.usage.configure({ pollInterval: result.config.usage.pollInterval })
+    this.usage.configure({ pollInterval: result.config.usage.pollInterval,
+      ...(this.outbox ? { pollers: this.#hostPollers() } : {}) })
     for (const session of this.sessions.values()) session.refreshHibernate()
     for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
       peer.notify('config', { config: result.config, errors: result.errors })
@@ -344,7 +373,21 @@ export class DaemonServer {
     for (const peer of this.#mcp.keys()) peer.notify('mcp/tools_changed', {})
   }
 
+  #hostPollers(): UsageConfig['pollers'] {
+    const agents = this.configuration.value.agents
+    return Object.fromEntries(['claude', 'codex', 'dsh'].filter((name) => agents[name]).map((name) => [name,
+      { command: [agents[name].executable, ...(name === 'dsh' ? ['--profile', 'sdk', '--patch',
+        join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')] : [])] }]))
+  }
+
   #tools(value: unknown): void {
+    if (this.outbox) {
+      const tools = object(value)
+      if (Array.isArray(tools.tools) && Array.isArray(tools.readOnly)) value = {
+        tools: [...tools.tools.filter((t: any) => !configNames.includes(t.name)), ...configTools],
+        readOnly: [...new Set([...tools.readOnly, 'config_read'])],
+      }
+    }
     if (this.editor.update(value)) {
       for (const connection of this.#mcp.keys()) connection.notify('mcp/tools_changed', {})
       void this.editor.flush().catch((error) => this.#log(`Cannot save tools: ${error}`))
@@ -369,7 +412,7 @@ export class DaemonServer {
       this.#session({ id: session })
       if (connection === this.client) invalid('An editor connection cannot become an MCP connection')
       this.#mcp.set(connection, session)
-      return {}
+      return { remote: !!this.outbox }
     }
     const mcp = this.#mcp.get(connection)
     if (mcp !== undefined) {
@@ -397,6 +440,7 @@ export class DaemonServer {
       case 'ping': return { daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 },
         liveAgents: [...this.sessions.values()].filter((session) => session.backend.alive()).length }
       case 'hello': {
+        if (params.config !== undefined) this.#configChanged(this.configuration.push(params.config))
         if (params.agents !== undefined) {
           if (!Array.isArray(params.agents) || !params.agents.every((s) => typeof s === 'string')) invalid('Expected string[]: agents')
           if (JSON.stringify(this.collab.enabled) !== JSON.stringify(params.agents)) {
@@ -418,8 +462,24 @@ export class DaemonServer {
         this.#checkIdle()
         return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value }, () => {
           connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas })
+          if (this.outbox) connection.notify('usage/outbox', { entries: this.outbox.entries })
           connection.notify('sessions', { sessions: this.#list() })
         })
+      }
+      case 'config/call': {
+        if (this.outbox) throw new Error('Configuration files belong to the local daemon')
+        return this.configFiles.call(string(params.method, 'method'), object(params.arguments))
+      }
+      case 'usage/ack': {
+        if (!this.outbox) throw new Error('Only host daemons have a usage outbox')
+        this.outbox.ack(params.source === undefined ? string(params.id, 'id') : string(params.source, 'source'),
+          params.source === undefined ? undefined : integer(params.sequence, 'sequence', 1))
+        return {}
+      }
+      case 'config/push': {
+        const result = this.configuration.push(params.config)
+        this.#configChanged(result)
+        return { config: result.config, errors: result.errors }
       }
       case 'config/get': return { config: this.configuration.value, errors: this.configuration.errors }
       case 'config/reload': {
@@ -444,6 +504,7 @@ export class DaemonServer {
             config.pollers[source] = { command }
           }
         }
+        if (this.outbox) config.pollers = this.#hostPollers()
         const result = this.usage.configure(config)
         // Persist commands so quota polls continue without an attached editor.
         const file = join(stateDir(this.varDir), 'usage.json')
@@ -454,14 +515,14 @@ export class DaemonServer {
       }
       case 'usage/record': {
         const id = string(params.id, 'id')
-        this.usage.record({ id, record: object(params.record) })
-        return { id }
+        return this.usage.record({ id, record: object(params.record),
+          ...(params.source === undefined ? {} : { source: string(params.source, 'source'), sequence: integer(params.sequence, 'sequence', 1) }) })
       }
       case 'usage/quota': {
         const id = string(params.id, 'id')
         const reading = object(params.reading)
-        this.usage.quota({ ...reading, agent: string(reading.agent, 'agent') }, id)
-        return { id }
+        return this.usage.quota({ ...reading, agent: string(reading.agent, 'agent') }, id,
+          optionalString(params.source, 'source'), params.source === undefined ? undefined : integer(params.sequence, 'sequence', 1))
       }
       case 'usage/report': return this.usage.report(params)
       case 'usage/refresh': return this.usage.refresh(params)
@@ -645,6 +706,7 @@ export class DaemonServer {
 
   async #close(): Promise<void> {
     this.#stopping = true
+    clearInterval(this.#outboxTimer)
     this.configuration.close()
     this.collab.stop()
     this.editor.detach()

@@ -17,6 +17,7 @@ export interface SessionOptions {
   settings?: Settings
   resume?: string
   daemonSocket?: string
+  environment?: () => Promise<NodeJS.ProcessEnv>
   agentConfig?: () => import('../config.ts').AgentConfig | undefined
   hibernateAfter?: () => number
   editorTools?: () => import('./protocol.ts').EditorTools
@@ -49,6 +50,7 @@ export class Session implements SessionHost {
   info: Info
   settings: Settings
   readonly daemonSocket: string
+  readonly environment: NonNullable<SessionOptions['environment']>
   readonly agentConfig: NonNullable<SessionOptions['agentConfig']>
   readonly editorTools: () => import('./protocol.ts').EditorTools
   capabilities: Capabilities = { models: [], modes: [], commands: [] }
@@ -77,6 +79,7 @@ export class Session implements SessionHost {
     this.agent = options.agent
     this.root = options.root
     this.daemonSocket = options.daemonSocket ?? ''
+    this.environment = options.environment ?? (async () => ({ ...process.env }))
     this.agentConfig = options.agentConfig ?? (() => undefined)
     this.editorTools = options.editorTools ?? (() => ({ tools: [], readOnly: [] }))
     this.info = structuredClone(options.info ?? {})

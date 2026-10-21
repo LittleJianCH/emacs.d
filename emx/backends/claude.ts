@@ -300,7 +300,7 @@ export class ClaudeBackend implements Backend {
     if (skills?.skillsDir) args.push('--add-dir', skills.skillsDir)
     if (skills?.supersededSkills?.length) args.push('--settings', JSON.stringify({ skillOverrides: Object.fromEntries(skills.supersededSkills.map((s) => [s, 'off'])) }))
     args.push(...config.extraArgs ?? [])
-    const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, stdio: 'pipe' })
+    const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, env: await this.host.environment?.(), stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
     child.stderr.resume()

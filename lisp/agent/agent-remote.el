@@ -41,14 +41,18 @@ Return (STATUS . OUTPUT)."
     (let ((status (apply #'call-process "ssh" nil t nil "-S" control (append args (list host)))))
       (cons status (string-trim (buffer-string))))))
 
-(defun agent-remote--master (root)
-  "Return (CONTROL HOST PID) of the ControlMaster serving remote ROOT."
+(defun agent-remote--master (root &optional connected-only)
+  "Return (CONTROL HOST PID) of the ControlMaster serving remote ROOT.
+With CONNECTED-ONLY, inspect the existing master without touching ROOT."
   (let ((vec (tramp-dissect-file-name root)))
     (unless (equal (tramp-file-name-method vec) "rpc")
       (user-error "远程会话目前只支持 /rpc: 路径（tramp-rpc）"))
     ;; Touching the root opens the tramp-rpc connection and its master.
-    (unless (file-directory-p root)
-      (user-error "远程目录不存在：%s" root))
+    (if connected-only
+        (unless (agent-session--host-connected-p root)
+          (error "Remote host is not connected"))
+      (unless (file-directory-p root)
+        (user-error "远程目录不存在：%s" root)))
     (let* ((control (tramp-rpc--controlmaster-socket-path vec))
            (host (if-let* ((user (tramp-file-name-user vec)))
                      (concat user "@" (tramp-file-name-host vec))

@@ -1,26 +1,35 @@
 // main.ts --- foreground daemon, detached startup and clean shutdown.
 
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { appendFile, chmod, mkdir } from 'node:fs/promises'
 import { createConnection } from 'node:net'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { codeVersion, checkoutRoot, defaultVar, socketPath, stateDir } from './paths.ts'
+import { clientPaths, codeVersion, checkoutRoot, defaultVar, runtimeFiles, socketPath, stateDir } from './paths.ts'
 import type { HelloResult } from './protocol.ts'
 import { Connection } from './rpc.ts'
 import { DaemonServer } from './server.ts'
 
 interface Options {
   varDir: string
+  client?: string
   idleExit?: number
-  mode: 'foreground' | 'ensure' | 'stop'
+  mode: 'foreground' | 'ensure' | 'stop' | 'manifest'
 }
 
 function options(args: string[]): Options {
   const result: Options = { varDir: defaultVar, mode: 'foreground' }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
-    if (arg === '--var') {
+    if (arg === '--client') {
+      result.client = args[++i]
+      if (!result.client) throw new Error('--client requires an id')
+      result.varDir = clientPaths(result.client).varDir
+    } else if (arg === '--manifest') {
+      result.mode = 'manifest'
+    } else if (arg === '--var') {
       if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error('--var requires a directory')
       result.varDir = resolve(args[++i])
     } else if (arg === '--idle-exit') {
@@ -35,6 +44,7 @@ function options(args: string[]): Options {
       result.mode = arg === '--ensure' ? 'ensure' : 'stop'
     } else throw new Error(`Unknown daemon option: ${arg}`)
   }
+  if (result.client && args.includes('--var')) throw new Error('--client and --var are mutually exclusive')
   return result
 }
 
@@ -77,7 +87,7 @@ async function ping(path: string): Promise<{ connection: Connection, result: Hel
 }
 
 async function ensure(opts: Options): Promise<void> {
-  const socket = socketPath(opts.varDir)
+  const socket = (opts.client ? clientPaths(opts.client).socket : socketPath(opts.varDir))
   let peer = await ping(socket)
   let started = false
   if (peer && peer.result.version !== codeVersion() && peer.result.capabilities?.stopIfIdle === 1
@@ -85,7 +95,7 @@ async function ensure(opts: Options): Promise<void> {
   if (!peer) {
     started = true
     const child = spawn(process.execPath, [join(checkoutRoot, 'bin', 'emx'), 'daemon',
-      '--var', opts.varDir, ...(opts.idleExit === undefined ? [] : ['--idle-exit', String(opts.idleExit)])], { detached: true, stdio: 'ignore' })
+      ...(opts.client ? ['--client', opts.client] : ['--var', opts.varDir]), ...(opts.idleExit === undefined ? [] : ['--idle-exit', String(opts.idleExit)])], { detached: true, stdio: 'ignore' })
     let spawnError: Error | undefined
     child.on('error', (error) => { spawnError = error })
     child.unref()
@@ -103,7 +113,7 @@ async function ensure(opts: Options): Promise<void> {
 }
 
 async function stop(opts: Options): Promise<void> {
-  const peer = await ping(socketPath(opts.varDir))
+  const peer = await ping((opts.client ? clientPaths(opts.client).socket : socketPath(opts.varDir)))
   if (!peer) return
   await stopPeer(peer.connection)
 }
@@ -142,7 +152,14 @@ async function foreground(opts: Options): Promise<void> {
       `${new Date().toISOString()} ${message}\n`, { mode: 0o600 }))
       .catch((error) => { console.error(`emx daemon: ${error.message}`) })
   }
-  const daemon = new DaemonServer({ varDir: opts.varDir, idleExit: opts.idleExit, log })
+  const socket = opts.client ? clientPaths(opts.client).socket : undefined
+  if (socket) {
+    await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
+    await chmod(dirname(socket), 0o700)
+    await chmod(opts.varDir, 0o700)
+  }
+  const daemon = new DaemonServer({ varDir: opts.varDir, socket, remote: !!opts.client,
+    idleExit: opts.idleExit, log })
   await daemon.start()
   const shutdown = (): void => { void daemon.stop() }
   process.on('SIGTERM', shutdown)
@@ -158,7 +175,11 @@ async function foreground(opts: Options): Promise<void> {
 
 export async function main(args: string[]): Promise<void> {
   const opts = options(args)
-  if (opts.mode === 'ensure') await ensure(opts)
+  if (opts.mode === 'manifest') console.log(JSON.stringify({ version: codeVersion(), files: runtimeFiles(), integrity: runtimeFiles().map((file) => {
+    const bytes = readFileSync(join(checkoutRoot, file))
+    return { file, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
+  }) }))
+  else if (opts.mode === 'ensure') await ensure(opts)
   else if (opts.mode === 'stop') await stop(opts)
   else await foreground(opts)
 }

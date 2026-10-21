@@ -1,5 +1,5 @@
 // config.ts --- validated configuration, last-good reloads and directory watches.
-import { readFileSync, watchFile, unwatchFile, mkdirSync } from 'node:fs'
+import { readFileSync, watchFile, unwatchFile, mkdirSync, writeFileSync, renameSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { emxRoot, stateDir } from './daemon/paths.ts'
 import type { EditorTools } from './daemon/protocol.ts'
@@ -118,28 +118,56 @@ export class Configuration {
   errors: string[] = []
   readonly defaults: string
   readonly override: string
+  #base?: Config
+  readonly baseFile?: string
+  readonly host: boolean
   #watched: string[] = []
   #timer?: NodeJS.Timeout
-  constructor(varDir: string, defaults = join(emxRoot, 'config.json')) {
+  constructor(varDir: string, defaults = join(emxRoot, 'config.json'), hostOverride?: string) {
     this.defaults = defaults
-    this.override = join(stateDir(varDir), 'config.json')
+    this.host = hostOverride !== undefined
+    this.override = hostOverride ?? join(stateDir(varDir), 'config.json')
+    if (this.host) {
+      this.baseFile = join(stateDir(varDir), 'client-config.json')
+      try { this.#base = validate(JSON.parse(readFileSync(this.baseFile, 'utf8'))) }
+      catch { /* First connection supplies the effective local config. */ }
+    }
     this.value = validate(JSON.parse(readFileSync(defaults, 'utf8')))
     this.reload()
   }
   reload(): { config: Config, errors: string[], changed: boolean } {
     let changed = false
     try {
-      const base = JSON.parse(readFileSync(this.defaults, 'utf8'))
+      const base = this.#base ?? JSON.parse(readFileSync(this.defaults, 'utf8'))
       let override = {}
       try { override = JSON.parse(readFileSync(this.override, 'utf8')) }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
       if (!object(override)) throw new Error(`${this.override}: expected object`)
+      if (this.host) {
+        if (Object.keys(override).some((k) => k !== 'agents') || (override.agents !== undefined && !object(override.agents))) {
+          throw new Error('Host config may only override agents.<name>.executable')
+        }
+        for (const [name, agent] of Object.entries(override.agents ?? {})) {
+          if (!object(agent) || Object.keys(agent).some((k) => k !== 'executable') || !base.agents[name]) {
+            throw new Error('Host config may only override configured agents executables')
+          }
+        }
+      }
       const next = validate(merge(base, override))
       changed = JSON.stringify(next) !== JSON.stringify(this.value)
       this.value = next
       this.errors = []
     } catch (error) { this.errors = [String(error)] }
     return { config: this.value, errors: this.errors, changed }
+  }
+  push(value: unknown): ReturnType<Configuration['reload']> {
+    if (!this.baseFile) throw new Error('Only host daemons accept config/push')
+    const base = validate(structuredClone(value))
+    mkdirSync(dirname(this.baseFile), { recursive: true, mode: 0o700 })
+    writeFileSync(this.baseFile + '.tmp', JSON.stringify(base), { mode: 0o600 })
+    renameSync(this.baseFile + '.tmp', this.baseFile)
+    this.#base = base
+    return this.reload()
   }
   watch(changed: (result: ReturnType<Configuration['reload']>) => void): void {
     mkdirSync(dirname(this.override), { recursive: true, mode: 0o700 })

@@ -110,7 +110,7 @@ export class Collaboration {
   #target(name: unknown): Session {
     if (typeof name !== 'string') throw new Error('Name a session by its @handle; list them with sessions')
     const s = [...this.host.sessions.values()].find((s) => this.#handle(s) === name.replace(/^@/, '') || s.id === name)
-    if (!s) throw new Error(`No agent session called ${name}; list them with sessions`)
+    if (!s) throw new Error(`No agent session called ${name} in this daemon; list them with sessions. Cross-daemon collaboration is not supported`)
     return s
   }
   unique(name: string, current?: Session): string {

@@ -1662,7 +1662,7 @@ session opens; an unreachable host isn't asked again at once."
                                                 (equal default-directory dev))
                                            "1" "0"))
                                      (nthcdr 3 args) "\n")
-                          "\n")
+                          "\nv22.18.0\n")
                   0)))
        (agent-session-check-programs dev)
        (agent-session-check-programs bare)

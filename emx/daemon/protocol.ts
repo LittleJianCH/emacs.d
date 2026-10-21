@@ -115,6 +115,7 @@ export interface HelloParams {
   /** Hash of the client's copy of the emx sources. */
   version: string
   agents?: string[]
+  config?: import('../config.ts').Config
   tools?: EditorTools
 }
 export interface HelloResult {
@@ -255,6 +256,9 @@ export interface SendParams {
 }
 
 export interface Requests {
+  'config/push': [{ config: import('../config.ts').Config }, { config: import('../config.ts').Config, errors: string[] }]
+  'config/call': [{ method: string, arguments: Record<string, unknown> }, string]
+  'usage/ack': [{ id: string }, {}]
   /** Whether a daemon answers, and which: never takes over (see hello). */
   'ping': [{}, HelloResult]
   /** Makes this connection the daemon's Emacs; a previous one gets `replaced`. */

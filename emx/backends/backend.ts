@@ -16,6 +16,7 @@ export interface SessionHost {
   readonly blocks: Block[]
   readonly id: string
   readonly daemonSocket: string
+  environment?(): Promise<NodeJS.ProcessEnv>
   agentConfig?(): import('../config.ts').AgentConfig | undefined
   editorTools(): import('../daemon/protocol.ts').EditorTools
   emit(event: SessionEvent): void

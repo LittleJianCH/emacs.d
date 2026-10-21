@@ -135,7 +135,7 @@ export class CodexBackend implements Backend {
     this.#usageTotal = undefined
     this.#tools = structuredClone(this.host.editorTools())
     const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host),
-      { cwd: this.host.root, stdio: 'pipe' })
+      { cwd: this.host.root, env: await this.host.environment?.(), stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
     child.stderr.resume()

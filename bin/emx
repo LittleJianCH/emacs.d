@@ -22,6 +22,19 @@
 //              the tools again when the file changes.
 
 'use strict';
+
+// Node before 24 calls type stripping experimental and warns about it on
+// every run of the daemon's TypeScript.  On a host that line went into the
+// output of `emx daemon --ensure`, which Emacs parses as JSON.  Drop that
+// warning only; the others are printed as usual.
+{
+  const listeners = process.listeners('warning');
+  process.removeAllListeners('warning');
+  process.on('warning', (warning) => {
+    if (warning.name === 'ExperimentalWarning' && /type stripping/i.test(warning.message)) return;
+    for (const listener of listeners) listener(warning);
+  });
+}
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');

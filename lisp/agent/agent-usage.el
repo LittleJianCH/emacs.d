@@ -108,8 +108,53 @@ is left out when its program isn't installed.  Backends add themselves.")
     (clrhash agent-usage--inflight)
     (agent-usage--schedule-reconnect)))
 
+(defvar agent-usage--outbox-loaded nil "File whose durable outbox is loaded.")
+(defvar server-name)
+
+(defun agent-usage--outbox-file ()
+  "Return this editor's durable producer state file."
+  (expand-file-name
+   (concat "emx/editor-usage-" (substring (secure-hash 'sha256
+                                                   (if (boundp 'server-name) server-name "server")) 0 12)
+           ".el") agent-emx-var-directory))
+
+(defun agent-usage--save-outbox ()
+  "Atomically retain producer identity, sequence and unacknowledged entries."
+  (let* ((file (agent-usage--outbox-file))
+         (dir (file-name-directory file)))
+    (make-directory dir t)
+    (let ((temp (make-temp-file (expand-file-name ".editor-usage-" dir))))
+      (unwind-protect
+          (progn
+            (with-temp-file temp
+              (let ((print-length nil) (print-level nil))
+                (prin1 (list :source agent-usage--id-prefix :sequence agent-usage--serial
+                             :entries agent-usage--outbox) (current-buffer))))
+            (set-file-modes temp #o600)
+            (rename-file temp file t))
+        (when (file-exists-p temp) (delete-file temp))))))
+
+(defun agent-usage--restore-outbox ()
+  "Load persisted producer state once before producing or delivering usage."
+  (let ((file (agent-usage--outbox-file)))
+    (unless (equal file agent-usage--outbox-loaded)
+      (when (file-exists-p file)
+        (let ((state (with-temp-buffer
+                       (insert-file-contents file) (read (current-buffer)))))
+          (setq agent-usage--id-prefix (plist-get state :source)
+                agent-usage--serial (plist-get state :sequence)
+                agent-usage--outbox (append (plist-get state :entries) agent-usage--outbox))))
+      (setq agent-usage--outbox-loaded file))
+    ;; Live editors may still have entries made by the previous code version.
+    (dolist (entry agent-usage--outbox)
+      (unless (plist-get entry :source)
+        (nconc entry (list :source agent-usage--id-prefix
+                           :sequence (cl-incf agent-usage--serial)))))
+    (agent-usage--save-outbox)))
+
 (defun agent-usage--flush-outbox (connection)
   "Send retained entries to capable CONNECTION; remove only matching acks."
+  (agent-usage--restore-outbox)
   (when (agent-usage--capable-p connection)
     (dolist (entry (copy-sequence agent-usage--outbox))
       (let ((id (plist-get entry :id)))
@@ -118,14 +163,22 @@ is left out when its program isn't installed.  Backends add themselves.")
           (agent-emx--request
            connection (concat "usage/" (plist-get entry :method))
            (agent-usage--nulls
-            (append (list :id id) (plist-get entry :params)))
+            (append (list :id id :source (plist-get entry :source)
+                          :sequence (plist-get entry :sequence)) (plist-get entry :params)))
            (lambda (ack)
-             (when (equal (plist-get ack :id) id)
+             (when (or (and (equal (plist-get ack :source) (plist-get entry :source))
+                            (numberp (plist-get ack :sequence))
+                            (>= (plist-get ack :sequence) (plist-get entry :sequence)))
+                       (and (not (plist-get ack :source)) (equal (plist-get ack :id) id)))
                (remhash id agent-usage--inflight)
                (setq agent-usage--outbox
-                     (cl-delete id agent-usage--outbox
-                                :key (lambda (item) (plist-get item :id))
-                                :test #'equal))))
+                     (cl-delete-if
+                      (lambda (item)
+                        (if (plist-get ack :source)
+                            (and (equal (plist-get item :source) (plist-get ack :source))
+                                 (<= (plist-get item :sequence) (plist-get ack :sequence)))
+                          (equal (plist-get item :id) id))) agent-usage--outbox))
+               (agent-usage--save-outbox)))
            (lambda (error)
              (remhash id agent-usage--inflight)
              (agent-usage--error error))))))))
@@ -281,16 +334,19 @@ exist yet, and kept as .bak."
 
 (defun agent-usage--notify (method params)
   "Retain usage METHOD with PARAMS until the daemon acknowledges its id."
+  (agent-usage--restore-outbox)
   (let* ((id (format "%s-%s" agent-usage--id-prefix (cl-incf agent-usage--serial)))
          (quota (equal method "quota"))
          (key (when quota (cons (plist-get params :agent) (plist-get params :host))))
-         (entry (list :id id :method method :key key
+         (entry (list :id id :source agent-usage--id-prefix :sequence agent-usage--serial
+                      :method method :key key
                       :params (if quota (list :reading params) params))))
     (when quota
       (setq agent-usage--outbox
             (cl-delete-if (lambda (item) (equal (plist-get item :key) key))
                           agent-usage--outbox)))
     (setq agent-usage--outbox (append agent-usage--outbox (list entry)))
+    (agent-usage--save-outbox)
     (agent-usage--with-connection #'agent-usage--flush-outbox)))
 
 (defun agent-usage--nulls (value)

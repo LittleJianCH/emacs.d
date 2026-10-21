@@ -34,7 +34,8 @@ lisp/core/               base layer
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
-  agent-emx.el          daemon client and editor tools; agent-emx-agents opts dsh in
+  agent-emx.el          daemon client and editor tools; agent-emx-agents opts agents in
+  agent-emx-remote.el   host runtime install, -L transport, config and usage relay
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       backend implementation and registration
     dsh/                DeepSeek Harness bridge plugin and profile patches
@@ -61,6 +62,7 @@ test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git r
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
 test/agent-emx-test.el      ERT suite for the emx backend (starts a daemon on a temp var dir)
+test/agent-emx-remote-test.el ERT host simulation with stubbed tramp/SSH
 test/emx/usage*.test.ts     usage arithmetic, daemon accounting and fake quota polls
                            (unchanged fixtures in test/fixtures/usage/)
 test/emx/                   node --test suites for the emx daemon
@@ -92,29 +94,32 @@ var/                     runtime state (history, backups, pasted images...); git
   (`agent-claude--follow-script`) and passes on only those messages, so neither the
   watch nor the CLI's own writes cost round trips. The CLI is restarted with
   `--resume` before the next send so its context catches up.
-  Local sessions opt into `emx/backends/claude.ts` when `agent-emx-agents`
+  Sessions opt into `emx/backends/claude.ts` when `agent-emx-agents`
   contains `claude`; Lisp stays the default. The daemon's transitional
   `EMX_CLAUDE_CONFIG` JSON sets executable, extraArgs, disallowedTools
   (same defaults as Lisp) and historyTurns (20). Tests override the executable
   and project transcript directory with fake stream-json fixtures. Node streams
   history pages and follows external clients with a 500 ms directory-watch
   debounce; a resume after external writes forgets usage totals. Remote roots
-  and forks are unsupported; historical session discovery stays in Lisp.
+  use a host daemon; native forks use collaboration, and historical discovery
+  stays in Lisp.
 - `backend/agent-codex.el` — Codex backend over `codex app-server` (JSON-RPC: `thread/start`,
   `turn/start`, `turn/steer`, approvals via `item/*/requestApproval`). The emx MCP server
   is injected per process with `-c mcp_servers.emacs.*`.
-  Local sessions opt into `emx/backends/codex.ts` when `agent-emx-agents`
+  Sessions opt into `emx/backends/codex.ts` when `agent-emx-agents`
   contains `codex`; Lisp stays the default. The daemon's transitional
   `EMX_CODEX_CONFIG` JSON sets executable, extraArgs and nativeSubagents
   (default false). Tests use `EMX_CODEX_EXECUTABLE` and a fake app-server.
   Changed editor tools restart saved threads before their next send;
   ephemeral children retain their process. Usage excludes replayed history.
-  Remote roots and forks are unsupported; external discovery stays in Lisp.
+  Remote roots use a host daemon; native forks use collaboration, and external
+  discovery stays in Lisp.
 - `backend/agent-dsh.el` — DeepSeek Harness (`dsh`) backend. The default remains
   Lisp; `agent-emx-agents` containing `dsh` registers new sessions with `:backend emx
   :emx-agent "dsh"` (set before startup or via `customize-set-variable`). Removing
   it restores Lisp; existing sessions keep their backend. The daemon path is local
-  only, always disables native subagents, and rejects remote roots. It uses
+  or /rpc:, and always disables native subagents. Remote sessions use a host
+  daemon through agent-emx-remote.el. It uses
   `emx/backends/dsh.ts` with the same plugin; Lisp renders notices and the daemon
   records usage directly. dsh's own SDK/ACP protocols are too
   thin (SDK cannot cancel or approve), so we ship a dsh plugin, `backend/dsh/emacs-bridge.mjs`,
@@ -137,6 +142,17 @@ var/                     runtime state (history, backups, pasted images...); git
   `agent-dsh-tested-version`. It depends on dsh internals,
   so expect to adjust it when dsh is upgraded. The API key lives in dsh's
   `~/.dsh/.credentials.yaml`; never pass it through the environment.
+- `agent-emx-remote.el` — opted-in remote agents run under a content-addressed
+  host daemon, connected over a private `ssh -L` ControlMaster forward. Node
+  >= 22.18 is checked with the existing program lookup. Timers only recreate
+  local forwards to remembered sockets on connected hosts; ensure, staged
+  runtime verification, root expansion, skills and image uploads need user action.
+  Each host session gets its root's direnv environment, matching tramp-rpc; editor calls map host paths, config tools use the
+  local daemon, and durable usage entries use persisted producer sequence
+  watermarks acknowledged after local storage.
+  Host config can override executables only. Cross-daemon collaboration remains
+  unsupported; children stay in their parent's daemon. See phase 7 in
+  `doc/emx-daemon.md`. The following legacy path stays for other backends.
 - `agent-remote.el` — remote projects (`/rpc:` roots). The agent CLI runs on the
   project's host through tramp-rpc, so it uses the host's toolchain and history, like
   Claude Desktop's SSH mode. emx stays local: a per-host bridge forwards a Unix socket
@@ -286,7 +302,7 @@ cannot take over the editor connection. See doc/emx-daemon.md for the contract.
 
 Run from the repo root.
 
-Tests (ERT, 265 tests, about half a minute). They exercise the native Emacs keys, so turn
+Tests (ERT, 277 tests, about half a minute). They exercise the native Emacs keys, so turn
 evil off first (it is on by default and its normal state would eat typed keys):
 
 ```sh
@@ -299,7 +315,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
       -l test/agent-usage-test.el \
       -l test/agent-emx-test.el -l test/agent-emx-config-test.el \
-      -l test/agent-emx-collab-test.el \
+      -l test/agent-emx-collab-test.el -l test/agent-emx-remote-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 

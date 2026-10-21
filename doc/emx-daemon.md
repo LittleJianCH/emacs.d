@@ -1,9 +1,10 @@
 # emx daemon: agents outside Emacs
 
-Status: phases 1–6 implemented on `claude/emx-daemon` for local projects.
+Status: phases 1–7 implemented on `claude/emx-daemon`.
 Agent execution remains opt-in through `agent-emx-agents`; all usage now shares
-the daemon. Mixed Lisp/daemon collaboration has the limitation below; remote
-transport remains design.
+the daemon. Mixed Lisp/daemon and cross-daemon collaboration have the
+limitations below. Remote transport is tested with a locally simulated host;
+a real tramp-rpc/sshd test is still required.
 
 ## Goal
 
@@ -226,7 +227,8 @@ with `mcp/hello {session: EMX_SESSION}`. This connection cannot say
 `hello`, take over the editor or control sessions. Without the variable,
 the existing emacsclient temp-file path, stamp watcher and remote-only
 `config_*` tools are unchanged. Bare CLI commands also keep that path.
-Daemon sessions currently support local tools only.
+Host daemon sessions also offer `config_read`, `config_edit` and
+`config_write`, forwarded through Emacs to the local daemon.
 
 An MCP connection binds once to an existing daemon session; a second
 `mcp/hello` on that connection is an error, even for the same session.
@@ -288,8 +290,8 @@ stream into the session events above.
   implements this in `emx/backends/dsh.ts`: local stdio transport, presets
   and plan mode, configuration, slash commands, steering/cancel, tool views,
   asks, discard, usage/balance, version warnings and resume transcripts.
-  Remote roots are rejected. Native subagents are always disabled on this
-  path. `EMX_DSH_EXECUTABLE` overrides `dsh` for installations and fake
+  Phase 7 maps remote project roots to host paths before opening sessions
+  on a host daemon. Native subagents are always disabled on this path. `EMX_DSH_EXECUTABLE` overrides `dsh` for installations and fake
   protocol peers in tests; no API credentials pass through this option.
   External session discovery stays on the old Lisp path; phase 5 adds
   native conversation forks through the daemon collaboration tools.
@@ -338,7 +340,7 @@ with `executable`, `extraArgs`, `disallowedTools` (default `Agent`,
 not contact the API. Phase 5 replaces those defaults with the shared
 config-file/watcher while retaining environment overrides for fixtures.
 
-Remote projects are rejected explicitly. Phase 5 supports native forks
+Remote projects use a host daemon in phase 7. Phase 5 supports native forks
 through `session_start context=fork`. Historical
 session discovery stays on the Lisp side, which already scans Claude's
 project directory; the daemon handles live sessions and transcript paging.
@@ -388,11 +390,11 @@ credits. A fresh attach republishes the cached account reading after
 turns and `session/earlier`. A crashed app-server resumes its saved id on
 the next send.
 
-Remote roots remain unsupported. Phase 5 implements ephemeral `thread/fork`
+Remote roots use a host daemon in phase 7. Phase 5 implements ephemeral `thread/fork`
 through `session_start context=fork`. Discovering
 past sessions stays in Lisp's `thread/list` implementation; use the Lisp
 registration to browse sessions outside the daemon's own session table.
-Remote transport and shared historical discovery belong to later phases.
+Shared historical discovery remains later work.
 
 ## Localization
 
@@ -519,11 +521,10 @@ We follow them:
 
 ## Remote projects
 
-Today a remote agent runs on the host under `agent-keeper.py`, emx stays
-local, and the agent's MCP client reaches it through
-`agent-remote-relay.py`, a socket on the host and an `ssh -R` forward over
-the tramp-rpc ControlMaster to a per-session local emx. With a daemon on
-the host all three go.
+Agents selected by `agent-emx-agents` run under the host daemon. Agents
+still on their Lisp backend retain `agent-keeper.py`, the local emx and
+`agent-remote-relay.py` over the `-R` bridge until phase 8. Existing
+sessions keep their original backend.
 
 ```
  this machine                         │ host
@@ -539,7 +540,15 @@ the host all three go.
 The daemon's code is copied to the host content-addressed:
 `~/.cache/emacs-agent/emx/<hash>/`, the hash being the one `hello`
 reports, so a copy is made once per version and several versions can
-coexist (as the dsh plugin is copied today). The host needs Node 22.18 or
+coexist (as the dsh plugin is copied today). `daemon --manifest` returns
+this version, runtime paths, byte sizes and SHA-256 hashes: TypeScript/JSON under `emx/`, `bin/emx`,
+and the dsh `.mjs`/`.yml` files. `node_modules` and tests are excluded.
+On user action, Emacs copies through the file handler into a unique private
+staging directory beside the target, verifies every size and hash, and writes
+`.complete` containing the version. An atomic rename publishes the directory;
+a concurrent completed publication wins and the staging copy is removed.
+Ensure checks the marker's contents. A failed ensure repairs the installation
+and retries once, on the user-triggered path only. The host needs Node 22.18 or
 later, checked in the same single round trip that looks up the agent
 programs when a remote session opens (`agent-session-check-programs`);
 python3 is no longer needed. The agents' credentials stay the host's own,
@@ -549,11 +558,20 @@ as today.
 
 The host runs one daemon per user and per client checkout:
 `~/.cache/emacs-agent/emx/run/<client id>.sock`, in a directory of mode
-0700, the client id being a hash of the checkout's path and the machine's
+0700. If the socket path exceeds 100 bytes (below both macOS and Linux
+limits), it uses a stable hash of the client id in `$XDG_RUNTIME_DIR`, or
+`/tmp/emx-<uid>/` if unset or too long. The fallback directory must be owned
+by the user, mode 0700 and not a symlink. The client id is a hash of the checkout's path and the machine's
 name. So this branch's worktree and the user's main checkout get separate
 daemons on the same host, and two machines never share one. Its state
 (session table, usage outbox) lives next to it in
-`~/.cache/emacs-agent/emx/state/<client id>/`.
+`~/.cache/emacs-agent/emx/state/<client id>/`. The id is the first 16 hex
+digits of SHA-1(checkout real path, NUL, machine name). Session state,
+logs and the outbox use the existing `emx/` subdirectory there; the host's
+usage files are only a cache for local quota freshness/reporting. The
+local daemon remains the authoritative combined ledger. `--client` and
+`--var` are mutually exclusive; `--stop --client <id>` stops only that
+host/client daemon.
 
 ### Connecting
 
@@ -561,15 +579,23 @@ daemons on the same host, and two machines never share one. Its state
    `node <dir>/bin/emx daemon --client <id> --ensure`. It copies nothing;
    it starts the daemon detached (`setsid`) unless one answers on the
    socket, and prints the socket path and the running daemon's code hash.
-   If the code dir is missing it says so, Emacs copies it and runs the
-   command again.
+   Emacs wraps this in a shell check for the version's `.complete` marker.
+   A missing or mismatched marker returns status 44; an explicit connection
+   repairs a failed install and retries once. Ensure and copies run before
+   asynchronous local callbacks, never in timers or sentinels. Ensure
+   retains a stale daemon with live agents; once none are live, it replaces
+   it using the same atomic stop-if-idle guard as local ensure.
 2. Emacs forwards a private local socket to the remote one over the
    ControlMaster: `ssh -S <control> -O forward -L <local>:<remote> host`,
    as `agent-remote-bridge` does today with `-R`. The local end lives in a
    temporary directory of mode 0700.
 3. Emacs connects to the local end and speaks exactly the local protocol:
    `hello`, `session/attach`, events, editor calls. Nothing in the
-   protocol knows it crosses a host.
+   protocol knows it crosses a host. Emacs shares one connection per host
+   prefix and local var directory, with sessions still keyed by their
+   project places: separate projects must not take over the same daemon's
+   exclusive editor role. Tool descriptions use the connection's project
+   place. Local sessions and the usage-only connection remain independent.
 
 The forward belongs to the ControlMaster, so a new master (after a
 reconnect) gets a new forward, as the bridge does today. A host where
@@ -589,6 +615,20 @@ notices on its existing hooks and timer, never opening a connection
 itself), Emacs makes a new forward and reattaches each session with
 `after: seq`, so it receives exactly the events it missed, pending asks
 included. Sending to a disconnected session reconnects first, as today.
+Automatic reconnect reuses the socket path remembered from the last successful
+ensure; it never runs a host process, including through `make-process` with
+a file handler. If the daemon no longer answers, the session stays disconnected
+until a send or `M-x agent-emx-reconnect` runs ensure again. A silent automatic
+hello times out locally after two seconds. Only existing session ids are
+reattached automatically; opening sessions and copying skills require user
+action. Forward setup uses
+`agent-remote--master` in connected-only mode, which checks the existing
+master without `file-directory-p` on the project. The 10-second reconnect
+timer never opens a host, starts a remote process or copies files. A changed master replaces
+and cancels the old forward and its private local directory.
+`agent-emx-restart-daemon` targets the current daemon view's host (or the
+local daemon outside a host view), so a stale host daemon can be restarted
+after resumable sessions become idle.
 
 ### Editor calls and paths
 
@@ -596,29 +636,74 @@ A remote agent's MCP client runs `node <dir>/bin/emx mcp` on the host,
 which talks to the host's daemon. Editor tools are forwarded over the
 client connection to Emacs: no relay, no per-session local emx. Paths stay
 in the host's terms on the wire; Emacs maps them to `/rpc:host:` names
-(`agent-session-expand-file-name`, as today).
+(`agent-session-expand-file-name`, as today). Before asynchronous opening,
+Emacs expands remote roots (including `~`) once on the host and retains the
+`/rpc:` prefix for editor mapping. Pasted image attachments are uploaded with
+`agent-remote-upload` before send or steer; the wire contains host paths.
 
 The `config_*` tools read and write this machine's Emacs configuration,
 which the host can't reach. The host daemon forwards them to Emacs like an
 editor call, and Emacs passes them to the local daemon, which does the
 file I/O (it never blocks Emacs, which is why they live in emx today).
+`config/call {method, arguments}` is local-editor-only. The port retains
+checkout/symlink/`.git` guards, numbered reads, exact replacement checks,
+unsaved-buffer refusal and visiting-buffer refresh. Only the private
+`_config_modified`/`_config_written` editor requests touch buffers. Tools
+and their private read-only classification are cached on the host, so
+`config_read` is available to each backend without a permission prompt.
+
+### Project environments
+
+Bootstrap runs in the host home directory, outside the first project's direnv.
+The daemon keeps that base environment and computes each session's overlay by
+running `direnv export json` in its root. Direnv enforces `.envrc` authorization;
+an unavailable or blocked direnv leaves the base environment unchanged. The
+overlay uses the same essential variables as tramp-rpc (including PATH, compiler,
+Rust, Python and Node paths), so its program lookup and daemon spawn agree.
+Each CLI and the `emx mcp` it launches inherit this project environment. Results
+are cached per root for up to five minutes and invalidated by parent `.envrc`
+and `.direnv` changes; filesystem inspection and direnv run asynchronously in
+Node, never on an Emacs timer.
 
 ### Configuration, usage and collaboration across hosts
 
 - **Configuration:** the local config file is the source. Emacs sends the
-  effective config in `hello` to each remote daemon and again when it
-  changes. The host may override its agents' executables in
-  `~/.config/emx/config.json`, since programs differ per host.
-- **Usage:** the ledger stays local. A remote daemon emits its records as
-  events and keeps them in an outbox on disk until a client acknowledges
-  them (`usage/ack {seq}`); Emacs hands them to the local daemon. A host's
-  quota polls run on the host, for the accounts logged in there, and arrive
-  the same way.
-- **Collaboration:** children start in their parent's daemon, so
-  `session_start`, `session_stop` and a child's reply never leave the host.
-  `sessions`, `session_read` and `session_ask` naming a session on another
-  daemon go through Emacs, which knows them all: they work while Emacs is
-  attached and fail clearly otherwise.
+  effective config in `hello.config` and again with `config/push` on change
+  or local reconnection. It preserves JSON empty objects, false and null.
+  The host persists the pushed base in `emx/client-config.json`, so it
+  survives editor/daemon restarts. `~/.config/emx/config.json` may override
+  only `agents.<name>.executable`; all other overrides are rejected with
+  last-good config retained. Host config notifications never overwrite
+  Emacs's local policy cache. Host quota commands use those executables
+  and the installed dsh plugin, rather than local-machine command paths.
+- **Usage:** the ledger stays local. Each host outbox and Emacs editor outbox
+  persists a stable producer `source`, a monotonically increasing `sequence`,
+  and pending entries before delivery. Entries retain their old UUID `id` for
+  migration, plus `method` and `params`. Hello and a 5-second attached retry
+  replay pending host entries in sequence order. Emacs adds host/root context
+  and relays the same source and sequence to `usage/record` or `usage/quota`.
+  The ledger owner returns its applied sequence watermark; only then does
+  Emacs send `usage/ack {source, sequence}`. Anything at or below that source's
+  watermark is a duplicate, independent of backlog size or receipt-cache age.
+  Records persist delivery identity with the counters in the same append;
+  quota snapshots retain each producer's watermark atomically. Startup rebuilds
+  watermarks from those operations if a crash preceded the separate watermark
+  index or acknowledgment. Producer state retains its sequence even when its
+  outbox becomes empty. Editor outboxes use `emx/editor-usage-<server hash>.el`;
+  host outboxes use `emx/usage-outbox.json`. Existing host array outboxes receive
+  source/sequences once before replay. Migration scans all legacy ledger ids,
+  including receipts older than the former 10,000-entry cache, without charging
+  them again. Legacy id-only peers remain supported during upgrade.
+  Remote quotas preserve their sampling times and never replace the combined
+  local snapshot; a stale producer sequence cannot overwrite a newer reading.
+- **Collaboration limitation:** children, `session_start`, `session_stop`
+  and mailbox delivery remain in the parent's daemon. `sessions` lists
+  only that daemon; `session_read` and `session_ask` resolve only its
+  handles. Cross-daemon list/read/ask is deferred, like the phase-5 mixed
+  Lisp/daemon bridge: asynchronous confirmations and reply ownership need
+  a shared routing contract. An unknown target explicitly reports that
+  cross-daemon collaboration is unsupported. Use sessions in the same
+  daemon for collaborating tasks; no cross-host calls are silently routed.
 
 ### Security
 
@@ -628,11 +713,11 @@ its agents, as they can drive the agents themselves today.
 
 ### What goes away
 
-`agent-keeper.py`, `agent-remote-relay.py` and their tests, the `-R`
-bridge and per-session local emx in `agent-remote.el`, and the reattach
-logic built on byte offsets in `agent-session.el`. `agent-remote.el`
-keeps installing and starting the host daemon, the forward, and path
-mapping.
+Removal moves to phase 8: `agent-keeper.py`, `agent-remote-relay.py` and
+their tests, the `-R` bridge and per-session local emx, and keeper byte-offset
+reattach still serve non-opted-in Lisp backends. `agent-emx-remote.el`
+installs/starts the host daemon, owns the `-L` transport, maps paths and
+relays config/usage for opted-in sessions. Both paths coexist deliberately.
 
 ## Code layout
 
@@ -643,7 +728,7 @@ emx/daemon/              socket server, sessions, events, editor calls
 emx/backends/            claude.ts, codex.ts, dsh.ts
 emx/collab/              children, mailbox, session_* tools
 emx/usage/               ledger, quota polls, forecasts and turn accounting
-emx/remote/              --ensure, usage outbox
+emx/remote/              durable host usage outbox
 lisp/agent/backend/dsh/  the dsh plugin, unchanged in place
 test/emx/                node --test suites, with fake CLIs
 emx/package.json         @types/node for tsc -p emx
@@ -672,8 +757,8 @@ the end.
    accounting; Lisp backends send records to the same writer.
 7. **Remote**: install and `--ensure`, the `-L` forward, disconnect and
    reattach by `seq`, `config_*` through the local daemon, usage outbox,
-   cross-daemon `session_*` through Emacs. Then remove the keeper and the
-   relay.
+   same-daemon collaboration (cross-daemon list/read/ask deferred as above).
+   Keep the keeper and relay for non-opted-in agents until phase 8.
 8. **Cut over**: remove the Lisp backends and what only they used; shrink
    `agent-session` (a `restart_required` struct change, done once).
 
@@ -747,13 +832,145 @@ records to a daemon without that capability. Each record stays in an Emacs
 in-memory outbox under a stable id until `usage/record` replies with that id.
 Quota readings use `usage/quota` with an id and retain the latest per agent/host.
 Failed ensure, socket loss and uncertain replies retain entries for retry.
-The daemon persists record ids in the same ledger append (a bounded set of the
-most recent 10,000), and quota receipts in the same atomic quota-file update
-(up to 128 per source), so a restart between write and reply does not duplicate
-usage. Legacy notifications remain supported for attached older editors.
+Phase 7 review replaces the original bounded receipt caches with durable
+producer sequence watermarks (see Remote projects above). Legacy receipt ids
+remain in ledger appends for migration, and legacy notifications remain
+supported for attached older editors.
 
 While usage monitoring is active, failures schedule asynchronous ensure/connect
 with 2–60 second exponential backoff. A successful usage handshake resets the
 backoff, reapplies poll settings and flushes retained entries. Disabling the echo
 monitor cancels its pending reconnect timer. The outbox survives daemon restarts
-but intentionally lives only in the producing Emacs process.
+and producing Emacs restarts through the persisted editor outbox.
+
+## Phase 7 verification
+
+`test/emx/remote.test.ts` installs only the runtime into a temporary HOME,
+checks the hash, plugin inclusion and stale/live versus idle replacement,
+starts a second daemon through `--ensure --client`, holds a fake Codex
+turn through editor disconnect, and replays only events after its cursor.
+It exercises editor calls, remote -> editor -> local-daemon config tools,
+config push/host overrides, durable usage and duplicate receipts. No SSH,
+real account or model is used.
+
+`test/agent-emx-remote-test.el` uses a local file handler and remote-process
+stub to execute the actual ensure shell command in that temporary HOME;
+the forwarding stub returns the host socket directly. Other tests stub
+ControlMaster/ssh and verify private directories, forward reuse/replacement,
+Node in the single program lookup, timer guards, path mapping, JSON types,
+missing-install retry and local-before-remote acknowledgement order.
+The legacy keeper and relay tests continue to cover the unswitched path.
+
+### Proposed real-host check (requires separate approval)
+
+Use a disposable host account/project and a dedicated Emacs server/config
+var directory; do not attach the user's usual Emacs or its daemon, or
+change executable overrides for an account running production daemons.
+For example, after writing a fake-only config to `/tmp/emx-phase7-var/emx/config.json`:
+
+```sh
+emacs -Q --daemon=emx-phase7-check \
+  --eval '(setq user-emacs-directory "/ABS/WORKTREE/" package-user-dir "/ABS/ELPA/" agent-emx-var-directory "/tmp/emx-phase7-var/" my/use-evil nil)' \
+  -l /ABS/WORKTREE/init.el
+emacsclient -s emx-phase7-check -c
+```
+
+First choose the disposable host,
+project, installed Node path and a test client id with the user. Install
+only this runtime through `agent-emx-remote--install` in that isolated
+Emacs. Copy a fake CLI separately to the disposable host test directory
+(the production runtime installer intentionally excludes fixtures). Push
+a test config with all executables pointing to fake CLIs, polling disabled,
+`collab.handleCommand: []`, and `collab.agentHandleCommands: {}`. This
+checks actual tramp-rpc/sshd without model calls.
+
+1. In isolated Emacs open `/rpc:HOST:/TEST/PROJECT/`, call
+   `agent-session-check-programs`, and inspect the cached `:node` value.
+   It must be >= 22.18 and lookup must issue only one `process-file`.
+2. Through that file handler install the runtime, then run on the host:
+   `node ~/.cache/emacs-agent/emx/VERSION/bin/emx daemon --client ID --ensure`.
+   Check the JSON version/socket, a second ensure's identical pid, and
+   `stat` of `~/.cache/emacs-agent/emx/run` and `state/ID` (0700).
+3. From the local machine, using the test tramp-rpc ControlMaster:
+   `mkdir -m 700 /tmp/emx-realhost-ID` and
+   `ssh -S CONTROL -O forward -L /tmp/emx-realhost-ID/emx.sock:REMOTE_SOCKET HOST`.
+   Connect the isolated client to that socket. A fake echo/Codex session
+   should attach, render, answer an approval and map `/TEST/PROJECT/a.el`
+   to `/rpc:HOST:/TEST/PROJECT/a.el` for an editor `open` call.
+4. Hold a fake turn, record its epoch/seq, then close only this test master
+   (`ssh -S CONTROL -O exit HOST`). The view must become disconnected;
+   the host daemon/fake CLI must remain alive. Wait past the reconnect
+   timer: it must not establish SSH. Reopen the test tramp-rpc connection;
+   a new master/forward must reattach with the cursor and no duplicate
+   blocks or pending approvals. With the host connection still open, stop only
+   the test daemon: another timer tick must use only local SSH forwarding and
+   leave sessions disconnected, with no host ensure or file copy. A manual
+   reconnect should then ensure and reattach again.
+5. Write/read/edit a disposable `var/phase7-realhost.el` using remote
+   `config_*`, confirm that only the isolated local checkout changes,
+   and test refusal while its visiting buffer is modified. Change the
+   isolated local config, confirm the host receives it, and confirm an
+   executable-only host override survives the push.
+6. Finish a fake turn while detached and inspect the host outbox. Reattach,
+   verify one combined local ledger record and a cleared remote outbox;
+   interrupt again between local receipt and remote ack and verify retry
+   still leaves one record. Check host-labelled quota readings too.
+7. Open two allowed direnv projects with different fake CLI PATHs, including
+   `/rpc:HOST:~/PROJECT/` for one. Check both lookup and actual CLI/MCP
+   environments, then edit `.envrc`/`.direnv` and launch again. Paste an image
+   and check send/steer receives a readable host path. Race two installers and
+   interrupt one copy; only a fully verified version may appear at the target.
+   Repeat a backlog over 10,000 records across an apply-before-ack restart,
+   checking source watermarks and unchanged combined counts. Try a long HOME
+   and verify the shortened socket directory's ownership and mode.
+8. Stop only the test daemon with
+   `node ~/.cache/emacs-agent/emx/VERSION/bin/emx daemon --client ID --stop`,
+   cancel the test forward using `ssh -S CONTROL -O cancel -L LOCAL:REMOTE HOST`,
+   and remove the disposable directories/config-file fixture.
+
+The open real-host risks are tramp-rpc's process environment/detachment,
+sshd stream-local forwarding policy, socket-path limits on that host,
+and ControlMaster close/reopen behavior. The `emx connect` pipe fallback
+remains deferred until a host actually requires it.
+
+### Verification output (2026-10-20)
+
+All commands ran from this worktree. Socket/process tests used only temp
+var/HOME directories, fake CLIs and local host simulation. No live reload,
+default Emacs server/daemon, real SSH host or real model was used.
+
+```text
+tsc -p emx                                      exit 0
+node --test test/emx/ test/emx-mcp-test.js        155 passed, 0 failed
+full ERT (AGENTS.md, shared package-user-dir)    277 tests; 276 passed, 0 unexpected, 1 skipped
+  skipped: init-base-scroll-with-point
+byte compile, my/use-evil=nil and t              exit 0 in each mode
+  only known lang-agda.el:114 adjust-face / :116 protect-font-lock warnings
+python3 test/agent-keeper-test.py                all passed
+python3 test/agent-remote-relay-test.py           all passed
+node --check bin/emx                            exit 0
+git diff --check                                clean
+```
+
+### Phase 7 review fixes verification (2026-10-20)
+
+Final verification used this worktree, fake CLIs and temporary daemon state;
+no remote host, default Emacs server, reload or model call was used for these
+fixes. A preliminary keeper test used its default cache and reported complete
+cleanup; the final keeper/relay runs both used a temporary HOME.
+
+- `tsc -p emx`, `node --check bin/emx`, and the dsh bridge syntax check passed.
+- `node --test test/emx/ test/emx-mcp-test.js`: 159 passed, 0 failed.
+- Full AGENTS ERT with the shared package directory and remote tests:
+  290 total, 289 passed, 0 unexpected, 1 skipped (`init-base-scroll-with-point`).
+- Byte compilation with evil on and off: only the two known `lang-agda.el`
+  unknown-slot warnings (`adjust-face`, `protect-font-lock`) in each run.
+- Keeper and relay Python suites: all passed with a temporary HOME.
+
+Regression runs against the preceding implementations reproduced the timer,
+copy verification/publication, image/root, per-project PATH and large-outbox
+failures. In particular, the old usage cache replay wrote 20,002 records from
+10,001 deliveries; sequence watermarks preserve 10,001 across both restarts.
+The existing Node-warning ensure parser fix remains intact. The proposed
+real-host check above is still needed for actual tramp direnv behavior, atomic
+file-handler renames, stream-local forwarding and ControlMaster replacement.

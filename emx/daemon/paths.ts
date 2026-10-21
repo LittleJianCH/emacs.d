@@ -1,8 +1,8 @@
 // paths.ts --- where a daemon keeps its socket and state, and its version.
 
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { lstatSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -35,27 +35,52 @@ export function socketPath(varDir: string): string {
   return join(tmpdir(), `emx-${hash}.sock`)
 }
 
-let version: string | undefined
-
-/**
- * A hash of the daemon's code: the TypeScript under emx/ and bin/emx.
- * A client whose copy hashes differently runs other code.
- */
-export function codeVersion(): string {
-  if (version !== undefined) return version
+/** Runtime files shared by the installer and code hash; never development trees. */
+export function runtimeFiles(): string[] {
   const files: string[] = []
-  const walk = (dir: string): void => {
+  const walk = (dir: string, pattern: RegExp): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'test', 'tests', '.git'].includes(entry.name)) continue
       const path = join(dir, entry.name)
-      if (entry.isDirectory()) walk(path)
-      else if (/\.(ts|json)$/.test(entry.name)) files.push(path)
+      if (entry.isDirectory()) walk(path, pattern)
+      else if (pattern.test(entry.name)) files.push(relative(checkoutRoot, path))
     }
   }
-  walk(emxRoot)
-  files.push(join(checkoutRoot, 'bin', 'emx'))
+  walk(emxRoot, /\.(ts|json)$/)
+  walk(join(checkoutRoot, 'lisp/agent/backend/dsh'), /\.(mjs|yml)$/)
+  files.push('bin/emx')
+  return files.sort()
+}
+
+/** Host state is stable across content-addressed code installations. */
+export function clientPaths(id: string): { socket: string, varDir: string } {
+  if (!/^[a-f0-9]{16,40}$/.test(id)) throw new Error('--client requires a 16..40 digit lowercase hex id')
+  const base = join(homedir(), '.cache/emacs-agent/emx')
+  let socket = join(base, 'run', id + '.sock')
+  if (Buffer.byteLength(socket) > MAX_SOCKET) {
+    const uid = process.getuid!()
+    const fallback = `/tmp/emx-${uid}`
+    let dir = process.env.XDG_RUNTIME_DIR || fallback
+    const name = createHash('sha256').update(id).digest('hex').slice(0, 24) + '.sock'
+    if (Buffer.byteLength(join(dir, name)) > MAX_SOCKET) dir = fallback
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const stat = lstatSync(dir)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o777) !== 0o700) {
+      throw new Error('Socket directory must be private, owned by us and not a symlink')
+    }
+    socket = join(dir, name)
+  }
+  return { socket, varDir: join(base, 'state', id) }
+}
+
+let version: string | undefined
+
+/** Hash exactly the installed runtime, including dsh plugins and configuration. */
+export function codeVersion(): string {
+  if (version !== undefined) return version
   const hash = createHash('sha1')
-  for (const file of files.sort()) {
-    hash.update(relative(checkoutRoot, file)).update('\0').update(readFileSync(file)).update('\0')
+  for (const file of runtimeFiles()) {
+    hash.update(file).update('\0').update(readFileSync(join(checkoutRoot, file))).update('\0')
   }
   version = hash.digest('hex').slice(0, 16)
   return version
