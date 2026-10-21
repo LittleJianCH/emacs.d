@@ -23,7 +23,7 @@ test('config validates defaults and rejects malformed policy with a field path',
     { collab: { typo: true } }, { agents: { claude: { executable: '' } } }]) {
     assert.throws(() => validate(merge(defaults(), patch)), /config\./)
   }
-  for (const key of ['startSummary', 'forkAgents']) {
+  for (const key of ['startSummary', 'forkAgents', 'failedReply', 'replyError', 'partialReply']) {
     const c = defaults()
     delete c.collab.prompts[key]
     assert.throws(() => validate(c), { message: `config.collab.prompts.${key}: expected string` })

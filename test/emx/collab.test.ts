@@ -11,6 +11,7 @@ import { checkoutRoot, emxRoot } from '../../emx/daemon/paths.ts'
 import { DaemonServer } from '../../emx/daemon/server.ts'
 import { SocketClient } from './client.ts'
 import type { Config } from '../../emx/config.ts'
+import type { Notice } from '../../emx/daemon/protocol.ts'
 
 const defaults = (): Config => JSON.parse(readFileSync(join(emxRoot, 'config.json'), 'utf8'))
 const signal = () => new AbortController().signal
@@ -129,6 +130,87 @@ test('every daemon collaboration tool works; origin and hidden notes survive sep
     assert.match(user.text, /\n\n---\n\n/)
     assert.ok(!user.text.includes('delivered by Emacs'))
     assert.match((parent.blocks.at(-1) as any).text, /delivered by Emacs; not from the user/)
+  } finally { await t.cleanup() }
+})
+const balanceError: Notice = { kind: 'backend-error', level: 'error', args: { message: 'Insufficient Balance (request_id: test)' } }
+const partialOutput = 'Now I have the authoritative encoding rule. Let me make the edits.'
+const failureCases: { name: string, texts: string[], notices: Notice[], body: string, exited?: boolean }[] = [
+  { name: 'partial output then duplicate errors', texts: [partialOutput], notices: [balanceError, balanceError],
+    body: 'The turn failed:\nbackend-error: Insufficient Balance (request_id: test)\n\nPartial output written before the failure:\n' + partialOutput },
+  { name: 'error without output', texts: [], notices: [balanceError],
+    body: 'The turn failed:\nbackend-error: Insufficient Balance (request_id: test)' },
+  { name: 'max-tokens without a message', texts: [], notices: [{ kind: 'max-tokens', level: 'error' }],
+    body: 'The turn failed:\nmax-tokens' },
+  { name: 'successful output stays unchanged', texts: ['Earlier text', 'Finished'],
+    notices: [{ kind: 'backend-warning', level: 'warning', args: { message: 'Warning only' } }], body: 'Finished' },
+  { name: 'successful empty output stays unchanged', texts: [], notices: [], body: '(no reply)' },
+  { name: 'exited failure keeps its suffix', texts: [partialOutput], notices: [balanceError], exited: true,
+    body: 'The turn failed:\nbackend-error: Insufficient Balance (request_id: test)\n\nPartial output written before the failure:\n' + partialOutput },
+  { name: 'all partial output and distinct errors', texts: ['First partial paragraph.', partialOutput],
+    notices: [balanceError, { kind: 'max-tokens', level: 'error' }, balanceError],
+    body: 'The turn failed:\nbackend-error: Insufficient Balance (request_id: test)\nmax-tokens\n\nPartial output written before the failure:\nFirst partial paragraph.\n\n' + partialOutput },
+]
+for (const method of ['session_start', 'session_ask']) for (const c of failureCases) {
+  test(`${method} reply: ${c.name}`, async () => {
+    const t = setup()
+    try {
+      const parent = t.create(); await parent.start(); parent.setStatus('running')
+      let target: Session
+      const prepare = async (s: Session) => {
+        target = s
+        s.addBlock({ id: 'old-user', type: 'user', text: 'Previous turn' })
+        s.addBlock({ id: 'old-error', type: 'notice', notice: { kind: 'old-error', level: 'error' } })
+        // Use the echo session with a deterministic failed/successful backend turn.
+        s.backend.send = (text, _images, block) => {
+          s.setStatus('running')
+          s.addBlock({ id: block!, type: 'user', text })
+          s.addBlock({ id: 'thinking', type: 'text', kind: 'thinking', text: 'Private reasoning', done: true })
+          for (const [i, text] of c.texts.entries()) s.addBlock({ id: `partial-${i}`, type: 'text', kind: 'assistant', text, done: true })
+          for (const [i, notice] of c.notices.entries()) s.addBlock({ id: `notice-${i}`, type: 'notice', notice })
+          s.setStatus(c.exited ? 'exited' : 'idle')
+        }
+      }
+      if (method === 'session_start') {
+        t.collab.host.view = prepare
+        await t.collab.call(parent, method, { profile: 'echo', handle: 'worker', prompt: 'task' }, signal())
+      } else {
+        const peer = t.create('echo', t.dir, {}, { handle: 'worker' }); await peer.start()
+        await prepare(peer)
+        await t.collab.call(parent, method, { session: '@worker', prompt: 'task' }, signal())
+      }
+      await until(() => !!t.collab.mailbox.get(parent.id)?.length)
+      const reply = t.collab.mailbox.get(parent.id)![0].text
+      const followup = method === 'session_start' ? 'It takes no follow-ups; for more work, start another session.'
+        : 'Follow up with session_ask session=@worker; see what it did with session_read.'
+      assert.equal(reply, `Reply from "@worker" (Echo)${c.exited ? ', which then exited' : ''}:\n\n${c.body}\n\n${followup}`)
+      if (c.notices.some((n) => n.level === 'error')) {
+        assert.doesNotMatch(reply, /\(no reply\)/)
+        assert.ok(t.sessions.has(target!.id), 'failed sessions remain open')
+      }
+    } finally { await t.cleanup() }
+  })
+}
+test('failure prompts are configurable and long failure replies keep the existing clipping and full file', async () => {
+  const t = setup()
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    const child = t.create('echo', t.dir, {}, { handle: 'worker', parent: parent.id }); await child.start()
+    t.config.collab.prompts.failedReply = 'FAILED: %s'
+    t.config.collab.prompts.replyError = '[%s] %s'
+    t.config.collab.prompts.partialReply = '\n\nPARTIAL: %s'
+    const message = '😀'.repeat(100), partial = 'Partial text. '.repeat(20)
+    const full = `FAILED: [backend-error] ${message}\n\nPARTIAL: ${partial.trim()}`
+    t.config.collab.replyLimit = 80
+    child.addBlock({ id: 'task', type: 'user', text: 'task' })
+    child.addBlock({ id: 'partial', type: 'text', kind: 'assistant', text: partial, done: true })
+    for (const id of ['error-1', 'error-2']) child.addBlock({ id, type: 'notice', notice: { kind: 'backend-error', level: 'error', args: { message } } })
+    t.collab.pending.push({ target: child.id, asker: parent.id, block: 'task' })
+    await t.collab.settle()
+    const reply = t.collab.mailbox.get(parent.id)![0].text
+    assert.ok(reply.includes([...full].slice(0, 80).join('') + `\n… (${[...full].length - 80} more characters)`))
+    const file = reply.match(/Full reply: (.+) \(read it with your file tools\)\./)![1]
+    assert.equal(readFileSync(file, 'utf8'), full)
+    assert.ok(t.sessions.has(child.id))
   } finally { await t.cleanup() }
 })
 test('child restrictions, mode cap, naming collisions, stop ownership, visibility and maxActive', async () => {

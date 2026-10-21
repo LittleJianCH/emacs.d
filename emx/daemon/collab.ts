@@ -455,7 +455,18 @@ export class Collaboration {
         const turn = target && turns(target).find((t) => t[0].id === entry.block)
         const text = turn?.findLast((b) => b.type === 'text' && b.kind !== 'thinking') as Extract<Block, {type: 'text'}> | undefined
         const handle = target ? this.#handle(target) : entry.handle ?? entry.target
-        let reply = target ? this.#replyText(handle, text?.text ?? '(no reply)') : ''
+        const errors = (turn ?? []).filter((b): b is Extract<Block, {type: 'notice'}> => b.type === 'notice' && b.notice.level === 'error')
+        let body = text?.text ?? '(no reply)'
+        if (errors.length) {
+          const messages = [...new Set(errors.map(({ notice }) => {
+            const message = String(notice.args?.message ?? '').trim()
+            return message ? this.#prompt('replyError', notice.kind, message) : notice.kind
+          }))]
+          const partial = (turn ?? []).filter((b): b is Extract<Block, {type: 'text'}> => b.type === 'text' && b.kind !== 'thinking')
+            .map((b) => b.text.trim()).filter(Boolean).join('\n\n')
+          body = this.#prompt('failedReply', messages.join('\n')) + (partial ? this.#prompt('partialReply', partial) : '')
+        }
+        let reply = target ? this.#replyText(handle, body) : ''
         const tools = (turn ?? []).filter((b): b is Extract<Block, {type: 'tool'}> => b.type === 'tool').map(toolLine)
         const summary = tools.length ? 'What it did:\n' + tools.slice(0, 12).join('\n') + (tools.length > 12 ? `\n- … ${tools.length - 12} more` : '') + '\n\n' : ''
         reply = target ? this.#prompt('reply', handle, this.#title(target), target.status === 'exited' ? ', which then exited' : '', reply,
@@ -464,7 +475,7 @@ export class Collaboration {
         else this.mailbox.set(asker!.id, [...this.mailbox.get(asker!.id) ?? [], { handle, text: reply }])
         this.save()
         if (asker && target?.info.parent === asker.id && target.status === 'idle' && this.config.collab.closeFinished
-          && !turn?.some((b) => b.type === 'notice' && b.notice.level === 'error') && !await this.host.visible(target)) {
+          && !errors.length && !await this.host.visible(target)) {
           await this.host.close(target)
         }
       }
