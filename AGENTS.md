@@ -42,7 +42,7 @@ lisp/agent/              shared agent support (see below)
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  Node bridge: CLI, MCP server and daemon entry
-emx/                     the emx daemon (TypeScript run by Node directly): protocol, sessions, backends
+emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
   backends/dsh.ts         local dsh bridge peer, enabled by agent-emx-agents
   usage/                 ledger, quotas, forecasts, polls and live turn accounting
   mcp.ts                 daemon-only stdio MCP client (EMX_DAEMON_SOCKET opt-in)
@@ -144,7 +144,7 @@ var/                     runtime state (history, backups, pasted images...); git
   `~/.dsh/.credentials.yaml`; never pass it through the environment.
 - `agent-emx-remote.el` — opted-in remote agents run under a content-addressed
   host daemon, connected over a private `ssh -L` ControlMaster forward. Node
-  >= 22.18 is checked with the existing program lookup. Timers only recreate
+  18.17+ (or 20.3+) is checked with the existing program lookup. Timers only recreate
   local forwards to remembered sockets on connected hosts; ensure, staged
   runtime verification, root expansion, skills and image uploads need user action.
   Each host session gets its root's direnv environment, matching tramp-rpc; editor calls map host paths, config tools use the
@@ -302,7 +302,7 @@ cannot take over the editor connection. See doc/emx-daemon.md for the contract.
 
 Run from the repo root.
 
-Tests (ERT, 277 tests, about half a minute). They exercise the native Emacs keys, so turn
+Tests (ERT, 290 tests, about half a minute). They exercise the native Emacs keys, so turn
 evil off first (it is on by default and its normal state would eat typed keys):
 
 ```sh
@@ -338,10 +338,30 @@ with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macr
 lisp/agent/backend/dsh/emacs-bridge.mjs` for the dsh plugin. The usage tests moved
 to `test/emx/usage*.test.ts`, retaining `test/fixtures/usage/`.
 
-The emx daemon is checked with `tsc -p emx` (needs `npm install --prefix emx` once for
-`@types/node`) and `node --test test/emx/ test/emx-mcp-test.js`. Its tests run
-daemons only on temp var dirs, never the default one. Quota poll tests use only fake CLIs; batch
-Emacs integration tests bind `agent-usage-poll-interval` to 0.
+Install the pinned local build tools with `npm install --prefix emx`. Build and
+check the daemon from the checkout (never use a global `tsc`):
+
+```sh
+npm install --prefix emx
+node bin/emx daemon --manifest              # build on demand and print host manifest
+emx/node_modules/.bin/tsc -p emx             # noEmit, includes test/emx
+node --test test/emx/ test/emx-mcp-test.js
+```
+
+`emx/tsconfig.build.json` emits ESM ES2022 JavaScript with rewritten `.js`
+imports. `bin/emx` invokes the local compiler into a temporary tree, copies
+`config.json` and adds an ESM package marker, then atomically switches
+`emx/dist` to a complete immutable generation (`emx/.dist-build-*`). A source
+stamp skips unchanged builds; competing builders wait under a lock, and a
+failed compile leaves dist intact. Dist and generations are generated and
+git-ignored. Keep old generations while processes may still import them;
+they can be removed once those processes have exited. Hosts receive only the
+manifest's dist files, `bin/emx` and dsh plugins, and never need build tools.
+Node 18.17+ (or 20.3+) is required by `AbortSignal.any`; tests themselves use
+this machine's Node with type stripping. Set `EMX_NODE_MIN=/path/to/node`
+to exercise the source-free runtime with the minimum Node binary. Tests run
+daemons only on temp var dirs, never the default one. Quota poll tests use only
+fake CLIs; batch Emacs integration tests bind `agent-usage-poll-interval` to 0.
 
 Add or update a regression test for every bug fix and UI behavior change. Tests that
 need the Claude/Codex backends should exercise their pure functions (as the sync and

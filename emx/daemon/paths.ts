@@ -3,14 +3,22 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/** The emx/ directory of this checkout. */
+/** Runtime root: emx/ in source tests, emx/dist (or its generation) when built. */
 export const emxRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** The checkout this daemon's code belongs to. */
-export const checkoutRoot = resolve(emxRoot, '..')
+export const checkoutRoot = resolve(emxRoot, import.meta.url.endsWith('.ts') ? '..' : '../..')
+
+/** The built tree whose bytes this process imports (immutable in a checkout). */
+const runtimeRoot = import.meta.url.endsWith('.ts') ? join(emxRoot, 'dist') : emxRoot
+
+/** Read an installed runtime path from this process's own generation. */
+export function runtimePath(file: string): string {
+  return file.startsWith('emx/dist/') ? join(runtimeRoot, file.slice('emx/dist/'.length)) : join(checkoutRoot, file)
+}
 
 /** The checkout's runtime directory, the default for --var. */
 export const defaultVar = join(checkoutRoot, 'var')
@@ -38,16 +46,16 @@ export function socketPath(varDir: string): string {
 /** Runtime files shared by the installer and code hash; never development trees. */
 export function runtimeFiles(): string[] {
   const files: string[] = []
-  const walk = (dir: string, pattern: RegExp): void => {
+  const walk = (dir: string, prefix: string, pattern: RegExp): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (['node_modules', 'test', 'tests', '.git'].includes(entry.name)) continue
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) walk(path, pattern)
-      else if (pattern.test(entry.name)) files.push(relative(checkoutRoot, path))
+      const file = join(prefix, entry.name)
+      if (entry.isDirectory()) walk(join(dir, entry.name), file, pattern)
+      else if (pattern.test(entry.name)) files.push(file)
     }
   }
-  walk(emxRoot, /\.(ts|json)$/)
-  walk(join(checkoutRoot, 'lisp/agent/backend/dsh'), /\.(mjs|yml)$/)
+  walk(runtimeRoot, 'emx/dist', /\.(js|json)$/)
+  const dsh = 'lisp/agent/backend/dsh'
+  walk(join(checkoutRoot, dsh), dsh, /\.(mjs|yml)$/)
   files.push('bin/emx')
   return files.sort()
 }
@@ -80,7 +88,7 @@ export function codeVersion(): string {
   if (version !== undefined) return version
   const hash = createHash('sha1')
   for (const file of runtimeFiles()) {
-    hash.update(file).update('\0').update(readFileSync(join(checkoutRoot, file))).update('\0')
+    hash.update(file).update('\0').update(readFileSync(runtimePath(file))).update('\0')
   }
   version = hash.digest('hex').slice(0, 16)
   return version

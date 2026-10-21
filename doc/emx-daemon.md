@@ -39,12 +39,18 @@ built for it), changing how sessions look, moving canvas or review UI.
 - **Agent configuration is emx's.** Agents, profiles (roles), start
   guidance, limits and approval policy move from `agent-collab-profiles`
   and friends into an emx config file.
-- **TypeScript, run by Node directly.** Node strips the types itself
-  (22.18 and later), so there is no build step; only erasable syntax (no
-  `enum`, `namespace` or parameter properties). `tsc --noEmit` joins the
-  checks, with `@types/node` as the only development dependency
-  (`emx/package.json`, `emx/node_modules/` ignored). `bin/emx` and the
-  dsh plugin remain JavaScript. Usage is now TypeScript under `emx/usage/`; the plugin runs inside dsh and stays JavaScript.
+- **TypeScript, compiled to dist.** A pinned local TypeScript compiler
+  (`npm install --prefix emx`) emits ESM JavaScript into generated, ignored
+  `emx/dist/`, mirroring `emx/`. The build targets ES2022, rewrites `.ts`
+  imports to `.js`, and keeps `erasableSyntaxOnly`. `config.json` is copied
+  into dist alongside a minimal `package.json` declaring ESM. The check-only
+  `emx/node_modules/.bin/tsc -p emx` still covers the TypeScript tests too;
+  tests can run directly with this machine's newer Node. `bin/emx` and the
+  dsh plugin remain JavaScript. Runtime Node is 18.17+ (or 20.3+):
+  `AbortSignal.any` is the limiting API; `structuredClone`, `Array.at`,
+  `findLast`, `Object.hasOwn`, `randomUUID` and promise timers are older.
+  See the [Node 18.17 release notes](https://nodejs.org/en/blog/release/v18.17.0).
+  Node 19 and Node 20.0–20.2 lack that API and are rejected.
 - **A daemon on every host.** A remote project's agents run under a daemon
   on that host, which Emacs attaches to like the local one (see Remote
   projects). It replaces the keeper and the MCP relay.
@@ -83,7 +89,22 @@ built for it), changing how sessions look, moving canvas or review UI.
   Children keep theirs too: Claude's and Codex's save no transcript
   (`--no-session-persistence`, ephemeral threads), so they can't resume,
   and no child is hibernated; they close when done anyway.
-- **Stale code:** a daemon reports the hash of the code it runs on
+- **Build before entry:** `bin/emx` imports only compiled `.js`, for both
+  daemon and daemon-backed MCP commands. In a checkout it hashes source
+  paths, contents and mtimes (`emx/**/*.ts`, config, tsconfigs, package
+  manifests and the entry itself). An unchanged stamp avoids the compiler.
+  A hard-link owner lock serializes builders, including recovery after a
+  dead owner; the second process rechecks the stamp after waiting. A build
+  goes into `emx/.dist-stage-*`; errors are printed and leave the previous
+  runtime intact. Edits during compilation cause a retry. A successful tree
+  becomes an immutable `.dist-build-*` generation, and renaming a temporary
+  symlink over `emx/dist` publishes it atomically. Old generations remain for
+  processes/imports already using them; remove them after those processes
+  exit. Config defaults take effect after the next build/daemon restart.
+  A host install has no sources and simply imports dist, with no build step.
+  Build explicitly with `node bin/emx daemon --manifest`; check with
+  `emx/node_modules/.bin/tsc -p emx`.
+- **Stale code:** a daemon reports the hash of the built runtime it runs on
   `hello`. When the client's differs, a daemon with no live agent restarts
   at once; otherwise the client says so and the daemon restarts once every
   agent is idle, hibernating them first. Current implementation: `--ensure`
@@ -541,15 +562,20 @@ The daemon's code is copied to the host content-addressed:
 `~/.cache/emacs-agent/emx/<hash>/`, the hash being the one `hello`
 reports, so a copy is made once per version and several versions can
 coexist (as the dsh plugin is copied today). `daemon --manifest` returns
-this version, runtime paths, byte sizes and SHA-256 hashes: TypeScript/JSON under `emx/`, `bin/emx`,
-and the dsh `.mjs`/`.yml` files. `node_modules` and tests are excluded.
+this version, runtime paths, byte sizes and SHA-256 hashes: JavaScript/JSON
+under `emx/dist/`, `bin/emx`, and the dsh `.mjs`/`.yml` files. Sources,
+tsconfigs, dependency manifests, build stamps, `node_modules` and tests are
+excluded (dist's minimal ESM package marker is included). The version hashes
+exactly these paths and bytes; source mtimes or erased comments can rebuild
+without changing the runtime version. Each process reads its own immutable
+generation when hashing; installed and local manifests agree. Hosts never
+compile or install npm dependencies.
 On user action, Emacs copies through the file handler into a unique private
 staging directory beside the target, verifies every size and hash, and writes
 `.complete` containing the version. An atomic rename publishes the directory;
 a concurrent completed publication wins and the staging copy is removed.
 Ensure checks the marker's contents. A failed ensure repairs the installation
-and retries once, on the user-triggered path only. The host needs Node 22.18 or
-later, checked in the same single round trip that looks up the agent
+and retries once, on the user-triggered path only. The host needs Node 18.17+ or 20.3+, checked in the same single round trip that looks up the agent
 programs when a remote session opens (`agent-session-check-programs`);
 python3 is no longer needed. The agents' credentials stay the host's own,
 as today.
@@ -731,7 +757,9 @@ emx/usage/               ledger, quota polls, forecasts and turn accounting
 emx/remote/              durable host usage outbox
 lisp/agent/backend/dsh/  the dsh plugin, unchanged in place
 test/emx/                node --test suites, with fake CLIs
-emx/package.json         @types/node for tsc -p emx
+emx/package.json         pinned local TypeScript and Node types
+emx/tsconfig.build.json   ESM build with rewritten imports
+emx/dist/                generated runtime, only this tree is shipped
 ```
 
 ## Migration
@@ -886,7 +914,7 @@ checks actual tramp-rpc/sshd without model calls.
 
 1. In isolated Emacs open `/rpc:HOST:/TEST/PROJECT/`, call
    `agent-session-check-programs`, and inspect the cached `:node` value.
-   It must be >= 22.18 and lookup must issue only one `process-file`.
+   It must be 18.17+ (or 20.3+) and lookup must issue only one `process-file`.
 2. Through that file handler install the runtime, then run on the host:
    `node ~/.cache/emacs-agent/emx/VERSION/bin/emx daemon --client ID --ensure`.
    Check the JSON version/socket, a second ensure's identical pid, and
@@ -974,3 +1002,40 @@ failures. In particular, the old usage cache replay wrote 20,002 records from
 The existing Node-warning ensure parser fix remains intact. The proposed
 real-host check above is still needed for actual tramp direnv behavior, atomic
 file-handler renames, stream-local forwarding and ControlMaster replacement.
+
+### Compiled runtime verification (2026-10-20)
+
+All work ran in this worktree. Daemons used temporary `--var` and HOME;
+model commands were fixtures and collaboration naming was disabled in the
+new build fixtures. No real host, model, default Emacs daemon/server or
+reload was used.
+
+- `npm install --prefix emx`: pinned TypeScript 7.0.2 installed; zero audit
+  vulnerabilities. Both `emx/node_modules/.bin/tsc -p emx` and bridge/plugin
+  `node --check` commands passed.
+- Removed dist in this worktree: first ensure built and started in 0.461 s;
+  the second retained both PID and generation. Touching a source followed by
+  two concurrent ensure calls produced exactly one generation; the unchanged
+  runtime version retained the idle daemon. The isolated daemon stopped cleanly.
+- Build regressions also cover a dead build-lock owner, compiler errors
+  retaining the previous generation, source-only comments retaining the
+  runtime hash, emitted code/config changing it, and source-free host installs.
+- `EMX_NODE_MIN=/path/to/node-v18.17.0 node --test test/emx/ test/emx-mcp-test.js`:
+  164 passed, zero failures/skips. The official Node 18.17.0 macOS arm64 binary
+  loaded every emitted module and ran a source-free daemon, configuration,
+  echo session and stdio MCP. The static target/API inventory runs even when
+  `EMX_NODE_MIN` is absent. The Node guard also rejects 18.16, 19 and 20.0–20.2.
+- Full AGENTS ERT, including remote tests and shared `package-user-dir`:
+  290 total, 289 passed, zero unexpected, one existing environment skip
+  (`init-base-scroll-with-point`). Evil off/on byte compilation passed with
+  only the two known Agda slot warnings in each mode.
+- Keeper and relay Python suites passed with temporary HOME; `git diff --check`
+  was clean.
+
+No-op cost on this machine (Node 26.9.0): after one warm build, 100 sequential
+calls to the entry's exported `ensureBuild()` had median 0.81 ms, P95 1.09 ms.
+Twenty fresh `node bin/emx daemon --manifest` processes had median 109 ms,
+P95 143 ms including Node startup, module imports and manifest hashing.
+Only the source freshness check is on the no-op build path; no compiler is
+started. Old immutable generations are deliberately retained until processes
+using them have exited.

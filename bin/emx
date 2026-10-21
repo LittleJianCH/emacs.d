@@ -23,29 +23,130 @@
 
 'use strict';
 
-// Node before 24 calls type stripping experimental and warns about it on
-// every run of the daemon's TypeScript.  On a host that line went into the
-// output of `emx daemon --ensure`, which Emacs parses as JSON.  Drop that
-// warning only; the others are printed as usual.
-{
-  const listeners = process.listeners('warning');
-  process.removeAllListeners('warning');
-  process.on('warning', (warning) => {
-    if (warning.name === 'ExperimentalWarning' && /type stripping/i.test(warning.message)) return;
-    for (const listener of listeners) listener(warning);
-  });
-}
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const { createHash, randomUUID } = require('node:crypto');
 
 const EMACSCLIENT = process.env.EMX_EMACSCLIENT || 'emacsclient';
 const VERSION = '0.1.0';
 // The Emacs configuration checkout this emx belongs to.
 const CONFIG_DIR = path.resolve(__dirname, '..');
 const REMOTE_AGENT = process.env.EMX_REMOTE_AGENT === '1';
+
+// A host install has only dist, bin/emx and the dsh plugin: never build there.
+// Immutable generations keep imports in flight and existing daemons on one build.
+const EMX_DIR = path.join(CONFIG_DIR, 'emx');
+const DIST = path.join(EMX_DIR, 'dist');
+const BUILD_LOCK = path.join(EMX_DIR, '.dist-lock');
+
+function sourceStamp() {
+  const hash = createHash('sha256');
+  const add = (file) => {
+    const stat = fs.statSync(file);
+    hash.update(path.relative(EMX_DIR, file)).update('\0')
+      .update(String(stat.mtimeMs)).update('\0').update(fs.readFileSync(file)).update('\0');
+  };
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name.startsWith('.dist-')) continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else if (entry.name.endsWith('.ts')) add(file);
+    }
+  };
+  walk(EMX_DIR);
+  for (const file of ['config.json', 'tsconfig.json', 'tsconfig.build.json', 'package.json', 'package-lock.json']) {
+    add(path.join(EMX_DIR, file));
+  }
+  add(__filename);
+  return hash.digest('hex');
+}
+
+function built(stamp) {
+  try { return fs.readFileSync(path.join(DIST, '.build-stamp'), 'utf8') === stamp; }
+  catch { return false; }
+}
+
+async function buildLock() {
+  // Publish a complete owner record, so a killed builder cannot strand waiters.
+  const owner = path.join(EMX_DIR, `.dist-owner-${process.pid}-${randomUUID()}`);
+  fs.writeFileSync(owner, String(process.pid), { flag: 'wx', mode: 0o600 });
+  const deadline = Date.now() + 120000;
+  try {
+    for (;;) {
+      try {
+        fs.linkSync(owner, BUILD_LOCK);
+        return () => {
+          if (fs.readFileSync(BUILD_LOCK, 'utf8') === String(process.pid)) fs.unlinkSync(BUILD_LOCK);
+        };
+      } catch (error) { if (error.code !== 'EEXIST') throw error; }
+      const reclaim = BUILD_LOCK + '.reclaim';
+      let claiming = false;
+      try {
+        fs.mkdirSync(reclaim);
+        claiming = true;
+        // Re-read under the reclaim mutex: another waiter may now own the lock.
+        const pid = Number(fs.readFileSync(BUILD_LOCK, 'utf8'));
+        if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid emx build lock owner');
+        try { process.kill(pid, 0); }
+        catch (error) {
+          if (error.code === 'ESRCH') fs.unlinkSync(BUILD_LOCK);
+          else if (error.code !== 'EPERM') throw error;
+        }
+      } catch (error) {
+        if (error.code === 'EEXIST') {
+          // A killed reclaimer leaves an empty directory; its critical section
+          // never waits or invokes the compiler.
+          try {
+            if (Date.now() - fs.statSync(reclaim).mtimeMs > 10000) fs.rmdirSync(reclaim);
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        } else if (error.code !== 'ENOENT') throw error;
+      } finally { if (claiming) fs.rmdirSync(reclaim); }
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for the emx build lock');
+      await sleep(25);
+    }
+  } finally { fs.unlinkSync(owner); }
+}
+
+async function ensureBuild() {
+  if (!fs.existsSync(path.join(EMX_DIR, 'daemon/main.ts'))) return;
+  if (built(sourceStamp())) return;
+  const release = await buildLock();
+  try {
+    for (;;) {
+      const stamp = sourceStamp();
+      if (built(stamp)) return;
+      const temp = fs.mkdtempSync(path.join(EMX_DIR, '.dist-stage-'));
+      const link = temp + '.link';
+      try {
+        const compiler = path.join(EMX_DIR, 'node_modules/.bin/tsc');
+        if (!fs.existsSync(compiler)) throw new Error('Install build tools first: npm install --prefix emx');
+        const result = spawnSync(compiler, ['-p', path.join(EMX_DIR, 'tsconfig.build.json'), '--outDir', temp],
+          { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+        if (result.stdout) process.stderr.write(result.stdout);
+        if (result.stderr) process.stderr.write(result.stderr);
+        if (result.error) throw result.error;
+        if (result.status !== 0) throw new Error(`emx build failed (${result.status ?? result.signal})`);
+        fs.copyFileSync(path.join(EMX_DIR, 'config.json'), path.join(temp, 'config.json'));
+        fs.writeFileSync(path.join(temp, 'package.json'), '{"type":"module"}\n');
+        // Edits during compilation must not bless a mixed generation as current.
+        if (sourceStamp() !== stamp) continue;
+        fs.writeFileSync(path.join(temp, '.build-stamp'), stamp);
+        const generation = temp.replace('.dist-stage-', '.dist-build-');
+        fs.renameSync(temp, generation);
+        fs.symlinkSync(path.basename(generation), link);
+        fs.renameSync(link, DIST);
+        return;
+      } finally {
+        fs.rmSync(link, { force: true });
+        fs.rmSync(temp, { recursive: true, force: true });
+      }
+    }
+  } finally { release(); }
+}
 
 // Maps positional arguments to parameter names; other parameters use --key value.
 const POSITIONAL = {
@@ -467,9 +568,13 @@ function mcpServer() {
 
 async function main() {
   const [method, ...rest] = process.argv.slice(2);
-  if (method === 'daemon') return import('../emx/daemon/main.ts').then((m) => m.main(rest));
+  if (method === 'daemon') {
+    await ensureBuild();
+    return import('../emx/dist/daemon/main.js').then((m) => m.main(rest));
+  }
   if (method === 'mcp' && process.env.EMX_DAEMON_SOCKET) {
-    return import('../emx/mcp.ts').then((m) => m.serve(MCP_HEAD + MCP_BODY, VERSION));
+    await ensureBuild();
+    return import('../emx/dist/mcp.js').then((m) => m.serve(MCP_HEAD + MCP_BODY, VERSION));
   }
   if (method === 'mcp') return mcpServer();
   // The usage service needs no Emacs: it never goes through request().
@@ -480,7 +585,9 @@ async function main() {
   console.log(render(await invoke(method, parseArgs(method, rest))));
 }
 
-main().catch((err) => {
+module.exports = { ensureBuild };
+
+if (require.main === module) main().catch((err) => {
   console.error(`emx: ${err.message}`);
   process.exit(1);
 });

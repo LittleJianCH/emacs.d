@@ -4,7 +4,6 @@ import { spawn } from 'node:child_process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { once } from 'node:events'
 import { isAbsolute, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { checkoutRoot } from '../daemon/paths.ts'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -16,8 +15,8 @@ export const testedVersion = '0.2.0-rc.2'
 export const presets: Record<string, string> = {
   ask: 'read-only', edits: 'workspace-write', auto: 'auto', full: 'danger-full-access',
 }
-const patch = fileURLToPath(new URL('../../lisp/agent/backend/dsh/emacs.yml', import.meta.url))
-const noSubagents = fileURLToPath(new URL('../../lisp/agent/backend/dsh/no-subagents.yml', import.meta.url))
+const patch = join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')
+const noSubagents = join(checkoutRoot, 'lisp/agent/backend/dsh/no-subagents.yml')
 const quiet = new Set(['todo_write', 'exit_plan_mode', 'write', 'edit'])
 
 /** Match the Lisp display diff, including the absence of trailing empty lines. */

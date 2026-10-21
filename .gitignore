@@ -12,3 +12,7 @@
 
 # emx daemon development dependencies
 /emx/node_modules/
+
+# Generated emx runtime and immutable build generations
+/emx/dist
+/emx/.dist-*

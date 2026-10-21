@@ -1,8 +1,9 @@
 {
   "private": true,
-  "description": "Development types for the emx daemon.",
+  "description": "Build tooling for the emx daemon.",
   "type": "module",
   "devDependencies": {
-    "@types/node": "^26.6.5"
+    "@types/node": "^26.6.5",
+    "typescript": "7.0.2"
   }
 }

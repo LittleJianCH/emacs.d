@@ -43,9 +43,9 @@
     (should (funcall predicate))))
 
 (ert-deftest agent-emx-remote-node-and-single-lookup ()
-  (dolist (version '("v22.18.0" "v23.0.0" "v26.9.0"))
+  (dolist (version '("v18.17.0" "v18.20.8" "v20.3.0" "v22.18.0" "v26.9.0"))
     (should (agent-emx-remote--node-p version)))
-  (dolist (version '(nil "v22.17.9" "v20.30.0" "missing" "22.18.0"))
+  (dolist (version '(nil "v18.16.9" "v19.9.0" "v20.2.9" "v16.20.2" "missing" "18.17.0"))
     (should-not (agent-emx-remote--node-p version)))
   (let ((agent-session--remote-programs (make-hash-table :test #'equal))
         (agent-session-agents '((test . (:executable agent-emx-remote-test--executable))))
@@ -357,7 +357,7 @@
           (agent-emx--connections (make-hash-table :test #'equal))
           (agent-session--remote-programs (make-hash-table :test #'equal))
           (connection (agent-emx--make-connection
-                       :place root :remote '(:remote "/host/emx.sock")))
+                       :place root :remote '(:remote "/host/emx.sock" :version "v1")))
           (default-directory root) forwarded connected)
      (setf (agent-session-root session) root
            (agent-session-status session) 'disconnected)
@@ -384,6 +384,8 @@
                ((symbol-function 'agent-emx--connect)
                 (lambda (_ result)
                   (should (equal (plist-get result :socket) "/local/emx.sock"))
+                  ;; hello needs it: a real host refused a versionless hello.
+                  (should (equal (plist-get result :version) "v1"))
                   (setq connected t))))
        (agent-emx-remote--reconnect)
        (should forwarded) (should connected)))))

@@ -7,7 +7,7 @@ import { appendFile, chmod, mkdir } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { clientPaths, codeVersion, checkoutRoot, defaultVar, runtimeFiles, socketPath, stateDir } from './paths.ts'
+import { clientPaths, codeVersion, checkoutRoot, defaultVar, runtimeFiles, runtimePath, socketPath, stateDir } from './paths.ts'
 import type { HelloResult } from './protocol.ts'
 import { Connection } from './rpc.ts'
 import { DaemonServer } from './server.ts'
@@ -176,7 +176,7 @@ async function foreground(opts: Options): Promise<void> {
 export async function main(args: string[]): Promise<void> {
   const opts = options(args)
   if (opts.mode === 'manifest') console.log(JSON.stringify({ version: codeVersion(), files: runtimeFiles(), integrity: runtimeFiles().map((file) => {
-    const bytes = readFileSync(join(checkoutRoot, file))
+    const bytes = readFileSync(runtimePath(file))
     return { file, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
   }) }))
   else if (opts.mode === 'ensure') await ensure(opts)

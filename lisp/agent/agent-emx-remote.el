@@ -31,12 +31,14 @@
 					"\0" (system-name))) 0 16))
 
 (defun agent-emx-remote--node-p (version)
-  "Whether VERSION identifies Node 22.18 or later."
+  "Whether VERSION has the runtime APIs in Node 18.17 / 20.3 and later."
   (and (stringp version)
        (string-match "\\`v\\([0-9]+\\)\\.\\([0-9]+\\)\\." version)
        (let ((major (string-to-number (match-string 1 version)))
              (minor (string-to-number (match-string 2 version))))
-         (or (> major 22) (and (= major 22) (>= minor 18))))))
+         (or (> major 20)
+             (and (= major 20) (>= minor 3))
+             (and (= major 18) (>= minor 17))))))
 
 (defun agent-emx-remote--install (root manifest &optional force)
   "Verify MANIFEST in a private staging directory, then publish atomically.
@@ -145,9 +147,11 @@ Reuse OLD only if the ControlMaster is unchanged.  Return transport data."
               (if agent-emx-remote--automatic
                   (progn
                     (unless (and (agent-session--host-connected-p root)
-                                 (plist-get old :remote))
+                                 (plist-get old :remote) (plist-get old :version))
                       (error "No remembered host socket; reconnect manually"))
-                    (list :socket (plist-get old :remote)))
+                    ;; hello needs the daemon's version: remembered with its
+                    ;; socket, since a timer may not compute the manifest.
+                    (list :socket (plist-get old :remote) :version (plist-get old :version)))
                 (let* ((manifest (agent-emx-remote--manifest))
                        (version (plist-get manifest :version))
                        (relative (concat ".cache/emacs-agent/emx/" version))
@@ -170,7 +174,8 @@ Reuse OLD only if the ControlMaster is unchanged.  Return transport data."
                         value)))))))
         (let ((forward (agent-emx-remote--forward
                         root (plist-get result :socket) old agent-emx-remote--automatic)))
-          (setf (agent-emx--connection-remote connection) forward)
+          (setf (agent-emx--connection-remote connection)
+                (plist-put forward :version (plist-get result :version)))
           (setq result (plist-put result :socket (plist-get forward :socket)))
           ;; The callback below does local socket work only.  No sentinel or
           ;; timer is allowed to enter the synchronous tramp file handler.
@@ -204,7 +209,7 @@ all its project views, since one host daemon has one editor attachment."
                          (puthash key (agent-emx--make-connection :place root)
                                   agent-emx--connections))))
     (unless (agent-emx-remote--node-p node)
-      (error "Remote emx requires Node >= 22.18; program lookup reported %s" node))
+      (error "Remote emx requires Node 18.17+ or >= 20.3; program lookup reported %s" node))
     (if (and (agent-emx--connection-ready connection)
              (process-live-p (agent-emx--connection-process connection)))
         (funcall callback connection)
