@@ -47,7 +47,7 @@ which keeps changing; only entries the tests would add count.")
   (setenv (concat "EMX_" name "_EXECUTABLE") nil)
   (setenv (concat "EMX_" name "_CONFIG") nil))
 (dolist (name '("EMX_CLAUDE_LOG" "EMX_CODEX_LOG" "EMX_DSH_LOG" "EMX_PI_LOG"
-                "EMX_CODEX_BAD_CONFIG" "EMX_CODEX_RESTART_GATE"))
+                "EMX_CODEX_BAD_CONFIG" "EMX_CODEX_RESTART_GATE" "EMX_PI_USAGE_URL"))
   (setenv name nil))
 (setenv "EMX_CLAUDE_PROJECTS_DIR" (expand-file-name "projects" emx-test--var))
 (setenv "EMX_PI_SESSIONS_DIR" (expand-file-name "pi-sessions" emx-test--var))

@@ -861,6 +861,17 @@ Quota pollers are derived from the effective agent executables, not from
 editor-supplied commands: Claude through `claude -p /usage --output-format
 json --no-session-persistence`, Codex through `codex app-server` and
 `account/rateLimits/read`, dsh through its patched bridge and `balance`.
+Pi runs `pi auth print-api-key --provider opencode-go` and uses the trimmed
+key only in memory for a Bearer request to the undocumented
+`https://opencode.ai/zen/go/v1/usage` endpoint (verified 2026-10-21).
+`EMX_PI_USAGE_URL` overrides the URL for local test servers. HTTP requests
+have a 15-second timeout; failures use the same quiet daemon log and backoff
+as missing executables. Keys and response bodies never enter errors or state.
+Its plan is `OpenCode Go`; rolling, weekly and monthly windows show as `5h`,
+`周` and `月`. Non-`ok` status marks a window limited while preserving its used
+fraction. Monthly has no fixed duration (`minutes: null`) and no forecast;
+5h and weekly retain the usual forecasts. The echo line uses its configured
+window labels (by default 5h / weekly); the usage page shows all three.
 Polling settings are persisted in `<var>/emx/usage.json`, so polls continue
 without an editor or across a daemon restart. `usage/configure` carries the
 enabled agent list for display order; it does not override the poller

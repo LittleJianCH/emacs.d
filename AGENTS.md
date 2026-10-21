@@ -46,7 +46,7 @@ bin/emx                  minimal launcher: locate/build dist, import compiled CL
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
   cli/                   argument parsing, help, emacsclient transport, daemon/MCP dispatch
   backends/               Claude, Codex, dsh, Pi protocol adapters and native history
-  usage/                 ledger, quotas, forecasts, polls and live turn accounting
+  usage/                 ledger, quotas (including Pi OpenCode Go), forecasts and live accounting
   mcp.ts                 stdio MCP client (requires daemon socket/session binding)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
@@ -145,6 +145,8 @@ var/                     runtime state (history, backups, pasted images...); git
   `emx/usage/` alone owns turn accounting, ledger writes, quota polls and
   forecasts, including while Emacs is disconnected. Commands come from effective
   agent config and the enabled agent list; `usage.pollInterval` owns cadence.
+  Pi polls OpenCode Go's undocumented usage endpoint using a key obtained
+  from Pi, never persisted: 5h / weekly forecasts, monthly allowance only.
   The editor retains durable pending upgrade entries and the transport used to
   forward acknowledged host usage, plus one-time old-ledger conversion.
   `C-c a u` opens the report; `agent-usage-clear` stays unbound and confirmed.

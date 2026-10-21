@@ -9,6 +9,7 @@ import type { TestContext } from 'node:test'
 import { DaemonServer } from '../../emx/daemon/server.ts'
 import { UsageService, readLedger } from '../../emx/usage/service.ts'
 import { SocketClient } from './client.ts'
+import { piUsageServer } from './fixtures/pi-usage.ts'
 
 async function setup(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'emx-account-'))
@@ -76,8 +77,9 @@ test('detached accounting and process exit flush once; editor requests use the s
 
 test('fake quota poll commands persist and poll without an editor after restart', async (t) => {
   const {daemon, client, dir} = await setup(t)
+  const http = await piUsageServer(t)
   const fixture = new URL('./fixtures/usage-poller.mjs', import.meta.url).pathname
-  const executables = Object.fromEntries(['claude', 'codex', 'dsh'].map((source) => {
+  const executables = Object.fromEntries(['claude', 'codex', 'dsh', 'pi'].map((source) => {
     const file = join(dir, source)
     writeFileSync(file, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)} ${source} "$@"\n`)
     chmodSync(file, 0o700)
@@ -86,16 +88,23 @@ test('fake quota poll commands persist and poll without an editor after restart'
   writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({ agents: executables,
     usage: { pollInterval: 900 }, collab: { handleCommand: [], agentHandleCommands: {} } }))
   await client.request('config/reload', {})
-  await client.request('usage/configure', {agents: ['claude', 'codex', 'dsh']})
+  await client.request('usage/configure', {agents: ['claude', 'codex', 'dsh', 'pi']})
   const pollers = structuredClone(daemon.usage.pollers)
   await daemon.usage.pollAll(true)
   // configure may already have started each source; wait for its quota pushes.
-  for (const source of ['claude', 'codex', 'dsh']) {
+  for (const source of ['claude', 'codex', 'dsh', 'pi']) {
     await client.waitFor((n) => n.method === 'usage/quotas' && n.params.quotas.some((q: any) => q.agent === source))
   }
   assert.equal(daemon.usage.quotas.find((q) => q.agent === 'claude')!.windows[0].used, 0.25)
   assert.equal(daemon.usage.quotas.find((q) => q.agent === 'codex')!.credits, 'unlimited')
   assert.equal(daemon.usage.quotas.find((q) => q.agent === 'dsh')!.balance![0].amount, 9.03)
+  assert.deepEqual(daemon.usage.pollers.pi.command, [executables.pi.executable])
+  const pi = (await client.request('usage/report', {range: 'all'})).quotas.find((q: any) => q.agent === 'pi')
+  assert.ok(pi)
+  assert.equal(pi.plan, 'OpenCode Go')
+  assert.deepEqual(pi.windows.map((w: any) => [w.label, w.used]), [['5h', 0], ['周', 0], ['月', 0]])
+  assert.ok(http.requests.length > 0)
+  assert.ok(!readFileSync(join(dir, 'agent-quota.json'), 'utf8').includes('fake-go-key'))
   await client.close()
   await daemon.stop()
   const stored = JSON.parse(readFileSync(join(dir, 'emx/usage.json'), 'utf8'))
@@ -108,7 +117,7 @@ test('fake quota poll commands persist and poll without an editor after restart'
     assert.equal(restarted.usage.pollInterval, 900)
     assert.ok(restarted.usage.timer)
     await restarted.usage.pollAll(true)
-    assert.equal(restarted.usage.quotas.length, 3)
+    assert.equal(restarted.usage.quotas.length, 4)
     assert.equal(readLedger(join(dir, 'agent-usage.jsonl')).length, 0, 'polling does not charge model usage')
   } finally { await restarted.stop() }
 })

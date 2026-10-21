@@ -16,7 +16,7 @@ for (const name of ['CLAUDE', 'CODEX', 'DSH', 'PI']) {
   delete process.env[`EMX_${name}_CONFIG`]
   delete process.env[`EMX_${name}_LOG`]
 }
-for (const name of ['EMX_CODEX_BAD_CONFIG', 'EMX_CODEX_RESTART_GATE', 'EMX_DAEMON_SOCKET', 'EMX_SESSION']) {
+for (const name of ['EMX_PI_USAGE_URL', 'EMX_CODEX_BAD_CONFIG', 'EMX_CODEX_RESTART_GATE', 'EMX_DAEMON_SOCKET', 'EMX_SESSION']) {
   delete process.env[name]
 }
 process.env.EMX_EMACSCLIENT = '/does-not-exist'

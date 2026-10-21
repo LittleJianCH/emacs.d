@@ -393,7 +393,8 @@ Quotas are kept.  Deliberately bound to no key."
   "Fraction of WINDOW left, or nil once it has reset since it was reported."
   (let ((resets (plist-get window :resets)))
     (unless (and resets (< resets (float-time)))
-      (max 0.0 (- 1.0 (or (plist-get window :used) 0))))))
+      (if (plist-get window :limited) 0.0
+        (max 0.0 (- 1.0 (or (plist-get window :used) 0)))))))
 
 (defun agent-usage--left-face (left)
   "Face of a quota with fraction LEFT."
@@ -687,7 +688,7 @@ Not the selected window's: the page is also redrawn from elsewhere."
   (insert (propertize "额度" 'face 'agent-usage-heading) "\n")
   (let ((quotas (cl-remove-if (lambda (quota) (plist-get quota :duplicate)) quotas)))
     (if (null quotas)
-        (insert (propertize "    还没有额度读数：用一次 Claude、Codex 或 DeepSeek，或等 emx 查一次\n"
+        (insert (propertize "    还没有额度读数：用一次 Claude、Codex、DeepSeek 或 Pi，或等 emx 查一次\n"
                             'face 'agent-session-dim))
       (dolist (quota quotas)
         (insert "  " (propertize (agent-usage--agent-title (plist-get quota :agent)
@@ -700,7 +701,8 @@ Not the selected window's: the page is also redrawn from elsewhere."
           (insert (agent-usage--align-right age) (propertize age 'face 'agent-session-dim) "\n"))
         (mapc #'agent-usage--insert-window
               (cl-sort (copy-sequence (plist-get quota :windows)) #'<
-                       :key (lambda (w) (or (plist-get w :minutes) 0))))
+                       :key (lambda (w) (or (plist-get w :minutes)
+                                            most-positive-fixnum))))
         (dolist (balance (plist-get quota :balance))
           (insert "    余额" (agent-usage--align 12)
                   (propertize (agent-usage-money (plist-get balance :amount)

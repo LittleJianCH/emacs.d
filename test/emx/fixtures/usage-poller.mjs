@@ -3,10 +3,15 @@
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 const source = process.argv[2]
-if (process.argv[3] && !process.argv[3].startsWith('-') && process.argv[3] !== 'app-server') {
+if (source !== 'pi' && process.argv[3] && !process.argv[3].startsWith('-') && process.argv[3] !== 'app-server') {
   appendFileSync(process.argv[3], source + '\n')
 }
-if (source === 'claude') {
+if (source === 'pi') {
+  if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(['auth', 'print-api-key', '--provider', 'opencode-go'])) {
+    throw new Error('Unexpected Pi quota arguments')
+  }
+  process.stdout.write('  fake-go-key\n')
+} else if (source === 'claude') {
   console.log(JSON.stringify({result: 'Current session: 25% used'}))
 } else {
   createInterface({input: process.stdin}).on('line', (line) => {

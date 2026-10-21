@@ -575,6 +575,25 @@ function capture(spawn: Spawn, command: string[], timeout = POLL_TIMEOUT): Promi
   });
 }
 
+// OpenCode Go's undocumented usage endpoint (verified 2026-10-21).
+function piReading(body: Json): QuotaReading {
+  const windows = ([
+    ['rolling', '300', 300],
+    ['weekly', '10080', 10080],
+    ['monthly', 'monthly', null],
+  ] as const).map(([key, id, minutes]) => {
+    const window = body?.usage?.[key];
+    const resets = typeof window?.resetsAt === 'string' ? Date.parse(window.resetsAt) / 1000 : NaN;
+    if (!window || typeof window.status !== 'string' || !Number.isInteger(window.percent) ||
+        window.percent < 0 || window.percent > 100 || !Number.isFinite(resets)) {
+      throw new Error('Invalid Pi usage response');
+    }
+    return { id, label: key === 'monthly' ? '月' : windowLabel(minutes), minutes,
+      used: window.percent / 100, resets, limited: window.status !== 'ok' };
+  });
+  return { agent: 'pi', host: null, plan: 'OpenCode Go', windows };
+}
+
 const FETCHERS: Record<string, Fetcher> = {
   async claude(command, { spawn, now }) {
     const out = await capture(spawn, [...command, '-p', '/usage', '--output-format', 'json',
@@ -591,6 +610,35 @@ const FETCHERS: Record<string, Fetcher> = {
     ]);
     if (!result || !result.rateLimits) throw new Error('no rate limits');
     return codexReading(result.rateLimits);
+  },
+  async pi(command, { spawn }) {
+    let key: string;
+    try {
+      key = (await capture(spawn, [...command, 'auth', 'print-api-key', '--provider', 'opencode-go'])).trim();
+    } catch {
+      throw new Error('Pi API key unavailable');
+    }
+    if (!key) throw new Error('Pi API key unavailable');
+    let response: Response;
+    try {
+      response = await fetch(process.env.EMX_PI_USAGE_URL || 'https://opencode.ai/zen/go/v1/usage', {
+        headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15000), redirect: 'error',
+      });
+    } catch {
+      throw new Error('Pi usage request failed');
+    }
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch { /* discard response details */ }
+      throw new Error(`Pi usage HTTP ${response.status}`);
+    }
+    let body: Json;
+    try {
+      body = await response.json() as Json;
+    } catch {
+      // JSON parser errors can quote the response, which could echo credentials.
+      throw new Error('Invalid Pi usage response');
+    }
+    return piReading(body);
   },
   async dsh(command, { spawn }) {
     const result = await converse(spawn, command, [{ id: 1, method: 'balance', params: {} }]);

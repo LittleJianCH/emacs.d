@@ -120,6 +120,45 @@
           (should (eq (get-text-property pos 'face text)
                       'agent-usage-low)))))))
 
+(ert-deftest agent-usage-test-pi-go-windows ()
+  "Pi's pushed Go quotas retain labels, plan and limited status in both UIs."
+  (agent-usage-test--with-files
+    (let* ((agent-session-agents '((pi :title "Pi")))
+           (agent-usage-echo-windows '("5h" "周"))
+           (now (float-time))
+           (future (+ now 86400)))
+      (agent-usage--receive-quotas
+       (vector
+        (list :agent "pi" :host :null :time now :plan "OpenCode Go"
+              ;; Deliberately unordered: the page puts monthly last.
+              :windows (vector
+                        (list :id "monthly" :label "月" :minutes :null
+                              :used 0.2 :limited :false :resets future)
+                        (list :id "10080" :label "周" :minutes 10080
+                              :used 0.42 :limited t :resets future)
+                        (list :id "300" :label "5h" :minutes 300
+                              :used 0.25 :limited :false :resets future)))))
+      (let ((text (agent-usage-echo-text)))
+        (should (equal (substring-no-properties text) "Pi 5h 75% · 周 0%"))
+        (should (eq (get-text-property (string-match "周 0%" text) 'face text)
+                    'agent-usage-out)))
+      (let ((agent-usage-echo-windows '("5h" "周" "月")))
+        (should (string-match-p "月 80%" (agent-usage-echo-text))))
+      (with-temp-buffer
+        (agent-usage--insert-quotas agent-usage--snapshot)
+        (let ((text (buffer-string)))
+          (should (string-match-p "Pi · OpenCode Go" text))
+          (should (string-match-p "5h.*75%" text))
+          (should (string-match-p "周.*0%" text))
+          (should (string-match-p "月.*80%" text))
+          (should (< (string-match "5h" text) (string-match "周" text)))
+          (should (< (string-match "周" text) (string-match "月" text))))
+        (let* ((windows (plist-get (car agent-usage--snapshot) :windows))
+               (weekly (seq-find (lambda (w) (equal (plist-get w :id) "10080")) windows)))
+          (should (= (plist-get weekly :used) 0.42))
+          (should (null (agent-usage--window-left
+                         (plist-put (copy-sequence weekly) :resets (- now 1))))))))))
+
 (ert-deftest agent-usage-test-clear ()
   "Clearing asks first; declined, nothing is sent."
   (agent-usage-test--with-files

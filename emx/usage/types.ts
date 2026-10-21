@@ -18,6 +18,7 @@ export interface UsageWindow {
   label?: string
   minutes?: number | null
   used?: number
+  limited?: boolean
   resets?: number | null
   history?: number[][]
   [key: string]: any

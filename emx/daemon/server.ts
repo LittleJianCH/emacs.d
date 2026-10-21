@@ -445,7 +445,7 @@ export class DaemonServer {
 
   #hostPollers(enabled = this.usage.agents): UsageConfig['pollers'] {
     const agents = this.configuration.value.agents
-    return Object.fromEntries(['claude', 'codex', 'dsh'].filter((name) => agents[name] && enabled.includes(name)).map((name) => [name,
+    return Object.fromEntries(['claude', 'codex', 'dsh', 'pi'].filter((name) => agents[name] && enabled.includes(name)).map((name) => [name,
       { command: [agents[name].executable, ...(name === 'dsh' ? ['--profile', 'sdk', '--patch',
         join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')] : [])] }]))
   }
