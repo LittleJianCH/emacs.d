@@ -52,7 +52,7 @@
           "agent": "pi",
           "model": "opencode-go/deepseek-v4.1-flash",
           "mode": "auto",
-          "effort": "high"
+          "effort": "max"
         },
         {
           "agent": "codex",
