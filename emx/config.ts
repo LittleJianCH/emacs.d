@@ -11,6 +11,8 @@ export interface AgentConfig {
   nativeSubagents?: boolean
   disallowedTools?: string[]
   historyTurns?: number
+  defaultModel?: string
+  models?: { include: string[], exclude: string[] }
 }
 export interface Profile {
   agent: string
@@ -75,13 +77,27 @@ export function validate(value: unknown): Config {
   keys(c, ['agents', 'profiles', 'collab', 'usage', 'daemon', 'sessions'], '')
   for (const [name, a] of Object.entries(obj(c.agents, 'agents'))) {
     const p = `agents.${name}`
-    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns'], p)
+    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'models'], p)
     str(a.title, p + '.title'); str(a.executable, p + '.executable')
     if (!a.executable) fail(p + '.executable', 'nonempty string')
     if (a.extraArgs !== undefined) array(a.extraArgs, p + '.extraArgs')
     if (a.disallowedTools !== undefined) array(a.disallowedTools, p + '.disallowedTools')
     if (a.nativeSubagents !== undefined) bool(a.nativeSubagents, p + '.nativeSubagents')
     if (a.historyTurns !== undefined) num(a.historyTurns, p + '.historyTurns', 1)
+    if (a.defaultModel !== undefined) {
+      str(a.defaultModel, p + '.defaultModel')
+      if (!a.defaultModel) fail(p + '.defaultModel', 'nonempty string')
+    }
+    if (a.models !== undefined) {
+      keys(a.models, ['include', 'exclude'], p + '.models')
+      for (const key of ['include', 'exclude']) {
+        array(a.models[key], p + '.models.' + key)
+        for (const pattern of a.models[key]) {
+          try { new RegExp(pattern, 'i') }
+          catch { fail(p + '.models.' + key, 'valid regular expressions') }
+        }
+      }
+    }
   }
   for (const [name, a] of Object.entries(obj(c.profiles, 'profiles'))) {
     const p = `profiles.${name}`

@@ -22,7 +22,7 @@ What this gives:
   reattaches and catches up from its cursor.
 - **One place for policy.** Approvals, children and the mailbox, concurrency
   limits and usage live in the daemon and are tested with `node --test`. The
-  differences between Claude, Codex and dsh are absorbed by one layer
+  differences between Claude, Codex, dsh and Pi are absorbed by one layer
   instead of three protocol implementations.
 - **Configuration, not defcustoms.** Agents, profiles, start guidance, limits
   and polling live in `emx/config.json` and its runtime override.
@@ -136,8 +136,8 @@ shutdown.
 ### Stale code and restart
 
 The daemon's version is a hash of its runtime files: `emx/dist/**/*.js`,
-`*.json`, `bin/emx`, and the dsh `.mjs`/`.yml` files. A daemon reports it
-on `hello` and `ping`, and `--ensure` compares it with its own.
+`*.json`, `bin/emx`, the dsh `.mjs`/`.yml` files, and the Pi bridge `.js`
+file. A daemon reports it on `hello` and `ping`, and `--ensure` compares it with its own.
 
 `reload` (the MCP tool, `bin/emx reload`, or `M-x my/reload-config`)
 updates connected daemons as well as Lisp. It builds changed TypeScript sources
@@ -478,10 +478,10 @@ Codex's `thread/list` and dsh's `sessions/list`, grouped by git worktree and
 run on the daemon that owns the host. Emacs maps host roots back through its
 transport.
 
-All three adapters accept an executable override from their effective agent
+All adapters accept an executable override from their effective agent
 configuration and from an environment variable used by installations and
 protocol fixtures (`EMX_CLAUDE_EXECUTABLE`, `EMX_CODEX_EXECUTABLE`,
-`EMX_DSH_EXECUTABLE`). No credentials pass through those options.
+`EMX_DSH_EXECUTABLE`, `EMX_PI_EXECUTABLE`). No credentials pass through those options.
 
 ### dsh
 
@@ -551,6 +551,42 @@ The hard parts shape the adapter:
 
 Children run with `--no-session-persistence`. A native fork uses
 `--resume <parent> --fork-session`; images are sent as base64 content.
+
+### Pi
+
+The adapter runs Pi 1.3.0 (`@earendil-works/pi-coding-agent`) with
+`--mode rpc -e <checkout>/lisp/agent/backend/pi/emacs-extension.js`.
+The thin extension registers direct `mcp__emacs__*` tools using the daemon
+socket/session environment and forwards every tool call through an RPC
+select dialog. The daemon owns approval policy: read-only builtins and
+its audited MCP set pass in every mode; plan denies all other tools; ask
+asks; edits additionally allows writes/edits contained in the project after
+path expansion and symlink resolution; auto also allows bash; full allows
+all tools. An always grant is per tool for this session, with plan taking
+precedence. This is tool arbitration, not an operating-system sandbox.
+
+`agents.pi.defaultModel` defaults to `opencode-go/kimi-k3`. The regex
+`models.include`/`exclude` filters default to OpenCode Go without contributor,
+free or preview routes. Model choices are validated even while hibernated;
+each prompt reconciles the native route before submission. Thinking choices
+come from each model's non-null `thinkingLevelMap` entries. Model, thinking,
+and permission settings change live. Streaming uses LF-only JSONL framing,
+authoritative final message content, tool execution results, retry notices,
+and per-assistant usage; only `agent_settled` makes the session idle.
+
+Native sessions persist and resume through `--session`; forks use `--fork`
+and fresh ephemeral children use `--no-session`. Pi 1.3 gives that flag
+precedence over `--fork`, so fork children retain a native session file.
+A persistent session restarts and
+resumes before sending after its editor tools change; children retain their
+original set. Pi writes session entries synchronously; a `get_state` RPC
+barrier is sufficient before fork. Installed emx skills use `--no-skills`
+plus an explicit `--skill <skillsDir>/.claude/skills` so superseded native
+workflows cannot shadow the editor set. Without that context, native skill
+discovery remains enabled. No `--approve` override is added: saved trust and
+Pi's `defaultProjectTrust` apply; an unanswered default ask in RPC skips
+protected project resources. Credentials remain in Pi's native auth store;
+quota polling is not implemented.
 
 ### Codex
 

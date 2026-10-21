@@ -9,7 +9,7 @@ import type { Block, EditorTools, SessionEvent, Settings } from './protocol.ts'
 import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop']
-export const forkAgents = ['claude', 'codex', 'dsh']
+export const forkAgents = ['claude', 'codex', 'dsh', 'pi']
 const costRanks: Record<string, number> = { minimal: 0, low: 1, medium: 2, high: 3, premium: 4, unknown: 5 }
 const modes = ['plan', 'ask', 'edits', 'auto', 'full']
 const icons: Record<string, string> = { command: '$', edit: '✎', read: '≡', search: '⌕', web: '◎', mcp: '⚙', task: '◆', plan: '☰', question: '?', other: '•' }

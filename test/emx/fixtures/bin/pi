@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Never resolve the real Pi CLI from a test daemon or naming command.
+import '../pi.mjs'

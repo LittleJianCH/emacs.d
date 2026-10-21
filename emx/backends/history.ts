@@ -60,6 +60,48 @@ const location = (cwd: string, dirs: Directory[]) => {
   return dir?.label ? { root: dir.root, worktree: dir.label } : {}
 }
 
+/**
+ * Pi encodes a cwd directory as `--` plus the absolute path with its leading
+ * separator removed and every `/`, `\` and `:` replaced by `-`, plus `--`.
+ * See session-format.md, "File Location".
+ */
+function piEncode(root: string): string {
+  return `--${root.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
+}
+
+/**
+ * Read a Pi session's header id and display title from bounded head/tail
+ * regions. The title is the latest `session_info` name, else the first user
+ * message, as Pi's own session picker chooses it.
+ */
+async function piSession(file: string): Promise<{ id: string, title: string }> {
+  const fallback = basename(file, '.jsonl').replace(/^[^_]*_/, '')
+  const handle = await open(file, 'r')
+  try {
+    const size = (await handle.stat()).size
+    const read = async (start: number) => {
+      const buffer = Buffer.alloc(Math.min(65536, size - start))
+      await handle.read(buffer, 0, buffer.length, start)
+      return buffer.toString('utf8').split('\n').flatMap((line) => { try { return [JSON.parse(line)] } catch { return [] } })
+    }
+    const tail = await read(Math.max(0, size - 65536))
+    const head = await read(0)
+    const header = head.find((e) => e.type === 'session')
+    const id = typeof header?.id === 'string' && header.id.trim() ? header.id.trim() : fallback || basename(file, '.jsonl')
+    const info = tail.reverse().find((e) => e.type === 'session_info')
+      ?? [...head].reverse().find((e) => e.type === 'session_info')
+    if (typeof info?.name === 'string' && info.name.trim()) return { id, title: title(info.name) }
+    for (const e of head) {
+      if (e.type !== 'message' || e.message?.role !== 'user') continue
+      const c = e.message.content
+      const text = typeof c === 'string' ? c
+        : Array.isArray(c) ? c.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('\n') : undefined
+      if (text?.trim()) return { id, title: title(text) }
+    }
+    return { id, title: title(undefined) }
+  } finally { await handle.close() }
+}
+
 /** Bound title reads to the transcript head/tail, as the original sidebar did. */
 async function claudeTitle(file: string): Promise<string> {
   const handle = await open(file, 'r')
@@ -106,6 +148,24 @@ export async function history(agent: string, root: string, config?: AgentConfig,
     }))).flat().sort((a, b) => b.time - a.time).slice(0, 50)
     return Promise.all(files.map(async ({ file, dir, time }) => ({ id: basename(file, '.jsonl'), title: await claudeTitle(file), time,
       ...dir.label ? { root: dir.root, worktree: dir.label } : {} })))
+  }
+  if (agent === 'pi') {
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi/agent')
+    const sessions = process.env.EMX_PI_SESSIONS_DIR ?? process.env.PI_CODING_AGENT_SESSION_DIR
+      ?? join(agentDir, 'sessions')
+    const files = (await Promise.all(dirs.map(async (d) => {
+      const folder = join(sessions, piEncode(d.root))
+      const names = await readdir(folder).catch((e) => { if (e.code === 'ENOENT') return []; throw e })
+      return Promise.all(names.filter((f) => f.endsWith('.jsonl')).map(async (f) => {
+        const file = join(folder, f)
+        return { file, dir: d, time: (await stat(file)).mtimeMs / 1000 }
+      }))
+    }))).flat().sort((a, b) => b.time - a.time).slice(0, 50)
+    return Promise.all(files.map(async ({ file, dir, time }) => {
+      const session = await piSession(file)
+      return { id: session.id, title: session.title, time,
+        ...dir.label ? { root: dir.root, worktree: dir.label } : {} }
+    }))
   }
   if (!config) throw new Error(`Agent is not configured: ${agent}`)
   const cwds = dirs.map((d) => d.root)

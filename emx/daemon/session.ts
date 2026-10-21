@@ -370,6 +370,7 @@ export class Session implements SessionHost {
   configure(settings: Settings): Promise<void> {
     return this.#operate(async () => {
       if (this.#stopped) return
+      this.backend.validateSettings?.({ ...this.settings, ...settings })
       this.emit({ type: 'settings', settings })
       if (this.backend.alive()) await this.backend.configure(this.settings)
     })

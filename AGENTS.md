@@ -38,13 +38,14 @@ lisp/agent/              shared agent support (see below)
   agent-emx-remote.el   host runtime install, -L transport, config and usage relay
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       enabled-agent registration (all use :backend emx)
+    pi/                 thin Pi RPC approval and direct MCP extension
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  minimal launcher: locate/build dist, import compiled CLI
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
   cli/                   argument parsing, help, emacsclient transport, daemon/MCP dispatch
-  backends/               Claude, Codex, dsh protocol adapters and native history
+  backends/               Claude, Codex, dsh, Pi protocol adapters and native history
   usage/                 ledger, quotas, forecasts, polls and live turn accounting
   mcp.ts                 stdio MCP client (requires daemon socket/session binding)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
@@ -82,7 +83,7 @@ var/                     runtime state (history, backups, pasted images...); git
   transient menu `agent-session-menu`, global prefix map on `C-c a`.
 - `agent-session-table.el` — renders complete Markdown tables in replies after
   fontification, keeping cell faces and lining up CJK text.
-- `backend/agent-{claude,codex,dsh}.el` — small registration modules, loaded
+- `backend/agent-{claude,codex,dsh,pi}.el` — small registration modules, loaded
   only for `my/agents`. All register `:backend emx`; no Lisp protocol adapters
   or migration switch remain. Defaults and execution policy are daemon config.
 - `emx/backends/claude.ts` — Claude stream-json, approvals, live model/mode
@@ -99,6 +100,10 @@ var/                     runtime state (history, backups, pasted images...); git
   review and live usage. The plugin uses dsh internals (tested 0.2.0-rc.2);
   it gates non-read-only MCP calls in restricted presets and delegates Auto to
   dsh's reviewer. Credentials stay in dsh's own credentials file.
+- `emx/backends/pi.ts` — Pi 1.3.0 RPC, filtered OpenCode Go models, live
+  thinking/mode settings, native resume/fork and `agent_settled` completion.
+  `backend/pi/emacs-extension.js` forwards every tool for daemon arbitration
+  and registers direct Emacs MCP. Tests use a fake Pi CLI only.
 - `emx/backends/history.ts` — `sessions/history {agent, root}`: discover past
   Claude JSONL, Codex `thread/list`, and dsh `sessions/list` asynchronously on
   their owning host. Groups git worktrees and preserves each resume root.

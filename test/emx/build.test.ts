@@ -26,7 +26,9 @@ function fixture(t: TestContext) {
   } })
   fs.mkdirSync(join(dir, 'bin'))
   fs.copyFileSync(join(root, 'bin/emx'), join(dir, 'bin/emx'))
-  fs.cpSync(join(root, 'lisp/agent/backend/dsh'), join(dir, 'lisp/agent/backend/dsh'), { recursive: true })
+  for (const name of ['dsh', 'pi']) {
+    fs.cpSync(join(root, 'lisp/agent/backend', name), join(dir, 'lisp/agent/backend', name), { recursive: true })
+  }
   fs.symlinkSync(join(root, 'emx/node_modules'), join(dir, 'emx/node_modules'))
   fs.mkdirSync(join(dir, 'var/emx'), { recursive: true })
   fs.writeFileSync(join(dir, 'var/emx/config.json'), JSON.stringify({
@@ -47,6 +49,7 @@ test('clean ensure builds once, concurrent touched sources build once, failures 
   assert.equal(fs.existsSync(join(dir, 'emx/dist')), false)
   const first = JSON.parse((await command(dir, args)).stdout)
   const manifest = JSON.parse((await command(dir)).stdout)
+  assert.ok(manifest.files.includes('lisp/agent/backend/pi/emacs-extension.js'))
   const original = generation(dir)
   const noop = JSON.parse((await command(dir, args)).stdout)
   assert.equal(noop.pid, first.pid)

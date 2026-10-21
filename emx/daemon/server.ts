@@ -599,7 +599,7 @@ export class DaemonServer {
       case 'usage/clear': return this.usage.clear()
       case 'sessions/history': {
         const agent = string(params.agent, 'agent')
-        if (!['claude', 'codex', 'dsh'].includes(agent)) invalid(`Unknown history agent: ${agent}`)
+        if (!['claude', 'codex', 'dsh', 'pi'].includes(agent)) invalid(`Unknown history agent: ${agent}`)
         const root = string(params.root, 'root')
         return history(agent, root, this.configuration.value.agents[agent],
           this.environments ? () => this.environments!.get(root) : undefined).then((items) => ({ items }))

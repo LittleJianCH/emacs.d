@@ -43,13 +43,14 @@ which keeps changing; only entries the tests would add count.")
 (let ((bin (expand-file-name "test/emx/fixtures/bin/" emx-test--checkout)))
   (setenv "PATH" (concat bin path-separator (getenv "PATH")))
   (add-to-list 'exec-path bin))
-(dolist (name '("CLAUDE" "CODEX" "DSH"))
+(dolist (name '("CLAUDE" "CODEX" "DSH" "PI"))
   (setenv (concat "EMX_" name "_EXECUTABLE") nil)
   (setenv (concat "EMX_" name "_CONFIG") nil))
-(dolist (name '("EMX_CLAUDE_LOG" "EMX_CODEX_LOG" "EMX_DSH_LOG"
+(dolist (name '("EMX_CLAUDE_LOG" "EMX_CODEX_LOG" "EMX_DSH_LOG" "EMX_PI_LOG"
                 "EMX_CODEX_BAD_CONFIG" "EMX_CODEX_RESTART_GATE"))
   (setenv name nil))
 (setenv "EMX_CLAUDE_PROJECTS_DIR" (expand-file-name "projects" emx-test--var))
+(setenv "EMX_PI_SESSIONS_DIR" (expand-file-name "pi-sessions" emx-test--var))
 (make-directory (expand-file-name "emx" emx-test--var))
 (with-temp-file (expand-file-name "emx/config.json" emx-test--var)
   (insert "{\"collab\":{\"handleCommand\":[],\"agentHandleCommands\":{}},"

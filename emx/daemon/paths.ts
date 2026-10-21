@@ -56,6 +56,8 @@ export function runtimeFiles(): string[] {
   walk(runtimeRoot, 'emx/dist', /\.(js|json)$/)
   const dsh = 'lisp/agent/backend/dsh'
   walk(join(checkoutRoot, dsh), dsh, /\.(mjs|yml)$/)
+  const pi = 'lisp/agent/backend/pi'
+  walk(join(checkoutRoot, pi), pi, /\.js$/)
   files.push('bin/emx')
   return files.sort()
 }

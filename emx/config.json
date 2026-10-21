@@ -22,6 +22,21 @@
       "title": "DeepSeek",
       "executable": "dsh",
       "nativeSubagents": false
+    },
+    "pi": {
+      "title": "Pi",
+      "executable": "pi",
+      "defaultModel": "opencode-go/kimi-k3",
+      "models": {
+        "include": [
+          "^opencode-go/"
+        ],
+        "exclude": [
+          "contributor",
+          "free",
+          "preview"
+        ]
+      }
     }
   },
   "profiles": {

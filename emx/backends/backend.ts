@@ -5,6 +5,7 @@ import { EchoBackend } from './echo.ts'
 import { DshBackend } from './dsh.ts'
 import { ClaudeBackend } from './claude.ts'
 import { CodexBackend } from './codex.ts'
+import { PiBackend } from './pi.ts'
 import type { SessionEvent } from '../daemon/protocol.ts'
 
 export type NewAsk = Ask extends infer A ? A extends Ask ? Omit<A, 'id'> : never : never
@@ -41,6 +42,8 @@ export interface Backend {
   readonly steerWhilePreparing?: boolean
   steer(text: string, images?: string[], block?: string): boolean
   interrupt(): void
+  /** Validate choices even while a persistent session is hibernated. */
+  validateSettings?(settings: Settings): void
   configure(settings: Settings): void | Promise<void>
   stop(): void | Promise<void>
   alive(): boolean
@@ -61,6 +64,7 @@ export const backends: Record<string, (host: SessionHost) => Backend> = {
   dsh: (host) => new DshBackend(host),
   claude: (host) => new ClaudeBackend(host),
   codex: (host) => new CodexBackend(host),
+  pi: (host) => new PiBackend(host),
 }
 
 /** Read backend-neutral editor skill context. */
