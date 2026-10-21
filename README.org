@@ -190,7 +190,7 @@ agent 页面中： ~TAB~ 折叠区块 / 下一个按钮， ~RET~ 点击， ~c~ �
 insert state 使用 Emacs 的编辑键，上面的 Emacs 键位在 evil 下照常可用。
 
 leader 为 ~SPC~ ： ~SPC f~ 找文件， ~SPC b~ 切换 buffer， ~SPC r~ 最近文件， ~SPC s~ 搜索当前文件，
-~SPC /~ 项目内搜索， ~SPC p~ 项目命令， ~SPC g~ magit， ~SPC a~ agent 命令 (同 ~C-c a~)，
+~SPC /~ 项目内搜索， ~SPC p~ 项目命令， ~SPC g g~ magit， ~SPC g b~ 开关逐行 blame， ~SPC a~ agent 命令 (同 ~C-c a~)，
 ~SPC w~ 窗口， ~SPC u~ 前缀参数 (~C-u~ 用于向上翻页)， ~SPC i~ 打开 init.el。
 
 会话起始为 normal： ~i~ / ~a~ / ~o~ 在对话中跳到输入区末尾进入 insert，insert 下 ~C-c C-c~ 发送，

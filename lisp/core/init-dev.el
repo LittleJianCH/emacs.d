@@ -16,6 +16,16 @@
   (magit-display-buffer-function #'magit-display-buffer-same-window-except-diff-v1)
   (magit-diff-refine-hunk 'all))
 
+(declare-function magit-blame-quit "magit-blame")
+(defvar magit-blame-mode)
+
+(defun my/magit-blame-toggle ()
+  "Show the commit that last changed each line, or stop showing it."
+  (interactive)
+  (call-interactively (if (bound-and-true-p magit-blame-mode)
+                          #'magit-blame-quit
+                        #'magit-blame-addition)))
+
 ;; Change markers next to line numbers show at a glance what an agent changed.
 (use-package diff-hl
   :ensure t

@@ -6,9 +6,10 @@
 ;; The leader key is SPC (in normal / motion state):
 ;;   SPC f  find file       SPC b  switch buffer    SPC r  recent files
 ;;   SPC s  search buffer   SPC /  search project   SPC p  project commands
-;;   SPC g  magit           SPC a  agent commands (same as C-c a)
+;;   SPC a  agent commands (same as C-c a)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
 ;;   SPC t  terminal (same as C-c t, init-term.el)
+;;   SPC g g  magit status  SPC g b  toggle per-line blame (magit-blame)
 ;; C-j / C-k move point and the text together, a line at a time, so point
 ;; stays where it is on the screen.
 ;; Insert state uses Emacs editing keys; Escape returns to normal state.
@@ -52,7 +53,8 @@
     (kbd "<leader>s") #'consult-line
     (kbd "<leader>/") #'consult-ripgrep
     (kbd "<leader>p") project-prefix-map
-    (kbd "<leader>g") #'magit-status
+    (kbd "<leader>gg") #'magit-status
+    (kbd "<leader>gb") #'my/magit-blame-toggle
     (kbd "<leader>w") evil-window-map
     (kbd "<leader>u") #'universal-argument
     (kbd "<leader>h") help-map

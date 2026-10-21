@@ -14,6 +14,7 @@
 (require 'ert)
 
 (defvar treesit-auto-install-grammar)
+(defvar magit-blame-mode)
 (defvar evil-mode)
 
 (ert-deftest init-base-evil-keybinding-preset ()
@@ -314,6 +315,28 @@ Scrolling needs a real display: run it in the running Emacs."
       (should (equal input-source sis-english-source))
       (evil-insert-state)
       (should (equal input-source sis-other-source)))))
+
+(ert-deftest init-base-magit-blame-toggle ()
+  "The blame command starts magit-blame, and quits it once it is on."
+  (let (called)
+    (cl-letf (((symbol-function 'magit-blame-addition)
+               (lambda () (interactive) (push 'addition called)))
+              ((symbol-function 'magit-blame-quit)
+               (lambda () (interactive) (push 'quit called))))
+      (with-temp-buffer
+        (my/magit-blame-toggle)
+        (setq-local magit-blame-mode t)
+        (my/magit-blame-toggle)))
+    (should (equal (nreverse called) '(addition quit)))))
+
+(ert-deftest init-base-evil-git-leader ()
+  "SPC g is a git prefix: g opens magit, b toggles blame."
+  (skip-unless (featurep 'init-evil))
+  (with-temp-buffer
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "SPC g g")) 'magit-status))
+    (should (eq (key-binding (kbd "SPC g b")) 'my/magit-blame-toggle))))
 
 (provide 'init-base-test)
 ;;; init-base-test.el ends here
