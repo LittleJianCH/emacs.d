@@ -225,6 +225,7 @@ export class ClaudeBackend implements Backend {
   #running = false
   #restart = false
   #external = false
+  #readOnly: string[] = []
   #confirmed: Settings = {}
   #configuration: Promise<void> = Promise.resolve()
   #sending: Promise<void> = Promise.resolve()
@@ -301,10 +302,13 @@ export class ClaudeBackend implements Backend {
     if (skills?.skillsDir) args.push('--add-dir', skills.skillsDir)
     if (skills?.supersededSkills?.length) args.push('--settings', JSON.stringify({ skillOverrides: Object.fromEntries(skills.supersededSkills.map((s) => [s, 'off'])) }))
     args.push(...config.extraArgs ?? [])
+    const readOnly = this.host.editorTools().readOnly
+    if (readOnly.length) args.push('--allowedTools', readOnly.map((name) => `mcp__emacs__${name}`).join(','))
     const env = await this.host.environment?.()
     if (this.#stopped) return
     const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
+    this.#readOnly = [...readOnly]
     child.stdin.on('error', () => {})
     child.stderr.resume()
     createInterface({ input: child.stdout }).on('line', (line) => {
@@ -472,6 +476,7 @@ export class ClaudeBackend implements Backend {
     await this.#configuration
     await this.#lifecycle
     await this.#syncSoon()
+    const content = await this.#content(text, images)
     if (this.#external) {
       if (this.host.info.parent) throw new Error('Cannot resume a non-persistent Claude child')
       this.#external = false
@@ -479,7 +484,10 @@ export class ClaudeBackend implements Backend {
       this.#notice('restart-for-external')
       await this.#restartProcess()
     }
-    const content = await this.#content(text, images)
+    while (!this.host.info.parent
+      && JSON.stringify(this.#readOnly) !== JSON.stringify(this.host.editorTools().readOnly)) {
+      await this.#restartProcess()
+    }
     this.#source = undefined
     this.host.addBlock({ id: block ?? this.host.newId('user'), type: 'user', text, images })
     if (!this.alive()) throw new Error('Claude exited while preparing the message')

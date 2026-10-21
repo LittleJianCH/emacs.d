@@ -12,6 +12,12 @@ import { DaemonServer } from '../../emx/daemon/server.ts'
 import { SocketClient } from './client.ts'
 import type { OpenParams, Usage } from '../../emx/daemon/protocol.ts'
 
+const editorTools = {
+  tools: [{ name: 'context', description: 'Context', inputSchema: { type: 'object' } },
+    { name: 'eval', description: 'Evaluate', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }],
+  readOnly: ['context', 'context', 'session_start', 'removed'],
+}
+
 async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?: string, config?: Record<string, unknown>) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'emx-claude-')))
   const saved = { ...process.env }
@@ -22,6 +28,10 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
   process.env.EMX_CLAUDE_PROJECTS_DIR = join(dir, 'projects')
   const file = join(dir, 'projects', encodePath(dir), `${options.resume ?? 'fixture-native'}.jsonl`)
   if (history) { await mkdir(join(dir, 'projects', encodePath(dir)), { recursive: true }); await writeFile(file, history) }
+  await mkdir(join(dir, 'emx'), { recursive: true })
+  await writeFile(join(dir, 'emx/config.json'), JSON.stringify({
+    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
+  }))
   const daemon = new DaemonServer({ varDir: dir })
   await daemon.start()
   const client = await SocketClient.connect(daemon.socket)
@@ -31,7 +41,8 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
     Object.assign(process.env, saved)
     await rm(dir, { recursive: true, force: true })
   })
-  await client.request('hello', { client: 'claude-test', version: daemon.version })
+  await client.request('hello', { client: 'claude-test', version: daemon.version,
+    tools: editorTools })
   const { id } = await client.request('session/open', { agent: 'claude', root: dir, ...options })
   const attached = await client.request('session/attach', { id })
   await client.waitFor((n) => n.method === 'history/done')
@@ -59,6 +70,8 @@ test('launch flags, daemon MCP, skills, choices and child lifetime', async (t) =
   const value = (s: string) => argv[argv.indexOf(s) + 1]
   assert.equal(value('--permission-mode'), 'auto')
   assert.equal(value('--permission-prompt-tool'), 'stdio')
+  assert.equal(value('--allowedTools'), 'mcp__emacs__context,mcp__emacs__session_read,mcp__emacs__sessions')
+  assert.equal(argv.at(-2), '--allowedTools')
   assert.equal(value('--disallowedTools'), 'Agent,Workflow,SendMessage,ListAgents')
   assert.equal(value('--model'), 'haiku'); assert.equal(value('--effort'), 'low')
   assert.ok(argv.includes('--no-session-persistence'))
@@ -419,4 +432,29 @@ test('raw JSON spans handle escaped keys, duplicate fields and all value types',
   assert.equal(rawJsonField('{"input":false,"input": -0}', 'input'), '-0')
   assert.equal(rawJsonField('{}', 'input'), undefined)
   assert.equal(rawJsonField('[]', 'input'), undefined)
+})
+
+for (const child of [false, true]) test('claude snapshots read-only approvals; removal restarts only persistent sessions (' + child + ')', async (t) => {
+  const { client, id, session, send, calls } = await setup(t, child ? { parent: 'parent' } : {})
+  const before = (await calls()).filter((r) => r.type === 'spawn')
+  const allowed = (argv: string[]) => argv[argv.indexOf('--allowedTools') + 1].split(',')
+  assert.ok(allowed(before[0].argv).includes('mcp__emacs__context'))
+  client.notify('editor/tools', { ...editorTools, readOnly: [...editorTools.readOnly].reverse() })
+  await send('same-set')
+  assert.equal((await calls()).filter((r) => r.type === 'spawn').length, 1)
+  // Change classification alone, leaving every tool definition byte-for-byte intact.
+  client.notify('editor/tools', { tools: editorTools.tools, readOnly: [] })
+  await send('after-removal')
+  const log = await calls(), starts = log.filter((r) => r.type === 'spawn')
+  assert.equal(starts.length, child ? 1 : 2)
+  const sent = log.find((r) => r.type === 'user' && r.message.content === 'after-removal')
+  assert.equal(sent.pid, starts.at(-1).pid)
+  assert.equal(allowed(starts.at(-1).argv).includes('mcp__emacs__context'), child)
+  if (!child) {
+    assert.notEqual(starts[0].pid, starts[1].pid)
+    assert.ok(starts[1].argv.includes('--resume'))
+    assert.equal(starts[1].argv[starts[1].argv.indexOf('--resume') + 1], session.resumeId())
+    await send('same-classification')
+    assert.equal((await calls()).filter((r) => r.type === 'spawn').length, 2)
+  }
 })

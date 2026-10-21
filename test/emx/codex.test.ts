@@ -1,6 +1,6 @@
 // codex.test.ts --- app-server protocol, exercised through isolated daemon sockets.
 import * as assert from 'node:assert/strict'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,12 @@ import { DaemonServer } from '../../emx/daemon/server.ts'
 import { developerInstructions, itemView, modes } from '../../emx/backends/codex.ts'
 import type { OpenParams } from '../../emx/daemon/protocol.ts'
 import { SocketClient } from './client.ts'
+
+const editorTools = {
+  tools: [{ name: 'context', description: 'Context', inputSchema: { type: 'object' } },
+    { name: 'eval', description: 'Evaluate', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }],
+  readOnly: ['context', 'context', 'session_start', 'removed'],
+}
 
 async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfig = false, restartGate = false) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'emx-codex-')))
@@ -22,6 +28,10 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfi
   else delete process.env.EMX_CODEX_RESTART_GATE
   if (badConfig) process.env.EMX_CODEX_BAD_CONFIG = '1'
   else delete process.env.EMX_CODEX_BAD_CONFIG
+  await mkdir(join(dir, 'emx'), { recursive: true })
+  await writeFile(join(dir, 'emx/config.json'), JSON.stringify({
+    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
+  }))
   const daemon = new DaemonServer({ varDir: dir })
   await daemon.start()
   const client = await SocketClient.connect(daemon.socket)
@@ -31,7 +41,7 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfi
     await rm(dir, { recursive: true, force: true })
   })
   await client.request('hello', { client: 'codex-test', version: daemon.version,
-    tools: { tools: [{ name: 'context', description: 'Context', inputSchema: { type: 'object' } }], readOnly: ['context'] } })
+    tools: editorTools })
   const { id } = await client.request('session/open', { agent: 'codex', root: dir, ...options })
   const attached = await client.request('session/attach', { id, turns: 1 })
   await client.waitFor((n) => n.method === 'history/done')
@@ -55,6 +65,11 @@ test('Codex launches private daemon MCP, skill replacements, modes and instructi
   assert.equal(init.argv[0], 'app-server')
   const overrides = init.argv.filter((_: string, i: number) => init.argv[i - 1] === '-c')
   assert.equal(new Set(overrides.map((s: string) => s.split('=')[0])).size, overrides.length)
+  assert.deepEqual(overrides.filter((s: string) => s.includes('.approval_mode=')), [
+    'mcp_servers.emacs.tools.context.approval_mode="approve"',
+    'mcp_servers.emacs.tools.session_read.approval_mode="approve"',
+    'mcp_servers.emacs.tools.sessions.approval_mode="approve"',
+  ])
   assert.ok(overrides.includes('agents.enabled=false'))
   assert.ok(overrides.includes('skills.config=[{name="atomic-review",enabled=false}]'))
   assert.ok(overrides.includes(`mcp_servers.emacs.env={EMX_DAEMON_SOCKET=${JSON.stringify(daemon.socket)},EMX_SESSION=${JSON.stringify(id)}}`))
@@ -282,4 +297,28 @@ test('Codex item views and effective instructions match Lisp behavior', () => {
   assert.equal(itemView('/p', { type: 'fileChange', changes: [{ path: '/p/a', kind: { type: 'delete' } }] })?.diff, '--- a\n+++ /dev/null')
   assert.equal(itemView('/p', { type: 'fileChange', changes: [{ path: '/p/a', kind: { type: 'update' }, diff: '@@\n-a\n+b\n' }] })?.diff,
     '--- a\n+++ a\n@@\n-a\n+b')
+})
+
+for (const child of [false, true]) test('codex snapshots read-only approvals; removal restarts only persistent sessions (' + child + ')', async (t) => {
+  const { client, id, session, send, requests } = await setup(t, child ? { parent: 'parent' } : {})
+  const before = (await requests()).filter((r) => r.method === 'initialize')
+  const allowed = (argv: string[]) => argv.filter((s) => s.includes('.approval_mode='))
+  assert.ok(allowed(before[0].argv).includes('mcp_servers.emacs.tools.context.approval_mode="approve"'))
+  client.notify('editor/tools', { ...editorTools, readOnly: [...editorTools.readOnly].reverse() })
+  await send('same-set')
+  assert.equal((await requests()).filter((r) => r.method === 'initialize').length, 1)
+  // Change classification alone, leaving every tool definition byte-for-byte intact.
+  client.notify('editor/tools', { tools: editorTools.tools, readOnly: [] })
+  await send('after-removal')
+  const log = await requests(), starts = log.filter((r) => r.method === 'initialize')
+  assert.equal(starts.length, child ? 1 : 2)
+  const sent = log.find((r) => r.method === 'turn/start' && r.params.input[0].text === 'after-removal')
+  assert.equal(sent.pid, starts.at(-1).pid)
+  assert.equal(allowed(starts.at(-1).argv).includes('mcp_servers.emacs.tools.context.approval_mode="approve"'), child)
+  if (!child) {
+    assert.notEqual(starts[0].pid, starts[1].pid)
+    assert.equal(log.filter((r) => r.method === 'thread/resume').length, 1)
+    await send('same-classification')
+    assert.equal((await requests()).filter((r) => r.method === 'initialize').length, 2)
+  }
 })

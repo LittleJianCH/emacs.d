@@ -59,13 +59,18 @@ export function itemView(root: string, item: any): ToolView | undefined {
 }
 
 /** JSON strings are TOML basic strings too; each table key is emitted once. */
-export function launchArgs(host: SessionHost): string[] {
+export function launchArgs(host: SessionHost, readOnly = host.editorTools().readOnly): string[] {
   const config = codexConfig(host)
   const context = sessionSkills(host)
   const overrides: Record<string, unknown> = {
     'mcp_servers.emacs.command': process.execPath,
     'mcp_servers.emacs.args': [join(checkoutRoot, 'bin/emx'), 'mcp'],
     'mcp_servers.emacs.tool_timeout_sec': 1800,
+  }
+  for (const name of readOnly) {
+    // Quote non-bare names so a dot cannot turn one tool into nested tables.
+    const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)
+    overrides[`mcp_servers.emacs.tools.${key}.approval_mode`] = 'approve'
   }
   // TOML inline tables use '=' rather than JSON's ':'.
   const args = ['app-server', ...Object.entries(overrides).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]),
@@ -145,10 +150,11 @@ export class CodexBackend implements Backend {
     this.#turn = undefined
     this.#completedTurn = undefined
     this.#usageTotal = undefined
-    this.#tools = structuredClone(this.host.editorTools())
     const env = await this.host.environment?.()
     if (this.#stopping) return
-    const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host),
+    const tools = structuredClone(this.host.editorTools())
+    this.#tools = tools
+    const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host, tools.readOnly),
       { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
@@ -235,7 +241,7 @@ export class CodexBackend implements Backend {
   async send(text: string, images?: string[], block?: string): Promise<void> {
     // Cancellation belongs to this message, including its tools-change restart.
     this.#interruptPending = false
-    if (this.#resume && !this.host.info.parent && !isDeepStrictEqual(this.#tools, this.host.editorTools())) {
+    while (this.#resume && !this.host.info.parent && !isDeepStrictEqual(this.#tools, this.host.editorTools())) {
       this.#notice('codex-tools-changed')
       await this.stop()
       await this.start(this.#resume)

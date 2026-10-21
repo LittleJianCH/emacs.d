@@ -152,7 +152,9 @@ export class Collaboration {
   }
   tools(editor: EditorTools, root?: string): EditorTools {
     return { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, root ? this.host.environment?.(root) : undefined)],
-      readOnly: [...new Set([...editor.readOnly, 'sessions', 'session_read'])] }
+      readOnly: [...new Set([...editor.readOnly.filter((name) =>
+        !toolNames.includes(name) && editor.tools.some((tool) => tool.name === name)),
+        'sessions', 'session_read'])].sort() }
   }
   get starting(): boolean { return this.#starts.size > 0 }
   assertOpen(session: Session): void {

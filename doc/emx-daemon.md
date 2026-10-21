@@ -525,12 +525,28 @@ answer. There are two ask types:
 The first answer wins; a late answer gets `{stale: true}`. An interrupted or
 stopped session cancels its asks.
 
-The audited read-only editor methods (`context`, `buffers`, `read_buffer`,
-`diagnostics`) and collaboration's `sessions` and `session_read` are marked
-read-only. Their names go to the dsh bridge, whose gate lets those MCP calls
-through; Claude and Codex apply their own permission machinery, and the
-classification is never exposed as an MCP hint. The permission modes are the
-same names in Emacs and the daemon: `ask`, `edits`, `auto`, `full`, `plan`.
+The daemon builds one sorted, caller-independent read-only set for each
+place: editor methods explicitly audited with `:read-only` (`context`,
+`buffers`, `read_buffer`, `diagnostics`), collaboration's `sessions` and
+`session_read`, and `config_read` on host daemons. These calls need no
+approval. Claude receives exact comma-separated `mcp__emacs__<name>` entries
+in `--allowedTools`, after other flags, without wildcards. Codex receives
+`-c mcp_servers.emacs.tools.<name>.approval_mode="approve"` for each name,
+with unique TOML keys. dsh keeps its bridge gate using the same set. This
+private classification is never an MCP `readOnlyHint`; tool annotations do
+not determine the allowlist.
+
+A CLI keeps the set it started with. Before the next send, a persistent
+Claude session whose set changed restarts with `--resume`; Codex reuses its
+tools-change path to resume the saved thread in a new process. Revoking a
+read-only classification therefore removes pre-approval before that send,
+even if the tool definition stays the same. Non-persistent children keep
+their original process and set. Flags depend only on configuration and
+place, so a fork gets the same read-only flags as its parent under the same
+configuration, preserving its prompt cache.
+
+The permission modes are the same names in Emacs and the daemon: `ask`,
+`edits`, `auto`, `full`, `plan`.
 Each backend maps them to its own settings. `auto` delegates to that
 backend's reviewer (Claude's classifier, Codex's `auto_review`, dsh's
 auto-review), and what a reviewer refuses or cannot decide reaches the user.

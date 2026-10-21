@@ -59,7 +59,7 @@ test('initialize passes local launch, settings, parent and MCP; advertises choic
   assert.match(init.argv[5], /no-subagents.yml$/)
   const mcpServers = [{ name: 'emacs', command: process.execPath,
     args: [fileURLToPath(new URL('../../bin/emx', import.meta.url)), 'mcp'],
-    env: { EMX_DAEMON_SOCKET: daemon.socket, EMX_SESSION: id }, timeoutMs: 1800000, readOnly: ['context', 'sessions', 'session_read'] }]
+    env: { EMX_DAEMON_SOCKET: daemon.socket, EMX_SESSION: id }, timeoutMs: 1800000, readOnly: ['context', 'session_read', 'sessions'] }]
   assert.deepEqual(init.params, { cwd: dir, preset: 'auto', plan: false, mcpServers,
     parent: 'parent', model: 'fake/chat', effort: 'high' })
   assert.equal(session.resumeId(), 'fake-session')

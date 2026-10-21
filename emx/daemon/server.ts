@@ -415,7 +415,7 @@ export class DaemonServer {
       const tools = object(value)
       if (Array.isArray(tools.tools) && Array.isArray(tools.readOnly)) value = {
         tools: [...tools.tools.filter((t: any) => !configNames.includes(t.name)), ...configTools],
-        readOnly: [...new Set([...tools.readOnly, 'config_read'])],
+        readOnly: [...new Set([...tools.readOnly.filter((name: string) => !configNames.includes(name)), 'config_read'])],
       }
     }
     if (this.editor.update(value)) {

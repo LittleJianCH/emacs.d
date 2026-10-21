@@ -162,6 +162,14 @@ var/                     runtime state (history, backups, pasted images...); git
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
 
 The daemon injects MCP only into its own agent processes, never globally.
+Its audited read-only set combines editor `:read-only` methods with
+`sessions`, `session_read`, and host `config_read`. These need no approval:
+Claude gets exact `--allowedTools` entries, Codex per-tool
+`mcp_servers.emacs.tools.<name>.approval_mode="approve"`, and dsh its bridge
+gate. Never publish `readOnlyHint` in MCP definitions. Persistent Claude and
+Codex sessions resume in a new process before sending after a set change;
+children retain their original set. Keep flags caller-independent so forks
+share their parent's prompt cache under the same configuration and place.
 `emx mcp` requires `EMX_DAEMON_SOCKET` and `EMX_SESSION`, and uses
 `mcp/hello`, `mcp/tools`, `mcp/call`. The legacy emacsclient MCP transport
 is removed. Bare `bin/emx` CLI commands still use emacsclient explicitly.

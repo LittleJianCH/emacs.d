@@ -182,11 +182,12 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`${agent} forks its native 
   process.env[keys[1]] = join(dir, 'cli.jsonl')
   process.env.EMX_CLAUDE_PROJECTS_DIR = join(dir, 'projects')
   mkdirSync(join(dir, 'emx'))
-  writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({ collab: { handleCommand: [], agentHandleCommands: {}, closeFinished: false } }))
+  writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({ collab: { handleCommand: [], agentHandleCommands: {}, closeFinished: false }, usage: { pollInterval: 0 } }))
   const d = new DaemonServer({ varDir: dir }); await d.start()
   const client = await SocketClient.connect(d.socket)
   try {
-    await client.request('hello', { client: 'test', version: '' })
+    await client.request('hello', { client: 'test', version: '', tools: {
+      tools: [{ name: 'context', description: 'Context', inputSchema: { type: 'object' } }], readOnly: ['context'] } })
     const { id } = await client.request('session/open', { agent, root: dir, settings: { model: 'fake-model', effort: 'high', mode: 'auto' } })
     const parent = d.sessions.get(id)!
     await until(() => !!parent.resumeId())
@@ -204,10 +205,18 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`${agent} forks its native 
     assert.ok(!user.text.includes('You are a fork'))
     const calls = readFileSync(join(dir, 'cli.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
     if (agent === 'claude') {
-      const argv = calls.filter((c) => c.type === 'spawn')[1].argv
+      const spawns = calls.filter((c) => c.type === 'spawn')
+      const argv = spawns[1].argv
+      const allowed = (args: string[]) => args[args.indexOf('--allowedTools') + 1]
+      assert.equal(allowed(argv), allowed(spawns[0].argv))
+      assert.equal(allowed(argv), 'mcp__emacs__context,mcp__emacs__session_read,mcp__emacs__sessions')
       assert.ok(argv.includes('--fork-session')); assert.ok(argv.includes('--no-session-persistence'))
       assert.equal(argv[argv.indexOf('--resume') + 1], parent.resumeId())
     } else if (agent === 'codex') {
+      const starts = calls.filter((c) => c.method === 'initialize')
+      const approvals = (args: string[]) => args.filter((s) => s.includes('.approval_mode='))
+      assert.deepEqual(approvals(starts[1].argv), approvals(starts[0].argv))
+      assert.equal(approvals(starts[0].argv).length, 3)
       assert.deepEqual(calls.find((c) => c.method === 'thread/fork').params,
         { threadId: parent.resumeId(), ephemeral: true, excludeTurns: true })
     } else {
@@ -215,6 +224,9 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`${agent} forks its native 
       assert.ok(calls.findIndex((c) => c.method === 'flush') < fork)
       assert.equal(calls[fork].params.forkFrom, parent.resumeId())
       assert.equal(calls[fork].params.parent, parent.resumeId())
+      assert.deepEqual(calls[fork].params.mcpServers[0].readOnly, ['context', 'session_read', 'sessions'])
+      assert.deepEqual(calls[fork].params.mcpServers[0].readOnly,
+        calls.find((c) => c.method === 'initialize').params.mcpServers[0].readOnly)
     }
   } finally {
     await client.close(); await d.stop()
