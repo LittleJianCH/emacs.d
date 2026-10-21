@@ -60,6 +60,11 @@
     (kbd "C-j") #'my/scroll-down-with-point
     (kbd "C-k") #'my/scroll-up-with-point))
 
+(with-eval-after-load 'evil
+  ;; SPC w and C-w share the window map.
+  (define-key evil-window-map (kbd "u") #'winner-undo)
+  (define-key evil-window-map (kbd "U") #'winner-redo))
+
 (use-package evil-collection
   :ensure t
   :after evil
