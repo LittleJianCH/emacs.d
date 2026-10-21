@@ -672,8 +672,8 @@ configuration and where the caller runs, never on who is calling: a forked
 session must see exactly its parent's tools to keep its prompt cache.
 
 Profiles are roles with ordered `candidates` (`agent`, optional `model`, `mode`
-and `effort`), a static `cost` tier, `description`, optional `confirm`, and
-optional `preferOtherAgent`. Legacy top-level agent/model/mode/effort profiles
+and `effort`), a static `cost` tier, `description`, a short `use`, optional
+`confirm`, and optional `preferOtherAgent`. Legacy top-level agent/model/mode/effort profiles
 remain a single candidate; top-level legacy overrides take precedence over an
 inherited candidates array. A role is listed if any candidate's agent is enabled
 by Emacs on `hello` and its executable is runnable in the caller root's
@@ -799,7 +799,7 @@ The schema:
 | Section | Keys |
 |---|---|
 | `agents` | `title`, `executable`, `extraArgs`, `nativeSubagents`; Claude also `disallowedTools`, `historyTurns` |
-| `profiles` | `cost`, `description`, `confirm`, `preferOtherAgent`, ordered `candidates` (`agent`, `model`, `effort`, `mode`); legacy top-level candidate fields remain valid |
+| `profiles` | `cost`, `description`, `use` (a few words shown in every MCP summary), `confirm`, `preferOtherAgent`, ordered `candidates` (`agent`, `model`, `effort`, `mode`); legacy top-level candidate fields remain valid |
 | `usage` | `pollInterval` (seconds) |
 | `daemon` | `idleExit` (seconds) |
 | `sessions` | `hibernateAfter` (seconds) |

@@ -42,7 +42,7 @@ function help(name?: string): string {
 // tool's own description.
 const MCP_HEAD = `Your session is hosted in the user's Emacs: this conversation is an Emacs buffer, and these tools operate that Emacs.
 - When the user means the current page, window, input box or editor, that is Emacs unless they name another app: call context first.
-- Long-running commands, when your Bash tool has run_in_background: use it rather than a detached shell waiter; this session's process stays alive while they run, and their completion starts a new turn for you to report back.`
+- Long-running commands, when your Bash tool has run_in_background: use it rather than a detached shell waiter; this session's process stays alive while they run, and their completion starts a new turn for you to report back.  It is for one long command; a multi-step job around runs (implement, build, measure, compare) is independent work for session_start.`
 
 const MCP_BODY = `
 - Formatted content (option comparisons, plans, review results, diagrams, progress):
@@ -53,7 +53,7 @@ const MCP_BODY = `
 - @handles name other agent sessions in this Emacs: sessions, session_read, session_ask.
 - For nontrivial work with independent parts, use session_start (discover it if
   it is not listed) to delegate a bounded task early, then continue another part
-  yourself; the available profiles are listed below.
+  yourself; the available profiles and when to start each are listed below.
   If you are a subagent assigned one task, do it yourself without starting sessions.
 - After editing Lisp or emx/ code in this Emacs configuration, call reload.
 - Other editor operations: eval.

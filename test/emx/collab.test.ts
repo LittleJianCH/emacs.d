@@ -56,6 +56,20 @@ test('daemon config owns five caller-independent collaboration definitions', () 
   assert.ok(!profiles(c).some(([, p]) => profileCandidates(p).some((c) => c.agent === 'dsh')))
   assert.ok(profiles(c, ['claude']).every(([, p]) => profileCandidates(p).some((c) => c.agent === 'claude')))
 })
+test('delegation guidance names no profiles and profile descriptions name no other profile', () => {
+  const c = defaults()
+  for (const name of Object.keys(c.profiles)) {
+    assert.ok(!c.collab.startGuidance.includes(name), `startGuidance names ${name}`)
+    for (const [other, p] of Object.entries(c.profiles)) {
+      if (other !== name) assert.ok(!p.description?.includes(name) && !p.use?.includes(name), `${other} names ${name}`)
+    }
+  }
+})
+test('every default profile says when to start it in a few words', () => {
+  for (const [name, p] of Object.entries(defaults().profiles)) {
+    assert.ok(p.use && p.use.split(/\s+/).length <= 12, `${name} use`)
+  }
+})
 test('descriptions and summary include only enabled and available profiles and fork agents', () => {
   const c = defaults()
   for (const a of Object.values(c.agents)) a.executable = process.execPath
@@ -66,7 +80,7 @@ test('descriptions and summary include only enabled and available profiles and f
   const start = description(), summary = startSummary(c, undefined, env)
   for (const text of [start, summary]) assert.doesNotMatch(text, /\bPi\b|\{forkAgents\}/)
   assert.match(start, /\n  Claude, Codex and DeepSeek sessions can fork\.\n/)
-  assert.equal(summary, '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); researcher, reviewer (high); expert (premium).  session_start describes each.')
+  assert.equal(summary, '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): a fact or definition found in a few reads\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it')
   assert.match(description(['codex']), /\n  Codex sessions can fork\.\n/)
   assert.doesNotMatch(description(['pi']), /sessions can fork|\{forkAgents\}/)
   c.agents.claude.executable = c.agents.codex.executable = '/does/not/exist'
@@ -88,10 +102,10 @@ test('profiles, rendered lines and summary share stable cost order including unk
   const lines = definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description.split(c.collab.prompts.profileHeader)[1]
   assert.doesNotMatch(lines, /Claude|Codex|Pi|haiku|gpt-|opencode-go\//)
   assert.equal(profileCost('unpriced', c.profiles.unpriced), 'unknown')
-  assert.equal(startSummary(c, undefined, env), '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); researcher, reviewer (high); expert (premium); unpriced (unknown).  session_start describes each.')
+  assert.equal(startSummary(c, undefined, env), '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): a fact or definition found in a few reads\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it\n  - unpriced (unknown)')
   c.profiles.explorer.cost = 'premium'
   assert.deepEqual(renderedNames(), ['coder-flash', 'explorer-flash', 'coder', 'researcher', 'reviewer', 'explorer', 'expert', 'unpriced'])
-  assert.match(startSummary(c, undefined, env), /explorer, expert \(premium\)/)
+  assert.match(startSummary(c, undefined, env), /\n  - explorer \(premium\): a fact[^\n]*\n  - expert \(premium\)/)
   assert.match(definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description, /- explorer: premium cost\./)
 })
 test('every daemon collaboration tool works; origin and hidden notes survive separately; child closes after mailbox', async () => {

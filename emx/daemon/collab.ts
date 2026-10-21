@@ -50,14 +50,8 @@ function profileLines(available: [string, Profile][]): string {
   return available.map(([name, p]) => `- ${name}: ${profileCost(name, p)} cost.  ${p.description ?? ''}`).join('\n')
 }
 export function startSummary(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): string {
-  const groups = new Map<string, string[]>()
-  for (const [name, p] of profiles(c, enabled, env)) {
-    const cost = profileCost(name, p)
-    if (!groups.has(cost)) groups.set(cost, [])
-    groups.get(cost)!.push(name)
-  }
-  return groups.size ? format(c.collab.prompts.startSummary,
-    [...groups].map(([cost, names]) => `${names.join(', ')} (${cost})`).join('; ')) : ''
+  const lines = profiles(c, enabled, env).map(([name, p]) => `  - ${name} (${profileCost(name, p)})${p.use ? ': ' + p.use : ''}`)
+  return lines.length ? format(c.collab.prompts.startSummary, lines.join('\n')) : ''
 }
 export function definitions(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): EditorTools['tools'] {
   const titles = forkAgents.filter((a) => availableAgent(c, a, enabled, env)).map((a) => c.agents[a].title)

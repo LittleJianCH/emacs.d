@@ -25,6 +25,8 @@ export interface Profile extends Partial<ProfileCandidate> {
   preferOtherAgent?: boolean
   cost?: string
   description?: string
+  /** A few words on when to start it, shown in every session's MCP instructions. */
+  use?: string
   confirm?: boolean
 }
 export interface Config {
@@ -106,7 +108,7 @@ export function validate(value: unknown): Config {
   }
   for (const [name, a] of Object.entries(obj(c.profiles, 'profiles'))) {
     const p = `profiles.${name}`
-    keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'confirm', 'preferOtherAgent', 'candidates'], p)
+    keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'use', 'confirm', 'preferOtherAgent', 'candidates'], p)
     const candidate = (v: any, path: string) => {
       obj(v, path)
       str(v.agent, path + '.agent')
@@ -124,7 +126,7 @@ export function validate(value: unknown): Config {
     }
     // Legacy overrides can inherit candidates through the recursive config merge.
     if (a.candidates === undefined || ['agent', 'model', 'mode', 'effort'].some((k) => a[k] !== undefined)) candidate(a, p)
-    for (const k of ['cost', 'description']) if (a[k] != null) str(a[k], p + '.' + k)
+    for (const k of ['cost', 'description', 'use']) if (a[k] != null) str(a[k], p + '.' + k)
     if (a.preferOtherAgent !== undefined) bool(a.preferOtherAgent, p + '.preferOtherAgent')
     if (a.cost !== undefined && !['minimal', 'low', 'medium', 'high', 'premium'].includes(a.cost)) fail(p + '.cost', 'cost tier')
     if (a.confirm !== undefined) bool(a.confirm, p + '.confirm')

@@ -185,12 +185,20 @@ knows the task best and needs no model call to do it. Without one the child is
 named after its role. Use a fork when the task needs the caller's conversation
 and prompt cache; emx chooses a candidate when a role is requested.
 The shared MCP instructions in `emx/cli/main.ts` name `session_start` as the entry
-point for delegating independent work early. `mcp/hello` appends a short summary
-of available profiles grouped by cost, so agents see them before discovering
-the tool. Its tool description opens with the delegation trigger before explaining
-context modes, and lists only enabled, executable fork backends by title.
+point for delegating independent work early. `mcp/hello` appends a summary
+of available profiles in cost order, each with its `use`: a few words on when
+to start it. Claude Code defers MCP tool schemas behind ToolSearch, so the
+`session_start` description, with the guidance and profile descriptions, stays
+unseen until an agent loads it; sessions that never did delegated nothing,
+while the summary named only roles and costs. The triggers therefore live in
+the always visible instructions. The bullet on `run_in_background` limits it to
+one long command: once background runs could wake the session, an
+agent implemented a change and ran a series of benchmarks itself (hundreds of
+Bash calls, no child), work the guidance hands to a cheap coder. The tool
+description opens with the delegation trigger before explaining context
+modes, and lists only enabled, executable fork backends by title.
 `collab.startGuidance` names no profiles; per-profile use belongs in each
-profile's description. It adds the
+profile's `use` and description. It adds the
 details: after brief orientation, delegate a bounded independent task before
 doing it yourself, continue a different part, and reconsider as new work appears.
 Trivial tasks, the immediate blocker on the next step, tightly coupled work and

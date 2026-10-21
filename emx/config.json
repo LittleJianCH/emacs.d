@@ -46,6 +46,7 @@
   "profiles": {
     "coder-flash": {
       "cost": "minimal",
+      "use": "implementation to a clear spec; builds, benchmarks and test series",
       "description": "Implementation or long runs with a clear goal and verification: writes code and tests to a clear specification.",
       "candidates": [
         {
@@ -70,6 +71,7 @@
     },
     "explorer-flash": {
       "cost": "minimal",
+      "use": "simple questions over long reading: many files, logs, docs",
       "description": "Investigations where the question is simple but the reading is long: many or large files, logs, docs.  Doesn't edit.",
       "candidates": [
         {
@@ -88,6 +90,7 @@
     },
     "explorer": {
       "cost": "low",
+      "use": "a fact or definition found in a few reads",
       "description": "Bounded investigations needing a few reads: finds a definition, checks a fact in a few files or docs.  Doesn't edit.  Its price rises fivefold once its context passes 100K tokens, so not for long reading.",
       "candidates": [
         {
@@ -112,6 +115,7 @@
     },
     "coder": {
       "cost": "medium",
+      "use": "implementation or debugging that needs judgment",
       "description": "Implementation that needs more judgment: changes across files, debugging, refactoring.",
       "candidates": [
         {
@@ -136,6 +140,7 @@
     },
     "researcher": {
       "cost": "high",
+      "use": "open questions written up as a report or design note",
       "description": "Investigates open questions across code, docs and the web, compares options and writes up findings (reports, design notes, pages).  Edits documents; code changes stay small.",
       "candidates": [
         {
@@ -160,6 +165,7 @@
     },
     "reviewer": {
       "cost": "high",
+      "use": "review of substantive changes before delivery",
       "description": "Reviews substantive changes before delivery; reproduces what it finds and reports findings without editing files.",
       "preferOtherAgent": true,
       "candidates": [
@@ -184,6 +190,7 @@
     },
     "expert": {
       "cost": "premium",
+      "use": "when you are stuck or the user asks for it",
       "description": "Works through the hardest problems: subtle bugs, tricky designs.  Use it when you are stuck or the user asks for it, not for routine work.",
       "confirm": true,
       "candidates": [
@@ -372,7 +379,7 @@
       "handlePrompt": "Name this coding conversation with a short English handle: one or two lowercase words joined by '-', at most 16 characters, about its topic. Reply with the handle only.\n\nFirst message:\n",
       "task": "Your task:\n",
       "forkAgents": "  %s sessions can fork.",
-      "startSummary": "- Subagent profiles here, cheapest first: %s.  session_start describes each.",
+      "startSummary": "- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n%s",
       "candidateSkipped": "%s: %s",
       "candidatesSkipped": "  Skipped candidates: %s.",
       "candidateUnavailable": "unavailable here",

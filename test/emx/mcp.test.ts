@@ -72,8 +72,10 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
   assert.equal(init.capabilities.tools.listChanged, true)
   assert.equal(init.instructions.includes('config_read'), false)
   const summary = daemon.collab.startSummary(dir)
-  assert.ok(summary.startsWith('- Subagent profiles here, cheapest first:'))
+  assert.ok(summary.startsWith('- Subagent profiles here, cheapest first'))
   assert.ok(init.instructions.endsWith('\n' + summary))
+  assert.match(init.instructions, /run_in_background[^\n]*a multi-step job around runs[^\n]*session_start/)
+  assert.match(summary, /\n  - coder-flash \(minimal\): [^\n]*benchmarks/)
   assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(tools).tools })
   assert.equal(daemon.client?.socket.destroyed, false, 'MCP hello does not replace editor')
   const result = await request('tools/call', { name: 'context', arguments: {} })
@@ -113,7 +115,7 @@ test('initialize uses enabled profiles in the bound session root environment bef
     return { PATH: '', EMX_CODEX_EXECUTABLE: process.execPath }
   } })
   const init = await request('initialize')
-  const summary = '- Subagent profiles here, cheapest first: coder-flash, explorer-flash (minimal); explorer (low); coder (medium); researcher, reviewer (high); expert (premium).  session_start describes each.'
+  const summary = '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): a fact or definition found in a few reads\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it'
   assert.ok(init.instructions.endsWith('\n' + summary))
   assert.doesNotMatch(init.instructions, /DeepSeek|\bPi\b|\bClaude\b/)
   assert.ok(roots.length > 0)
