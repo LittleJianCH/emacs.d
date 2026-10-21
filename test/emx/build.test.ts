@@ -116,20 +116,12 @@ test('manifest versions describe runtime bytes and source-free hosts never need 
   assert.notEqual(JSON.parse((await command(dir)).stdout).version, before)
 })
 
-// This inventory is intentionally explicit: review new APIs against the minimum.
-// AbortSignal.any is the limiting API (18.17.0, also backported from 20.3.0).
-const apiFloor = {
-  'crypto.randomUUID': '14.17.0', 'timers/promises.setTimeout': '15.0.0',
-  'Array.at': '16.6.0', 'Object.hasOwn': '16.9.0', 'structuredClone': '17.0.0',
-  'AbortSignal.timeout': '17.3.0', 'Array.findLast': '18.0.0', 'AbortSignal.any': '18.17.0',
-}
 test('build target and runtime APIs stay within Node 18.17', async (t) => {
   assert.equal(JSON.parse(fs.readFileSync(join(root, 'emx/tsconfig.json'), 'utf8')).compilerOptions.target, 'es2022')
   const build = JSON.parse(fs.readFileSync(join(root, 'emx/tsconfig.build.json'), 'utf8')).compilerOptions
   assert.equal(build.rewriteRelativeImportExtensions, true)
   assert.equal(JSON.parse(fs.readFileSync(join(root, 'emx/tsconfig.json'), 'utf8')).compilerOptions.erasableSyntaxOnly, true)
   assert.deepEqual(build.lib, ['es2023'])
-  assert.equal(apiFloor['AbortSignal.any'], '18.17.0')
   const manifest = JSON.parse((await exec(process.execPath, [join(root, 'bin/emx'), 'daemon', '--manifest'])).stdout)
   const modules = new Set(['child_process', 'crypto', 'events', 'fs', 'fs/promises', 'net', 'os', 'path', 'readline', 'timers/promises', 'url', 'util'])
   for (const file of ['bin/emx', ...manifest.files.filter((f: string) => f.startsWith('emx/dist/') && f.endsWith('.js'))]) {

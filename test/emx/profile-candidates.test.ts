@@ -54,7 +54,6 @@ test('roles are listed while any agent is available, independently of quotas, ca
   c.profiles.onlyPi = { candidates: [{ agent: 'pi', model: 'other-provider/other' }] }
   const piEnv = { PATH: '', EMX_PI_EXECUTABLE: process.execPath }
   assert.ok(profiles(c, ['pi'], piEnv).some(([name]) => name === 'onlyPi'))
-  assert.deepEqual(definitions(c, ['pi'], piEnv), definitions(c, ['pi'], piEnv))
   assert.deepEqual(profileCandidates({ agent: 'claude', model: 'haiku', candidates: [codex] }),
     [{ agent: 'claude', model: 'haiku', mode: undefined, effort: undefined }])
 })
