@@ -279,7 +279,7 @@ test('echo round trip streams a consecutive event sequence', async (t) => {
     'status idle at the end of the turn',
     mark,
   )
-  const events = sessionEvents(client, id, mark)
+  const events = sessionEvents(client, id, mark).filter((n) => n.method !== 'info')
   assert.deepEqual(
     events.map((n) => n.method),
     [
@@ -312,7 +312,7 @@ test('echo round trip streams a consecutive event sequence', async (t) => {
   assert.equal(update.params.fields.text, 'echo: hi')
   assert.equal(idle.params.status, 'idle')
 
-  const seqs = events.map((n) => Number(n.params.seq))
+  const seqs = sessionEvents(client, id, mark).map((n) => Number(n.params.seq))
   assert.equal(seqs[0], attach.seq + 1, 'the first event follows the attach snapshot')
   for (let i = 1; i < seqs.length; i++) {
     assert.equal(seqs[i], seqs[i - 1] + 1, `event ${i} has the next seq (${JSON.stringify(seqs)})`)
@@ -683,7 +683,7 @@ test('ping, --ensure and --stop do not replace an attached client', async (t) =>
   const { client, id } = await openEcho(t, info)
   const probe = track(t, await connect(info.socket))
   const mark = client.notifications.length
-  assert.deepEqual(await probe.request('ping', {}), { daemon: info.pid, version: info.version })
+  assert.deepEqual(await probe.request('ping', {}), { daemon: info.pid, version: info.version, capabilities: { usage: 1, stopIfIdle: 1 }, liveAgents: 1 })
   await assert.rejects(probe.request('sessions/list', {}), { code: 2 })
   assert.equal(ensure(dir).pid, info.pid)
   await sendAndWaitIdle(client, id, 'still attached')

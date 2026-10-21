@@ -66,7 +66,7 @@ export interface Notice {
 export type Block =
   | { id: string, type: 'user', text: string, images?: string[],
       /** Number of historical images when the original paths are unavailable. */
-      imageCount?: number }
+      imageCount?: number, origin?: string }
   | { id: string, type: 'text', kind: 'assistant' | 'thinking', text: string, done: boolean }
   | { id: string, type: 'tool', view: ToolView, status: ToolStatus, output?: string }
   | { id: string, type: 'notice', notice: Notice }
@@ -114,9 +114,13 @@ export interface HelloParams {
   client: string
   /** Hash of the client's copy of the emx sources. */
   version: string
+  agents?: string[]
   tools?: EditorTools
 }
 export interface HelloResult {
+  config?: import('../config.ts').Config
+  capabilities?: { usage: number, stopIfIdle?: number }
+  liveAgents?: number
   daemon: number
   /** Hash of the emx sources the daemon runs. */
   version: string
@@ -258,6 +262,8 @@ export interface Requests {
   'mcp/hello': [{ session: SessionId }, {}]
   'mcp/tools': [{}, { tools: EditorTools['tools'] }]
   'mcp/call': [{ name: string, arguments?: Record<string, unknown> }, unknown]
+  'config/get': [{}, { config: import('../config.ts').Config, errors: string[] }]
+  'config/reload': [{}, { config: import('../config.ts').Config, errors: string[] }]
   'sessions/list': [{ root?: string }, { sessions: SessionSummary[] }]
   'session/open': [OpenParams, { id: SessionId }]
   'session/attach': [AttachParams, AttachResult]
@@ -269,11 +275,14 @@ export interface Requests {
   'session/answer': [{ id: SessionId, ask: string } & Answer, { stale: boolean }]
   'session/earlier': [EarlierParams, { earlier: boolean }]
   'session/stop': [{ id: SessionId }, {}]
+  'usage/hello': [{}, HelloResult]
+  'usage/record': [{id: string, record: Partial<UsageRecord>}, {id: string}]
+  'usage/quota': [{id: string, reading: QuotaReading}, {id: string}]
   'usage/configure': [Partial<Pick<UsageConfig, 'agents' | 'pollInterval' | 'pollers'>>, ReturnType<UsageService['configure']>]
   'usage/report': [ReportParams, ReturnType<UsageService['report']>]
   'usage/refresh': [{force?: boolean}, {}]
   'usage/clear': [{}, {}]
-  'daemon/stop': [{}, {}]
+  'daemon/stop': [{ ifIdle?: boolean, idleOnly?: boolean }, { stopped?: boolean }]
 }
 
 export type Method = keyof Requests
@@ -322,6 +331,10 @@ export type EventParams = SessionEvent & { session: SessionId, seq: number }
 
 /** Notifications that are not about one session. */
 export interface DaemonNotifications {
+  /** Effective file policy, also delivered on usage-only connections. */
+  'config': { config: import('../config.ts').Config, errors: string[] }
+  /** The daemon stopped a child or an explicitly closed session. */
+  'collab/closed': { id: SessionId }
   /** Another Emacs said hello; this connection no longer gets events. */
   'replaced': {}
   /** Sent only to MCP connections. */

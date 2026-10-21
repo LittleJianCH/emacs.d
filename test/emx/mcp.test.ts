@@ -67,7 +67,7 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
   const init = await request('initialize')
   assert.equal(init.capabilities.tools.listChanged, true)
   assert.equal(init.instructions.includes('config_read'), false)
-  assert.deepEqual(await request('tools/list'), { tools: tools.tools })
+  assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(tools).tools })
   assert.equal(daemon.client?.socket.destroyed, false, 'MCP hello does not replace editor')
   const result = await request('tools/call', { name: 'context', arguments: {} })
   assert.deepEqual(JSON.parse(result.content[0].text), { session: id, root: dir, place: null })
@@ -77,12 +77,12 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
   const updated = { ...tools, tools: [...tools.tools, definition('new')] }
   editor.notify('editor/tools', updated)
   await wait((m) => m.method === 'notifications/tools/list_changed')
-  assert.deepEqual(await request('tools/list'), { tools: updated.tools })
+  assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(updated).tools })
   await daemon.editor.flush()
   assert.deepEqual(JSON.parse(await readFile(join(dir, 'emx/tools.json'), 'utf8')), updated)
   editor.socket.destroy()
   await delay(50)
-  assert.deepEqual(await request('tools/list'), { tools: updated.tools })
+  assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(updated).tools })
   const offline = await request('tools/call', { name: 'context' })
   assert.equal(offline.isError, true)
   assert.match(offline.content[0].text, /Emacs is not attached/)
@@ -93,7 +93,7 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
     const peer = new Connection(createConnection(restored.socket))
     try {
       await peer.request('mcp/hello', { session: id })
-      assert.deepEqual(await peer.request('mcp/tools', {}), { tools: updated.tools })
+      assert.deepEqual(await peer.request('mcp/tools', {}), { tools: daemon.collab.tools(updated).tools })
       await assert.rejects(peer.request('mcp/call', { name: 'context' }), /Emacs is not attached/)
     } finally { peer.socket.destroy() }
   } finally { await restored.stop() }

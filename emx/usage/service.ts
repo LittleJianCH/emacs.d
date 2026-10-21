@@ -10,7 +10,7 @@
 // Socket methods usage/report, usage/refresh and usage/clear expose its
 // reports. usage/configure supplies display order, polling interval and
 // the commands registered by Emacs backends; it cannot change file paths.
-// Lisp backends send usage/record and usage/quota notifications. Daemon
+// Lisp backends send acknowledged usage/record and usage/quota requests. Daemon
 // backends call accounting.ts at the producer boundary, never on replay.
 // usage/quotas pushes snapshots; usage/changed invalidates visible reports.
 //
@@ -611,6 +611,7 @@ class UsageService {
   pollers: Record<string, {command: string[]}> = {};
   records: UsageRecord[] = [];
   offset = 0;
+  recentIds = new Set<string>();
   quotas: QuotaEntry[] = [];
   // OPTIONS: send (message -> void), now (() -> epoch s), spawn, fetchers,
   // log.
@@ -636,6 +637,7 @@ class UsageService {
     this.records = [];
     this.offset = 0;
     this.syncLedger();
+    this.recentIds = new Set(this.records.slice(-10000).map((record) => record.id).filter((id) => typeof id === 'string'));
     this.quotas = readQuotas(this.quotaFile);
     this.initialized = true;
     this.configure(params);
@@ -678,17 +680,31 @@ class UsageService {
     return this.quotas;
   }
 
-  record(params: {record: Partial<UsageRecord>}) {
-    const record = { ...params.record };
+  record(params: {record: Partial<UsageRecord>, id?: string}) {
+    if (params.id && this.recentIds.has(params.id)) return {id: params.id};
+    // Keep the receipt in the same append as the counters: a crash before the
+    // reply cannot turn a retry into a second charge.
+    const record = { ...params.record, ...(params.id ? {id: params.id} : {}) };
     if (typeof record.time !== 'number') record.time = this.now();
     appendLedger(this.usageFile, record);
+    if (params.id) {
+      this.recentIds.add(params.id);
+      if (this.recentIds.size > 10000) this.recentIds.delete(this.recentIds.values().next().value!);
+    }
     this.send({method: 'changed', params: {}});
+    return {id: params.id};
   }
 
-  quota(reading: QuotaReading) {
-    mergeQuota(this.loadQuotas(), reading, this.now());
+  quota(reading: QuotaReading, id?: string) {
+    this.loadQuotas();
+    const previous = this.quotas.find((q) => q.agent === reading.agent && (q.host ?? null) === (reading.host ?? null));
+    if (id && previous?.receiptIds?.includes(id)) return {id};
+    const entry = mergeQuota(this.quotas, reading, this.now());
+    // Persist receipts atomically with the reading, bounded per source.
+    if (id) entry.receiptIds = [...(entry.receiptIds || []), id].slice(-128);
     writeQuotas(this.quotaFile, this.quotas);
     this.send({ method: 'quotas', params: { quotas: snapshot(this.quotas, this.agents) } });
+    return {id};
   }
 
   report(params: ReportParams) {

@@ -12,10 +12,15 @@
 (require 'json)
 (require 'agent-usage)
 (require 'agent-ui)
+(require 'agent-emx-config)
 
 (defgroup agent-emx nil
   "Sessions owned by the emx daemon."
   :group 'agent-session)
+
+(defvar agent-emx--adopting nil
+  "Dynamic (CONNECTION . SUMMARY) while opening a daemon child view.")
+(declare-function agent-collab--link-tool "agent-collab")
 
 (defvar agent-emx--offered nil
   "Agents the daemon can run, with their Lisp backends: ((AGENT . BACKEND) ...).")
@@ -96,7 +101,7 @@ accepting the args plist.  Unknown kinds are displayed dimly as-is."
   (next-id 0)
   (pending (make-hash-table :test #'eql))
   (sessions (make-hash-table :test #'equal))
-  pending-stops)
+  pending-stops role capabilities)
 
 (defvar agent-emx--connections (make-hash-table :test #'equal)
   "Connections keyed by (PLACE . VAR-DIRECTORY), for future remote use.")
@@ -162,6 +167,7 @@ Call CALLBACK with the result or ERROR-CALLBACK with the error plist."
   "Fail CONNECTION's pending work with ERROR and disconnect its sessions.
 QUIET marks transport loss, whose uncertain replies need no failure notice."
   (agent-emx--cancel-deferred connection)
+  (agent-usage--disconnected connection)
   (when quiet
     (setq error (plist-put (copy-sequence error) :connection-lost t)))
   (remhash connection agent-emx--tools-signatures)
@@ -207,6 +213,43 @@ Daemon events keep their distinct false value; only tool arguments use nil."
    ((vectorp value) (apply #'vector (mapcar #'agent-emx--editor-params value)))
    (t value)))
 
+(defun agent-emx--adopt (connection summary)
+  "Create a view for daemon child SUMMARY on CONNECTION, without a new CLI."
+  (let* ((id (plist-get summary :id))
+         (info (plist-get summary :info))
+         (parent (gethash (plist-get info :parent)
+                          (agent-emx--connection-sessions connection))))
+    (or (when-let* ((existing (gethash id (agent-emx--connection-sessions connection))))
+          (when (and (eq (agent-session-status existing) 'disconnected)
+                     (not (agent-emx--get existing :emx-attaching)))
+            (agent-emx--set existing :emx-attaching t)
+            (agent-emx--attach existing connection))
+          existing)
+        (when parent
+          (let* ((agent (intern (plist-get summary :agent)))
+                 (entry (copy-sequence (cdr (assq agent agent-session-agents))))
+                 (agent-session-agents
+                  (cons (cons agent (plist-put entry :backend 'emx))
+                        (assq-delete-all agent (copy-sequence agent-session-agents))))
+                 (agent-emx--adopting (cons connection summary))
+                 (buffer (agent-session-open
+                          agent (plist-get summary :root) nil nil
+                          (plist-put (copy-sequence info) :parent
+                                     (agent-session-buffer parent))))
+                 (child (buffer-local-value 'agent-session--current buffer)))
+            (agent-session-set-handle child (plist-get info :handle))
+            (when (fboundp 'agent-collab--link-tool)
+              (agent-collab--link-tool parent child))
+            child)))))
+
+(defun agent-emx--close-view (connection id)
+  "Close the view of daemon ID on CONNECTION after daemon-owned cleanup."
+  (when-let* ((session (gethash id (agent-emx--connection-sessions connection))))
+    (remhash id (agent-emx--connection-sessions connection))
+    (agent-emx--set session :emx-id nil)
+    (agent-emx--set session :emx-stopped t)
+    (agent-session-kill-quietly (agent-session-buffer session))))
+
 (defun agent-emx--editor-call (connection message)
   "Answer an editor request MESSAGE on CONNECTION without blocking."
   (let* ((id (plist-get message :id))
@@ -223,6 +266,19 @@ Daemon events keep their distinct false value; only tool arguments use nil."
       (cond
        ((not (equal (plist-get message :method) "editor/call"))
         (list :error '(:code -32601 :message "Unknown editor request")))
+       ;; Private daemon requests are never MCP tool definitions.
+       ((equal method "_session_open")
+        (condition-case err
+            (progn (agent-emx--adopt connection (plist-get args :session))
+                   (list :result '(:ok t :result t)))
+          (error (list :result (list :ok :false :error (error-message-string err))))))
+       ((equal method "_session_visible")
+        (list :result (list :ok t :result
+                            (list :visible
+                                  (if (and session
+                                           (get-buffer-window
+                                            (agent-session-buffer session) t))
+                                      t :false)))))
        ;; Cleanup may arrive after the session stopped and lost its mapping.
        ((and (equal method "_poll") (plist-get args :cancel))
         (let ((entry (gethash (plist-get args :id) agent-ui--deferred)))
@@ -261,7 +317,8 @@ Daemon events keep their distinct false value; only tool arguments use nil."
   "Publish changed local tools on every ready daemon connection."
   (maphash
    (lambda (_ connection)
-     (when (and (agent-emx--connection-ready connection)
+     (when (and (not (eq (agent-emx--connection-role connection) 'usage))
+                (agent-emx--connection-ready connection)
                 (process-live-p (agent-emx--connection-process connection)))
        (let* ((tools (agent-emx--tools))
               (signature (agent-emx--tools-signature tools)))
@@ -291,6 +348,14 @@ Daemon events keep their distinct false value; only tool arguments use nil."
            (session (gethash (plist-get params :session)
                              (agent-emx--connection-sessions connection))))
       (cond
+       ((equal method "collab/closed")
+        (agent-emx--close-view connection (plist-get params :id)))
+       ((equal method "sessions")
+        (seq-doseq (summary (plist-get params :sessions))
+          (when (plist-get (plist-get summary :info) :parent)
+            (agent-emx--adopt connection summary))))
+       ((equal method "config")
+        (agent-emx-config-receive (plist-get params :config)))
        ((equal method "usage/changed")
         (run-hooks 'agent-usage-change-functions))
        ((equal method "usage/quotas")
@@ -315,6 +380,8 @@ Daemon events keep their distinct false value; only tool arguments use nil."
 
 (defun agent-emx--connect (connection result)
   "Connect CONNECTION to the daemon described by ensure RESULT."
+  (when (eq (plist-get result :stale) t)
+    (message "emx daemon 代码已过期；请在会话空闲后运行 M-x agent-emx-restart-daemon，休眠并重启"))
   (setf (agent-emx--connection-starter connection) nil
         (agent-emx--connection-input connection) (encode-coding-string "" 'utf-8 t)
         (agent-emx--connection-process connection)
@@ -328,19 +395,29 @@ Daemon events keep their distinct false value; only tool arguments use nil."
                      (when (and (eq process (agent-emx--connection-process connection))
                                 (not (process-live-p process)))
                        (agent-emx--lost connection (list :message (string-trim event)) t)))))
-  (let* ((tools (agent-emx--tools))
-         (signature (agent-emx--tools-signature tools)))
+  (let* ((usage (eq (agent-emx--connection-role connection) 'usage))
+         (tools (unless usage (agent-emx--tools)))
+         (signature (unless usage (agent-emx--tools-signature tools))))
     (agent-emx--request
-     connection "hello" (list :client "emacs" :version (plist-get result :version)
-                              :tools tools)
-     (lambda (_)
-       (puthash connection signature agent-emx--tools-signatures)
-       (setf (agent-emx--connection-ready connection) t)
-       (agent-usage--connected connection)
-       (agent-emx--flush-stops connection)
-       (let ((waiters (agent-emx--connection-waiters connection)))
-         (setf (agent-emx--connection-waiters connection) nil)
-         (dolist (pair waiters) (funcall (car pair) connection))))
+     connection (if usage "usage/hello" "hello")
+     (if usage (make-hash-table)
+       (list :client "emacs" :version (plist-get result :version) :tools tools
+             :agents (vconcat (mapcar (lambda (a) (symbol-name (car a)))
+                                      agent-session-agents))))
+     (lambda (hello)
+       (setf (agent-emx--connection-capabilities connection) (plist-get hello :capabilities))
+       (if (and usage (not (agent-usage--capable-p connection)))
+           (progn
+             (agent-emx--lost connection '(:message "Daemon does not support acknowledged usage"))
+             (delete-process (agent-emx--connection-process connection)))
+         (agent-emx-config-receive (plist-get hello :config))
+         (unless usage
+           (puthash connection signature agent-emx--tools-signatures)
+           (agent-emx--flush-stops connection))
+         (setf (agent-emx--connection-ready connection) t)
+         (let ((waiters (agent-emx--connection-waiters connection)))
+           (setf (agent-emx--connection-waiters connection) nil)
+           (dolist (pair waiters) (funcall (car pair) connection)))))
      (lambda (error)
        (agent-emx--lost connection error)
        (delete-process (agent-emx--connection-process connection))))))
@@ -405,14 +482,15 @@ command asynchronously so starting a daemon never waits in the editor."
          (kill-buffer buffer)
          (agent-emx--lost connection (list :message (error-message-string err))))))))
 
-(defun agent-emx--local-connection (callback error-callback)
+(defun agent-emx--local-connection (callback error-callback &optional role)
   "Obtain the local daemon connection without waiting interactively.
-Call CALLBACK after hello or ERROR-CALLBACK on failure."
+Call CALLBACK after hello or ERROR-CALLBACK on failure.
+ROLE usage obtains a separate non-exclusive connection."
   (agent-usage--migrate)
   (let* ((var (expand-file-name agent-emx-var-directory))
-         (key (cons nil var))
+         (key (cons role var))
          (connection (or (gethash key agent-emx--connections)
-                         (puthash key (agent-emx--make-connection :var var)
+                         (puthash key (agent-emx--make-connection :var var :role role)
                                   agent-emx--connections))))
     (if (and (agent-emx--connection-ready connection)
              (process-live-p (agent-emx--connection-process connection)))
@@ -465,7 +543,7 @@ Call CALLBACK after hello or ERROR-CALLBACK on failure."
       ("user"
        (unless existing
          (agent-session--new-block session id
-                                   (list :type 'user :text
+                                   (list :type 'user :origin (plist-get block :origin) :text
                                          (string-join
                                           (append (make-list
                                                    (or (plist-get block :imageCount)
@@ -965,7 +1043,14 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
 
 (cl-defmethod agent-session-backend-start ((_ (eql emx)) session)
   (agent-emx--set session :emx-stopped nil)
-  (agent-emx--ready session))
+  (when agent-emx--adopting
+    (agent-emx--set session :emx-id (plist-get (cdr agent-emx--adopting) :id))
+    (agent-emx--set session :emx-connection (car agent-emx--adopting))
+    (puthash (agent-emx--get session :emx-id) session
+             (agent-emx--connection-sessions (car agent-emx--adopting))))
+  (if agent-emx--adopting
+      (agent-emx--attach session (car agent-emx--adopting))
+    (agent-emx--ready session)))
 
 (cl-defmethod agent-session-backend-send ((_ (eql emx)) session text)
   (agent-emx--rpc session "session/send" (agent-emx--message text)))
@@ -1028,6 +1113,40 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
   (unless (eq (agent-session-backend session) 'emx)
     (user-error "当前会话不由 emx daemon 管理"))
   (agent-emx--ready session))
+
+(defun agent-emx--restart-after-stop (connection attempts)
+  "Wait asynchronously for CONNECTION to close, with ATTEMPTS left."
+  (if (process-live-p (agent-emx--connection-process connection))
+      (if (> attempts 0)
+          (run-at-time 0.1 nil #'agent-emx--restart-after-stop connection (1- attempts))
+        (message "emx daemon 尚未停止，请稍后重试"))
+    (let ((noninteractive nil))
+      (agent-emx--local-connection
+       (lambda (_)
+         (when agent-usage--monitoring (agent-usage--start))
+         (message "emx daemon 已休眠会话并重启；下次发送时恢复"))
+       (lambda (error) (message "emx daemon 重启失败：%s" (plist-get error :message)))))))
+
+(defun agent-emx-restart-daemon ()
+  "Hibernate resumable idle sessions and start the checkout's current daemon.
+Running turns, asks and ephemeral children must finish before restart."
+  (interactive)
+  (agent-emx--local-connection
+   (lambda (connection)
+     (agent-emx--request
+      connection "sessions/list" nil
+      (lambda (result)
+        (if (seq-some (lambda (session)
+                        (or (member (plist-get session :status) '("running" "starting"))
+                            (plist-get (plist-get session :info) :parent)))
+                      (plist-get result :sessions))
+            (message "请先结束运行中的回合、审批和子会话，再重启 emx daemon")
+          (agent-emx--request
+           connection "daemon/stop" '(:idleOnly t)
+           (lambda (_) (agent-emx--restart-after-stop connection 50))
+           (lambda (error) (message "emx daemon 休眠失败：%s" (plist-get error :message))))))
+      (lambda (error) (message "emx daemon 读取会话失败：%s" (plist-get error :message)))))
+   (lambda (error) (message "emx daemon 连接失败：%s" (plist-get error :message)))))
 
 (provide 'agent-emx)
 ;;; agent-emx.el ends here

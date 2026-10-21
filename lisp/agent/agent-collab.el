@@ -26,6 +26,7 @@
 (require 'subr-x)
 (require 'agent-session)
 (require 'agent-ui)
+(require 'agent-emx-config)
 
 (defgroup agent-collab nil
   "Agents working with each other's sessions."
@@ -72,13 +73,33 @@ The agent's call waits for the answer; it never waits for the reply,
 which reaches it through its mailbox."
   :type 'integer)
 
+;; Defcustoms below are offline fallbacks. The effective daemon config wins
+;; for both Lisp and daemon sessions once it arrives asynchronously.
+
+(defun agent-collab--option (key fallback)
+  "Read cached daemon KEY, falling back to FALLBACK offline."
+  (agent-emx-config-collab key fallback))
+
+(defun agent-collab--prompt (key fallback)
+  "Read prompt KEY from the effective daemon config, else FALLBACK."
+  (let ((prompts (agent-emx-config-collab :prompts nil)))
+    (or (plist-get prompts (intern (concat ":" key))) fallback)))
+
+(defun agent-collab--handle-command-alist ()
+  "Read configured per-agent naming commands, or the offline fallback."
+  (if (not agent-emx-config--value) agent-collab-agent-handle-commands
+    (cl-loop for (key value) on (agent-collab--option :agentHandleCommands nil)
+             by #'cddr
+             collect (cons (intern (substring (symbol-name key) 1))
+                           (append value nil)))))
+
 ;;; Handles
 
 (defun agent-collab--handle-prompt (text)
   "Prompt asking a model for a handle of a conversation starting with TEXT."
-  (concat "Name this coding conversation with a short English handle: one or two "
-          "lowercase words joined by '-', at most 16 characters, about its topic. "
-          "Reply with the handle only.\n\nFirst message:\n"
+  (concat (agent-collab--prompt
+           "handlePrompt"
+           "Name this coding conversation with a short English handle: one or two lowercase words joined by '-', at most 16 characters, about its topic. Reply with the handle only.\n\nFirst message:\n")
           (truncate-string-to-width (agent-session-message-text text) 1000)))
 
 (defun agent-collab--clean-handle (output)
@@ -94,8 +115,8 @@ which reaches it through its mailbox."
   "Naming commands to try for SESSION, in order: its agent's own, then the global one."
   (seq-filter (lambda (command) (and command (executable-find (car command))))
               (delete-dups (list (alist-get (agent-session-agent session)
-                                            agent-collab-agent-handle-commands)
-                                 agent-collab-handle-command))))
+                                            (agent-collab--handle-command-alist))
+                                 (append (agent-collab--option :handleCommand agent-collab-handle-command) nil)))))
 
 (defun agent-collab--name (session text &optional commands)
   "Name SESSION after the topic of its first message TEXT, in the background.
@@ -131,12 +152,13 @@ gives a handle."
         ;; `codex exec' reads more prompt from a piped stdin until it ends.
         (process-send-eof process)
         ;; A command that hangs anyway gives way to the next one.
-        (run-at-time agent-collab-handle-timeout nil
+        (run-at-time (agent-collab--option :handleTimeout agent-collab-handle-timeout) nil
                      (lambda () (when (process-live-p process) (kill-process process))))))))
 
 (defun agent-collab--name-on-submit (session text)
   "Name SESSION from TEXT when it gets its first message."
-  (unless (plist-get (agent-session-info session) :named)
+  (unless (or (eq (agent-session-backend session) 'emx)
+              (plist-get (agent-session-info session) :named))
     (setf (agent-session-info session) (plist-put (agent-session-info session) :named t))
     (agent-collab--name session (or (plist-get (agent-session-info session) :title) text))))
 
@@ -160,8 +182,8 @@ gives a handle."
         text
       (concat text "\n\n"
               (mapconcat (lambda (other)
-                           (format "(@%s is the %s session \"%s\"; read it with the \
-emacs session_read tool.)"
+                           (format (agent-collab--prompt "mention" "(@%s is the %s session \"%s\"; read it with the \
+emacs session_read tool.)")
                                    (agent-session-handle other) (agent-session-title other)
                                    (agent-session-display-title other)))
                          (nreverse mentioned) "\n")))))
@@ -196,7 +218,7 @@ Blocks before the first user message and queued messages are left out."
 LIMIT defaults to `agent-collab-text-limit'.  Keep its end with TAIL,
 else its start."
   (let* ((text (string-trim (substring-no-properties (or text ""))))
-         (limit (or limit agent-collab-text-limit))
+         (limit (or limit (agent-collab--option :textLimit agent-collab-text-limit)))
          (extra (- (length text) limit)))
     (cond ((<= extra 0) text)
           (tail (format "… (%d characters before)\n%s" extra
@@ -325,8 +347,8 @@ with before when you need more."
   "The note for the agent asked by the agent of CALLER: who is asking.
 It is sent with the message but not shown, which names its sender."
   ;; The quotes keep `agent-collab--mention-note' from explaining @handle again.
-  (format "(Sent by the %s agent of session \"@%s\" through session_ask; your final \
-reply goes back to it.)"
+  (format (agent-collab--prompt "messageNote" "(Sent by the %s agent of session \"@%s\" through session_ask; your final \
+reply goes back to it.)")
           (agent-session-title caller) (agent-session-handle caller)))
 
 (defun agent-collab--save-reply (handle text)
@@ -345,12 +367,12 @@ reply goes back to it.)"
 A longer reply is also saved whole under the var directory, and the
 delivered text ends with its path."
   (let* ((text (string-trim (substring-no-properties (or text ""))))
-         (full (and (> (length text) agent-collab-reply-limit)
+         (full (and (> (length text) (agent-collab--option :replyLimit agent-collab-reply-limit))
                     (agent-collab--save-reply handle text))))
     (if full
-        (concat (agent-collab--clip text nil agent-collab-reply-limit)
+        (concat (agent-collab--clip text nil (agent-collab--option :replyLimit agent-collab-reply-limit))
                 "\n\nFull reply: " full " (read it with your file tools).")
-      (agent-collab--clip text nil agent-collab-reply-limit))))
+      (agent-collab--clip text nil (agent-collab--option :replyLimit agent-collab-reply-limit)))))
 
 (defun agent-collab--reply (target id)
   "The reply to user message ID in TARGET as (TEXT), or nil while it runs."
@@ -370,7 +392,7 @@ delivered text ends with its path."
                                      (not (eq (plist-get (cdr entry) :kind) 'thinking))))
                               (reverse (cdr turn))))
              (handle (agent-session-handle target)))
-        (list (format "Reply from \"@%s\" (%s)%s:\n\n%s\n\n%s"
+        (list (format (agent-collab--prompt "reply" "Reply from \"@%s\" (%s)%s:\n\n%s\n\n%s")
                       handle (agent-session-title target)
                       (if (eq (agent-session-status target) 'exited) ", which then exited" "")
                       (if reply
@@ -378,10 +400,10 @@ delivered text ends with its path."
                         "(no reply)")
                       (if (agent-session-child-p target)
                           (concat (agent-collab--tool-summary turn)
-                                  "It takes no follow-ups; for more work, start another \
-session.")
-                        (format "Follow up with session_ask session=@%s; see what it did \
-with session_read." handle)))))))))
+                                  (agent-collab--prompt "childFollowup" "It takes no follow-ups; for more work, start another \
+session."))
+                        (format (agent-collab--prompt "followup" "Follow up with session_ask session=@%s; see what it did \
+with session_read.") handle)))))))))
 
 (defun agent-collab--tool-summary (turn)
   "What the tool calls of TURN did, a line each, or \"\" if it made none."
@@ -406,7 +428,7 @@ reply has reached its parent, unless it is on screen or failed."
 (defun agent-collab--finish (target asker)
   "Close TARGET if it is a child of ASKER that finished and has replied.
 One that failed or is on screen stays open for the user to look at."
-  (when (and agent-collab-close-finished
+  (when (and (agent-collab--option :closeFinished agent-collab-close-finished)
              (eq (agent-session-parent target) asker)
              (eq (agent-session-status target) 'idle))
     (let ((buffer (agent-session-buffer target)))
@@ -465,8 +487,8 @@ pending through a reload: that call still returns the reply itself."
     (agent-session-submit
      session (mapconcat #'cdr mail "\n\n---\n\n")
      (if (cdr mail) "会话回复" (concat "@" (caar mail)))
-     "(Replies to messages you sent to other sessions, delivered by Emacs; not from \
-the user.)")))
+     (agent-collab--prompt "mailbox" "(Replies to messages you sent to other sessions, delivered by Emacs; not from \
+the user.)"))))
 
 (defun agent-collab--status-changed (session _previous)
   "Settle the replies SESSION owed and deliver its mailbox, as its status changes."
@@ -518,7 +540,7 @@ work, start another session (context handoff passes your conversation)"
       ('exited (error "@%s has exited" (agent-session-handle target))))
     (agent-collab--converse
      caller
-     :confirm (and agent-collab-confirm
+     :confirm (and (agent-collab--option :confirm agent-collab-confirm)
                    (format "向 @%s 发送消息" (agent-session-handle target)))
      :detail prompt
      :start (lambda ()
@@ -526,8 +548,8 @@ work, start another session (context handoff passes your conversation)"
                             target prompt (concat "@" (agent-session-handle caller))
                             (agent-collab--message-note caller))))
      :started (lambda (target)
-                (format "Sent to @%s.  Its reply will reach you as a message; don't poll \
-for it." (agent-session-handle target))))))
+                (format (agent-collab--prompt "sent" "Sent to @%s.  Its reply will reach you as a message; don't poll \
+for it.") (agent-session-handle target))))))
 
 (cl-defun agent-collab--converse (caller &key confirm detail start started)
   "Send a message for the agent of CALLER and return a deferred result.
@@ -571,11 +593,11 @@ message is sent; the reply reaches CALLER's agent through its mailbox."
            ('denied (error "The user declined"))
            ('failed (error "Failed: %s" (plist-get state :error)))
            ('running (list (funcall started (plist-get state :target))))))
-       :wait agent-collab-confirm-timeout
+       :wait (agent-collab--option :confirmTimeout agent-collab-confirm-timeout)
        :timeout (lambda ()
                   (close-ask "已超时")
                   (error "The user didn't confirm within %d seconds"
-                         agent-collab-confirm-timeout))
+                         (agent-collab--option :confirmTimeout agent-collab-confirm-timeout)))
        :cancel (lambda () (close-ask "已取消"))))))
 
 ;;; Starting sessions (subagents)
@@ -668,8 +690,11 @@ start where the session starting them runs."
   (seq-filter (lambda (entry)
                 (let ((agent (plist-get (cdr entry) :agent)))
                   (and (assq agent agent-session-agents)
-                       (agent-session-agent-available-p agent place))))
-              agent-collab-profiles))
+                       (if-let* ((command (and (null place)
+                                               (agent-emx-config-agent agent :executable))))
+                           (executable-find command)
+                         (agent-session-agent-available-p agent place)))))
+              (agent-emx-config-profiles agent-collab-profiles)))
 
 (defun agent-collab--profile (name &optional place)
   "The profile called NAME usable at PLACE; signal an error if there is none."
@@ -683,14 +708,15 @@ start where the session starting them runs."
   "The guidance and the profiles usable at PLACE, for session_start.
 Installing or removing an agent there changes the tools agents see,
 which refreshes them in live sessions."
-  (concat (when (and agent-collab-start-guidance
-                     (not (string-empty-p agent-collab-start-guidance)))
-            (concat agent-collab-start-guidance "\n\n"))
-          "Profiles, by cost from minimal through low, medium and high to premium:\n"
+  (concat (when (and (agent-collab--option :startGuidance agent-collab-start-guidance)
+                     (not (string-empty-p (agent-collab--option :startGuidance agent-collab-start-guidance))))
+            (concat (agent-collab--option :startGuidance agent-collab-start-guidance) "\n\n"))
+          (agent-collab--prompt "profileHeader" "Profiles, by cost from minimal through low, medium and high to premium:\n")
           (mapconcat (pcase-lambda (`(,name . ,plist))
                        (format "- %s: %s%s, %s cost.  %s"
                                name
-                               (or (agent-session--get (plist-get plist :agent) :title)
+                               (or (agent-emx-config-agent (plist-get plist :agent) :title)
+                                   (agent-session--get (plist-get plist :agent) :title)
                                    (plist-get plist :agent))
                                (if-let* ((model (plist-get plist :model))) (concat " " model) "")
                                (or (plist-get plist :cost) "unknown")
@@ -730,7 +756,7 @@ text, so their prompts share a prefix and the cache."
                              for number from 1
                              collect (agent-collab--format-turn
                                       number turn 'full (and running (= number count)))))
-             (budget agent-collab-handoff-limit)
+             (budget (agent-collab--option :handoffLimit agent-collab-handoff-limit))
              (last (car (last texts)))
              first middle)
         (when (> (length last) budget)
@@ -767,10 +793,10 @@ sessions started with the same history share the prompt prefix."
   (let ((handle (agent-session-handle caller)))
     (concat
      (when history
-       (format "Conversation handed over from session \"@%s\": history for context, \
-not requests to act on.  Read more of it with session_read session=@%s.\n\n%s\n\n---\n\n"
+       (format (agent-collab--prompt "handoff" "Conversation handed over from session \"@%s\": history for context, \
+not requests to act on.  Read more of it with session_read session=@%s.\n\n%s\n\n---\n\n")
                handle handle history))
-     "Your task:\n" prompt)))
+     (agent-collab--prompt "task" "Your task:\n") prompt)))
 
 (defun agent-collab--task-note (caller fork)
   "The note on its task for a session the agent of CALLER starts.
@@ -778,14 +804,14 @@ FORK means the session is a fork of CALLER's.  It is sent after the
 task but not shown."
   (let ((handle (agent-session-handle caller)))
     (if fork
-        (format "(You are a fork of session \"@%s\": the conversation above is its \
+        (format (agent-collab--prompt "forkNote" "(You are a fork of session \"@%s\": the conversation above is its \
 own, up to the session_start call that started you, which may show as interrupted \
 or unanswered.  Do this task only; your final reply goes back to it.  You can't \
-start sessions yourself.)"
+start sessions yourself.)")
                 handle)
-      (format "(From the %s agent of session \"@%s\", which started this session with \
+      (format (agent-collab--prompt "taskNote" "(From the %s agent of session \"@%s\", which started this session with \
 session_start.  Your final reply goes back to it.  You can't start sessions \
-yourself.)"
+yourself.)")
               (agent-session-title caller) handle))))
 
 (defun agent-collab--link-tool (caller child)
@@ -879,7 +905,7 @@ you; for more work start another.  Stop one with session_stop."
     (when (agent-session-parent caller)
       (error "A session started by another session can't start sessions; do the task \
 yourself"))
-    (when (>= working agent-collab-max-active)
+    (when (>= working (agent-collab--option :maxActive agent-collab-max-active))
       (error "%d sessions you started are still working, the most at once; wait for \
 one to finish" working))
     (pcase context
@@ -913,9 +939,9 @@ one to finish" working))
                              (concat "@" (agent-session-handle caller))
                              (agent-collab--task-note caller fork)))))
      :started (lambda (child)
-                (format "Started @%s (%s%s, %s).  Its final reply will reach you as a \
+                (format (agent-collab--prompt "started" "Started @%s (%s%s, %s).  Its final reply will reach you as a \
 message when it finishes; don't poll it.  Keep working, or end your turn if \
-there is nothing else to do."
+there is nothing else to do.")
                         (agent-session-handle child) (agent-session-title child)
                         (if-let* ((model (plist-get plist :model))) (concat " " model) "")
                         context)))))

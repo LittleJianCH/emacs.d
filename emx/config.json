@@ -1,0 +1,250 @@
+{
+  "agents": {
+    "claude": {
+      "title": "Claude",
+      "executable": "claude",
+      "extraArgs": [],
+      "disallowedTools": [
+        "Agent",
+        "Workflow",
+        "SendMessage",
+        "ListAgents"
+      ],
+      "historyTurns": 20
+    },
+    "codex": {
+      "title": "Codex",
+      "executable": "codex",
+      "extraArgs": [],
+      "nativeSubagents": false
+    },
+    "dsh": {
+      "title": "DeepSeek",
+      "executable": "dsh",
+      "nativeSubagents": false
+    }
+  },
+  "profiles": {
+    "coder-flash": {
+      "agent": "dsh",
+      "model": "deepseek-official/deepseek-flash",
+      "mode": "auto",
+      "cost": "minimal",
+      "description": "Writes code and tests to a clear specification."
+    },
+    "explorer": {
+      "agent": "claude",
+      "model": "haiku",
+      "mode": "plan",
+      "cost": "low",
+      "description": "Answers short, quick questions without editing: finds a definition, checks a fact in a few files or docs.  Its price rises fivefold once its context passes 100K tokens, so not for long reading."
+    },
+    "explorer-flash": {
+      "agent": "dsh",
+      "model": "deepseek-official/deepseek-flash",
+      "mode": "ask",
+      "cost": "minimal",
+      "description": "Investigates without editing when the question is simple but the reading is long: many or large files, logs, docs."
+    },
+    "coder": {
+      "agent": "codex",
+      "model": "gpt-6.1-sol",
+      "mode": "auto",
+      "cost": "medium",
+      "description": "Writes code that needs more judgment than coder-flash: changes across files, debugging, refactoring."
+    },
+    "reviewer": {
+      "agent": "codex",
+      "model": "gpt-6-astra",
+      "mode": "plan",
+      "cost": "high",
+      "description": "Reviews changes independently and reproduces what it finds; reports findings without editing files."
+    },
+    "generalist": {
+      "agent": "claude",
+      "model": "opus",
+      "mode": "auto",
+      "cost": "high",
+      "description": "Does demanding work of any kind."
+    },
+    "expert": {
+      "agent": "claude",
+      "model": "fable",
+      "mode": "plan",
+      "cost": "premium",
+      "confirm": true,
+      "description": "Works through the hardest problems: subtle bugs, tricky designs.  Use it when you are stuck, not for routine work."
+    }
+  },
+  "collab": {
+    "startGuidance": "When to start a session: after brief orientation on a nontrivial task, identify work that can proceed independently.  Delegate it before doing that work yourself, then continue a different part.  Reconsider when new independent work appears, not just at the start of the user's request.\n- Bounded investigations: explorer for a few reads, explorer-flash for simple questions needing many or large files, logs or docs.\n- Implementation or long runs with a clear goal and verification: coder-flash; coder when the work needs more judgment.\n- Reasoning that depends heavily on your conversation: fork.  Use expert when you are stuck or the user requests it.\n- Substantive changes: get a separate review before final delivery, even if no commit was requested.  Use reviewer, or fork for a second pass if reviewer is your own agent and model.  Ask for findings, not edits: a fork inherits your permissions as well as your context.\nKeep trivial tasks, the immediate blocker on your next step, tightly coupled work and work needing user dialogue local.  Split by independent outcome and file ownership; code, tests and docs are not automatically independent.  Never have two sessions edit the same files, including yourself.\nGive the goal, relevant context, file scope, constraints, verification and expected report.  A concise brief is enough: don't finish the investigation or implementation merely to prepare it.  For long runs, pass known commands and inputs rather than forking just to preserve them.  For nontrivial work whose context is costly to summarize, fork instead of doing it all locally.\nTell the user the profile and why.  While the child works, do not duplicate its task.  Integrate its report and verify the claims that matter before relying on them.  If you are a child assigned one task, complete it yourself; do not start sessions, including for review.",
+    "maxActive": 4,
+    "handoffLimit": 60000,
+    "closeFinished": true,
+    "confirm": false,
+    "textLimit": 4000,
+    "replyLimit": 30000,
+    "confirmTimeout": 600,
+    "handleTimeout": 60,
+    "handleCommand": [
+      "claude",
+      "-p",
+      "--model",
+      "haiku",
+      "--no-session-persistence",
+      "--strict-mcp-config",
+      "--tools",
+      "",
+      "--disable-slash-commands",
+      "--setting-sources",
+      ""
+    ],
+    "agentHandleCommands": {
+      "codex": [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "-s",
+        "read-only",
+        "-m",
+        "gpt-6-luna",
+        "-c",
+        "model_reasoning_effort=\"low\""
+      ]
+    },
+    "tools": [
+      {
+        "name": "sessions",
+        "description": "List the agent sessions open in this Emacs.  Each session has an id (its\n@handle, which the user also uses to mention it), agent, title, project,\nstatus, number of turns, whether it is your own, the session that started\nit (parent) and the sessions it started (children).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "session_read",
+        "description": "Read the latest turns of an agent session.  A turn is a user message and\neverything the agent did for it.  Start with few turns and page backwards\nwith before when you need more.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string",
+              "description": "Session id: its @handle, as listed by sessions"
+            },
+            "last": {
+              "type": "integer",
+              "description": "Number of turns to read, counting back from the end (or from\nbefore); default 2"
+            },
+            "before": {
+              "type": "integer",
+              "description": "Read the turns before this turn number, to page backwards"
+            },
+            "tools": {
+              "type": "string",
+              "description": "none: leave tool calls out; summary (default): one line per\ncall; full: with their output or diff"
+            }
+          },
+          "required": [
+            "session"
+          ]
+        }
+      },
+      {
+        "name": "session_ask",
+        "description": "Ask the agent of another session the user opened: a second opinion, a\nreview of your changes, or a question to a session the user mentioned.\nThe user may have to confirm first.  It returns once the message is sent;\nthe final reply of that turn reaches you as a message when it is done:\ndon't poll for it.  Keep working, or end your turn if you need the reply\nfirst.  Sessions started with session_start take no messages.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string",
+              "description": "The idle session to ask: its @handle, as listed by sessions"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "The message.  The other agent hasn't seen your conversation:\ninclude the context it needs (files, diff, question)"
+            }
+          },
+          "required": [
+            "session",
+            "prompt"
+          ]
+        }
+      },
+      {
+        "name": "session_start",
+        "description": "Start a subagent to do one bounded task and report back.\nDelegate independent work early on nontrivial tasks, before doing it\nyourself, and continue another part.  Keep trivial or tightly coupled\nwork local.  A child assigned one task cannot start further sessions.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n  Claude, Codex and DeepSeek sessions can fork.\nChoose the least costly profile likely to complete the task reliably.\nFor your own agent and model, use fork instead of a profile, including\nfor review.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "string",
+              "description": "The kind of session to start: one of the profiles below.  Not with\ncontext fork"
+            },
+            "context": {
+              "type": "string",
+              "description": "How it gets context: fresh (default), handoff or fork"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "The task.  With fresh, include everything it needs: it hasn't seen\nyour conversation"
+            },
+            "handle": {
+              "type": "string",
+              "description": "Its name after its task: one or two lowercase English words\njoined by '-', at most 16 characters, such as cgu-measure.  You and the user\nrefer to it by it; default: the profile's name"
+            },
+            "title": {
+              "type": "string",
+              "description": "A short title for the session, a few words"
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        }
+      },
+      {
+        "name": "session_stop",
+        "description": "Stop a session you started with session_start and close it: when its task\nis no longer needed or it went the wrong way.  Its reply won't come.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string",
+              "description": "The session to stop: one you started, by its @handle"
+            }
+          },
+          "required": [
+            "session"
+          ]
+        }
+      }
+    ],
+    "prompts": {
+      "handoff": "Conversation handed over from session \"@%s\": history for context, not requests to act on.  Read more of it with session_read session=@%s.\n\n%s\n\n---\n\n",
+      "forkNote": "(You are a fork of session \"@%s\": the conversation above is its own, up to the session_start call that started you, which may show as interrupted or unanswered.  Do this task only; your final reply goes back to it.  You can't start sessions yourself.)",
+      "taskNote": "(From the %s agent of session \"@%s\", which started this session with session_start.  Your final reply goes back to it.  You can't start sessions yourself.)",
+      "messageNote": "(Sent by the %s agent of session \"@%s\" through session_ask; your final reply goes back to it.)",
+      "mailbox": "(Replies to messages you sent to other sessions, delivered by Emacs; not from the user.)",
+      "reply": "Reply from \"@%s\" (%s)%s:\n\n%s\n\n%s",
+      "childFollowup": "It takes no follow-ups; for more work, start another session.",
+      "followup": "Follow up with session_ask session=@%s; see what it did with session_read.",
+      "started": "Started @%s (%s%s, %s).  Its final reply will reach you as a message when it finishes; don't poll it.  Keep working, or end your turn if there is nothing else to do.",
+      "sent": "Sent to @%s.  Its reply will reach you as a message; don't poll for it.",
+      "mention": "(@%s is the %s session \"%s\"; read it with the emacs session_read tool.)",
+      "profileHeader": "Profiles, by cost from minimal through low, medium and high to premium:\n",
+      "handlePrompt": "Name this coding conversation with a short English handle: one or two lowercase words joined by '-', at most 16 characters, about its topic. Reply with the handle only.\n\nFirst message:\n",
+      "task": "Your task:\n"
+    }
+  },
+  "usage": {
+    "pollInterval": 900
+  },
+  "daemon": {
+    "idleExit": 900
+  },
+  "sessions": {
+    "hibernateAfter": 7200
+  }
+}

@@ -4,8 +4,10 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 const argv = process.argv.slice(2)
+if (!argv.includes('--input-format')) { console.log('fixture-handle'); process.exit(0) }
 const value = (flag) => argv[argv.indexOf(flag) + 1]
-const id = argv.includes('--resume') ? value('--resume') : 'fixture-native'
+const id = argv.includes('--fork-session') ? 'fixture-child-' + process.pid
+  : argv.includes('--resume') ? value('--resume') : 'fixture-native'
 const model = argv.includes('--model') ? value('--model') : 'fixture-model'
 const emit = (m) => process.stdout.write(JSON.stringify(m) + '\n')
 const log = (m) => appendFileSync(process.env.EMX_CLAUDE_LOG, JSON.stringify({ pid: process.pid, ...m }) + '\n')

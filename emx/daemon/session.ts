@@ -17,9 +17,12 @@ export interface SessionOptions {
   settings?: Settings
   resume?: string
   daemonSocket?: string
+  agentConfig?: () => import('../config.ts').AgentConfig | undefined
+  hibernateAfter?: () => number
   editorTools?: () => import('./protocol.ts').EditorTools
   restored?: boolean
   transcript?: Transcript
+  onEvent?: (session: Session, event: SessionEvent) => void
   onUsage?: (session: Session, event: SessionEvent) => void
   onChange?: (summaryChanged: boolean) => void
 }
@@ -34,6 +37,7 @@ interface Message {
   text: string
   images?: string[]
   block?: string
+  meta?: { text: string, origin: string }
 }
 
 export class Session implements SessionHost {
@@ -45,6 +49,7 @@ export class Session implements SessionHost {
   info: Info
   settings: Settings
   readonly daemonSocket: string
+  readonly agentConfig: NonNullable<SessionOptions['agentConfig']>
   readonly editorTools: () => import('./protocol.ts').EditorTools
   capabilities: Capabilities = { models: [], modes: [], commands: [] }
   blocks: Block[] = []
@@ -55,23 +60,31 @@ export class Session implements SessionHost {
   seq = 0
   readonly log: EventParams[] = []
   notify: ((event: EventParams) => void) | undefined
+  #onEvent?: SessionOptions['onEvent']
+  #messageMeta = new Map<string, { text: string, origin: string }>()
   #onUsage?: SessionOptions['onUsage']
   #onChange: (summaryChanged: boolean) => void
   #resume: string | undefined
   #queued: Message[] = []
   #active = false
   #generation = 0
+  #hibernateAfter: () => number
+  #hibernateTimer?: NodeJS.Timeout
+  #hibernating?: Promise<void>
 
   constructor(options: SessionOptions) {
     this.id = options.id
     this.agent = options.agent
     this.root = options.root
     this.daemonSocket = options.daemonSocket ?? ''
+    this.agentConfig = options.agentConfig ?? (() => undefined)
     this.editorTools = options.editorTools ?? (() => ({ tools: [], readOnly: [] }))
     this.info = structuredClone(options.info ?? {})
     this.settings = { ...options.settings }
     this.status = options.restored ? 'idle' : 'starting'
     this.#resume = options.resume
+    this.#hibernateAfter = options.hibernateAfter ?? (() => 0)
+    this.#onEvent = options.onEvent
     this.#onUsage = options.onUsage
     this.#onChange = options.onChange ?? (() => {})
     if (options.transcript) {
@@ -89,6 +102,11 @@ export class Session implements SessionHost {
       status: this.status, info: structuredClone(this.info) }
   }
 
+  /** Includes asynchronous send preparation before a backend publishes running. */
+  busy(): boolean {
+    return this.#active || ['starting', 'running', 'disconnected'].includes(this.status)
+  }
+
   resumeId(): string | undefined {
     return this.backend.resumeId() ?? this.#resume
   }
@@ -97,6 +115,8 @@ export class Session implements SessionHost {
     await this.backend.start(this.resumeId())
     await this.backend.configure(this.settings)
     this.#onChange(false)
+    this.#drain()
+    this.refreshHibernate()
   }
 
   newId(prefix: string): string {
@@ -109,6 +129,12 @@ export class Session implements SessionHost {
     // Accounting is applied at the producer boundary, never logged or replayed.
     if (this.#onUsage && ['usage/call', 'usage/end', 'quota', 'quota/rate-limits'].includes(input.type)) return
     let event = structuredClone(input)
+    if (event.type === 'block/add' && event.block.type === 'user') {
+      const previous = this.index.get(event.block.id)
+      const meta = this.#messageMeta.get(event.block.id)
+        ?? (previous?.type === 'user' && previous.origin ? { text: previous.text, origin: previous.origin } : undefined)
+      if (meta) { event.block = { ...event.block, ...meta }; this.#messageMeta.delete(event.block.id) }
+    }
     if (event.type === 'block/add') {
       const existing = this.index.get(event.block.id)
       if (existing) {
@@ -118,6 +144,10 @@ export class Session implements SessionHost {
         if (!Object.keys(fields).length) return
         event = { type: 'block/update', id: existing.id, fields }
       }
+    }
+    if (event.type === 'block/update' && typeof event.fields.text === 'string') {
+      const previous = this.index.get(event.id)
+      if (previous?.type === 'user' && previous.origin) event.fields.text = previous.text
     }
     // Summary.info currently includes every info key; transcript events do not.
     const summaryChanged = event.type === 'status' ? this.status !== event.status
@@ -168,7 +198,9 @@ export class Session implements SessionHost {
     if (this.log.length > 2000) this.log.shift()
     this.notify?.(logged)
     this.#onChange(summaryChanged)
+    this.#onEvent?.(this, event)
     if (event.type === 'status' && event.status === 'idle') this.#drain()
+    if (['status', 'ask/add', 'ask/remove'].includes(event.type)) this.refreshHibernate()
   }
 
   #replace(block: Block): void {
@@ -214,8 +246,12 @@ export class Session implements SessionHost {
     }
   }
 
-  send(text: string, images?: string[], block?: string): { queued: boolean } {
-    const message = { text, images, block }
+  sendMessage(text: string, origin: string, hidden: string, block = this.newId('user')): void {
+    this.send(text + (hidden ? '\n\n' + hidden : ''), undefined, block, { text, origin })
+  }
+
+  send(text: string, images?: string[], block?: string, meta?: Message['meta']): { queued: boolean } {
+    const message = { text, images, block, meta }
     if (this.#active || this.status === 'running') {
       this.#queued.push(message)
       this.emit({ type: 'queue', items: this.#queued.map((item) => item.text) })
@@ -226,9 +262,12 @@ export class Session implements SessionHost {
   }
 
   async #run(message: Message): Promise<void> {
+    clearTimeout(this.#hibernateTimer)
     this.#active = true
+    if (message.block && message.meta) this.#messageMeta.set(message.block, message.meta)
     const generation = this.#generation
     try {
+      if (this.#hibernating) await this.#hibernating
       if (!this.backend.alive()) await this.start()
       if (generation !== this.#generation) return
       await this.backend.send(message.text, message.images, message.block)
@@ -241,6 +280,7 @@ export class Session implements SessionHost {
     } finally {
       this.#active = false
       this.#drain()
+      this.refreshHibernate()
     }
   }
 
@@ -266,6 +306,8 @@ export class Session implements SessionHost {
   }
 
   async stop(): Promise<void> {
+    clearTimeout(this.#hibernateTimer)
+    if (this.#hibernating) await this.#hibernating
     this.#generation++
     this.#resume = this.resumeId()
     this.#queued = []
@@ -273,6 +315,21 @@ export class Session implements SessionHost {
     this.#cancelAsks()
     await this.backend.stop()
     this.setStatus('exited')
+  }
+
+  /** Idle saved sessions release their native process; children cannot resume. */
+  refreshHibernate(): void {
+    clearTimeout(this.#hibernateTimer)
+    const seconds = this.#hibernateAfter()
+    if (!seconds || this.info.parent || this.#active || this.asks.size
+      || this.status !== 'idle' || !this.backend.alive()) return
+    this.#hibernateTimer = setTimeout(() => {
+      this.#resume = this.resumeId()
+      this.#hibernating = Promise.resolve(this.backend.stop()).then(() => {
+        this.#onChange(true)
+      }).finally(() => { this.#hibernating = undefined })
+    }, seconds * 1000)
+    this.#hibernateTimer.unref()
   }
 
   detach(): void { this.notify = undefined }

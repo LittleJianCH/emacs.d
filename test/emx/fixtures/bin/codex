@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Never resolve the real CLI from test naming or quota commands.
+import '../codex.mjs'

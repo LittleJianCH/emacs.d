@@ -2,6 +2,7 @@
 // Deterministic app-server: no credentials, SDK, MCP child or network.
 import { createInterface } from 'node:readline'
 import { appendFileSync, existsSync } from 'node:fs'
+if (process.argv[2] === 'exec') { console.log('fixture-handle'); process.exit(0) }
 const write = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n')
 const notify = (method, params) => write({ method, params: { threadId: 'fake-thread', ...params } })
 const result = (id, value = {}) => write({ id, result: value })
@@ -61,7 +62,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (process.env.EMX_CODEX_BAD_CONFIG) result(msg.id, { config: { developer_instructions: 42 } })
       else result(msg.id, { config: { developer_instructions: '  User rules.\n' } }); break
     case 'skills/extraRoots/set': result(msg.id); break
-    case 'thread/start': case 'thread/resume':
+    case 'thread/start': case 'thread/resume': case 'thread/fork':
       result(msg.id, { thread: { id: 'fake-thread' }, model: p.model ?? 'fake-cheap' })
       notify('thread/tokenUsage/updated', { tokenUsage: usage() }); break
     case 'thread/turns/list':

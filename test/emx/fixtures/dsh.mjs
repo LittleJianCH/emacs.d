@@ -62,6 +62,7 @@ lines.on('line', (line) => {
       }
       config = { ...config, ...p, model: p.model ?? config.model, effort: p.effort ?? 'high' }
       result(msg.id, { config }); break
+    case 'flush': result(msg.id); break
     case 'balance': result(msg.id, { balances: [{ total: '12.34', currency: 'CNY' }] }); break
     case 'prompt':
       if (p.text.startsWith('/')) {

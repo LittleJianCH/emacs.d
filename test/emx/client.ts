@@ -4,6 +4,7 @@
 // delimited JSON-RPC 2.0 over a Unix socket.  Every wait is bounded so a
 // broken daemon fails a test instead of hanging the suite.
 
+import './fixtures/environment.ts'
 import type { Method, Params, Result } from '../../emx/daemon/protocol.ts'
 import type { Socket } from 'node:net'
 import * as net from 'node:net'

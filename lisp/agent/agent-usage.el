@@ -38,6 +38,7 @@
 (declare-function agent-emx--connection-ready "agent-emx")
 (declare-function agent-emx--connection-process "agent-emx")
 (declare-function agent-emx--connection-var "agent-emx")
+(declare-function agent-emx--connection-capabilities "agent-emx")
 (defvar agent-emx-var-directory)
 
 (defgroup agent-usage nil
@@ -73,7 +74,61 @@ A source that reported its quota more recently is skipped."
 FUNCTION returns the command (a list) emx runs, or nil not to poll; it
 is left out when its program isn't installed.  Backends add themselves.")
 
-(defvar agent-usage--connection nil "The shared local daemon connection.")
+(defvar agent-usage--connection nil "The local usage-only daemon connection.")
+(defvar agent-usage--outbox nil "Usage entries retained until acknowledged by id.")
+(defvar agent-usage--inflight (make-hash-table :test #'equal)
+  "Ids already sent on the current connection.")
+(defvar agent-usage--monitoring nil "Non-nil while usage should reconnect.")
+(defvar agent-usage--retry-timer nil "Pending asynchronous reconnect timer.")
+(defvar agent-usage--retry-delay 2 "Seconds until the next reconnect, at most 60.")
+(defvar agent-usage--serial 0 "Sequence for this Emacs's stable usage ids.")
+(defvar agent-usage--id-prefix
+  (format "%s-%s-%s" (emacs-pid) (float-time) (random most-positive-fixnum))
+  "Unique prefix for usage records from this Emacs process.")
+
+(defun agent-usage--capable-p (connection)
+  "Whether CONNECTION supports acknowledged usage delivery."
+  (>= (or (plist-get (agent-emx--connection-capabilities connection) :usage) 0) 1))
+
+(defun agent-usage--schedule-reconnect ()
+  "Retry ensure and connect asynchronously with bounded backoff."
+  (when (and agent-usage--monitoring (not (timerp agent-usage--retry-timer)))
+    (setq agent-usage--retry-timer
+          (run-at-time agent-usage--retry-delay nil
+                       (lambda ()
+                         (setq agent-usage--retry-timer nil)
+                         (when agent-usage--monitoring
+                           ;; Timer work must use asynchronous ensure even in tests.
+                           (let ((noninteractive nil)) (agent-usage--start))))))
+    (setq agent-usage--retry-delay (min 60 (* 2 agent-usage--retry-delay)))))
+
+(defun agent-usage--disconnected (connection)
+  "Retain outstanding work and retry after losing usage CONNECTION."
+  (when (eq connection agent-usage--connection)
+    (clrhash agent-usage--inflight)
+    (agent-usage--schedule-reconnect)))
+
+(defun agent-usage--flush-outbox (connection)
+  "Send retained entries to capable CONNECTION; remove only matching acks."
+  (when (agent-usage--capable-p connection)
+    (dolist (entry (copy-sequence agent-usage--outbox))
+      (let ((id (plist-get entry :id)))
+        (unless (gethash id agent-usage--inflight)
+          (puthash id t agent-usage--inflight)
+          (agent-emx--request
+           connection (concat "usage/" (plist-get entry :method))
+           (agent-usage--nulls
+            (append (list :id id) (plist-get entry :params)))
+           (lambda (ack)
+             (when (equal (plist-get ack :id) id)
+               (remhash id agent-usage--inflight)
+               (setq agent-usage--outbox
+                     (cl-delete id agent-usage--outbox
+                                :key (lambda (item) (plist-get item :id))
+                                :test #'equal))))
+           (lambda (error)
+             (remhash id agent-usage--inflight)
+             (agent-usage--error error))))))))
 (defvar agent-usage--snapshot nil
   "The quotas emx pushed last: a list of plists, in display order.")
 
@@ -104,21 +159,27 @@ is left out when its program isn't installed.  Backends add themselves.")
   (run-hooks 'agent-usage-change-functions))
 
 (defun agent-usage--connected (connection)
-  "Configure usage on a newly ready local daemon CONNECTION.
-File names belong to its var directory; only poll commands and ordering
-come from Emacs.  The daemon retains them when Emacs disconnects."
-  (setq agent-usage--connection connection)
-  (agent-emx--request
-   connection "usage/configure"
-   (list :agents (vconcat (mapcar #'symbol-name
-                                 (reverse (mapcar #'car agent-session-agents))))
-         :pollInterval agent-usage-poll-interval :pollers (agent-usage--pollers))
-   (lambda (result) (agent-usage--receive-quotas (plist-get result :quotas)))
-   #'agent-usage--error))
+  "Configure polling and flush retained records on ready usage CONNECTION."
+  (when (agent-usage--capable-p connection)
+    (setq agent-usage--connection connection
+          agent-usage--retry-delay 2)
+    (when (timerp agent-usage--retry-timer)
+      (cancel-timer agent-usage--retry-timer))
+    (setq agent-usage--retry-timer nil)
+    (agent-emx--request
+     connection "usage/configure"
+     (list :agents (vconcat (mapcar #'symbol-name
+                                   (reverse (mapcar #'car agent-session-agents))))
+           :pollInterval agent-usage-poll-interval :pollers (agent-usage--pollers))
+     (lambda (result)
+       (agent-usage--receive-quotas (plist-get result :quotas))
+       (agent-usage--flush-outbox connection))
+     #'agent-usage--error)))
 
 (defun agent-usage--error (error)
-  "Report daemon ERROR without blocking the editor."
-  (message "用量服务出错：%s" (plist-get error :message)))
+  "Report daemon ERROR and schedule recovery without blocking the editor."
+  (message "用量服务出错：%s" (plist-get error :message))
+  (agent-usage--schedule-reconnect))
 
 (defun agent-usage--json-record (record)
   "Old ledger RECORD, a plist with Lisp keys, as a JSON record."
@@ -190,8 +251,10 @@ exist yet, and kept as .bak."
   "Find or asynchronously start the shared local daemon."
   (agent-usage--migrate)
   (require 'agent-emx)
+  (setq agent-usage--monitoring t)
   (setq agent-usage--connection
-        (agent-emx--local-connection #'ignore #'agent-usage--error)))
+        (agent-emx--local-connection #'agent-usage--connected
+                                     #'agent-usage--error 'usage)))
 
 (defun agent-usage--service ()
   "Ensure the daemon is connected; batch runs require an explicit start."
@@ -211,15 +274,24 @@ exist yet, and kept as .bak."
 (defun agent-usage--with-connection (callback)
   "Run CALLBACK once the usage daemon connection is ready."
   (when (agent-usage--service)
-    (agent-emx--local-connection callback #'agent-usage--error)))
+    (agent-emx--local-connection
+     (lambda (connection)
+       (when (agent-usage--capable-p connection) (funcall callback connection)))
+     #'agent-usage--error 'usage)))
 
 (defun agent-usage--notify (method params)
-  "Send the daemon usage notification METHOD with PARAMS."
-  (agent-usage--with-connection
-   (lambda (connection)
-     (agent-emx--write connection
-                       (list :jsonrpc "2.0" :method (concat "usage/" method)
-                             :params params)))))
+  "Retain usage METHOD with PARAMS until the daemon acknowledges its id."
+  (let* ((id (format "%s-%s" agent-usage--id-prefix (cl-incf agent-usage--serial)))
+         (quota (equal method "quota"))
+         (key (when quota (cons (plist-get params :agent) (plist-get params :host))))
+         (entry (list :id id :method method :key key
+                      :params (if quota (list :reading params) params))))
+    (when quota
+      (setq agent-usage--outbox
+            (cl-delete-if (lambda (item) (equal (plist-get item :key) key))
+                          agent-usage--outbox)))
+    (setq agent-usage--outbox (append agent-usage--outbox (list entry)))
+    (agent-usage--with-connection #'agent-usage--flush-outbox)))
 
 (defun agent-usage--nulls (value)
   "Convert legacy JSON null markers in VALUE for agent-emx requests."
@@ -589,7 +661,10 @@ Starts the usage service, which then polls the quotas."
   (if agent-usage-echo-mode
       (progn (add-hook 'agent-usage-change-functions #'agent-usage-echo-refresh)
              (unless noninteractive (agent-usage--service)))
-    (remove-hook 'agent-usage-change-functions #'agent-usage-echo-refresh))
+    (remove-hook 'agent-usage-change-functions #'agent-usage-echo-refresh)
+    (setq agent-usage--monitoring nil)
+    (when (timerp agent-usage--retry-timer) (cancel-timer agent-usage--retry-timer))
+    (setq agent-usage--retry-timer nil))
   (agent-usage-echo-refresh))
 
 ;;; Usage page

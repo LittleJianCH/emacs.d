@@ -1,8 +1,9 @@
 # emx daemon: agents outside Emacs
 
-Status: phases 1–4 and 6 implemented on `claude/emx-daemon` for local projects.
+Status: phases 1–6 implemented on `claude/emx-daemon` for local projects.
 Agent execution remains opt-in through `agent-emx-agents`; all usage now shares
-the daemon. Collaboration and remote phases remain design.
+the daemon. Mixed Lisp/daemon collaboration has the limitation below; remote
+transport remains design.
 
 ## Goal
 
@@ -84,12 +85,25 @@ built for it), changing how sessions look, moving canvas or review UI.
 - **Stale code:** a daemon reports the hash of the code it runs on
   `hello`. When the client's differs, a daemon with no live agent restarts
   at once; otherwise the client says so and the daemon restarts once every
-  agent is idle, hibernating them first.
+  agent is idle, hibernating them first. Current implementation: `--ensure`
+  compares `codeVersion()` with `ping`; when ping advertises
+  `capabilities.stopIfIdle: 1`, it requests `daemon/stop {ifIdle: true}`.
+  The daemon atomically refuses with `{stopped: false}` if an agent is live
+  or starting (including a pending child start); otherwise it commits to
+  shutdown before returning `{stopped: true}`. Refusal returns `stale: true`.
+  Emacs displays a Chinese notice offering `M-x agent-emx-restart-daemon`. This explicit command requires idle,
+  resumable sessions, persists and stops them, then starts current code; active
+  turns, asks and ephemeral children must finish first. Automatic restart when
+  all agents become idle remains deferred. Daemons without `stopIfIdle`
+  are always left running with `stale: true`; only the explicit restart
+  command may stop them. Probes never take over the editor connection.
 - **One Emacs.** A daemon serves a single Emacs, as one Emacs server
   serves all its frames and emacsclients. A second Emacs saying `hello`
   takes over and the first is told it was replaced. Agents' `emx mcp`
   processes also connect to the socket, any number of them, but only to
-  run tools.
+  run tools. Usage producers/subscribers instead say `usage/hello`: any number
+  can publish records/readings and receive quota snapshots without taking over
+  the editor. Only sessions and editor tools require the exclusive role.
 - **Crash:** agent processes die with the daemon (they are its children).
   The session table (`var/emx/sessions.json`) is written on every change,
   so the next daemon lists the sessions and resumes them on the next send,
@@ -134,6 +148,7 @@ JSON-RPC 2.0, one JSON object per line, both directions over the socket.
 | `session/answer` | `{id, ask, choice?, answers?}` | `{stale?}` |
 | `session/earlier` | `{id, turns?}` | `{}` (blocks arrive as events) |
 | `session/stop` | `{id}` | `{}` |
+| `config/get` | `{}` | `{config, errors}` |
 | `config/reload` | `{}` | `{config, errors}` |
 | `usage/configure` | `{agents?, pollInterval?, pollers?: {source: {command: argv}}}` | `{quotas}` |
 | `usage/report` | `{range?, filter?, withoutCache?, now?}` | report (unchanged format) |
@@ -177,8 +192,9 @@ The implemented contract is `emx/daemon/protocol.ts`. In particular,
 `session/send` returns `{queued}`, `session/earlier` takes `{id, before,
 turns?}`, insertions use `block/add {block, before?}`, completion uses
 `block/update {id, fields}`, and notices are blocks with a `notice.kind`.
-`sessions/history`, forks, configuration files and children in the design
-tables remain later phases. Editor calls and usage requests are implemented.
+`sessions/history` and the direct `session/open.fork` parameter remain later
+work. Native forks are available through `session_start context=fork`.
+Configuration, children, editor calls and usage requests are implemented.
 `usage/record {record}` and `usage/quota {agent, host?, windows?, balance?,
 plan?, credits?}` are editor-only notifications for the remaining Lisp
 backends; MCP peers and replaced editors cannot write usage.
@@ -230,8 +246,9 @@ not an authentication token.
 | daemon → MCP | `mcp/tools_changed` | notification `{}` |
 | daemon → editor | `editor/call` | `{method, params, caller: {session, root, place: null}}` |
 
-- All methods still come from Lisp in this phase, including collaboration
-  and canvas methods. Moving their data into the daemon is later work.
+- Editor methods and canvas still come from Lisp. Phase 5 replaces the five
+  collaboration definitions with daemon definitions and handles their calls
+  directly, even without Emacs; other methods retain the editor transport.
   Emacs sends `agent-ui--describe nil` and the private audited read-only
   names on hello. The existing two-second signature timer also checks
   ready daemon connections and sends `editor/tools` when definitions or
@@ -274,8 +291,8 @@ stream into the session events above.
   Remote roots are rejected. Native subagents are always disabled on this
   path. `EMX_DSH_EXECUTABLE` overrides `dsh` for installations and fake
   protocol peers in tests; no API credentials pass through this option.
-  External session discovery and conversation forks stay on the old Lisp
-  path until the history/collaboration phases.
+  External session discovery stays on the old Lisp path; phase 5 adds
+  native conversation forks through the daemon collaboration tools.
 - **Claude** is the hardest and shaped the event set: restart with
   `--resume` before the next send (effort change, messages from other
   clients, tools changed); `control_request` permissions and model / mode
@@ -318,9 +335,11 @@ with `executable`, `extraArgs`, `disallowedTools` (default `Agent`,
 `Workflow`, `SendMessage`, `ListAgents`) and `historyTurns` (default 20).
 `EMX_CLAUDE_EXECUTABLE` overrides the executable for installations/tests;
 `EMX_CLAUDE_PROJECTS_DIR` isolates transcript fixtures. Fake CLI tests do
-not contact the API. The shared config-file/watcher phase remains later work.
+not contact the API. Phase 5 replaces those defaults with the shared
+config-file/watcher while retaining environment overrides for fixtures.
 
-Remote projects and native forks are rejected explicitly. Historical
+Remote projects are rejected explicitly. Phase 5 supports native forks
+through `session_start context=fork`. Historical
 session discovery stays on the Lisp side, which already scans Claude's
 project directory; the daemon handles live sessions and transcript paging.
 Claude receives MCP tool-list notifications directly, so it does not need
@@ -369,10 +388,11 @@ credits. A fresh attach republishes the cached account reading after
 turns and `session/earlier`. A crashed app-server resumes its saved id on
 the next send.
 
-Remote roots and `thread/fork` remain explicitly unsupported. Discovering
+Remote roots remain unsupported. Phase 5 implements ephemeral `thread/fork`
+through `session_start context=fork`. Discovering
 past sessions stays in Lisp's `thread/list` implementation; use the Lisp
 registration to browse sessions outside the daemon's own session table.
-Remote transport, native forks and shared discovery belong to later phases.
+Remote transport and shared historical discovery belong to later phases.
 
 ## Localization
 
@@ -388,26 +408,85 @@ During migration, `agent-emx-agents` is a Lisp defcustom (default nil).
 Set it before loading dsh, or use `(customize-set-variable
 'agent-emx-agents '(dsh))`, to register new dsh sessions with `:backend emx
 :emx-agent "dsh"`. Removing dsh restores its Lisp registration; existing
-sessions retain their backend. The Lisp executable/native-subagent
-options continue to apply to the old path. Daemon config is a later phase.
+sessions retain their backend. The asynchronously received effective
+configuration supplies launch policy and collaboration policy on both
+paths; the old Lisp options remain offline defaults.
 
-One tracked file, `emx/config.json`, with a git-ignored override at
-`var/emx/config.json` merged over it (user changes stay out of tracked
-paths). Contents:
+Phase 5a implements `emx/config.json` and the optional, git-ignored
+`<var>/emx/config.json` override. Objects merge deeply; arrays, scalars and
+null replace. Unknown fields, malformed JSON and invalid types report field
+paths and keep the last good effective config. Both files are polled every
+250 ms (including atomic replacement); reload is debounced 75 ms.
+`config/get` and `config/reload` return `{config, errors}`. Hello includes
+`config`; changes push a global `config {config, errors}` notification and
+`mcp/tools_changed`.
 
-- `agents`: per agent, `enabled`, `executable`, extra arguments, disallowed
-  tools, history turns.
-- `profiles`: today's `agent-collab-profiles` (agent, model, effort, mode,
-  cost, description, confirm).
-- `collab`: start guidance, `maxActive`, handoff limit, close finished
-  children, confirm `session_ask`.
-- `usage`: poll interval.
-- `approvals`: the policy below.
+Schema:
 
-The daemon watches the file and applies changes like a reload does today
-(a changed profile or guidance changes the tools' descriptions, which pushes
-`list_changed`); `config/reload` does it on demand and reports errors.
-Display preferences (keys, faces, evil, layout) stay in Lisp.
+- `agents`: executable, title, extraArgs, Claude disallowedTools/historyTurns,
+  Codex/dsh nativeSubagents. Enabled agents remain `my/agents` during migration.
+- `profiles`: named objects with agent, model, effort, mode, cost, description,
+  confirm. All current profile keys are preserved.
+- `collab`: startGuidance, maxActive, handoffLimit, closeFinished, confirm,
+  textLimit, replyLimit, confirmTimeout, handleTimeout, handleCommand,
+  agentHandleCommands, tools (verbatim descriptions and input schemas),
+  prompts (verbatim task, fork, handoff, mailbox and naming text).
+- `usage.pollInterval`, `daemon.idleExit`, `sessions.hibernateAfter`: seconds.
+
+Lisp collaboration reads the asynchronously pushed config from
+`agent-emx-config.el`; accessors never make blocking requests. Its defcustoms
+remain **offline fallbacks**, used before a config arrives. A disconnected
+editor retains its last effective snapshot until reconnection. Display
+preferences remain in Lisp. The transitional backend environment overrides
+remain for protocol fixtures and installations; file values otherwise apply
+on the next spawn. Existing processes retain their launch flags. Legacy
+`usage/configure` still accepts Lisp quota-poller registration, but its
+legacy pollInterval field cannot override the file's polling interval. Tests
+that disable polling set it to zero in their temporary override file.
+
+### Phase 5b: daemon collaboration
+
+`emx/daemon/collab.ts` serves `sessions`, `session_read`, `session_ask`,
+`session_start` and `session_stop` directly. Definitions come from the
+configuration, filtered by installed executables and the enabled agents
+Emacs sends on hello. Enabled agents are persisted with collaboration
+state. Definitions never depend on caller identity, status, model or child
+status; a Node test compares them byte for byte with Lisp's definitions.
+Refusals happen at call time.
+
+The daemon names first submissions with the configured cheap commands (own
+agent first, global fallback), limits concurrent starts including pending
+confirmations, caps modes, and implements fresh/handoff/fork. Handoff text
+is fixed per parent turn and puts the task last. Claude forks use resume
+plus fork-session and no persistence; Codex forks are ephemeral and omit
+new developer instructions; dsh flushes the parent before forkFrom and uses
+the native parentSession. Children do not hibernate or survive a daemon
+crash as resumable sessions.
+
+Pending replies and batched mailboxes live in `<var>/emx/collab.json`.
+Long replies are saved under `<var>/replies/`. The original agent-facing
+wording, hidden sender notes, tool summary and one-message idle delivery
+are preserved. Visible user text and origins are retained separately from
+hidden notes in the transcript and persisted queue. A child closes after
+its result reaches the mailbox, unless failed or visible in Emacs. Closing
+a parent stops its children; session_stop cancels its expected reply.
+
+Emacs receives private `editor/call` methods `_session_open` and
+`_session_visible` (never MCP definitions), plus `collab/closed` and the
+session summaries. It creates and attaches a child view without a second
+CLI, links the parent's oldest unlinked session_start block, and reuses
+native parent/footer approval mirroring. Reconnect reattaches existing
+child views. With no editor, collaboration continues; user confirmations
+remain pending until answered or timed out. An unresponsive visibility
+query conservatively keeps the child open.
+
+**Cross-path choice:** the migration does not bridge daemon tools to Lisp
+sessions. Daemon sessions list/read/ask daemon sessions only. Lisp tools
+retain their current buffer-based behavior and can inspect attached daemon
+views, but this is not a symmetric cross-path collaboration API. Use the
+same execution path for sessions that need to collaborate. A complete
+bridge must route asynchronous confirmations and reply tracking across both
+owners; it is deferred rather than duplicating mailbox ownership.
 
 ## Approvals
 
@@ -659,3 +738,22 @@ quota calls, live Emacs server, default daemon or reload was used.
 1. Config format: JSON as proposed, or something with comments?
 2. Default durations: `daemon.idleExit` 15 minutes, `sessions.hibernateAfter`
    2 hours.
+
+### Usage delivery recovery (phase 6 review)
+
+`usage/hello` and editor `hello` advertise `capabilities.usage = 1` for the
+acknowledged protocol. Lisp usage uses a dedicated connection and never sends
+records to a daemon without that capability. Each record stays in an Emacs
+in-memory outbox under a stable id until `usage/record` replies with that id.
+Quota readings use `usage/quota` with an id and retain the latest per agent/host.
+Failed ensure, socket loss and uncertain replies retain entries for retry.
+The daemon persists record ids in the same ledger append (a bounded set of the
+most recent 10,000), and quota receipts in the same atomic quota-file update
+(up to 128 per source), so a restart between write and reply does not duplicate
+usage. Legacy notifications remain supported for attached older editors.
+
+While usage monitoring is active, failures schedule asynchronous ensure/connect
+with 2–60 second exponential backoff. A successful usage handshake resets the
+backoff, reapplies poll settings and flushes retained entries. Disabling the echo
+monitor cancels its pending reconnect timer. The outbox survives daemon restarts
+but intentionally lives only in the producing Emacs process.

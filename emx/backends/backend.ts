@@ -16,6 +16,7 @@ export interface SessionHost {
   readonly blocks: Block[]
   readonly id: string
   readonly daemonSocket: string
+  agentConfig?(): import('../config.ts').AgentConfig | undefined
   editorTools(): import('../daemon/protocol.ts').EditorTools
   emit(event: SessionEvent): void
   setStatus(status: Status): void
@@ -43,6 +44,8 @@ export interface Backend {
   /** True when the native transcript has turns older than the loaded blocks. */
   hasEarlier?(): boolean
   loadEarlier?(turns: number): Promise<Block[]>
+  /** Flush native history before a fork. */
+  flush?(): Promise<void>
 }
 
 export const backends: Record<string, (host: SessionHost) => Backend> = {

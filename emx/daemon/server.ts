@@ -1,6 +1,8 @@
 // server.ts --- one socket, one editor client, and a persistent session table.
 
 import { randomUUID } from 'node:crypto'
+import { Configuration } from '../config.ts'
+import { Collaboration, toolNames } from './collab.ts'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
@@ -31,6 +33,7 @@ interface SavedSession {
 export interface ServerOptions {
   varDir: string
   idleExit?: number
+  configFile?: string
   log?: (message: string) => void
 }
 
@@ -81,8 +84,12 @@ export class DaemonServer {
   readonly usage: UsageService
   readonly accounting: Accounting
   readonly editor: Editor
+  readonly configuration: Configuration
+  readonly collab: Collaboration
+  #usageClients = new Set<Connection>()
   #mcp = new Map<Connection, string>()
   #calls = new Map<Connection, Map<unknown, AbortController>>()
+  #closing = new WeakMap<Session, Promise<void>>()
   #connections = new Set<Connection>()
   #idleExit: number
   #idleTimer: NodeJS.Timeout | undefined
@@ -100,11 +107,34 @@ export class DaemonServer {
     this.varDir = resolve(options.varDir)
     this.socket = socketPath(this.varDir)
     this.editor = new Editor(stateDir(this.varDir))
-    this.#idleExit = options.idleExit ?? 900
+    this.configuration = new Configuration(this.varDir, options.configFile)
+    this.#idleExit = options.idleExit ?? this.configuration.value.daemon.idleExit
     this.#log = options.log ?? (() => {})
     this.usage = new UsageService({ log: (message) => this.#log(message),
-      send: (message) => this.client?.notify('usage/' + message.method, message.params) })
+      send: (message) => {
+        for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
+          peer.notify('usage/' + message.method, message.params)
+        }
+      } })
     this.accounting = new Accounting(this.usage)
+    this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir,
+      config: () => this.configuration.value, changed: () => this.#changed(false),
+      create: (agent, root, settings, info) => {
+        const s = this.#make({ id: `session-${randomUUID()}`, agent, root, settings, info })
+        this.sessions.set(s.id, s); this.#changed(); return s
+      }, close: (s) => this.#closeSession(s),
+      view: async (s) => {
+        if (this.client) await this.client.request('editor/call', { method: '_session_open',
+          params: { session: s.summary() }, caller: { session: s.id, root: s.root, place: null } }, AbortSignal.timeout(5000))
+      },
+      visible: async (s) => {
+        if (!this.client) return false
+        try {
+          const out = await this.client.request('editor/call', { method: '_session_visible',
+            params: { id: s.id }, caller: { session: s.id, root: s.root, place: null } }, AbortSignal.timeout(1000)) as any
+          return out?.result?.visible !== false
+        } catch { return true }
+      } })
     this.finished = new Promise((resolve) => { this.#finish = resolve })
     this.server = createServer((socket) => {
       const connection = new Connection(socket)
@@ -122,6 +152,7 @@ export class DaemonServer {
       }
       connection.onClose = () => {
         this.#connections.delete(connection)
+        this.#usageClients.delete(connection)
         this.#mcp.delete(connection)
         for (const call of this.#calls.get(connection)?.values() ?? []) call.abort(new Error('MCP connection closed'))
         this.#calls.delete(connection)
@@ -149,9 +180,11 @@ export class DaemonServer {
       await this.editor.restore().catch((error) => this.#log(`Cannot load tools: ${error}`))
       let usageConfig = {}
       try { usageConfig = JSON.parse(await readFile(join(dir, 'usage.json'), 'utf8')) } catch { /* First start. */ }
-      this.usage.initialize({ ...usageConfig, usageFile: join(this.varDir, 'agent-usage.jsonl'),
+      this.usage.initialize({ ...usageConfig, pollInterval: this.configuration.value.usage.pollInterval, usageFile: join(this.varDir, 'agent-usage.jsonl'),
         quotaFile: join(this.varDir, 'agent-quota.json') })
+      this.configuration.watch((result) => this.#configChanged(result))
       await this.#restore()
+      this.collab.restore()
       await new Promise<void>((resolve, reject) => {
         this.server.once('error', reject)
         this.server.listen(this.socket, () => {
@@ -192,7 +225,7 @@ export class DaemonServer {
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, editorTools: () => this.editor.tools, onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
   }
 
   async #restore(): Promise<void> {
@@ -215,6 +248,8 @@ export class DaemonServer {
         const saved: SavedSession = { id: string(record.id, 'id'), agent,
           root: string(record.root, 'root'), info: object(record.info ?? {}),
           settings: settings(record.settings ?? {}), resume: optionalString(record.resume, 'resume') }
+        // Children have no resumable native transcript after a crash.
+        if (saved.info.parent) continue
         // Session ids are also file names; reject paths in a damaged state table.
         if (!/^session-[a-zA-Z0-9-]+$/.test(saved.id)) throw new Error('Invalid session id')
         let transcript: Transcript | undefined
@@ -240,6 +275,7 @@ export class DaemonServer {
     const files = new Map<string, string>()
     const records: SavedSession[] = []
     for (const session of this.sessions.values()) {
+      if (session.info.parent) continue
       records.push({ id: session.id, agent: session.agent, root: session.root,
         info: session.info, settings: session.settings, resume: session.resumeId() })
       files.set(this.#transcriptFile(session.id), JSON.stringify(session.transcript()) + '\n')
@@ -293,6 +329,21 @@ export class DaemonServer {
     return { text, images: params.images as string[] | undefined, block }
   }
 
+  #configChanged(result: ReturnType<Configuration['reload']>): void {
+    for (const error of result.errors) this.#log(error)
+    if (!result.changed) return
+    this.#idleExit = result.config.daemon.idleExit
+    clearTimeout(this.#idleTimer)
+    this.#idleTimer = undefined
+    this.#checkIdle()
+    this.usage.configure({ pollInterval: result.config.usage.pollInterval })
+    for (const session of this.sessions.values()) session.refreshHibernate()
+    for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
+      peer.notify('config', { config: result.config, errors: result.errors })
+    }
+    for (const peer of this.#mcp.keys()) peer.notify('mcp/tools_changed', {})
+  }
+
   #tools(value: unknown): void {
     if (this.editor.update(value)) {
       for (const connection of this.#mcp.keys()) connection.notify('mcp/tools_changed', {})
@@ -301,6 +352,17 @@ export class DaemonServer {
   }
 
   #request(connection: Connection, method: string, value: unknown, requestId?: unknown): unknown {
+    if (this.#stopping) throw new RpcError(ErrorCode.Internal, 'Daemon is stopping')
+    if (method === 'usage/hello') {
+      if (connection === this.client || this.#mcp.has(connection)) invalid('Connection already has another role')
+      this.#usageClients.add(connection)
+      this.#checkIdle()
+      return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value },
+        () => connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas }))
+    }
+    if (this.#usageClients.has(connection) && !method.startsWith('usage/') && method !== 'ping') {
+      throw new RpcError(ErrorCode.NotClient, 'Usage connections may only access usage methods')
+    }
     if (method === 'mcp/hello') {
       if (this.#mcp.has(connection)) invalid('MCP connection is already bound to a session')
       const session = string(object(value).session, 'session')
@@ -311,7 +373,7 @@ export class DaemonServer {
     }
     const mcp = this.#mcp.get(connection)
     if (mcp !== undefined) {
-      if (method === 'mcp/tools') return { tools: this.editor.tools.tools }
+      if (method === 'mcp/tools') return { tools: this.collab.tools(this.editor.tools).tools }
       if (method === 'mcp/call') {
         const session = this.#session({ id: mcp })
         const params = object(value)
@@ -319,21 +381,30 @@ export class DaemonServer {
         let calls = this.#calls.get(connection)
         if (!calls) this.#calls.set(connection, calls = new Map())
         calls.set(requestId, controller)
-        return this.editor.call(string(params.name, 'name'), object(params.arguments ?? {}),
-          { session: mcp, root: session.root, place: null }, controller.signal)
+        const name = string(params.name, 'name'), args = object(params.arguments ?? {})
+        return (toolNames.includes(name) ? this.collab.call(session, name, args, controller.signal)
+          : this.editor.call(name, args, { session: mcp, root: session.root, place: null }, controller.signal))
           .finally(() => calls!.delete(requestId))
       }
       throw new RpcError(ErrorCode.NotClient, 'MCP connections may only list and call tools')
     }
     if (method !== 'hello' && method !== 'ping' && method !== 'daemon/stop'
-      && connection !== this.client) {
+      && connection !== this.client && !(this.#usageClients.has(connection) && method.startsWith('usage/'))) {
       throw new RpcError(ErrorCode.NotClient, 'Say hello to become the client')
     }
     const params = object(value)
-    if (this.#stopping) throw new RpcError(ErrorCode.Internal, 'Daemon is stopping')
     switch (method) {
-      case 'ping': return { daemon: process.pid, version: this.version }
+      case 'ping': return { daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 },
+        liveAgents: [...this.sessions.values()].filter((session) => session.backend.alive()).length }
       case 'hello': {
+        if (params.agents !== undefined) {
+          if (!Array.isArray(params.agents) || !params.agents.every((s) => typeof s === 'string')) invalid('Expected string[]: agents')
+          if (JSON.stringify(this.collab.enabled) !== JSON.stringify(params.agents)) {
+            this.collab.enabled = params.agents
+            this.collab.save()
+            for (const peer of this.#mcp.keys()) peer.notify('mcp/tools_changed', {})
+          }
+        }
         if (params.tools !== undefined) this.#tools(params.tools)
         string(params.client, 'client')
         string(params.version, 'version')
@@ -345,7 +416,16 @@ export class DaemonServer {
         this.client = connection
         this.editor.connection = connection
         this.#checkIdle()
-        return new Reply({ daemon: process.pid, version: this.version }, () => connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas }))
+        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value }, () => {
+          connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas })
+          connection.notify('sessions', { sessions: this.#list() })
+        })
+      }
+      case 'config/get': return { config: this.configuration.value, errors: this.configuration.errors }
+      case 'config/reload': {
+        const result = this.configuration.reload()
+        this.#configChanged(result)
+        return { config: result.config, errors: result.errors }
       }
       case 'usage/configure': {
         const config: Partial<UsageConfig> = {}
@@ -353,7 +433,9 @@ export class DaemonServer {
           if (!Array.isArray(params.agents) || !params.agents.every((a) => typeof a === 'string')) invalid('Expected string[]: agents')
           config.agents = params.agents
         }
-        if (params.pollInterval !== undefined) config.pollInterval = integer(params.pollInterval, 'pollInterval', 0)
+        // Legacy editors still send this field; cadence belongs to config.json.
+        if (params.pollInterval !== undefined) integer(params.pollInterval, 'pollInterval', 0)
+        config.pollInterval = this.configuration.value.usage.pollInterval
         if (params.pollers !== undefined) {
           config.pollers = {}
           for (const [source, value] of Object.entries(object(params.pollers))) {
@@ -369,6 +451,17 @@ export class DaemonServer {
           pollInterval: this.usage.pollInterval, pollers: this.usage.pollers }), { mode: 0o600 })
         renameSync(file + '.tmp', file)
         return result
+      }
+      case 'usage/record': {
+        const id = string(params.id, 'id')
+        this.usage.record({ id, record: object(params.record) })
+        return { id }
+      }
+      case 'usage/quota': {
+        const id = string(params.id, 'id')
+        const reading = object(params.reading)
+        this.usage.quota({ ...reading, agent: string(reading.agent, 'agent') }, id)
+        return { id }
       }
       case 'usage/report': return this.usage.report(params)
       case 'usage/refresh': return this.usage.refresh(params)
@@ -405,7 +498,7 @@ export class DaemonServer {
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
         const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
           settings: settings(params.settings ?? {}),
-          info: { ...(handle ? { handle } : {}), ...(parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
+          info: { handle: this.collab.unique(handle ?? agent), ...(parent ? { parent, parentSession: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
             ...(codex ? { codex } : {}), ...(claude ? { claude } : {}) } })
         this.sessions.set(session.id, session)
         return (async () => {
@@ -443,6 +536,7 @@ export class DaemonServer {
         const session = this.#session(params)
         const message = this.#message(params)
         if (params.handle !== undefined) session.setInfo({ handle: string(params.handle, 'handle') })
+        this.collab.name(session, message.text)
         return session.send(message.text, message.images, message.block)
       }
       case 'session/steer': {
@@ -479,31 +573,60 @@ export class DaemonServer {
         const session = this.#session(params)
         return session.earlier(string(params.before, 'before'), integer(params.turns, 'turns', 0))
       }
-      case 'session/stop': {
-        const session = this.#session(params)
-        for (const [peer, owner] of this.#mcp) {
-          if (owner !== session.id) continue
-          for (const call of this.#calls.get(peer)?.values() ?? []) call.abort(new Error('Session stopped'))
-          this.#calls.delete(peer)
+      case 'session/stop': return this.#closeSession(this.#session(params)).then(() => ({}))
+      case 'daemon/stop': {
+        if (params.ifIdle !== undefined && typeof params.ifIdle !== 'boolean') invalid('Expected boolean: ifIdle')
+        if (params.ifIdle) {
+          if (this.collab.starting || [...this.sessions.values()].some((session) =>
+            session.backend.alive() || session.busy() || session.asks.size > 0)) return { stopped: false }
+          // Commit before yielding or replying, so no new launch can enter.
+          this.#stopping = true
+          return new Reply({ stopped: true }, () => { void this.stop() })
         }
-        return session.stop().then(async () => {
-          this.sessions.delete(session.id)
-          this.#changed()
-          // Await older writes before deleting, so none can recreate this file.
-          await this.persist()
-          await unlink(this.#transcriptFile(session.id)).catch((error: NodeJS.ErrnoException) => {
-            if (error.code !== 'ENOENT') throw error
-          })
-          return {}
-        })
+        // Recheck after the editor's list request: a turn may have started.
+        if (params.idleOnly && [...this.sessions.values()].some((session) =>
+          session.status === 'running' || session.status === 'starting' || session.info.parent)) {
+          throw new RpcError(ErrorCode.InvalidParams, 'Finish active turns, asks and children before restart')
+        }
+        return new Reply({}, () => { void this.stop() })
       }
-      case 'daemon/stop': return new Reply({}, () => { void this.stop() })
       default: throw new RpcError(ErrorCode.MethodNotFound, `Method not found: ${method}`)
     }
   }
 
+  #closeSession(session: Session): Promise<void> {
+    let closing = this.#closing.get(session)
+    if (!closing) {
+      closing = this.#finishCloseSession(session)
+      this.#closing.set(session, closing)
+    }
+    return closing
+  }
+
+  async #finishCloseSession(session: Session): Promise<void> {
+    const starts = this.collab.beginClose(session)
+    for (const [peer, owner] of this.#mcp) {
+      if (owner !== session.id) continue
+      for (const call of this.#calls.get(peer)?.values() ?? []) call.abort(new Error('Session stopped'))
+      this.#calls.delete(peer)
+    }
+    await starts
+    for (const child of [...this.sessions.values()]) {
+      if (child.info.parent === session.id) await this.#closeSession(child)
+    }
+    await session.stop()
+    this.sessions.delete(session.id)
+    this.client?.notify('collab/closed', { id: session.id })
+    this.collab.schedule()
+    this.#changed()
+    await this.persist()
+    await unlink(this.#transcriptFile(session.id)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error
+    })
+  }
+
   #checkIdle(): void {
-    const busy = this.client !== undefined || [...this.sessions.values()].some((session) => session.backend.alive())
+    const busy = this.client !== undefined || this.#usageClients.size > 0 || [...this.sessions.values()].some((session) => session.backend.alive())
     if (busy || this.#stopping) {
       clearTimeout(this.#idleTimer)
       this.#idleTimer = undefined
@@ -522,6 +645,8 @@ export class DaemonServer {
 
   async #close(): Promise<void> {
     this.#stopping = true
+    this.configuration.close()
+    this.collab.stop()
     this.editor.detach()
     await this.editor.flush().catch((error) => this.#log(`Cannot save tools: ${error}`))
     this.#checkIdle()

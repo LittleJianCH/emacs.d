@@ -5,19 +5,19 @@ import { appendFile, chmod, mkdir } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { checkoutRoot, defaultVar, socketPath, stateDir } from './paths.ts'
+import { codeVersion, checkoutRoot, defaultVar, socketPath, stateDir } from './paths.ts'
 import type { HelloResult } from './protocol.ts'
 import { Connection } from './rpc.ts'
 import { DaemonServer } from './server.ts'
 
 interface Options {
   varDir: string
-  idleExit: number
+  idleExit?: number
   mode: 'foreground' | 'ensure' | 'stop'
 }
 
 function options(args: string[]): Options {
-  const result: Options = { varDir: defaultVar, idleExit: 900, mode: 'foreground' }
+  const result: Options = { varDir: defaultVar, mode: 'foreground' }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (arg === '--var') {
@@ -80,10 +80,12 @@ async function ensure(opts: Options): Promise<void> {
   const socket = socketPath(opts.varDir)
   let peer = await ping(socket)
   let started = false
+  if (peer && peer.result.version !== codeVersion() && peer.result.capabilities?.stopIfIdle === 1
+    && await stopPeer(peer.connection, true)) peer = undefined
   if (!peer) {
     started = true
     const child = spawn(process.execPath, [join(checkoutRoot, 'bin', 'emx'), 'daemon',
-      '--var', opts.varDir, '--idle-exit', String(opts.idleExit)], { detached: true, stdio: 'ignore' })
+      '--var', opts.varDir, ...(opts.idleExit === undefined ? [] : ['--idle-exit', String(opts.idleExit)])], { detached: true, stdio: 'ignore' })
     let spawnError: Error | undefined
     child.on('error', (error) => { spawnError = error })
     child.unref()
@@ -95,14 +97,19 @@ async function ensure(opts: Options): Promise<void> {
     }
     if (!peer) throw new Error(`Daemon did not start within 5 seconds: ${socket}`)
   }
-  console.log(JSON.stringify({ socket, version: peer.result.version, pid: peer.result.daemon, started }))
+  console.log(JSON.stringify({ socket, version: peer.result.version, pid: peer.result.daemon, started,
+    stale: peer.result.version !== codeVersion() }))
   peer.connection.close()
 }
 
 async function stop(opts: Options): Promise<void> {
   const peer = await ping(socketPath(opts.varDir))
   if (!peer) return
-  const connection = peer.connection
+  await stopPeer(peer.connection)
+}
+
+/** Use the probed peer: an automatic stop must never fall back to legacy stop. */
+async function stopPeer(connection: Connection, ifIdle = false): Promise<boolean> {
   let timeout: NodeJS.Timeout | undefined
   const closed = new Promise<void>((resolve, reject) => {
     connection.socket.once('close', () => resolve())
@@ -112,10 +119,12 @@ async function stop(opts: Options): Promise<void> {
     }, 5000)
   })
   // Observe a close timeout immediately, even if the stop reply never arrives.
-  const requested = connection.request('daemon/stop', {})
+  const requested = connection.request('daemon/stop', ifIdle ? { ifIdle: true } : {})
   try {
-    await Promise.race([requested, closed])
+    const result = await Promise.race([requested, closed]) as { stopped?: boolean } | undefined
+    if (ifIdle && result?.stopped !== true) return false
     await closed
+    return true
   } finally {
     clearTimeout(timeout)
     connection.socket.destroy()

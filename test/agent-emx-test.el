@@ -9,6 +9,22 @@
 (require 'ert)
 (require 'agent-emx)
 
+;; Naming is daemon-owned too: keep every batch-test descendant off real CLIs.
+(when noninteractive
+  (let ((bin (expand-file-name "emx/fixtures/bin/"
+                               (file-name-directory (or load-file-name buffer-file-name)))))
+    (setenv "PATH" (concat bin path-separator (getenv "PATH")))
+    (add-to-list 'exec-path bin)))
+
+(defun agent-emx-test--var-directory (prefix)
+  "Make an isolated daemon directory without naming or quota model calls."
+  (let ((dir (make-temp-file prefix t)))
+    (make-directory (expand-file-name "emx" dir) t)
+    (with-temp-file (expand-file-name "emx/config.json" dir)
+      (insert "{\"collab\":{\"handleCommand\":[],\"agentHandleCommands\":{}},"
+              "\"usage\":{\"pollInterval\":0}}"))
+    dir))
+
 (agent-session-define-agent test-emx :title "Echo" :backend emx :emx-agent "echo")
 
 (defmacro agent-emx-test--with-session (&rest body)
@@ -547,7 +563,7 @@
         (should (equal (mapcar #'car sent) '("hello")))
         (funcall hello nil)
         (should (equal (mapcar #'car (reverse sent))
-                       '("hello" "usage/configure" "session/stop" "sessions/list")))
+                       '("hello" "session/stop" "sessions/list")))
         (should (equal (plist-get (cdr (cadr sent)) :id) "s"))
         (should (equal (agent-emx--connection-pending-stops connection) '("s")))
         ;; Transport errors retain the stop for the next hello.
@@ -576,7 +592,7 @@
     (ert-skip "Node or the daemon implementation is not available yet"))
   (let* ((agent-usage-poll-interval 0)
          (agent-usage--connection nil)
-         (agent-emx-var-directory (make-temp-file "emx-" t))
+         (agent-emx-var-directory (agent-emx-test--var-directory "emx-"))
          (agent-emx--connections (make-hash-table :test #'equal))
          (agent-session-submit-functions nil)
          (agent-session-status-functions nil)
@@ -798,7 +814,7 @@
   (require 'agent-dsh)
   (let* ((agent-usage-poll-interval 0)
          (agent-usage--connection nil)
-         (agent-emx-var-directory (make-temp-file "emx-dsh-" t))
+         (agent-emx-var-directory (agent-emx-test--var-directory "emx-dsh-"))
          (agent-emx--connections (make-hash-table :test #'equal))
          (process-environment
           (cons (concat "EMX_DSH_EXECUTABLE="

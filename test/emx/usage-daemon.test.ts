@@ -126,3 +126,57 @@ test('a stopped quota poll cannot publish a late reading after releasing ownersh
   assert.deepEqual(sent, [])
   assert.deepEqual(service.loadQuotas(), [])
 })
+
+
+test('two usage subscribers do not replace the editor or each other', async (t) => {
+  const {daemon, client, ledger} = await setup(t)
+  const a = await SocketClient.connect(daemon.socket)
+  const b = await SocketClient.connect(daemon.socket)
+  t.after(async () => { await a.close(); await b.close() })
+  for (const peer of [a, b]) {
+    const hello = await peer.request('usage/hello', {})
+    assert.equal(hello.capabilities?.usage, 1)
+    await assert.rejects(peer.request('sessions/list', {}), /usage/i)
+  }
+  assert.deepEqual(await a.request('usage/record', {id: 'a', record: {agent: 'claude', input: 3}}), {id: 'a'})
+  assert.deepEqual(await b.request('usage/record', {id: 'b', record: {agent: 'codex', input: 5}}), {id: 'b'})
+  await a.request('usage/quota', {id: 'q', reading: {agent: 'codex', windows: [{id: 'week', used: 0.5}]}})
+  for (const peer of [a, b]) await peer.waitFor((n) => n.method === 'usage/quotas' && n.params.quotas.length > 0)
+  assert.equal((await a.request('usage/report', {range: 'all'})).total.tokens, 8)
+  assert.equal((await client.request('sessions/list', {})).sessions.length, 1)
+  assert.equal(ledger().length, 2)
+  for (const peer of [client, a, b]) assert.ok(!peer.notifications.some((n) => n.method === 'replaced'))
+})
+
+test('acknowledged ids dedupe uncertain delivery even after daemon restart', async (t) => {
+  const {daemon, client, dir, ledger} = await setup(t)
+  const record = {id: 'uncertain-record', record: {agent: 'codex', input: 7}}
+  const quota = {id: 'uncertain-quota', reading: {agent: 'codex', windows: [{id: 'week', used: 0.5}]}}
+  await client.request('usage/record', record)
+  await client.request('usage/quota', quota)
+  await client.close()
+  await daemon.stop()
+  const restarted = new DaemonServer({varDir: dir})
+  await restarted.start()
+  const peer = await SocketClient.connect(restarted.socket)
+  try {
+    await peer.request('usage/hello', {})
+    assert.deepEqual(await peer.request('usage/record', record), {id: record.id})
+    const before = readFileSync(join(dir, 'agent-quota.json'), 'utf8')
+    assert.deepEqual(await peer.request('usage/quota', quota), {id: quota.id})
+    assert.equal(readFileSync(join(dir, 'agent-quota.json'), 'utf8'), before)
+    assert.equal(ledger().length, 1)
+    assert.equal((await peer.request('usage/report', {range: 'all'})).total.tokens, 7)
+  } finally { await peer.close(); await restarted.stop() }
+})
+
+
+test('an idle-only restart rechecks turns and ephemeral children before stopping', async (t) => {
+  const {client, session} = await setup(t)
+  session.setStatus('running')
+  await assert.rejects(client.request('daemon/stop', {idleOnly: true}), /Finish active/)
+  session.setStatus('idle')
+  await assert.rejects(client.request('daemon/stop', {idleOnly: true}), /children/)
+  delete session.info.parent
+  await client.request('daemon/stop', {idleOnly: true})
+})

@@ -63,6 +63,17 @@ parent's last request. Numbers are cached tokens / parent's last prompt.
   Emacs, with them on, hit the cache as well (see Fork below).
 - With stream-json input, restarting Claude with `--resume` keeps the cache.
 
+## Daemon migration
+
+For local sessions opted into `agent-emx-agents`, phase 5 of
+[emx-daemon.md](emx-daemon.md#phase-5b-daemon-collaboration) moves the tools,
+children and mailbox into the daemon. `emx/config.json` is the policy source;
+Lisp reads its effective config asynchronously and retains defcustoms only
+as offline fallbacks. The semantics below remain the contract. Daemon tool
+calls currently target daemon sessions only; mixed Lisp/daemon collaboration
+is not a symmetric API. Daemon children outlive an editor disconnect, and
+Emacs reattaches their views; they do not resume after a daemon crash.
+
 ## Design
 
 ### Two kinds of sessions, three kinds of context

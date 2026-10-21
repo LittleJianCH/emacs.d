@@ -102,8 +102,10 @@ export class DshBackend implements Backend {
     const mode = desired.mode ?? 'edits'
     if (mode !== 'plan') this.#beforePlan = mode
     // An executable override supports installations outside PATH and protocol fixtures.
-    const child = spawn(process.env.EMX_DSH_EXECUTABLE ?? 'dsh',
-      ['--profile', 'sdk', '--patch', patch, '--patch', noSubagents],
+    const config = this.host.agentConfig?.()
+    const child = spawn(process.env.EMX_DSH_EXECUTABLE ?? config?.executable ?? 'dsh',
+      ['--profile', 'sdk', '--patch', patch,
+        ...config?.nativeSubagents ? [] : ['--patch', noSubagents], ...(config?.extraArgs ?? [])],
       { cwd: this.host.root, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
@@ -133,7 +135,7 @@ export class DshBackend implements Backend {
         args: [join(checkoutRoot, 'bin/emx'), 'mcp'],
         env: { EMX_DAEMON_SOCKET: this.host.daemonSocket, EMX_SESSION: this.host.id },
         timeoutMs: 1800000, readOnly: this.host.editorTools().readOnly }], resume,
-      parent: this.host.info.parent, model: desired.model ?? undefined,
+      parent: this.host.info.parentSession ?? this.host.info.parent, forkFrom: this.host.info.forkFrom, model: desired.model ?? undefined,
       effort: desired.effort ?? undefined,
     })
     this.#resume = result.sessionId
@@ -203,6 +205,8 @@ export class DshBackend implements Backend {
       throw error
     }
   }
+
+  async flush(): Promise<void> { await this.#request('flush') }
 
   async send(text: string, images?: string[], block?: string): Promise<void> {
     this.host.addBlock({ id: block ?? this.host.newId('user'), type: 'user', text, images })

@@ -59,7 +59,7 @@ export function itemView(root: string, item: any): ToolView | undefined {
 
 /** JSON strings are TOML basic strings too; each table key is emitted once. */
 export function launchArgs(host: SessionHost): string[] {
-  const config = codexConfig()
+  const config = codexConfig(host)
   const context = host.info.codex as { skillsRoot?: string, supersededSkills?: string[] } | undefined
   const overrides: Record<string, unknown> = {
     'mcp_servers.emacs.command': process.execPath,
@@ -76,7 +76,7 @@ export function launchArgs(host: SessionHost): string[] {
 }
 
 /** Transitional daemon configuration, independent of the Lisp backend options. */
-function codexConfig(): { executable?: string, nativeSubagents?: boolean, extraArgs?: string[] } {
+function codexConfig(host?: SessionHost): { executable?: string, nativeSubagents?: boolean, extraArgs?: string[] } {
   const config = JSON.parse(process.env.EMX_CODEX_CONFIG ?? '{}')
   if (!config || typeof config !== 'object' || Array.isArray(config)
     || (config.executable !== undefined && typeof config.executable !== 'string')
@@ -84,7 +84,7 @@ function codexConfig(): { executable?: string, nativeSubagents?: boolean, extraA
     || (config.extraArgs !== undefined && (!Array.isArray(config.extraArgs) || !config.extraArgs.every((s: unknown) => typeof s === 'string')))) {
     throw new Error('Invalid EMX_CODEX_CONFIG')
   }
-  return config
+  return { ...host?.agentConfig?.(), ...config }
 }
 
 export class CodexBackend implements Backend {
@@ -134,7 +134,7 @@ export class CodexBackend implements Backend {
     this.#completedTurn = undefined
     this.#usageTotal = undefined
     this.#tools = structuredClone(this.host.editorTools())
-    const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig().executable ?? 'codex', launchArgs(this.host),
+    const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host),
       { cwd: this.host.root, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
@@ -173,7 +173,9 @@ export class CodexBackend implements Backend {
     try { instructions = developerInstructions(await this.#request('config/read', { cwd: this.host.root })) }
     catch (error) { this.#notice('codex-config-read-failed', (error as Error).message) }
     const mode = modes[this.host.settings.mode ?? 'edits'] ?? modes.edits
-    const result = await this.#request(resume ? 'thread/resume' : 'thread/start', {
+    const fork = this.host.info.forkFrom as string | undefined
+    const result = fork ? await this.#request('thread/fork', { threadId: fork, ephemeral: true, excludeTurns: true })
+      : await this.#request(resume ? 'thread/resume' : 'thread/start', {
       cwd: this.host.root, approvalPolicy: mode[0], sandbox: mode[2],
       ...(instructions === undefined ? {} : { developerInstructions: instructions }),
       ...(this.host.settings.model ? { model: this.host.settings.model } : {}),

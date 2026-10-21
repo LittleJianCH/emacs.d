@@ -26,7 +26,7 @@ export interface ClaudeConfiguration {
 }
 
 /** Transitional daemon configuration until the shared config-file phase. */
-export function configuration(): ClaudeConfiguration {
+export function configuration(host?: SessionHost): ClaudeConfiguration {
   const config = JSON.parse(process.env.EMX_CLAUDE_CONFIG ?? '{}')
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('EMX_CLAUDE_CONFIG must be a JSON object')
   if (config.executable !== undefined && typeof config.executable !== 'string') throw new Error('Expected string: executable')
@@ -38,7 +38,7 @@ export function configuration(): ClaudeConfiguration {
   if (config.historyTurns !== undefined && (!Number.isSafeInteger(config.historyTurns) || config.historyTurns < 1)) {
     throw new Error('Expected an integer >= 1: historyTurns')
   }
-  return config
+  return { ...host?.agentConfig?.(), ...config }
 }
 
 const counters = ['input', 'cacheRead', 'cacheWrite', 'output'] as const
@@ -284,7 +284,7 @@ export class ClaudeBackend implements Backend {
     this.#totals.newProcess()
     const desired = { ...this.host.settings }
     const skills = this.host.info.claude as { skillsDir?: string, supersededSkills?: string[] } | undefined
-    const config = configuration()
+    const config = configuration(this.host)
     const disallowed = config.disallowedTools ?? defaultDisallowedTools
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
       '--permission-prompt-tool', 'stdio', '--mcp-config', JSON.stringify({ mcpServers: { emacs: { command: process.execPath,
@@ -294,7 +294,9 @@ export class ClaudeBackend implements Backend {
     if (this.host.info.parent) args.push('--no-session-persistence')
     if (desired.model && desired.model !== 'default') args.push('--model', desired.model)
     if (desired.effort) args.push('--effort', desired.effort)
-    if (resume) args.push('--resume', resume)
+    const fork = this.host.info.forkFrom as string | undefined
+    if (fork) args.push('--resume', fork, '--fork-session')
+    else if (resume) args.push('--resume', resume)
     if (skills?.skillsDir) args.push('--add-dir', skills.skillsDir)
     if (skills?.supersededSkills?.length) args.push('--settings', JSON.stringify({ skillOverrides: Object.fromEntries(skills.supersededSkills.map((s) => [s, 'off'])) }))
     args.push(...config.extraArgs ?? [])

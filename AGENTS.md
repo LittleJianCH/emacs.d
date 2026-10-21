@@ -211,6 +211,16 @@ confirmations and questions also wait in its parent's footer, and the parent's
   (`agent-session-check-programs`; a failed lookup isn't retried for 5 minutes),
   never on a timer. Design and measurements:
   `doc/subagents.md`.
+  For local daemon sessions, `emx/daemon/collab.ts` owns those five tools,
+  children, naming and the persisted mailbox. Emacs only adopts/attaches views,
+  mirrors asks and links progress. `emx/config.json` plus the optional
+  `var/emx/config.json` override owns agent launch policy, profiles and prompts;
+  `agent-emx-config.el` receives the effective config asynchronously, with the
+  defcustoms retained as offline defaults. The daemon watches both files and
+  serves `config/get` / `config/reload`. Daemon tools currently target daemon
+  sessions only; mixed Lisp/daemon collaboration is not symmetric. See phase 5
+  of `doc/emx-daemon.md`. Tests: `test/emx/{config,collab,session}.test.ts`,
+  `test/agent-emx-config-test.el`, `test/agent-emx-collab-test.el`.
 - `agent-usage.el` — the tokens the agents started from this Emacs used, and what
   their accounts have left (no prices: the accounts are mostly coding-plan
   subscriptions). The emx daemon owns the bookkeeping, arithmetic and quota
@@ -276,7 +286,7 @@ cannot take over the editor connection. See doc/emx-daemon.md for the contract.
 
 Run from the repo root.
 
-Tests (ERT, 255 tests, about half a minute). They exercise the native Emacs keys, so turn
+Tests (ERT, 265 tests, about half a minute). They exercise the native Emacs keys, so turn
 evil off first (it is on by default and its normal state would eat typed keys):
 
 ```sh
@@ -288,7 +298,8 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
       -l test/agent-usage-test.el \
-      -l test/agent-emx-test.el \
+      -l test/agent-emx-test.el -l test/agent-emx-config-test.el \
+      -l test/agent-emx-collab-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 

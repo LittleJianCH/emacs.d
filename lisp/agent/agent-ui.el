@@ -511,13 +511,15 @@ PLACE is from `agent-session-place', nil for this machine."
   (vconcat
    (seq-keep (pcase-lambda (`(,name . ,entry))
                (unless (equal name "describe")
-                 (list :name name
+                 (or (and (fboundp 'agent-emx-config-tool)
+                          (funcall 'agent-emx-config-tool name place))
+                     (list :name name
                        :description
                        (concat (plist-get entry :description)
                                (when-let* ((fn (alist-get name agent-ui-description-functions
                                                           nil nil #'equal)))
                                  (concat "\n\n" (funcall fn place))))
-                       :inputSchema (agent-ui--schema (plist-get entry :params)))))
+                       :inputSchema (agent-ui--schema (plist-get entry :params))))))
              (reverse agent-ui--methods))))
 
 (defun agent-ui-read-only-methods (&optional place)
