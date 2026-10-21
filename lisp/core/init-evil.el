@@ -25,6 +25,8 @@
 ;; byte-compiler (they are loaded along with evil at runtime).
 (declare-function evil-set-leader "evil-core")
 (declare-function evil-define-key* "evil-core")
+(defvar magit-mode-map)
+(defvar magit-blame-read-only-mode-map)
 
 (use-package evil
   :ensure t
@@ -75,6 +77,15 @@
   (evil-collection-want-unimpaired-p nil)
   :config
   (evil-collection-init))
+
+;; evil-collection makes magit's maps override normal state, so their SPC
+;; (show the commit, scroll) shadows the leader, also in blamed file buffers.
+;; Give SPC back to the leader there; RET and S-SPC still show the commit.
+(with-eval-after-load 'evil-collection-magit
+  (dolist (map (list magit-mode-map magit-blame-read-only-mode-map))
+    (evil-define-key* '(normal visual) map (kbd "SPC")
+                      `(menu-item "" nil :filter
+                                  ,(lambda (_) (key-binding [leader]))))))
 
 (provide 'init-evil)
 ;;; init-evil.el ends here

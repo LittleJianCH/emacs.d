@@ -338,5 +338,22 @@ Scrolling needs a real display: run it in the running Emacs."
     (should (eq (key-binding (kbd "SPC g g")) 'magit-status))
     (should (eq (key-binding (kbd "SPC g b")) 'my/magit-blame-toggle))))
 
+(ert-deftest init-base-evil-leader-in-magit ()
+  "The leader wins over magit's SPC in blamed files and magit buffers."
+  (skip-unless (featurep 'init-evil))
+  (require 'magit)
+  (require 'magit-blame)
+  (with-temp-buffer
+    (evil-local-mode 1)
+    (magit-blame-read-only-mode 1)
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "SPC b")) 'consult-buffer))
+    (should (eq (key-binding (kbd "RET")) 'magit-show-commit)))
+  (with-temp-buffer
+    (magit-status-mode)
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "SPC b")) 'consult-buffer))
+    (should (eq (key-binding (kbd "S-SPC")) 'magit-diff-show-or-scroll-up))))
+
 (provide 'init-base-test)
 ;;; init-base-test.el ends here
