@@ -111,9 +111,12 @@ BUFFER is the optional target buffer passed to Polymode's mode setup."
         (when (eq major-mode 'agda2-mode)
           ;; Numeric offsets bake the current theme's RGB into the text.
           ;; A named face follows theme changes without refontification.
-          (setf (slot-value pm/chunkmode 'adjust-face) 'markdown-code-face))
+          ;; The slot belongs to the inner chunkmode Polymode sets here.
+          (with-no-warnings
+            (setf (slot-value pm/chunkmode 'adjust-face) 'markdown-code-face)))
       (setq-local markdown-fontify-code-blocks-natively nil)
-      (setf (slot-value pm/chunkmode 'protect-font-lock) t))))
+      (with-no-warnings
+        (setf (slot-value pm/chunkmode 'protect-font-lock) t)))))
 
 (use-package poly-markdown
   :ensure t
