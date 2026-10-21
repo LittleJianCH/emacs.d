@@ -457,6 +457,9 @@ function mcpServer() {
 async function main() {
   const [method, ...rest] = process.argv.slice(2);
   if (method === 'daemon') return import('../emx/daemon/main.ts').then((m) => m.main(rest));
+  if (method === 'mcp' && process.env.EMX_DAEMON_SOCKET) {
+    return import('../emx/mcp.ts').then((m) => m.serve(MCP_HEAD + MCP_BODY, VERSION));
+  }
   if (method === 'mcp') return mcpServer();
   // The usage service needs no Emacs: it never goes through request().
   if (method === 'serve') return require('./emx-usage.js').serve();

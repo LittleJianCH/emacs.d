@@ -7,7 +7,7 @@ import type { Backend, NewAsk, SessionHost } from '../backends/backend.ts'
 import { ErrorCode } from './protocol.ts'
 import { RpcError } from './rpc.ts'
 import type { Answer, Ask, AttachResult, Block, Cursor, EventParams, Info,
-  Capabilities, McpServer, SessionEvent, SessionSummary, Settings, Status } from './protocol.ts'
+  Capabilities, SessionEvent, SessionSummary, Settings, Status } from './protocol.ts'
 
 export interface SessionOptions {
   id: string
@@ -16,7 +16,8 @@ export interface SessionOptions {
   info?: Info
   settings?: Settings
   resume?: string
-  mcpServers?: McpServer[]
+  daemonSocket?: string
+  editorTools?: () => import('./protocol.ts').EditorTools
   restored?: boolean
   transcript?: Transcript
   onChange?: (summaryChanged: boolean) => void
@@ -42,7 +43,8 @@ export class Session implements SessionHost {
   status: Status
   info: Info
   settings: Settings
-  readonly mcpServers: McpServer[]
+  readonly daemonSocket: string
+  readonly editorTools: () => import('./protocol.ts').EditorTools
   capabilities: Capabilities = { models: [], modes: [], commands: [] }
   blocks: Block[] = []
   readonly index = new Map<string, Block>()
@@ -62,7 +64,8 @@ export class Session implements SessionHost {
     this.id = options.id
     this.agent = options.agent
     this.root = options.root
-    this.mcpServers = structuredClone(options.mcpServers ?? [])
+    this.daemonSocket = options.daemonSocket ?? ''
+    this.editorTools = options.editorTools ?? (() => ({ tools: [], readOnly: [] }))
     this.info = structuredClone(options.info ?? {})
     this.settings = { ...options.settings }
     this.status = options.restored ? 'idle' : 'starting'

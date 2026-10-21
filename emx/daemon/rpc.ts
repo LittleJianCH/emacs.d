@@ -26,7 +26,7 @@ export class Reply {
   }
 }
 
-type RequestHandler = (method: string, params: any) => unknown
+type RequestHandler = (method: string, params: any, id: unknown) => unknown
 type NotificationHandler = (method: string, params: any) => void
 
 interface Pending {
@@ -72,11 +72,22 @@ export class Connection {
     this.#write({ jsonrpc: '2.0', method, params })
   }
 
-  request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     const id = this.#nextId++
     return new Promise((resolve, reject) => {
       if (this.#closed) return reject(new Error('connection closed'))
-      this.#pending.set(id, { resolve, reject })
+      const abort = () => {
+        this.#pending.delete(id)
+        this.notify('notifications/cancelled', { requestId: id })
+        reject(new Error('Cancelled'))
+      }
+      if (signal?.aborted) { reject(new Error('Cancelled')); return }
+      signal?.addEventListener('abort', abort, { once: true })
+      const cleanup = () => signal?.removeEventListener('abort', abort)
+      this.#pending.set(id, {
+        resolve: (value) => { cleanup(); resolve(value) },
+        reject: (error) => { cleanup(); reject(error) },
+      })
       this.#write({ jsonrpc: '2.0', id, method, params })
     })
   }
@@ -131,7 +142,7 @@ export class Connection {
 
   async #handle(id: unknown, method: string, params: unknown): Promise<void> {
     try {
-      let value = this.onRequest(method, params)
+      let value = this.onRequest(method, params, id)
       if (value instanceof Promise || (value !== null && typeof value === 'object'
         && typeof (value as { then?: unknown }).then === 'function')) value = await value
       if (value instanceof Reply) {

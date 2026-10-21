@@ -34,7 +34,7 @@ lisp/core/               base layer
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
-  agent-emx.el          daemon client; agent-emx-agents opts dsh in (default nil)
+  agent-emx.el          daemon client and editor tools; agent-emx-agents opts dsh in
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       backend implementation and registration
     dsh/                DeepSeek Harness bridge plugin and profile patches
@@ -44,6 +44,7 @@ bin/emx                  Node bridge: agent -> Emacs (CLI and MCP server), usage
 bin/emx-usage.js         `emx serve`: usage ledger, quotas, reports, forecasts, quota polls
 emx/                     the emx daemon (TypeScript run by Node directly): protocol, sessions, backends
   backends/dsh.ts         local dsh bridge peer, enabled by agent-emx-agents
+  mcp.ts                 daemon-only stdio MCP client (EMX_DAEMON_SOCKET opt-in)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
 doc/subagents.md         design of subagents and agent collaboration, with measurements
 doc/emx-daemon.md        design of moving agents into an emx daemon (in progress)
@@ -154,7 +155,10 @@ var/                     runtime state (history, backups, pasted images...); git
   emx watches its agent's and sends
   `notifications/tools/list_changed`, which Claude and dsh act on. Codex ignores it, so
   a saved Codex thread whose tools changed is resumed in a new process before the next
-  send; a Codex child keeps the tools it started with.
+  send; a Codex child keeps the tools it started with. Daemon connections get
+  the same local definitions plus a private read-only list on hello and through
+  `editor/tools`, checked by that timer. `agent-ui-call` is the shared dispatcher
+  for emacsclient and `editor/call`; agent-emx maps daemon callers to live buffers.
 - `agent-collab.el` — agents working with each other. Every session has a handle
   (`@cfi-meaning`) named from its topic by a cheap model of its agent
   (`agent-collab-agent-handle-commands`, else `agent-collab-handle-command`); users
@@ -239,7 +243,12 @@ confirmations and questions also wait in its parent's footer, and the parent's
 
 The emx MCP server is only configured for agent processes started from Emacs (via
 `--mcp-config` / `-c`), never globally. emx talks to Emacs through `emacsclient` using
-temp request/response files (`agent-ui-rpc`).
+temp request/response files (`agent-ui-rpc`) on the legacy path. With
+`EMX_DAEMON_SOCKET` and `EMX_SESSION` set, `emx mcp` uses only the daemon:
+`mcp/hello`, `mcp/tools`, `mcp/call`; editor calls and deferred polling go over
+the attached agent-emx connection. The daemon caches definitions in tools.json
+and dsh builds its MCP launch spec there, never in session/open. MCP clients
+cannot take over the editor connection. See doc/emx-daemon.md for the contract.
 
 ## Verifying changes
 

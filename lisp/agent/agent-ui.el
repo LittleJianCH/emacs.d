@@ -162,6 +162,24 @@ up."
       (if-let* ((fn (plist-get entry :timeout))) (funcall fn) (error "Timed out")))
      (t (list :agent-ui-pending id)))))
 
+(defun agent-ui-call (method params caller)
+  "Run METHOD with PARAMS and CALLER; return the transport response envelope."
+  (condition-case err
+      (let* ((agent-ui-caller caller)
+             (result
+              (if (equal method "_poll")
+                  (agent-ui--poll (plist-get params :id) (plist-get params :cancel))
+                (let* ((entry (or (alist-get method agent-ui--methods nil nil #'equal)
+                                  (error "Unknown method: %s" method)))
+                       (spec (plist-get entry :params))
+                       (args (agent-ui--coerce params spec)))
+                  (agent-ui--check-required method args spec)
+                  (funcall (plist-get entry :function) args)))))
+        (if (eq (car-safe result) :agent-ui-pending)
+            (list :ok t :pending (cadr result))
+          (list :ok t :result (agent-ui--json-value result))))
+    (error (list :ok :false :error (error-message-string err)))))
+
 ;;;###autoload
 (defun agent-ui-rpc (request-file response-file)
   "Run the call in REQUEST-FILE and write the result to RESPONSE-FILE.
@@ -174,21 +192,10 @@ Used by emx."
                                (json-parse-buffer :object-type 'plist
                                                   :null-object nil
                                                   :false-object nil)))
-                    (method (plist-get request :method))
-                    (agent-ui-caller (plist-get request :context))
-                    (result
-                     (if (equal method "_poll")
-                         (let ((params (plist-get request :params)))
-                           (agent-ui--poll (plist-get params :id) (plist-get params :cancel)))
-                       (let* ((entry (or (alist-get method agent-ui--methods nil nil #'equal)
-                                         (error "Unknown method: %s" method)))
-                              (spec (plist-get entry :params))
-                              (params (agent-ui--coerce (plist-get request :params) spec)))
-                         (agent-ui--check-required method params spec)
-                         (funcall (plist-get entry :function) params)))))
-               (if (eq (car-safe result) :agent-ui-pending)
-                   (list :ok t :pending (cadr result))
-                 (list :ok t :result (agent-ui--json-value result))))
+                    (response (agent-ui-call (plist-get request :method)
+                                             (plist-get request :params)
+                                             (plist-get request :context))))
+               response)
            (error (list :ok :false :error (error-message-string err))))))
     (with-temp-buffer
       (condition-case err
@@ -548,10 +555,14 @@ isn't looked up here."
 (defvar agent-ui--tools-signatures (make-hash-table :test #'equal)
   "Place -> the signature last written to its stamp file.")
 
+(defvar agent-ui-tools-change-functions nil
+  "Functions checking and publishing changed tools through other transports.")
+
 (defun agent-ui--update-tools-stamp ()
   "Write the signature of the methods to each place's stamp if it changed.
 Only places already looked up: this runs on a timer, where a round trip to
 a host would freeze Emacs."
+  (run-hooks 'agent-ui-tools-change-functions)
   (dolist (place (agent-session-known-places))
     ;; From a timer: a module half reloaded mustn't raise errors here.
     (ignore-errors

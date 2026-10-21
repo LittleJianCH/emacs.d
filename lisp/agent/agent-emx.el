@@ -11,6 +11,7 @@
 (require 'agent-session)
 (require 'json)
 (require 'agent-usage)
+(require 'agent-ui)
 
 (defgroup agent-emx nil
   "Sessions owned by the emx daemon."
@@ -69,6 +70,9 @@ accepting the args plist.  Unknown kinds are displayed dimly as-is."
 (defvar agent-emx--connections (make-hash-table :test #'equal)
   "Connections keyed by (PLACE . VAR-DIRECTORY), for future remote use.")
 
+(defvar agent-emx--tools-signatures (make-hash-table :test #'eq)
+  "Connection -> last tools signature sent to its daemon.")
+
 (defun agent-emx--get (session key)
   "Return backend state KEY of SESSION."
   (plist-get (agent-session-state session) key))
@@ -108,11 +112,28 @@ Call CALLBACK with the result or ERROR-CALLBACK with the error plist."
          (funcall error-callback (list :message (error-message-string err))))))
     id))
 
+(defun agent-emx--cancel-deferred (connection &optional session)
+  "Cancel deferred calls owned by CONNECTION, optionally only SESSION."
+  (let (ids)
+    (maphash
+     (lambda (id entry)
+       (let ((owner (plist-get entry :emx-owner)))
+         (when (and (eq (car owner) connection)
+                    (or (null session) (equal (cdr owner) session)))
+           (push id ids))))
+     agent-ui--deferred)
+    (dolist (id ids)
+      (condition-case err
+          (agent-ui--poll id t)
+        (error (message "emx 取消等待失败：%s" (error-message-string err)))))))
+
 (defun agent-emx--lost (connection error &optional quiet)
   "Fail CONNECTION's pending work with ERROR and disconnect its sessions.
 QUIET marks transport loss, whose uncertain replies need no failure notice."
+  (agent-emx--cancel-deferred connection)
   (when quiet
     (setq error (plist-put (copy-sequence error) :connection-lost t)))
+  (remhash connection agent-emx--tools-signatures)
   (setf (agent-emx--connection-ready connection) nil)
   (let ((pending (hash-table-values (agent-emx--connection-pending connection)))
         (waiters (agent-emx--connection-waiters connection)))
@@ -131,15 +152,109 @@ QUIET marks transport loss, whose uncertain replies need no failure notice."
     (dolist (pair (append pending waiters))
       (when (cdr pair) (funcall (cdr pair) error)))))
 
+(defun agent-emx--write (connection message)
+  "Write a JSON-RPC MESSAGE to CONNECTION."
+  (let ((encoded
+         (condition-case err
+             (json-serialize message :null-object :null :false-object :false)
+           (error
+            (json-serialize
+             (list :jsonrpc "2.0" :id (plist-get message :id)
+                   :error (list :code -32603
+                                :message (format "Result cannot be serialized: %s"
+                                                 (error-message-string err)))))))))
+    (process-send-string (agent-emx--connection-process connection)
+                         (concat encoded (encode-coding-string "\n" 'utf-8 t)))))
+
+(defun agent-emx--editor-params (value)
+  "Copy editor argument VALUE with legacy false and null decoding.
+Daemon events keep their distinct false value; only tool arguments use nil."
+  (cond
+   ((eq value :false) nil)
+   ((consp value) (cons (agent-emx--editor-params (car value))
+                        (agent-emx--editor-params (cdr value))))
+   ((vectorp value) (apply #'vector (mapcar #'agent-emx--editor-params value)))
+   (t value)))
+
+(defun agent-emx--editor-call (connection message)
+  "Answer an editor request MESSAGE on CONNECTION without blocking."
+  (let* ((id (plist-get message :id))
+         (params (plist-get message :params))
+         (method (plist-get params :method))
+         (args (agent-emx--editor-params (plist-get params :params)))
+         (caller (plist-get params :caller))
+         (session-id (plist-get caller :session))
+         (session (gethash session-id (agent-emx--connection-sessions connection))))
+    (agent-emx--write
+     connection
+     (append
+      (list :jsonrpc "2.0" :id id)
+      (cond
+       ((not (equal (plist-get message :method) "editor/call"))
+        (list :error '(:code -32601 :message "Unknown editor request")))
+       ;; Cleanup may arrive after the session stopped and lost its mapping.
+       ((and (equal method "_poll") (plist-get args :cancel))
+        (let ((entry (gethash (plist-get args :id) agent-ui--deferred)))
+          (list :result
+                (cond
+                 ((null entry) '(:ok t :result :null))
+                 ((equal (plist-get entry :emx-owner) (cons connection session-id))
+                  (agent-ui-call method args nil))
+                 (t '(:ok :false :error "Pending result belongs to another caller"))))))
+       ((not (and session (buffer-live-p (agent-session-buffer session))))
+        (list :result '(:ok :false :error "Daemon session is not attached to Emacs")))
+       (t
+        (let* ((result
+                (agent-ui-call
+                 method args
+                 (list :agent_buffer (buffer-name (agent-session-buffer session))
+                       :session session-id
+                       :root (agent-session-root session)
+                       :place (agent-session-place (agent-session-root session)))))
+               (pending (plist-get result :pending)))
+          (when-let* ((entry (and pending (gethash pending agent-ui--deferred))))
+            (puthash pending (plist-put entry :emx-owner (cons connection session-id))
+                     agent-ui--deferred))
+          (list :result result))))))))
+
+(defun agent-emx--tools ()
+  "Return this machine's MCP definitions and private read-only classification."
+  (list :tools (agent-ui--describe nil)
+        :readOnly (vconcat (agent-ui-read-only-methods nil))))
+
+(defun agent-emx--tools-signature (tools)
+  "Hash captured TOOLS definitions and private permission classification."
+  (secure-hash 'sha1 (json-serialize tools)))
+
+(defun agent-emx--publish-tools ()
+  "Publish changed local tools on every ready daemon connection."
+  (maphash
+   (lambda (_ connection)
+     (when (and (agent-emx--connection-ready connection)
+                (process-live-p (agent-emx--connection-process connection)))
+       (let* ((tools (agent-emx--tools))
+              (signature (agent-emx--tools-signature tools)))
+         (unless (equal signature (gethash connection agent-emx--tools-signatures))
+           (agent-emx--write connection (list :jsonrpc "2.0" :method "editor/tools"
+                                               :params tools))
+           (puthash connection signature agent-emx--tools-signatures)))))
+   agent-emx--connections))
+
+(add-hook 'agent-ui-tools-change-functions #'agent-emx--publish-tools)
+
 (defun agent-emx--dispatch (connection message)
   "Dispatch a parsed JSON-RPC MESSAGE from CONNECTION."
-  (if (plist-member message :id)
-      (let* ((id (plist-get message :id))
-             (pair (gethash id (agent-emx--connection-pending connection))))
-        (remhash id (agent-emx--connection-pending connection))
-        (if (plist-member message :error)
-            (when (cdr pair) (funcall (cdr pair) (plist-get message :error)))
-          (when (car pair) (funcall (car pair) (plist-get message :result)))))
+  (cond
+   ((and (plist-member message :id) (plist-get message :method))
+    (agent-emx--editor-call connection message))
+   ((plist-member message :id)
+    (let* ((id (plist-get message :id))
+           (pair (gethash id (agent-emx--connection-pending connection))))
+      (remhash id (agent-emx--connection-pending connection))
+      (if (plist-member message :error)
+          (when (cdr pair) (funcall (cdr pair) (plist-get message :error)))
+        (when (car pair) (funcall (car pair) (plist-get message :result))))))
+   (t
     (let* ((method (plist-get message :method))
            (params (plist-get message :params))
            (session (gethash (plist-get params :session)
@@ -149,7 +264,7 @@ QUIET marks transport loss, whose uncertain replies need no failure notice."
         (agent-emx--lost connection '(:message "Connection replaced") t)
         (delete-process (agent-emx--connection-process connection)))
        ((and session (buffer-live-p (agent-session-buffer session)))
-        (agent-emx--event session method params))))))
+        (agent-emx--event session method params)))))))
 
 (defun agent-emx--filter (connection bytes)
   "Buffer partial BYTES on CONNECTION and dispatch complete UTF-8 lines."
@@ -178,17 +293,21 @@ QUIET marks transport loss, whose uncertain replies need no failure notice."
                      (when (and (eq process (agent-emx--connection-process connection))
                                 (not (process-live-p process)))
                        (agent-emx--lost connection (list :message (string-trim event)) t)))))
-  (agent-emx--request
-   connection "hello" (list :client "emacs" :version (plist-get result :version))
-   (lambda (_)
-     (setf (agent-emx--connection-ready connection) t)
-     (agent-emx--flush-stops connection)
-     (let ((waiters (agent-emx--connection-waiters connection)))
-       (setf (agent-emx--connection-waiters connection) nil)
-       (dolist (pair waiters) (funcall (car pair) connection))))
-   (lambda (error)
-     (agent-emx--lost connection error)
-     (delete-process (agent-emx--connection-process connection)))))
+  (let* ((tools (agent-emx--tools))
+         (signature (agent-emx--tools-signature tools)))
+    (agent-emx--request
+     connection "hello" (list :client "emacs" :version (plist-get result :version)
+                              :tools tools)
+     (lambda (_)
+       (puthash connection signature agent-emx--tools-signatures)
+       (setf (agent-emx--connection-ready connection) t)
+       (agent-emx--flush-stops connection)
+       (let ((waiters (agent-emx--connection-waiters connection)))
+         (setf (agent-emx--connection-waiters connection) nil)
+         (dolist (pair waiters) (funcall (car pair) connection))))
+     (lambda (error)
+       (agent-emx--lost connection error)
+       (delete-process (agent-emx--connection-process connection))))))
 
 (defun agent-emx--flush-stops (connection)
   "Send CONNECTION's pending stops, retaining them until acknowledged."
@@ -695,8 +814,6 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
     (agent-emx--set session :emx-waiters nil)
     (dolist (callback waiters) (funcall callback))))
 
-(declare-function agent-dsh--mcp-servers "agent-dsh" (session))
-
 (defun agent-emx--attach (session connection)
   "Attach SESSION on ready CONNECTION, opening it first if necessary."
   (let ((id (agent-emx--get session :emx-id))
@@ -722,8 +839,6 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
        (append (list :agent (or (agent-session--get (agent-session-agent session) :emx-agent)
                                (symbol-name (agent-session-agent session)))
                      :root (agent-session-root session) :settings (agent-emx--choices session))
-               (when (equal (agent-session--get (agent-session-agent session) :emx-agent) "dsh")
-                 (list :mcpServers (agent-dsh--mcp-servers session)))
                (when (agent-session-child-p session)
                  (list :parent (or (and (agent-session-parent session)
                                         (agent-emx--get (agent-session-parent session) :emx-id))
@@ -841,6 +956,7 @@ The daemon parent id is not a buffer; collaboration moves in phase 5."
   (agent-emx--set session :emx-waiters nil)
   (when-let* ((connection (agent-emx--get session :emx-connection))
               (id (agent-emx--get session :emx-id)))
+    (agent-emx--cancel-deferred connection id)
     (remhash id (agent-emx--connection-sessions connection))
     (agent-emx--stop connection id))
   (agent-emx--set session :emx-id nil))

@@ -588,6 +588,12 @@
                 session (buffer-local-value 'agent-session--current buffer)
                 connection (agent-emx--get session :emx-connection))
           (agent-emx-test--wait (lambda () (eq (agent-session-status session) 'idle)))
+          (let ((tools (plist-get (agent-emx-test--mcp connection session "tools/list") :tools))
+                (result (agent-emx-test--mcp connection session "tools/call"
+                                            '(:name "context"))))
+            (should (seq-find (lambda (tool) (equal (plist-get tool :name) "context")) tools))
+            (should-not (eq t (plist-get result :isError)))
+            (should (stringp (plist-get (aref (plist-get result :content) 0) :text))))
           (let ((id (agent-session-send session "hi")))
             (agent-emx-test--wait
              (lambda () (and (eq (agent-session-status session) 'idle)
@@ -751,7 +757,7 @@
       (should (eq (agent-session--get 'dsh :backend) 'dsh))
       (should-not (agent-session--get 'dsh :emx-agent)))))
 
-(ert-deftest agent-emx-test-open-passes-mcp-and-parent ()
+(ert-deftest agent-emx-test-open-passes-parent-without-mcp ()
   (require 'agent-dsh)
   (agent-emx-test--with-session
     (let ((agent-session-agents (copy-tree agent-session-agents))
@@ -767,8 +773,7 @@
                  (lambda (_ method params &rest _) (setq sent (cons method params)))))
         (agent-emx--attach session (agent-emx--make-connection))
         (should (equal (car sent) "session/open"))
-        (should (equal (plist-get (cdr sent) :mcpServers)
-                       [(:name "emacs" :command "node" :args ["emx" "mcp"])]))
+        (should-not (plist-member (cdr sent) :mcpServers))
         (should (equal (plist-get (cdr sent) :parent) "emacs"))))))
 
 (agent-session-define-agent test-emx-dsh :title "DeepSeek" :backend emx :emx-agent "dsh")
@@ -837,3 +842,247 @@
 
 (provide 'agent-emx-test)
 ;;; agent-emx-test.el ends here
+
+(ert-deftest agent-emx-test-editor-call-caller-deferred-and-errors ()
+  (agent-emx-test--with-session
+    (let ((connection (agent-emx--make-connection))
+          (agent-ui--methods (copy-tree agent-ui--methods))
+          (agent-ui--deferred (make-hash-table :test #'equal))
+          sent cancelled)
+      (puthash "s" session (agent-emx--connection-sessions connection))
+      (agent-ui-defmethod "test-caller" () "Return the daemon caller."
+        (list :buffer (plist-get agent-ui-caller :agent_buffer)
+              :root (agent-ui--caller-root)
+              :same (eq session (agent-ui-caller-session))))
+      (agent-ui-defmethod "test-deferred" () "Wait for a result."
+        (agent-ui-defer (lambda () (list (agent-ui--caller-root)))
+                        :cancel (lambda () (setq cancelled t))))
+      (agent-ui-defmethod "test-error" () "Signal a method error."
+        (error "Fixture error"))
+      (cl-letf (((symbol-function 'agent-emx--write)
+                 (lambda (_ message) (setq sent message))))
+        (cl-labels ((call (method &optional params id)
+                      (agent-emx--dispatch
+                       connection
+                       (list :jsonrpc "2.0" :id 42 :method "editor/call"
+                             :params (list :method method :params params
+                                           :caller (list :session (or id "s")
+                                                         :root "/untrusted/"))))
+                      (plist-get sent :result)))
+          (let ((result (call "test-caller")))
+            (should (eq t (plist-get result :ok)))
+            (should (equal (plist-get result :result)
+                           (list :buffer (buffer-name buffer)
+                                 :root (agent-session-root session) :same t))))
+          (let* ((result (call "test-deferred"))
+                 (id (plist-get result :pending)))
+            (should (stringp id))
+            (should (equal (plist-get (call "_poll" (list :id id)) :result)
+                           (agent-session-root session))))
+          (let ((id (plist-get (call "test-deferred") :pending)))
+            (call "_poll" (list :id id :cancel t))
+            (should cancelled)
+            (should-not (gethash id agent-ui--deferred)))
+          (dolist (method '("test-error" "missing"))
+            (let ((result (call method)))
+              (should (eq :false (plist-get result :ok)))
+              (should (stringp (plist-get result :error)))))
+          (should (eq :false (plist-get (call "context" nil "missing") :ok))))))))
+
+(ert-deftest agent-emx-test-tools-on-hello-and-change ()
+  (let* ((connection (agent-emx--make-connection))
+         (agent-emx--connections (make-hash-table :test #'equal))
+         (agent-emx--tools-signatures (make-hash-table :test #'eq))
+         (agent-ui--methods (copy-tree agent-ui--methods))
+         hello notices)
+    (puthash nil connection agent-emx--connections)
+    (cl-letf (((symbol-function 'make-network-process) (lambda (&rest _) 'fake))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'agent-emx--request)
+               (lambda (_ method params &optional callback &rest _)
+                 (when (equal method "hello")
+                   (setq hello params)
+                   (funcall callback nil))))
+              ((symbol-function 'agent-emx--write)
+               (lambda (_ message) (push message notices))))
+      (agent-emx--connect connection '(:socket "unused" :version "test"))
+      (should (equal (json-serialize (plist-get hello :tools))
+                     (json-serialize (agent-emx--tools))))
+      (agent-emx--publish-tools)
+      (should-not notices)
+      (agent-ui-defmethod "test-changed" () "A new tool." :read-only t "ok")
+      ;; Run the same hook the existing signature timer uses, without stamps.
+      (run-hooks 'agent-ui-tools-change-functions)
+      (should (= 1 (length notices)))
+      (should (equal (plist-get (car notices) :method) "editor/tools"))
+      (should (member "test-changed" (append (plist-get (plist-get (car notices) :params)
+                                                       :readOnly) nil)))
+      (agent-emx--publish-tools)
+      (should (= 1 (length notices)))
+      ;; Permission metadata changes must publish even if MCP definitions don't.
+      (setf (plist-get (alist-get "test-changed" agent-ui--methods nil nil #'equal)
+                       :read-only) nil)
+      (agent-emx--publish-tools)
+      (should (= 2 (length notices)))
+      (should-not (seq-some (lambda (tool) (plist-member tool :annotations))
+                             (plist-get (agent-emx--tools) :tools))))))
+
+(ert-deftest agent-emx-test-editor-response-serialization-error ()
+  (let ((connection (agent-emx--make-connection)) wire)
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_ bytes) (setq wire bytes))))
+      (agent-emx--write connection
+                        (list :jsonrpc "2.0" :id 1 :result (current-buffer)))
+      (should (= -32603 (plist-get (plist-get (agent-emx--parse wire) :error) :code))))))
+
+(defun agent-emx-test--mcp (connection session method &optional params)
+  "Run a real stdio MCP METHOD with PARAMS for SESSION on CONNECTION."
+  (let* ((process-environment
+          (append (list (concat "EMX_DAEMON_SOCKET="
+                                (process-contact (agent-emx--connection-process connection)
+                                                 :service))
+                        (concat "EMX_SESSION=" (agent-emx--get session :emx-id))
+                        "EMX_EMACSCLIENT=/does-not-exist") process-environment))
+         (buffer (generate-new-buffer " *emx-mcp-test*"))
+         (process (make-process
+                   :name "emx-mcp-test" :buffer buffer :connection-type 'pipe
+                   :coding 'utf-8-unix :noquery t
+                   :command (list "node" (expand-file-name "bin/emx" agent-emx--checkout)
+                                  "mcp"))))
+    (unwind-protect
+        (progn
+          (process-send-string process
+                               (concat (json-serialize
+                                        (list :jsonrpc "2.0" :id 1 :method method
+                                              :params (or params (make-hash-table)))) "\n"))
+          (agent-emx-test--wait
+           (lambda () (with-current-buffer buffer (string-search "\n" (buffer-string)))))
+          (with-current-buffer buffer
+            (let ((message (json-parse-string (car (split-string (buffer-string) "\n"))
+                                              :object-type 'plist)))
+              (should-not (plist-get message :error))
+              (plist-get message :result))))
+      (delete-process process)
+      (kill-buffer buffer))))
+
+(ert-deftest agent-emx-test-editor-call-json-booleans ()
+  (agent-emx-test--with-session
+    (let ((connection (agent-emx--make-connection))
+          (agent-ui--methods (copy-tree agent-ui--methods))
+          seen sent)
+      (puthash "s" session (agent-emx--connection-sessions connection))
+      (agent-ui-defmethod "test-booleans"
+          ((append boolean "Append content") (nested object "Nested values"))
+          "Record boolean arguments."
+        (setq seen (list :append append :nested nested))
+        (if append "appended" "replaced"))
+      (cl-letf (((symbol-function 'agent-emx--write)
+                 (lambda (_ message) (setq sent message))))
+        (let* ((wire "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"editor/call\",\"params\":{\"method\":\"test-booleans\",\"caller\":{\"session\":\"s\"},\"params\":{\"append\":false,\"nested\":{\"values\":[false,null,true,{\"flag\":false}]}}}}")
+               (message (agent-emx--parse wire))
+               (legacy (json-parse-string wire :object-type 'plist
+                                           :null-object nil :false-object nil)))
+          (agent-emx--dispatch connection message)
+          (should (equal (plist-get (plist-get sent :result) :result) "replaced"))
+          (should (equal seen (plist-get (plist-get legacy :params) :params)))
+          ;; Tool argument normalization must not alter event decoding.
+          (should (eq :false (plist-get (plist-get (plist-get message :params)
+                                                               :params) :append))))))))
+
+(defun agent-emx-test--editor-call (connection method params &optional session)
+  "Call editor METHOD with PARAMS on CONNECTION as SESSION."
+  (let (sent)
+    (cl-letf (((symbol-function 'agent-emx--write)
+               (lambda (_ message) (setq sent message))))
+      (agent-emx--dispatch
+       connection (list :jsonrpc "2.0" :id 42 :method "editor/call"
+                        :params (list :method method :params params
+                                      :caller (list :session (or session "s")))))
+      (plist-get sent :result))))
+
+(defun agent-emx-test--deferred-cleanup (action)
+  "Check deferred ownership and cancellation for ACTION."
+  (agent-emx-test--with-session
+    (let* ((connection (agent-emx--make-connection))
+           (other (agent-emx--make-connection))
+           (agent-ui--methods (copy-tree agent-ui--methods))
+           (agent-ui--deferred (make-hash-table :test #'equal))
+           cancelled)
+      (agent-emx--set session :emx-connection connection)
+      (puthash "s" session (agent-emx--connection-sessions connection))
+      (puthash "other" session (agent-emx--connection-sessions connection))
+      (puthash "s" session (agent-emx--connection-sessions other))
+      (agent-ui-defmethod "test-owned" () "Wait until cancelled."
+        (let ((owner (plist-get agent-ui-caller :session)))
+          (agent-ui-defer (lambda () nil)
+                          :cancel (lambda () (push owner cancelled)))))
+      (let* ((id (plist-get (agent-emx-test--editor-call connection "test-owned" nil)
+                            :pending))
+             (sibling (plist-get (agent-emx-test--editor-call
+                                  connection "test-owned" nil "other") :pending))
+             (foreign (plist-get (agent-emx-test--editor-call other "test-owned" nil)
+                                 :pending))
+             (legacy (cadr (agent-ui-defer (lambda () nil)))))
+        (pcase action
+          ('stop (agent-session-backend-stop 'emx session))
+          ('lost (agent-emx--lost connection '(:message "closed") t))
+          ('cancel
+           (remhash "s" (agent-emx--connection-sessions connection))
+           (should (eq t (plist-get
+                          (agent-emx-test--editor-call
+                           connection "_poll" (list :id id :cancel t)) :ok)))))
+        (should-not (gethash id agent-ui--deferred))
+        (should (equal (sort cancelled #'string<)
+                       (if (eq action 'lost) '("other" "s") '("s"))))
+        (should (eq (not (eq action 'lost))
+                    (not (null (gethash sibling agent-ui--deferred)))))
+        (should (gethash foreign agent-ui--deferred))
+        (should (gethash legacy agent-ui--deferred))
+        ;; A late cleanup must succeed after local cancellation and mapping loss.
+        (remhash "s" (agent-emx--connection-sessions connection))
+        (should (eq t (plist-get
+                       (agent-emx-test--editor-call
+                        connection "_poll" (list :id id :cancel t)) :ok)))
+        (should (= (length cancelled) (if (eq action 'lost) 2 1)))))))
+
+(ert-deftest agent-emx-test-editor-deferred-stop ()
+  (agent-emx-test--deferred-cleanup 'stop))
+
+(ert-deftest agent-emx-test-editor-deferred-lost ()
+  (agent-emx-test--deferred-cleanup 'lost))
+
+(ert-deftest agent-emx-test-editor-deferred-cancel-detached ()
+  (agent-emx-test--deferred-cleanup 'cancel))
+
+
+(ert-deftest agent-emx-test-tools-change-during-hello ()
+  (let* ((connection (agent-emx--make-connection))
+         (agent-emx--connections (make-hash-table :test #'equal))
+         (agent-emx--tools-signatures (make-hash-table :test #'eq))
+         (agent-ui--methods (copy-tree agent-ui--methods))
+         hello acknowledge notices)
+    (puthash nil connection agent-emx--connections)
+    (cl-letf (((symbol-function 'make-network-process) (lambda (&rest _) 'fake))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'agent-emx--request)
+               (lambda (_ method params &optional callback &rest _)
+                 (when (equal method "hello")
+                   (setq hello params acknowledge callback))))
+              ((symbol-function 'agent-emx--write)
+               (lambda (_ message) (push message notices))))
+      (agent-emx--connect connection '(:socket "unused" :version "test"))
+      (agent-ui-defmethod "test-during-hello" () "Added during hello." "ok")
+      (agent-emx--publish-tools)
+      (should-not notices)
+      (funcall acknowledge nil)
+      (agent-emx--publish-tools)
+      (should (= 1 (length notices)))
+      (should (equal (plist-get (car notices) :method) "editor/tools"))
+      (should-not (seq-find
+                   (lambda (tool) (equal (plist-get tool :name) "test-during-hello"))
+                   (plist-get (plist-get hello :tools) :tools)))
+      (should (seq-find
+               (lambda (tool) (equal (plist-get tool :name) "test-during-hello"))
+               (plist-get (plist-get (car notices) :params) :tools)))
+      (agent-emx--publish-tools)
+      (should (= 1 (length notices))))))

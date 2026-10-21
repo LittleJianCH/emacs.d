@@ -3,7 +3,7 @@
 // JSON-RPC 2.0, one JSON object per line, both directions over the
 // daemon's Unix socket (see doc/emx-daemon.md).  Emacs is the only client
 // that opens sessions; agents' `emx mcp` processes connect only to run
-// tools (a later phase).
+// tools.
 //
 // Everything here is data: the daemon never sends UI prose.  Notices and
 // labels carry a kind that Emacs maps to its own (Chinese) text; agent
@@ -111,6 +111,7 @@ export interface HelloParams {
   client: string
   /** Hash of the client's copy of the emx sources. */
   version: string
+  tools?: EditorTools
 }
 export interface HelloResult {
   daemon: number
@@ -126,15 +127,17 @@ export interface SessionSummary {
   info: Info
 }
 
-/** A stdio MCP server, supplied by Emacs until editor calls move here. */
-export interface McpServer {
-  name: string
-  command: string
-  args?: string[]
-  env?: Record<string, string>
-  timeoutMs?: number
-  /** Names of audited read-only tools, without the MCP prefix. */
-  readOnly?: string[]
+/** MCP definitions and an internal permission classification, never model hints. */
+export interface EditorTools {
+  tools: { name: string, description: string, inputSchema: Record<string, unknown> }[]
+  readOnly: string[]
+}
+
+/** Daemon requests sent to the attached editor. Results use agent-ui's envelope. */
+export interface EditorCall {
+  method: string
+  params: Record<string, unknown>
+  caller: { session: SessionId, root: string, place: null }
 }
 
 /** Choices advertised by the backend, in its native ordering. */
@@ -156,8 +159,6 @@ export interface Usage {
 export interface OpenParams {
   agent: string
   root: string
-  /** Per-session editor bridge specs until phase 3 owns MCP transport. */
-  mcpServers?: McpServer[]
   settings?: Settings
   /** A session to resume, in the agent's own terms. */
   resume?: string
@@ -244,6 +245,9 @@ export interface Requests {
   'ping': [{}, HelloResult]
   /** Makes this connection the daemon's Emacs; a previous one gets `replaced`. */
   'hello': [HelloParams, HelloResult]
+  'mcp/hello': [{ session: SessionId }, {}]
+  'mcp/tools': [{}, { tools: EditorTools['tools'] }]
+  'mcp/call': [{ name: string, arguments?: Record<string, unknown> }, unknown]
   'sessions/list': [{ root?: string }, { sessions: SessionSummary[] }]
   'session/open': [OpenParams, { id: SessionId }]
   'session/attach': [AttachParams, AttachResult]
@@ -302,6 +306,8 @@ export type EventParams = SessionEvent & { session: SessionId, seq: number }
 export interface DaemonNotifications {
   /** Another Emacs said hello; this connection no longer gets events. */
   'replaced': {}
+  /** Sent only to MCP connections. */
+  'mcp/tools_changed': {}
   /** The session list changed (opened, stopped, status). */
   'sessions': { sessions: SessionSummary[] }
 }
@@ -319,3 +325,11 @@ export const ErrorCode = {
   /** The connection was replaced by another Emacs. */
   NotClient: 2,
 } as const
+
+/** Editor notifications reuse hello's tools payload. */
+export interface EditorNotifications { 'editor/tools': EditorTools }
+/** MCP cancellation references the socket request id, as in MCP stdio. */
+export interface McpNotifications { 'notifications/cancelled': { requestId: number } }
+export interface EditorRequests { 'editor/call': [EditorCall, {
+  ok: boolean, result?: unknown, pending?: string, error?: string
+}] }

@@ -5,6 +5,8 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { once } from 'node:events'
 import { isAbsolute, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { checkoutRoot } from '../daemon/paths.ts'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { Backend, SessionHost } from './backend.ts'
 import type { Settings, ToolView } from '../daemon/protocol.ts'
@@ -127,7 +129,10 @@ export class DshBackend implements Backend {
     child.once('close', () => ended())
     const result = await this.#request('initialize', {
       cwd: this.host.root.replace(/\/$/, '') || '/', preset: presets[mode === 'plan' ? this.#beforePlan : mode] ?? presets.edits,
-      plan: mode === 'plan', mcpServers: this.host.mcpServers, resume,
+      plan: mode === 'plan', mcpServers: [{ name: 'emacs', command: process.execPath,
+        args: [join(checkoutRoot, 'bin/emx'), 'mcp'],
+        env: { EMX_DAEMON_SOCKET: this.host.daemonSocket, EMX_SESSION: this.host.id },
+        timeoutMs: 1800000, readOnly: this.host.editorTools().readOnly }], resume,
       parent: this.host.info.parent, model: desired.model ?? undefined,
       effort: desired.effort ?? undefined,
     })

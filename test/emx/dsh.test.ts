@@ -30,7 +30,8 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}) {
   })
   await daemon.start()
   client = await SocketClient.connect(daemon.socket)
-  await client.request('hello', { client: 'dsh-test', version: daemon.version })
+  await client.request('hello', { client: 'dsh-test', version: daemon.version, tools: {
+    tools: [{ name: 'context', description: 'Context', inputSchema: { type: 'object' } }], readOnly: ['context'] } })
   const { id } = await client.request('session/open', { agent: 'dsh', root: dir, ...options })
   const attached = await client.request('session/attach', { id })
   await client.waitFor((n) => n.method === 'history/done')
@@ -48,16 +49,17 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}) {
 }
 
 test('initialize passes local launch, settings, parent and MCP; advertises choices', async (t) => {
-  const mcpServers = [{ name: 'emacs', command: 'node', args: ['emx', 'mcp'],
-    env: { EMX_SESSION: 'test' }, timeoutMs: 1800000, readOnly: ['context'] }]
-  const { dir, attached, session, requests } = await setup(t, {
-    settings: { model: 'fake/chat', effort: 'high', mode: 'auto' }, parent: 'parent', mcpServers })
+  const { dir, daemon, id, attached, session, requests } = await setup(t, {
+    settings: { model: 'fake/chat', effort: 'high', mode: 'auto' }, parent: 'parent' })
   const init = (await requests()).find((r) => r.method === 'initialize')
   assert.equal(init.cwd, await realpath(dir))
   assert.deepEqual(init.argv.slice(0, 3), ['--profile', 'sdk', '--patch'])
   assert.match(init.argv[3], /\/lisp\/agent\/backend\/dsh\/emacs.yml$/)
   assert.equal(init.argv[4], '--patch')
   assert.match(init.argv[5], /no-subagents.yml$/)
+  const mcpServers = [{ name: 'emacs', command: process.execPath,
+    args: [fileURLToPath(new URL('../../bin/emx', import.meta.url)), 'mcp'],
+    env: { EMX_DAEMON_SOCKET: daemon.socket, EMX_SESSION: id }, timeoutMs: 1800000, readOnly: ['context'] }]
   assert.deepEqual(init.params, { cwd: dir, preset: 'auto', plan: false, mcpServers,
     parent: 'parent', model: 'fake/chat', effort: 'high' })
   assert.equal(session.resumeId(), 'fake-session')
@@ -134,9 +136,9 @@ test('configure maps presets, keeps plan permissions, and changes model and effo
   assert.equal(configs.at(-1).params.plan, true)
 })
 
-test('resume replays transcript once and excludes its usage; persisted MCP survives restart', async (t) => {
+test('resume replays transcript once and excludes its usage; daemon MCP is rebuilt after restart', async (t) => {
   const { session, attached, client, id, dir, daemon, requests } = await setup(t, {
-    resume: 'resume-id', mcpServers: [{ name: 'emacs', command: 'emx' }] })
+    resume: 'resume-id' })
   assert.equal(attached.info.title, 'Resumed')
   assert.equal(session.resumeId(), 'resume-id')
   assert.ok(session.blocks.some((b) => b.type === 'text' && b.kind === 'thinking' && b.text === 'thought'))
@@ -145,7 +147,7 @@ test('resume replays transcript once and excludes its usage; persisted MCP survi
   assert.equal(client.notifications.some((e) => e.method === 'usage/call'), false)
   await daemon.persist()
   const records = JSON.parse(await readFile(join(dir, 'emx/sessions.json'), 'utf8'))
-  assert.deepEqual(records[0].mcpServers, [{ name: 'emacs', command: 'emx' }])
+  assert.equal(records[0].mcpServers, undefined)
   await daemon.stop()
   await client.close()
   const restored = new DaemonServer({ varDir: dir })
@@ -163,7 +165,7 @@ test('resume replays transcript once and excludes its usage; persisted MCP survi
     await peer.waitFor((n) => n.method === 'usage/end', 5000, 'resumed turn', from)
     const resumed = restored.sessions.get(id)!
     assert.equal(resumed.blocks.filter((b) => b.id === 'old-user').length, 1)
-    assert.deepEqual(resumed.mcpServers, [{ name: 'emacs', command: 'emx' }])
+    assert.equal(resumed.daemonSocket, restored.socket)
     assert.equal(resumed.info.model, 'fake/restored')
     assert.equal(resumed.settings.effort, 'low')
     const calls = await requests()
@@ -205,11 +207,10 @@ test('tool views match Lisp diffs, quiet plan data, paths and search titles', ()
   assert.equal(toolView('/', 'web_search', { queries: ['a', 'b'] }).title, 'a · b')
 })
 
-test('remote roots and malformed MCP specs fail before launching a process', async (t) => {
+test('remote roots fail before launching a process', async (t) => {
   const { client } = await setup(t)
   await assert.rejects(client.request('session/open', { agent: 'dsh', root: '/rpc:host:/tmp' }), /local absolute root/)
-  await assert.rejects(client.request('session/open', { agent: 'dsh', root: '/',
-    mcpServers: [{ name: 'bad', command: 'emx', env: { BAD: 1 } } as any] }), /Expected a string/)
+
 })
 
 test('opening directly in plan mode retains the previous permission preset', async (t) => {

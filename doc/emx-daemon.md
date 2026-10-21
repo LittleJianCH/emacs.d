@@ -124,7 +124,7 @@ JSON-RPC 2.0, one JSON object per line, both directions over the socket.
 | `hello` | `{client, version, tools?}` | `{daemon, version, config}` |
 | `sessions/list` | `{root?}` | live sessions (summary) |
 | `sessions/history` | `{root, agent?}` | resumable past sessions |
-| `session/open` | `{agent, root, resume?, fork?, settings?, parent?, mcpServers?}` | `{id}` |
+| `session/open` | `{agent, root, resume?, fork?, settings?, parent?}` | `{id}` |
 | `session/attach` | `{id, after?, turns?}` (`turns` defaults to 20) | snapshot, then events (below) |
 | `session/detach` | `{id}` | `{}` |
 | `session/send` | `{id, text, images?}` | `{}` (queued while running) |
@@ -161,10 +161,11 @@ Every event carries `{session, seq}`; `seq` increases by one per session.
 
 Phase 2 additions are data only: questions carry an optional `intent`
 object unchanged (dsh's `{kind: "plan-review", approve: label}` selects
-Emacs's plan approval UI). `OpenParams.mcpServers` temporarily carries
-stdio specs `{name, command, args?, env?, timeoutMs?, readOnly?}` from
-Emacs; these persist with the session so a daemon restart can remount
-MCP. Phase 3 replaces this per-session editor bridge. `Settings.beforePlan`
+Emacs's plan approval UI). Phase 3 removes `OpenParams.mcpServers`:
+the dsh backend builds its own `node <checkout>/bin/emx mcp` spec using
+the daemon socket, daemon session id, cached read-only names and the
+same 1,800,000 ms timeout as the Lisp backend. No editor socket, buffer
+name or stamp path is persisted in a session. `Settings.beforePlan`
 retains the permission mode beneath plan mode, including on open/resume.
 A history user block may carry `imageCount` when original file paths are
 unavailable; Emacs renders its image labels.
@@ -197,25 +198,58 @@ keep using the existing defer-and-poll scheme between the daemon and Emacs.
 
 ## MCP: `emx mcp` becomes a daemon client
 
-Today `emx mcp` turns each tool call into an `emacsclient` request through
-temp files, and `EMX_TOOLS_STAMP` files tell it when tools change. In the
-new design `emx mcp` connects to the daemon and forwards `tools/list` and
-`tools/call`:
+Phase 3 is opt-in through `EMX_DAEMON_SOCKET`. With it set, `emx mcp`
+loads `emx/mcp.ts`, connects only to that socket and identifies itself
+with `mcp/hello {session: EMX_SESSION}`. This connection cannot say
+`hello`, take over the editor or control sessions. Without the variable,
+the existing emacsclient temp-file path, stamp watcher and remote-only
+`config_*` tools are unchanged. Bare CLI commands also keep that path.
+Daemon sessions currently support local tools only.
 
-- **Daemon tools** run in the daemon: `sessions`, `session_read`,
-  `session_ask`, `session_start`, `session_stop`, the remote `config_*`
-  tools, and later usage and review data.
-- **Editor tools** stay defined in Lisp with `agent-ui-defmethod`. On
-  `hello` the editor sends their schemas (`tools`); the daemon keeps the
-  last list on disk, so `tools/list` is stable while no Emacs is attached
-  (calls fail cleanly instead). A changed list is pushed as
-  `notifications/tools/list_changed` by the daemon itself: the stamp files
-  and the file watch go away.
-- The **fork-cache rule** stays: tools, their descriptions and any
-  allowlist depend on configuration and place only, never on the calling
-  session.
-- The `emacsclient` path remains for bare command-line use (`emx open
-  file 42` from a terminal).
+An MCP connection binds once to an existing daemon session; a second
+`mcp/hello` on that connection is an error, even for the same session.
+The owner-only socket trusts every process running as the user, like the
+rest of the design. There is no per-session authentication: agents can
+already run emacsclient themselves. The session id routes calls; it is
+not an authentication token.
+
+| direction | method | payload / result |
+|---|---|---|
+| MCP → daemon | `mcp/hello` | `{session}` → `{}` |
+| MCP → daemon | `mcp/tools` | `{}` → `{tools}` |
+| MCP → daemon | `mcp/call` | `{name, arguments?}` → method result or JSON-RPC error |
+| MCP → daemon | `notifications/cancelled` | `{requestId}` of the socket call |
+| editor → daemon | `hello` | `{client, version, tools?: {tools, readOnly}}` |
+| editor → daemon | `editor/tools` | notification `{tools, readOnly}` |
+| daemon → MCP | `mcp/tools_changed` | notification `{}` |
+| daemon → editor | `editor/call` | `{method, params, caller: {session, root, place: null}}` |
+
+- All methods still come from Lisp in this phase, including collaboration
+  and canvas methods. Moving their data into the daemon is later work.
+  Emacs sends `agent-ui--describe nil` and the private audited read-only
+  names on hello. The existing two-second signature timer also checks
+  ready daemon connections and sends `editor/tools` when definitions or
+  permission classifications change. Stamp files remain for Lisp-started
+  Claude/Codex/dsh sessions until their cut-over.
+- The daemon saves the last definitions and classification atomically in
+  `<stateDir>/tools.json`. `mcp/tools` returns only the definitions, even
+  without an editor or after daemon restart. Calls without an editor fail
+  immediately with `Emacs is not attached`. Neither readOnly nor
+  `readOnlyHint` is exposed in MCP tool definitions. Dsh uses the private
+  names in its existing bridge approval gate when mounting the server.
+- `mcp/tools_changed` becomes MCP `notifications/tools/list_changed` on
+  stdio. The fork-cache rule stays: definitions and classifications depend
+  on configuration and place, never on the calling session.
+- Emacs maps the daemon session id to its attached session buffer, derives
+  root/place locally, and calls `agent-ui-call` with `agent-ui-caller`
+  bound just as for `agent-ui-rpc`. Unknown/unattached callers fail; caller
+  root text is not trusted. The reply is `{ok, result}` or `{ok, pending}`
+  or `{ok: false, error}`, matching the legacy transport.
+- The daemon polls deferred results with `editor/call` of `_poll` every
+  second. Cancellation stops waiting and cancels the pending result; late
+  deferred ids are released too. Editor disconnection or replacement
+  fails outstanding calls rather than replaying their side effects on
+  another editor. Stdio tool failures are MCP `isError` results.
 
 ## Backends
 
@@ -457,7 +491,8 @@ the end.
 2. **dsh** through the daemon, behind `agent-emx-agents` (default nil),
    old path still available. Implemented for local roots; real-daemon tests
    use a fake dsh peer without contacting the API.
-3. **Editor calls and `emx mcp` over the daemon**; stamp files removed.
+3. **Editor calls and `emx mcp` over the daemon** (implemented); stamp
+   files remain for the legacy path until its cut-over.
 4. **Claude**, then **Codex**.
 5. **Collab**: profiles from config, `session_*` tools, mailbox,
    children's lifecycle and limits, the approval policy above.

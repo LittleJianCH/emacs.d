@@ -3,7 +3,7 @@
 import type { Answer, Ask, Block, Info, Settings, Status } from '../daemon/protocol.ts'
 import { EchoBackend } from './echo.ts'
 import { DshBackend } from './dsh.ts'
-import type { McpServer, SessionEvent } from '../daemon/protocol.ts'
+import type { SessionEvent } from '../daemon/protocol.ts'
 
 export type NewAsk = Ask extends infer A ? A extends Ask ? Omit<A, 'id'> : never : never
 
@@ -12,7 +12,9 @@ export interface SessionHost {
   readonly settings: Settings
   readonly info: Info
   readonly blocks: Block[]
-  readonly mcpServers: McpServer[]
+  readonly id: string
+  readonly daemonSocket: string
+  editorTools(): import('../daemon/protocol.ts').EditorTools
   emit(event: SessionEvent): void
   setStatus(status: Status): void
   setInfo(info: Info): void

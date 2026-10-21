@@ -10,8 +10,9 @@ import { backends } from '../backends/backend.ts'
 import { acquireLock } from './lock.ts'
 import { codeVersion, socketPath, stateDir } from './paths.ts'
 import { ErrorCode } from './protocol.ts'
-import type { Answer, Cursor, Info, McpServer, SessionSummary, Settings } from './protocol.ts'
+import type { Answer, Cursor, Info, SessionSummary, Settings } from './protocol.ts'
 import { Connection, Reply, RpcError } from './rpc.ts'
+import { Editor } from './editor.ts'
 import { Session } from './session.ts'
 import type { Transcript } from './session.ts'
 
@@ -22,7 +23,6 @@ interface SavedSession {
   info: Info
   settings: Settings
   resume?: string
-  mcpServers?: McpServer[]
 }
 
 export interface ServerOptions {
@@ -47,29 +47,6 @@ function string(value: unknown, name: string): string {
 
 function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name)
-}
-
-function mcpServers(value: unknown): McpServer[] {
-  if (value === undefined) return []
-  if (!Array.isArray(value)) invalid('Expected an array: mcpServers')
-  return value.map((entry) => {
-    const item = object(entry)
-    const result: McpServer = { name: string(item.name, 'name'),
-      command: string(item.command, 'command') }
-    for (const key of ['args', 'readOnly'] as const) {
-      if (item[key] === undefined) continue
-      if (!Array.isArray(item[key]) || !item[key].every((v) => typeof v === 'string')) {
-        invalid(`Expected string[]: ${key}`)
-      }
-      result[key] = item[key] as string[]
-    }
-    if (item.env !== undefined) {
-      result.env = {}
-      for (const [key, value] of Object.entries(object(item.env))) result.env[key] = string(value, key)
-    }
-    if (item.timeoutMs !== undefined) result.timeoutMs = integer(item.timeoutMs, 'timeoutMs', 1)
-    return result
-  })
 }
 
 function settings(value: unknown): Settings {
@@ -98,6 +75,9 @@ export class DaemonServer {
   readonly version = codeVersion()
   readonly finished: Promise<void>
   client: Connection | undefined
+  readonly editor: Editor
+  #mcp = new Map<Connection, string>()
+  #calls = new Map<Connection, Map<unknown, AbortController>>()
   #connections = new Set<Connection>()
   #idleExit: number
   #idleTimer: NodeJS.Timeout | undefined
@@ -114,16 +94,25 @@ export class DaemonServer {
   constructor(options: ServerOptions) {
     this.varDir = resolve(options.varDir)
     this.socket = socketPath(this.varDir)
+    this.editor = new Editor(stateDir(this.varDir))
     this.#idleExit = options.idleExit ?? 900
     this.#log = options.log ?? (() => {})
     this.finished = new Promise((resolve) => { this.#finish = resolve })
     this.server = createServer((socket) => {
       const connection = new Connection(socket)
       this.#connections.add(connection)
-      connection.onRequest = (method, params) => this.#request(connection, method, params)
+      connection.onRequest = (method, params, id) => this.#request(connection, method, params, id)
+      connection.onNotification = (method, params) => {
+        if (method === 'editor/tools' && connection === this.client) this.#tools(params)
+        if (method === 'notifications/cancelled') this.#calls.get(connection)?.get(params.requestId)?.abort(new Error('Cancelled'))
+      }
       connection.onClose = () => {
         this.#connections.delete(connection)
+        this.#mcp.delete(connection)
+        for (const call of this.#calls.get(connection)?.values() ?? []) call.abort(new Error('MCP connection closed'))
+        this.#calls.delete(connection)
         if (this.client === connection) {
+          this.editor.detach()
           this.client = undefined
           for (const session of this.sessions.values()) session.detach()
         }
@@ -143,6 +132,7 @@ export class DaemonServer {
       await unlink(this.socket).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== 'ENOENT') throw error
       })
+      await this.editor.restore().catch((error) => this.#log(`Cannot load tools: ${error}`))
       await this.#restore()
       await new Promise<void>((resolve, reject) => {
         this.server.once('error', reject)
@@ -184,7 +174,7 @@ export class DaemonServer {
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, editorTools: () => this.editor.tools, onChange: (summaryChanged) => this.#changed(summaryChanged) })
   }
 
   async #restore(): Promise<void> {
@@ -206,7 +196,7 @@ export class DaemonServer {
         if (!Object.hasOwn(backends, agent)) throw new Error(`Unknown agent: ${agent}`)
         const saved: SavedSession = { id: string(record.id, 'id'), agent,
           root: string(record.root, 'root'), info: object(record.info ?? {}),
-          settings: settings(record.settings ?? {}), mcpServers: mcpServers(record.mcpServers), resume: optionalString(record.resume, 'resume') }
+          settings: settings(record.settings ?? {}), resume: optionalString(record.resume, 'resume') }
         // Session ids are also file names; reject paths in a damaged state table.
         if (!/^session-[a-zA-Z0-9-]+$/.test(saved.id)) throw new Error('Invalid session id')
         let transcript: Transcript | undefined
@@ -233,7 +223,7 @@ export class DaemonServer {
     const records: SavedSession[] = []
     for (const session of this.sessions.values()) {
       records.push({ id: session.id, agent: session.agent, root: session.root,
-        info: session.info, settings: session.settings, mcpServers: session.mcpServers, resume: session.resumeId() })
+        info: session.info, settings: session.settings, resume: session.resumeId() })
       files.set(this.#transcriptFile(session.id), JSON.stringify(session.transcript()) + '\n')
     }
     // Publish the table after its transcripts.
@@ -285,7 +275,38 @@ export class DaemonServer {
     return { text, images: params.images as string[] | undefined, block }
   }
 
-  #request(connection: Connection, method: string, value: unknown): unknown {
+  #tools(value: unknown): void {
+    if (this.editor.update(value)) {
+      for (const connection of this.#mcp.keys()) connection.notify('mcp/tools_changed', {})
+      void this.editor.flush().catch((error) => this.#log(`Cannot save tools: ${error}`))
+    }
+  }
+
+  #request(connection: Connection, method: string, value: unknown, requestId?: unknown): unknown {
+    if (method === 'mcp/hello') {
+      if (this.#mcp.has(connection)) invalid('MCP connection is already bound to a session')
+      const session = string(object(value).session, 'session')
+      this.#session({ id: session })
+      if (connection === this.client) invalid('An editor connection cannot become an MCP connection')
+      this.#mcp.set(connection, session)
+      return {}
+    }
+    const mcp = this.#mcp.get(connection)
+    if (mcp !== undefined) {
+      if (method === 'mcp/tools') return { tools: this.editor.tools.tools }
+      if (method === 'mcp/call') {
+        const session = this.#session({ id: mcp })
+        const params = object(value)
+        const controller = new AbortController()
+        let calls = this.#calls.get(connection)
+        if (!calls) this.#calls.set(connection, calls = new Map())
+        calls.set(requestId, controller)
+        return this.editor.call(string(params.name, 'name'), object(params.arguments ?? {}),
+          { session: mcp, root: session.root, place: null }, controller.signal)
+          .finally(() => calls!.delete(requestId))
+      }
+      throw new RpcError(ErrorCode.NotClient, 'MCP connections may only list and call tools')
+    }
     if (method !== 'hello' && method !== 'ping' && method !== 'daemon/stop'
       && connection !== this.client) {
       throw new RpcError(ErrorCode.NotClient, 'Say hello to become the client')
@@ -295,13 +316,16 @@ export class DaemonServer {
     switch (method) {
       case 'ping': return { daemon: process.pid, version: this.version }
       case 'hello': {
+        if (params.tools !== undefined) this.#tools(params.tools)
         string(params.client, 'client')
         string(params.version, 'version')
         if (this.client !== connection) {
+          this.editor.detach()
           this.client?.notify('replaced', {})
           for (const session of this.sessions.values()) session.detach()
         }
         this.client = connection
+        this.editor.connection = connection
         this.#checkIdle()
         return { daemon: process.pid, version: this.version }
       }
@@ -315,7 +339,7 @@ export class DaemonServer {
         // Native conversation forks are a later migration phase.
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
         const session = this.#make({ id: `session-${randomUUID()}`, agent, root, resume,
-          settings: settings(params.settings ?? {}), mcpServers: mcpServers(params.mcpServers),
+          settings: settings(params.settings ?? {}),
           info: parent ? { parent: this.sessions.get(parent)?.resumeId() ?? parent } : {} })
         this.sessions.set(session.id, session)
         return (async () => {
@@ -389,6 +413,11 @@ export class DaemonServer {
       }
       case 'session/stop': {
         const session = this.#session(params)
+        for (const [peer, owner] of this.#mcp) {
+          if (owner !== session.id) continue
+          for (const call of this.#calls.get(peer)?.values() ?? []) call.abort(new Error('Session stopped'))
+          this.#calls.delete(peer)
+        }
         return session.stop().then(async () => {
           this.sessions.delete(session.id)
           this.#changed()
@@ -425,6 +454,8 @@ export class DaemonServer {
 
   async #close(): Promise<void> {
     this.#stopping = true
+    this.editor.detach()
+    await this.editor.flush().catch((error) => this.#log(`Cannot save tools: ${error}`))
     this.#checkIdle()
     clearTimeout(this.#saveTimer)
     clearTimeout(this.#sessionsTimer)
