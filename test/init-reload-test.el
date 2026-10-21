@@ -224,5 +224,20 @@ A string in FORMS is inserted as is."
                      (vector (list :file file :status "failed" :error "Boom"))))
       (should (string-prefix-p "Fix" (plist-get result :next_step))))))
 
+(ert-deftest init-reload-test-emx-report ()
+  "All entry points share the daemon report without treating it as a file."
+  (let ((my/reload-emx-function
+         (lambda () '((:place "local" :status "restart_scheduled"
+                       :waiting [(:session "s" :reason "approval or question pending")])))))
+    (cl-letf (((symbol-function 'my/reload--loaded) (lambda () nil))
+              ((symbol-function 'my/reload--changed-p) (lambda (_) nil)))
+      (let* ((report (my/reload-config))
+             (emx (plist-get (car report) :emx))
+             (result (agent-ui--method-reload nil)))
+        (should (equal (plist-get result :emx) emx))
+        (should (equal (plist-get result :files) []))
+        (should (string-match-p "空闲后重启" (my/reload--summary report)))
+        (should (string-match-p "approval" (plist-get (aref (plist-get (aref emx 0) :waiting) 0) :reason)))))))
+
 (provide 'init-reload-test)
 ;;; init-reload-test.el ends here

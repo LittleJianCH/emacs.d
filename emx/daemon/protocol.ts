@@ -129,7 +129,7 @@ export interface HelloParams {
 export interface HelloResult {
   sessions?: SessionSummary[]
   config?: import('../config.ts').Config
-  capabilities?: { usage: number, stopIfIdle?: number }
+  capabilities?: { usage: number, stopIfIdle?: number, restart?: number }
   liveAgents?: number
   daemon: number
   /** Hash of the emx sources the daemon runs. */
@@ -310,6 +310,9 @@ export interface Requests {
   'usage/report': [ReportParams, ReturnType<UsageService['report']>]
   'usage/refresh': [{force?: boolean}, {}]
   'usage/clear': [{}, {}]
+  'daemon/restart': [{ version: string, runtime: string },
+    { status: 'up_to_date' | 'restarted' | 'restart_scheduled', version: string,
+      waiting?: { session?: string, reason: string }[] }]
   'daemon/stop': [{ ifIdle?: boolean, idleOnly?: boolean }, { stopped?: boolean }]
 }
 
@@ -365,6 +368,8 @@ export interface DaemonNotifications {
   'collab/closed': { id: SessionId }
   /** Another Emacs said hello; this connection no longer gets events. */
   'replaced': {}
+  'daemon/restarting': { version: string }
+  'daemon/restart-failed': { error: string }
   /** Sent only to MCP connections. */
   'mcp/tools_changed': {}
   /** A visible report should be refetched after ledger writes or clear. */

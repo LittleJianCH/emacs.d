@@ -12,7 +12,7 @@ import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import type { Server } from 'node:net'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { backends } from '../backends/backend.ts'
 import { acquireLock } from './lock.ts'
 import { checkoutRoot, codeVersion, socketPath, stateDir } from './paths.ts'
@@ -42,6 +42,7 @@ export interface ServerOptions {
   remote?: boolean
   idleExit?: number
   configFile?: string
+  restart?: (runtime: string) => void
   log?: (message: string) => void
 }
 
@@ -123,11 +124,15 @@ export class DaemonServer {
   #savePending: Promise<void> | undefined
   #shutdown: Promise<void> | undefined
   #stopping = false
+  #restart?: { version: string, runtime: string }
+  #restartTimer?: NodeJS.Timeout
+  #launch?: ServerOptions['restart']
   #releaseLock: (() => void) | undefined
   #log: (message: string) => void
   #finish!: () => void
 
   constructor(options: ServerOptions) {
+    this.#launch = options.restart
     this.varDir = resolve(options.varDir)
     this.socket = options.socket ?? socketPath(this.varDir)
     this.editor = new Editor(stateDir(this.varDir))
@@ -465,10 +470,10 @@ export class DaemonServer {
       if (connection === this.client || this.#mcp.has(connection)) invalid('Connection already has another role')
       this.#usageClients.add(connection)
       this.#checkIdle()
-      return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value },
+      return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 }, config: this.configuration.value },
         () => connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas }))
     }
-    if (this.#usageClients.has(connection) && !method.startsWith('usage/') && method !== 'ping') {
+    if (this.#usageClients.has(connection) && !method.startsWith('usage/') && method !== 'ping' && method !== 'daemon/restart') {
       throw new RpcError(ErrorCode.NotClient, 'Usage connections may only access usage methods')
     }
     if (method === 'mcp/hello') {
@@ -497,12 +502,12 @@ export class DaemonServer {
       throw new RpcError(ErrorCode.NotClient, 'MCP connections may only list and call tools')
     }
     if (method !== 'hello' && method !== 'ping' && method !== 'daemon/stop'
-      && connection !== this.client && !(this.#usageClients.has(connection) && method.startsWith('usage/'))) {
+      && connection !== this.client && !(this.#usageClients.has(connection) && (method.startsWith('usage/') || method === 'daemon/restart'))) {
       throw new RpcError(ErrorCode.NotClient, 'Say hello to become the client')
     }
     const params = object(value)
     switch (method) {
-      case 'ping': return { daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 },
+      case 'ping': return { daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 },
         liveAgents: [...this.sessions.values()].filter((session) => session.backend.alive()).length }
       case 'hello': {
         if (params.config !== undefined) this.#configChanged(this.configuration.push(params.config))
@@ -525,7 +530,7 @@ export class DaemonServer {
         this.client = connection
         this.editor.connection = connection
         this.#checkIdle()
-        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1 }, config: this.configuration.value, sessions: this.#list() }, () => {
+        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 }, config: this.configuration.value, sessions: this.#list() }, () => {
           connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas })
           if (this.outbox) connection.notify('usage/outbox', { entries: this.outbox.entries })
           connection.notify('sessions', { sessions: this.#list() })
@@ -731,6 +736,24 @@ export class DaemonServer {
         return session.earlier(string(params.before, 'before'), integer(params.turns, 'turns', 0))
       }
       case 'session/stop': return this.#closeSession(this.#session(params)).then(() => ({}))
+      case 'daemon/restart': {
+        const version = string(params.version, 'version')
+        const runtime = string(params.runtime, 'runtime')
+        if (!isAbsolute(runtime)) invalid('Expected absolute runtime entry path')
+        if (version === this.version) {
+          this.#restart = undefined
+          return { status: 'up_to_date', version: this.version }
+        }
+        if (!this.#launch) throw new Error('Daemon cannot launch a replacement')
+        const waiting = this.restartBlockers()
+        // Publish only after the reply: a caller in this daemon must receive its
+        // reload report before its running turn can finish and release restart.
+        return new Reply({ status: waiting.length ? 'restart_scheduled' : 'restarted',
+          version, waiting }, () => {
+          this.#restart = { version, runtime }
+          this.#checkRestart()
+        })
+      }
       case 'daemon/stop': {
         if (params.ifIdle !== undefined && typeof params.ifIdle !== 'boolean') invalid('Expected boolean: ifIdle')
         if (params.ifIdle) {
@@ -826,6 +849,56 @@ export class DaemonServer {
     })
   }
 
+  /** Quiescence for a code restart, independent of live idle CLI processes. */
+  restartBlockers(): { session?: string, reason: string }[] {
+    const waiting = this.collab.restartBlockers()
+    if (this.#opens.size) waiting.push({ reason: 'session creation in flight' })
+    for (const session of this.sessions.values()) {
+      const add = (reason: string) => waiting.push({ session: session.id, reason })
+      if (session.info.parent) add('live child session must close')
+      if (session.busy()) add(`session ${session.status}; turn or preparation in flight`)
+      if (session.operating) add('session lifecycle operation in flight')
+      if (session.asks.size) add('approval or question pending')
+      if (session.queue.length) add('queued message pending')
+    }
+    for (const [peer, calls] of this.#calls) {
+      if (calls.size) waiting.push({ session: this.#mcp.get(peer), reason: 'MCP tool call in flight' })
+    }
+    return waiting
+  }
+
+  #checkRestart(): void {
+    clearTimeout(this.#restartTimer)
+    if (!this.#restart || this.#stopping) return
+    if (this.restartBlockers().length) {
+      // Observe completion even when the last blocker is an async operation,
+      // visibility query or mailbox delivery with no further status event.
+      this.#restartTimer = setTimeout(() => this.#checkRestart(), 50)
+      return
+    }
+    const target = this.#restart
+    this.#restart = undefined
+    // Commit without yielding: requests arriving before this point use old code;
+    // once committed no launch can sneak into the hibernation window.
+    this.#stopping = true
+    for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
+      peer.notify('daemon/restarting', { version: target.version })
+    }
+    void (async () => {
+      try {
+        for (const session of this.sessions.values()) await session.hibernate()
+        await this.persist()
+        await this.stop()
+        this.#launch!(target.runtime)
+      } catch (error) {
+        this.#log(`Cannot restart daemon: ${error}`)
+        this.client?.notify('daemon/restart-failed', { error: String(error) })
+        // Keep a daemon usable if hibernation or persistence failed before stop.
+        if (!this.#shutdown) this.#stopping = false
+      }
+    })()
+  }
+
   #checkIdle(): void {
     const busy = this.client !== undefined || this.#usageClients.size > 0 || [...this.sessions.values()].some((session) => session.backend.alive())
     if (busy || this.#stopping) {
@@ -846,6 +919,7 @@ export class DaemonServer {
 
   async #close(): Promise<void> {
     this.#stopping = true
+    clearTimeout(this.#restartTimer)
     clearInterval(this.#outboxTimer)
     this.configuration.close()
     this.collab.stop()

@@ -122,17 +122,43 @@ The daemon's version is a hash of its runtime files: `emx/dist/**/*.js`,
 `*.json`, `bin/emx`, and the dsh `.mjs`/`.yml` files. A daemon reports it
 on `hello` and `ping`, and `--ensure` compares it with its own.
 
-When the versions differ, `ensure` asks a daemon that advertises
-`capabilities.stopIfIdle: 1` to stop, atomically, only if no agent is live or
-starting and no ask is pending. If the daemon refuses, `ensure` returns
-`stale: true` and Emacs shows a Chinese notice: the explicit
-`M-x agent-emx-restart-daemon` stops idle top-level sessions, persisting
-their resume ids, starts current code, and the next send resumes them. It
-refuses while a turn is running or starting or a child exists. A daemon
-without `stopIfIdle` is left running.
-Automatic restart when all agents become idle is not implemented; the
-explicit command is the supported path. A probe never takes over the editor
-connection.
+`reload` (the MCP tool, `bin/emx reload`, or `M-x my/reload-config`)
+updates connected daemons as well as Lisp. It builds changed TypeScript sources
+before reading the manifest, then compares each connected local/host daemon's
+running version. A host's new content-addressed runtime is installed on this
+explicit user/agent action, before requesting its restart. Timers never install
+host files or open host connections.
+
+A stale idle daemon hibernates its top-level sessions, persists transcripts and
+native resume ids, closes its socket, then launches the target runtime through
+`--ensure` with the same `--var` or host `--client`. Emacs receives a short Chinese
+notice and reconnects through the existing hello/attach recovery path. Views keep
+their buffers; recovering history does not start CLIs. The next send resumes each
+native session with the new code.
+
+If busy, `daemon/restart` records a pending target and returns immediately. The
+old daemon continues serving new requests until every blocker clears: running,
+starting or disconnected turns/preparation; lifecycle operations; approvals and
+questions; queued messages; live children (including finished children that have
+not closed); child creation; pending `session_ask` replies and mailbox/outgoing
+replies; asynchronous collaboration delivery; and MCP calls in flight. A live
+idle top-level CLI alone is not a blocker. The daemon rechecks quiescence before
+committing shutdown, so a new turn arriving in the meantime also delays it.
+Children have no resumable transcript and must close before replacement.
+
+The reload result keeps its `files` array and adds `emx`, one entry per connected
+daemon: `{place, status, version?, waiting?, error?}`. Status is `restarted`,
+`restart_scheduled`, `up_to_date`, or `failed`; `waiting` contains English
+`{session?, reason}` blockers. Build/install errors are returned as failures
+without stopping agents. A reload from an agent running in that daemon normally
+reports `restart_scheduled`: its own turn and tool call must finish first. The
+restart request's reply is written before shutdown can begin.
+
+`M-x agent-emx-restart-daemon` remains the manual fallback, including for old
+daemons without `capabilities.restart: 1`. Startup `--ensure` retains its
+conservative `stopIfIdle` probe: it replaces stale daemons only when no agent
+process is live. That probe never takes over the editor attachment; explicit
+reload uses `daemon/restart` to support idle live processes and deferred restart.
 
 ### Locks and sockets
 
@@ -275,6 +301,7 @@ Requests may flow both ways; the contract is `emx/daemon/protocol.ts`.
 | `mcp/hello` | `{session}` | `{remote}` |
 | `mcp/tools` | `{}` | `{tools}` |
 | `mcp/call` | `{name, arguments?}` | method result |
+| `daemon/restart` | `{version, runtime}` | `{status, version, waiting?}` |
 | `daemon/stop` | `{ifIdle?, idleOnly?}` | `{stopped?}` |
 
 `hello` is the editor role: it replaces any previous editor, returns the
@@ -1059,9 +1086,6 @@ test/agent-emx-*.el      ERT suites: daemon client, host simulation, smoke
   replay after expiry may create a new session. Atomic file replacement
   covers process crashes, not power-loss durability (no fsync).
 
-- **Stale daemons with live agents restart manually.** Automatic restart once
-  every agent is idle is not implemented; `M-x agent-emx-restart-daemon` is
-  the supported path.
 - **`session/open.fork` is rejected.** Native forks exist only through
   `session_start context=fork`, and only for a caller with a live native
   conversation.
@@ -1077,5 +1101,4 @@ test/agent-emx-*.el      ERT suites: daemon client, host simulation, smoke
   client is not counted, and the ledger has no prices, since the accounts are
   subscription plans.
 - **Configuration is JSON without comments.** Whether the configuration
-  format needs comments, and whether the stale-daemon restart should become
-  automatic, remain open.
+  format needs comments remains open.

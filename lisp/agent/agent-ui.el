@@ -484,20 +484,29 @@ compile is not loaded.  Unlike a plain load, keymap definitions are
 merged into the live keymaps, options nobody customized move to their new
 default and changed faces are applied; other defvars keep their state.  A file
 whose struct layout changed, and init.el, are not loaded: they report
-restart_required."
+restart_required.  Also rebuild changed emx sources and update connected daemons.
+The emx array reports restarted, restart_scheduled (with English blockers),
+up_to_date or failed.  Scheduled restarts happen after all turns, asks,
+children and collaboration deliveries finish; sessions resume on next send."
   (let* ((report (my/reload-config (and files (split-string files))))
-         (statuses (mapcar (lambda (entry) (plist-get entry :status)) report)))
-    (list :files (vconcat (mapcar #'agent-ui--reload-entry report))
+         (emx (plist-get (seq-find (lambda (e) (plist-member e :emx)) report) :emx))
+         (files (seq-filter (lambda (e) (plist-member e :file)) report))
+         (statuses (mapcar (lambda (entry) (plist-get entry :status)) files)))
+    (list :files (vconcat (mapcar #'agent-ui--reload-entry files))
+          :emx (or emx [])
           :next_step
           (agent-ui--json-value
            (cond ((null report)
                   "Nothing to reload: no loaded configuration file changed on disk.")
-                 ((memq 'failed statuses)
+                 ((or (memq 'failed statuses)
+                      (seq-some (lambda (e) (equal (plist-get e :status) "failed")) emx))
                   "Fix the errors and call reload again.  A file that failed \
 to compile was not loaded; one that failed while loading may be partly loaded.")
                  ((memq 'restart_required statuses)
                   "Tell the user these changes take effect after restarting \
-Emacs."))))))
+Emacs.")
+                 ((seq-some (lambda (e) (equal (plist-get e :status) "restart_scheduled")) emx)
+                  "The daemon will restart automatically when its waiting sessions and deliveries finish. Sessions resume on their next send."))))))
 
 (defvar agent-ui-description-functions nil
   "Functions extending method descriptions: ((NAME . FUNCTION) ...).

@@ -289,6 +289,22 @@ plain `load`, it:
 - never reloads `init.el` / `early-init.el` (`restart_required`), nor files that only
   depend on a changed file: reload those yourself when they expand a changed macro.
 
+After editing `emx/`, call the same `reload`. It builds changed sources, compares
+runtime versions, and updates this Emacs's connected local and host daemons.
+The report adds an `emx` array alongside `files`: each daemon reports `restarted`,
+`restart_scheduled` (English reasons and session ids), `up_to_date`, or `failed`
+(including compiler/install errors). `my/reload-config` keeps its Lisp entry list
+and appends `(:emx VECTOR)` for the same reports.
+
+`restart_scheduled` needs no second reload: the old daemon continues serving
+requests and restarts itself once turns, asks, children and collaboration
+deliveries finish. A live child must close because it cannot be resumed. The
+calling agent's own running turn normally schedules the restart. Idle sessions
+hibernate with their transcripts and resume ids; Emacs reconnects and restores
+their views, and the next send resumes them with new code. Host runtime install
+happens during reload, never from a reconnect timer. The manual fallback remains
+`M-x agent-emx-restart-daemon`.
+
 Other caveats:
 
 - Re-running a major mode in a live buffer kills its buffer-local variables (e.g.

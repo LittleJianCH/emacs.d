@@ -22,7 +22,7 @@
                 (unless (zerop (call-process "node" nil t nil
                                              (expand-file-name "bin/emx" agent-emx--checkout)
                                              "daemon" "--manifest"))
-                  (error "Cannot read emx runtime manifest"))
+                  (error "Cannot build emx runtime manifest: %s" (buffer-string)))
                 (agent-emx--parse (buffer-string)))))))
 
 (defun agent-emx-remote-client-id ()

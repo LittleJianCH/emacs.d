@@ -159,7 +159,14 @@ async function foreground(opts: Options): Promise<void> {
     await chmod(opts.varDir, 0o700)
   }
   const daemon = new DaemonServer({ varDir: opts.varDir, socket, remote: !!opts.client,
-    idleExit: opts.idleExit, log })
+    idleExit: opts.idleExit, log, restart: (runtime) => {
+      const child = spawn(process.execPath, [runtime, 'daemon',
+        ...(opts.client ? ['--client', opts.client] : ['--var', opts.varDir]),
+        '--ensure', ...(opts.idleExit === undefined ? [] : ['--idle-exit', String(opts.idleExit)])],
+      { detached: true, stdio: 'ignore' })
+      child.on('error', (error) => log(`Cannot launch replacement: ${error.message}`))
+      child.unref()
+    } })
   await daemon.start()
   const shutdown = (): void => { void daemon.stop() }
   process.on('SIGTERM', shutdown)

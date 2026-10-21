@@ -699,7 +699,7 @@ test('ping, --ensure and --stop do not replace an attached client', async (t) =>
   const { client, id } = await openEcho(t, info)
   const probe = track(t, await connect(info.socket))
   const mark = client.notifications.length
-  assert.deepEqual(await probe.request('ping', {}), { daemon: info.pid, version: info.version, capabilities: { usage: 1, stopIfIdle: 1 }, liveAgents: 1 })
+  assert.deepEqual(await probe.request('ping', {}), { daemon: info.pid, version: info.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 }, liveAgents: 1 })
   await assert.rejects(probe.request('sessions/list', {}), { code: 2 })
   assert.equal(ensure(dir).pid, info.pid)
   await sendAndWaitIdle(client, id, 'still attached')

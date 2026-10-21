@@ -499,7 +499,7 @@ const MCP_BODY = `
   bounded task early, then continue another part yourself. Discover session_start
   if it is not listed.
   If you are a subagent assigned one task, do it yourself without starting sessions.
-- After editing the Lisp of this Emacs configuration, call reload.
+- After editing Lisp or emx/ code in this Emacs configuration, call reload.
 - Other editor operations: eval.
 - The user reads Chinese: write page content and notifications in Chinese.`;
 

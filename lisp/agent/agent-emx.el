@@ -97,6 +97,12 @@ accepting the args plist.  Unknown kinds are displayed dimly as-is."
   (or (agent-emx--get session key)
       (agent-emx--set session key (make-hash-table :test #'equal))))
 
+(defvar agent-emx-reload--restarting (make-hash-table :test #'eq)
+  "Connections awaiting automatic restart recovery, with target versions.")
+
+(defvar agent-emx-reload--recovering (make-hash-table :test #'eq)
+  "Connections with one active automatic restart recovery loop.")
+
 (defvar agent-emx--wire-message nil
   "Current parsed config message, with null distinct from empty objects.")
 (defvar agent-emx-config--wire nil
@@ -549,6 +555,13 @@ Daemon events keep their distinct false value; only tool arguments use nil."
            (session (gethash (plist-get params :session)
                              (agent-emx--connection-sessions connection))))
       (cond
+       ((equal method "daemon/restarting")
+        (puthash connection (plist-get params :version) agent-emx-reload--restarting)
+        (message "emx 代码已更新，正在休眠会话并重启；下次发送时恢复"))
+       ((equal method "daemon/restart-failed")
+        (remhash connection agent-emx-reload--restarting)
+        (remhash connection agent-emx-reload--recovering)
+        (message "emx 更新失败：%s" (plist-get params :error)))
        ((equal method "collab/closed")
         (agent-emx--close-view connection (plist-get params :id)))
        ((equal method "sessions")
@@ -621,7 +634,7 @@ Daemon events keep their distinct false value; only tool arguments use nil."
 (defun agent-emx--connect (connection result)
   "Connect CONNECTION to the daemon described by ensure RESULT."
   (when (eq (plist-get result :stale) t)
-    (message "emx daemon 代码已过期；请在会话空闲后运行 M-x agent-emx-restart-daemon，休眠并重启"))
+    (message "emx daemon 代码已过期；运行 reload 会在会话空闲后自动更新"))
   (setf (agent-emx--connection-starter connection) nil
         (agent-emx--connection-starting connection) nil
         (agent-emx--connection-input connection) (encode-coding-string "" 'utf-8 t)
@@ -635,7 +648,8 @@ Daemon events keep their distinct false value; only tool arguments use nil."
          :sentinel (lambda (process event)
                      (when (and (eq process (agent-emx--connection-process connection))
                                 (not (process-live-p process)))
-                       (agent-emx--lost connection (list :message (string-trim event)) t)))))
+                       (agent-emx--lost connection (list :message (string-trim event)) t)
+                       (agent-emx-reload--disconnected connection)))))
   (let* ((usage (eq (agent-emx--connection-role connection) 'usage))
          (tools (unless usage (agent-emx--tools (agent-emx--connection-place connection))))
          (signature (unless usage (agent-emx--tools-signature tools))))
@@ -1554,6 +1568,7 @@ Running turns, asks and ephemeral children must finish before restart."
    (lambda (error) (message "emx daemon 连接失败：%s" (plist-get error :message)))))
 
 (require 'agent-emx-remote)
+(require 'agent-emx-reload)
 
 (provide 'agent-emx)
 ;;; agent-emx.el ends here

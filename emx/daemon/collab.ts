@@ -156,6 +156,17 @@ export class Collaboration {
         !toolNames.includes(name) && editor.tools.some((tool) => tool.name === name)),
         'sessions', 'session_read'])].sort() }
   }
+  /** Include asynchronous visibility/hub delivery after pending entries are removed. */
+  restartBlockers(): { session?: string, reason: string }[] {
+    return [
+      ...(this.starting ? [{ reason: 'child creation in flight' }] : []),
+      ...(this.#settling ? [{ reason: 'collaboration delivery in flight' }] : []),
+      ...this.pending.map((p) => ({ session: p.target, reason: 'session_ask reply pending' })),
+      ...[...this.mailbox.keys()].map((session) => ({ session, reason: 'mailbox delivery pending' })),
+      ...this.outgoing.map((p) => ({ session: p.route.session, reason: 'cross-daemon reply pending' })),
+    ]
+  }
+
   get starting(): boolean { return this.#starts.size > 0 }
   assertOpen(session: Session): void {
     if (this.#closing.has(session) || !this.host.sessions.has(session.id)) {

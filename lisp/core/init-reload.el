@@ -348,11 +348,15 @@ made before this reload lack them" (car struct)))
                                  structs)
                          (cdr compiled)))))))
 
+(defvar my/reload-emx-function nil
+  "Function returning daemon reload reports, installed by agent-emx.")
+
 (defun my/reload-config (&optional files)
   "Reload FILES, by default every configuration file changed on disk.
 FILES are file names, relative ones against `user-emacs-directory'.  Return a
 list of plists (:file :status ...), where :status is `reloaded', `failed' or
-`restart_required'.  Interactively, report the outcome in the echo area."
+`restart_required', plus an optional (:emx VECTOR) daemon report entry.
+Interactively, report the outcome in the echo area."
   (interactive)
   (let* ((loaded (my/reload--loaded))
          (files (if files
@@ -378,6 +382,9 @@ list of plists (:file :status ...), where :status is `reloaded', `failed' or
           (setq report (append report
                                (list (list :file file :status 'restart_required
                                            :error "init files only run at startup")))))))
+    (when my/reload-emx-function
+      (when-let* ((emx (funcall my/reload-emx-function)))
+        (setq report (append report (list (list :emx (vconcat emx)))))))
     (when (called-interactively-p 'any)
       (message "%s" (my/reload--summary report)))
     report))
@@ -398,7 +405,17 @@ list of plists (:file :status ...), where :status is `reloaded', `failed' or
                      (format "加载失败 %s（%s）" (funcall names failed)
                              (plist-get (car failed) :error)))
                    (when-let* ((restart (alist-get 'restart_required by-status)))
-                     (format "需要重启 Emacs 才能生效：%s" (funcall names restart)))))
+                     (format "需要重启 Emacs 才能生效：%s" (funcall names restart)))
+                   (when-let* ((emx (seq-find (lambda (e) (plist-member e :emx)) report)))
+                     (format "emx：%s"
+                             (mapconcat
+                              (lambda (entry)
+                                (pcase (plist-get entry :status)
+                                  ("restarted" "已重启")
+                                  ("restart_scheduled" "会话空闲后重启")
+                                  ("up_to_date" "已是最新")
+                                  (_ "更新失败")))
+                              (plist-get emx :emx) "、")))))
        "；"))))
 
 (provide 'init-reload)

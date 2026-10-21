@@ -73,6 +73,7 @@ export class Session implements SessionHost {
   #active = false
   #prepared?: Promise<void>
   #operations: Promise<void> = Promise.resolve()
+  #operationCount = 0
   #stopped = false
   #hibernateAfter: () => number
   #hibernateTimer?: NodeJS.Timeout
@@ -117,16 +118,20 @@ export class Session implements SessionHost {
     return this.#active || ['starting', 'running', 'disconnected'].includes(this.status)
   }
 
+  /** Lifecycle work can still own a process even when status is idle. */
+  get operating(): boolean { return this.#operationCount > 0 }
+
   resumeId(): string | undefined {
     return this.backend.resumeId() ?? this.#resume
   }
 
   /** All process ownership changes run here, including adapter preparation. */
   #operate(action: () => Promise<void>): Promise<void> {
+    this.#operationCount++
     const task = this.#operations.then(() => {
       this.#environment = undefined
       return action()
-    })
+    }).finally(() => { this.#operationCount--; this.#onChange(false) })
     this.#operations = task.catch(() => {})
     return task
   }
