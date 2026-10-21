@@ -57,7 +57,8 @@ export class ProjectEnvironments {
       const { stdout } = await execute('direnv', ['export', 'json'], {
         cwd: root, env, timeout: 10000, maxBuffer: 4 * 1024 * 1024,
       })
-      const overlay = JSON.parse(stdout)
+      // Without an .envrc, or with nothing to change, direnv prints nothing.
+      const overlay = stdout.trim() ? JSON.parse(stdout) : {}
       for (const [key, value] of Object.entries(overlay)) {
         if (!essential.has(key)) continue
         if (value === null) delete env[key]

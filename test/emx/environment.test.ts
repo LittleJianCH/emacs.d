@@ -157,3 +157,22 @@ import fs from 'node:fs'; fs.appendFileSync(${JSON.stringify(counter)}, 'x'); co
     assert.match(notices[0], /ENOTDIR/)
   } finally { process.env.PATH = savedPath; rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('a root without an .envrc gets the base environment and no notice', async () => {
+  const dir = mkdtempSync('/tmp/emx-env-empty-')
+  const savedPath = process.env.PATH
+  const bin = join(dir, 'bin'); mkdirSync(bin)
+  // direnv prints nothing when there is no .envrc or nothing changes.
+  writeFileSync(join(bin, 'direnv'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+  process.env.PATH = bin + ':' + savedPath
+  try {
+    const root = join(dir, 'project'); mkdirSync(root)
+    const notices: string[] = []
+    const env = await new ProjectEnvironments().get(root, (message) => notices.push(message))
+    assert.deepEqual(notices, [])
+    assert.equal(env.PATH, process.env.PATH)
+  } finally {
+    process.env.PATH = savedPath
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
