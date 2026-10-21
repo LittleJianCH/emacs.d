@@ -44,6 +44,9 @@ methods can read it directly.")
 (defvar agent-ui--methods nil
   "Registered methods, with function, description, params and read-only metadata.")
 
+(defvar agent-ui-tools-change-functions nil
+  "Functions publishing changed editor definitions to the daemon.")
+
 (defmacro agent-ui-defmethod (name params docstring &rest body)
   "Define NAME (a string) as a method callable by agents.
 Each entry of PARAMS is (SYMBOL TYPE DESCRIPTION [required]), where TYPE is a
@@ -70,6 +73,7 @@ return value (plist / vector / string / number) is serialized as JSON."
        (setf (alist-get ,name agent-ui--methods nil nil #'equal)
              (list :function #',fn :description ,docstring :params ',params
                    :read-only ,read-only))
+       (run-hooks 'agent-ui-tools-change-functions)
        ,name)))
 
 (defun agent-ui--coerce (params spec)
@@ -511,15 +515,13 @@ PLACE is from `agent-session-place', nil for this machine."
   (vconcat
    (seq-keep (pcase-lambda (`(,name . ,entry))
                (unless (equal name "describe")
-                 (or (and (fboundp 'agent-emx-config-tool)
-                          (funcall 'agent-emx-config-tool name place))
-                     (list :name name
+                 (list :name name
                        :description
                        (concat (plist-get entry :description)
                                (when-let* ((fn (alist-get name agent-ui-description-functions
                                                           nil nil #'equal)))
                                  (concat "\n\n" (funcall fn place))))
-                       :inputSchema (agent-ui--schema (plist-get entry :params))))))
+                       :inputSchema (agent-ui--schema (plist-get entry :params)))))
              (reverse agent-ui--methods))))
 
 (defun agent-ui-read-only-methods (&optional place)
@@ -538,58 +540,11 @@ The remote emx also offers config_read, implemented outside Emacs."
     (when root (agent-session-ensure-programs root))
     (agent-ui--describe (and root (agent-session-place root)))))
 
-;;; Announcing changed methods
-;;
-;; Agents read the methods as MCP tools when they start.  When they change
-;; (a reload, a changed profile, an agent installed), the file
-;; `agent-session-tools-stamp' of each place gets their new signature there;
-;; each emx watches its agent's and tells its client to list the tools again.
-;; Claude and dsh do; Codex doesn't, so its backend compares the signature it
-;; started with before each send.
+(defun agent-ui--tools-loaded (&rest _)
+  "Publish editor definitions after loading a configuration module."
+  (run-hooks 'agent-ui-tools-change-functions))
 
-(defun agent-ui-tools-signature (&optional place)
-  "A hash of the methods as agents at PLACE see them; it changes with any.
-PLACE is from `agent-session-place'.  A remote project not looked up yet
-isn't looked up here."
-  (secure-hash 'sha1 (json-serialize (agent-ui--describe place)
-                                     :null-object :null :false-object :false)))
-
-(defvar agent-ui--tools-signatures (make-hash-table :test #'equal)
-  "Place -> the signature last written to its stamp file.")
-
-(defvar agent-ui-tools-change-functions nil
-  "Functions checking and publishing changed tools through other transports.")
-
-(defun agent-ui--update-tools-stamp ()
-  "Write the signature of the methods to each place's stamp if it changed.
-Only places already looked up: this runs on a timer, where a round trip to
-a host would freeze Emacs."
-  (run-hooks 'agent-ui-tools-change-functions)
-  (dolist (place (agent-session-known-places))
-    ;; From a timer: a module half reloaded mustn't raise errors here.
-    (ignore-errors
-      (let ((signature (agent-ui-tools-signature place))
-            (file (agent-session-tools-stamp place)))
-        (unless (equal signature (gethash place agent-ui--tools-signatures))
-          (unless (equal signature (ignore-errors
-                                     (with-temp-buffer
-                                       (insert-file-contents file)
-                                       (buffer-string))))
-            (make-directory (file-name-directory file) t)
-            (write-region signature nil file nil 'silent))
-          ;; Only once written: a failed write is tried again.
-          (puthash place signature agent-ui--tools-signatures))))))
-
-(defvar agent-ui--tools-timer nil
-  "Timer running `agent-ui--update-tools-stamp'.")
-
-;; Not an idle timer: that repeats only once Emacs stopped being idle, and
-;; the emacsclient calls of emx and reload don't count.  A check takes about
-;; 0.1 ms.  Batch Emacs serves no agents; a reload replaces the timer.
-(unless noninteractive
-  (when (timerp agent-ui--tools-timer)
-    (cancel-timer agent-ui--tools-timer))
-  (setq agent-ui--tools-timer (run-with-timer 2 2 #'agent-ui--update-tools-stamp)))
+(add-hook 'after-load-functions #'agent-ui--tools-loaded)
 
 ;;; Buffers of files written by emx
 

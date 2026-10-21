@@ -14,22 +14,22 @@ export const format = (text: string, ...args: unknown[]): string => {
   let i = 0
   return text.replace(/%[sd]/g, () => String(args[i++]))
 }
-export function executable(command: string): boolean {
-  for (const path of isAbsolute(command) ? [command] : (process.env.PATH ?? '').split(delimiter).map((p) => join(p, command))) {
+export function executable(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  for (const path of isAbsolute(command) ? [command] : (env.PATH ?? '').split(delimiter).map((p) => join(p, command))) {
     try { accessSync(path, constants.X_OK); return true } catch { /* Try next. */ }
   }
   return false
 }
-export function agentExecutable(c: Config, agent: string): string {
-  return process.env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? c.agents[agent]?.executable ?? agent
+export function agentExecutable(c: Config, agent: string, env: NodeJS.ProcessEnv = process.env): string {
+  return env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? c.agents[agent]?.executable ?? agent
 }
-export function profiles(c: Config, enabled?: string[]): [string, Profile][] {
-  return Object.entries(c.profiles).filter(([, p]) => (!enabled || enabled.includes(p.agent)) && executable(agentExecutable(c, p.agent)))
+export function profiles(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): [string, Profile][] {
+  return Object.entries(c.profiles).filter(([, p]) => (!enabled || enabled.includes(p.agent)) && executable(agentExecutable(c, p.agent, env), env))
 }
-export function definitions(c: Config, enabled?: string[]): EditorTools['tools'] {
+export function definitions(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): EditorTools['tools'] {
   return c.collab.tools.map((tool) => ({ ...tool, description: tool.description + (tool.name === 'session_start'
     ? '\n\n' + (c.collab.startGuidance ? c.collab.startGuidance + '\n\n' : '') + c.collab.prompts.profileHeader
-      + profiles(c, enabled).map(([name, p]) => `- ${name}: ${c.agents[p.agent].title}${p.model ? ' ' + p.model : ''}, ${p.cost ?? 'unknown'} cost.  ${p.description ?? ''}`).join('\n') : '') }))
+      + profiles(c, enabled, env).map(([name, p]) => `- ${name}: ${c.agents[p.agent].title}${p.model ? ' ' + p.model : ''}, ${p.cost ?? 'unknown'} cost.  ${p.description ?? ''}`).join('\n') : '') }))
 }
 export function cleanHandle(value: string): string | undefined {
   const last = value.trim().toLowerCase().split('\n').at(-1) ?? ''
@@ -79,6 +79,7 @@ interface Mail { handle: string, text: string }
 export interface CollabHost {
   sessions: Map<string, Session>
   config(): Config
+  environment?(root: string): NodeJS.ProcessEnv
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
   close(session: Session): Promise<void>
@@ -143,8 +144,8 @@ export class Collaboration {
     }
     next(0)
   }
-  tools(editor: EditorTools): EditorTools {
-    return { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled)],
+  tools(editor: EditorTools, root?: string): EditorTools {
+    return { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, root ? this.host.environment?.(root) : undefined)],
       readOnly: [...new Set([...editor.readOnly, 'sessions', 'session_read'])] }
   }
   get starting(): boolean { return this.#starts.size > 0 }
@@ -279,8 +280,8 @@ export class Collaboration {
       if (!fork) throw new Error('Your session has no conversation to fork yet')
       name = this.#handle(caller) + '-fork'; profile = { agent: caller.agent, ...caller.settings }
     } else {
-      const entry = profiles(this.config, this.enabled).find(([name]) => name === p.profile)
-      if (!entry) throw new Error(`${p.profile ? `No profile ${p.profile} here` : 'Name a profile'}; choose one of: ${profiles(this.config, this.enabled).map(([n]) => n).join(', ')}`)
+      const entry = profiles(this.config, this.enabled, this.host.environment?.(caller.root)).find(([name]) => name === p.profile)
+      if (!entry) throw new Error(`${p.profile ? `No profile ${p.profile} here` : 'Name a profile'}; choose one of: ${profiles(this.config, this.enabled, this.host.environment?.(caller.root)).map(([n]) => n).join(', ')}`)
       ;[name, profile] = entry
     }
     this.#reservations.set(caller.id, (this.#reservations.get(caller.id) ?? 0) + 1)

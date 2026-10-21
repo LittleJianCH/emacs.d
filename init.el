@@ -10,7 +10,8 @@
 ;;
 ;; To add a language: create lisp/lang/lang-NAME.el (ending with `provide'),
 ;; then add NAME to `my/languages'.
-;; Agent backends live in lisp/agent/backend/ and are enabled by `my/agents'.
+;; Agent registrations live in lisp/agent/backend/; all execute via emx.
+;; `my/agents' selects enabled agents.
 
 ;;; Code:
 
@@ -37,7 +38,7 @@
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
 
 (defvar my/agents '(claude codex dsh)
-  "Enabled agent backends, loaded from lisp/agent/backend/agent-NAME.el.")
+  "Enabled daemon agent registrations, loaded from lisp/agent/backend/agent-NAME.el.")
 
 (require 'init-base)        ; defaults, paths, macOS environment
 (require 'init-reload)      ; M-x my/reload-config: apply edited files, no restart

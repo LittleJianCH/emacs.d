@@ -55,11 +55,8 @@
     (agent-emx--block session '(:id "mail" :type "user" :text "Reply from child"
                                    :origin "@bounded"))
     (should (equal (plist-get (agent-session--block session "mail") :origin) "@bounded"))
-    (let ((called nil))
-      (cl-letf (((symbol-function 'agent-collab--name)
-                 (lambda (&rest _) (setq called t))))
-        (agent-collab--name-on-submit session "user text"))
-      (should-not called))))
+    (should-not (memq 'agent-collab--name-on-submit
+                      agent-session-submit-functions))))
 (provide 'agent-emx-collab-test)
 
 (ert-deftest agent-emx-collab-reconnect-reattaches-existing-child-once ()

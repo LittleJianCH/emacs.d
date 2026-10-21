@@ -1,3 +1,4 @@
+import { history } from '../backends/history.ts'
 import { ProjectEnvironments } from '../remote/environment.ts'
 // server.ts --- one socket, one editor client, and a persistent session table.
 
@@ -98,6 +99,7 @@ export class DaemonServer {
   #outboxTimer?: NodeJS.Timeout
   #usageClients = new Set<Connection>()
   #mcp = new Map<Connection, string>()
+  #rootTools = new Map<string, string>()
   #calls = new Map<Connection, Map<unknown, AbortController>>()
   #closing = new WeakMap<Session, Promise<void>>()
   #connections = new Set<Connection>()
@@ -136,7 +138,8 @@ export class DaemonServer {
       } })
     this.accounting = new Accounting(this.usage)
     this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir,
-      config: () => this.configuration.value, changed: () => this.#changed(false),
+      config: () => this.configuration.value,
+      environment: this.environments ? (root) => this.environments!.peek(root) : undefined, changed: () => this.#changed(false),
       create: (agent, root, settings, info) => {
         const s = this.#make({ id: `session-${randomUUID()}`, agent, root, settings, info })
         this.sessions.set(s.id, s); this.#changed(); return s
@@ -196,7 +199,7 @@ export class DaemonServer {
         if (error.code !== 'ENOENT') throw error
       })
       await this.editor.restore().catch((error) => this.#log(`Cannot load tools: ${error}`))
-      let usageConfig = {}
+      let usageConfig: Partial<UsageConfig> = {}
       try { usageConfig = JSON.parse(await readFile(join(dir, 'usage.json'), 'utf8')) } catch { /* First start. */ }
       this.outbox?.restore()
       if (this.outbox) {
@@ -207,9 +210,8 @@ export class DaemonServer {
         this.#outboxTimer = setInterval(deliver, 5000)
         this.#outboxTimer.unref()
       }
-      this.usage.initialize({ ...usageConfig, pollInterval: this.configuration.value.usage.pollInterval, usageFile: join(this.varDir, 'agent-usage.jsonl'),
+      this.usage.initialize({ ...usageConfig, pollers: this.#hostPollers(usageConfig.agents ?? []), pollInterval: this.configuration.value.usage.pollInterval, usageFile: join(this.varDir, 'agent-usage.jsonl'),
         quotaFile: join(this.varDir, 'agent-quota.json') })
-      if (this.outbox) this.usage.configure({ pollers: this.#hostPollers() })
       this.configuration.watch((result) => this.#configChanged(result))
       await this.#restore()
       this.collab.restore()
@@ -253,7 +255,23 @@ export class DaemonServer {
   }
 
   #make(saved: SavedSession, restored = false, transcript?: Transcript): Session {
-    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, environment: this.environments ? () => this.environments!.get(saved.root) : undefined, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    return new Session({ ...saved, restored, transcript, daemonSocket: this.socket, environment: this.environments ? async () => {
+      const env = await this.environments!.get(saved.root)
+      this.#refreshRootTools(saved.root)
+      return env
+    } : undefined, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+  }
+
+  /** Refresh only on explicit startup/environment resolution, never on a timer. */
+  #refreshRootTools(root: string): void {
+    const signature = JSON.stringify(this.collab.tools(this.editor.tools, root))
+    const previous = this.#rootTools.get(root)
+    this.#rootTools.set(root, signature)
+    if (previous !== undefined && previous !== signature) {
+      for (const [peer, id] of this.#mcp) {
+        if (this.sessions.get(id)?.root === root) peer.notify('mcp/tools_changed', {})
+      }
+    }
   }
 
   async #restore(): Promise<void> {
@@ -365,7 +383,7 @@ export class DaemonServer {
     this.#idleTimer = undefined
     this.#checkIdle()
     this.usage.configure({ pollInterval: result.config.usage.pollInterval,
-      ...(this.outbox ? { pollers: this.#hostPollers() } : {}) })
+      pollers: this.#hostPollers() })
     for (const session of this.sessions.values()) session.refreshHibernate()
     for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
       peer.notify('config', { config: result.config, errors: result.errors })
@@ -373,9 +391,9 @@ export class DaemonServer {
     for (const peer of this.#mcp.keys()) peer.notify('mcp/tools_changed', {})
   }
 
-  #hostPollers(): UsageConfig['pollers'] {
+  #hostPollers(enabled = this.usage.agents): UsageConfig['pollers'] {
     const agents = this.configuration.value.agents
-    return Object.fromEntries(['claude', 'codex', 'dsh'].filter((name) => agents[name]).map((name) => [name,
+    return Object.fromEntries(['claude', 'codex', 'dsh'].filter((name) => agents[name] && enabled.includes(name)).map((name) => [name,
       { command: [agents[name].executable, ...(name === 'dsh' ? ['--profile', 'sdk', '--patch',
         join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')] : [])] }]))
   }
@@ -416,7 +434,7 @@ export class DaemonServer {
     }
     const mcp = this.#mcp.get(connection)
     if (mcp !== undefined) {
-      if (method === 'mcp/tools') return { tools: this.collab.tools(this.editor.tools).tools }
+      if (method === 'mcp/tools') return { tools: this.#session({ id: mcp }).editorTools().tools }
       if (method === 'mcp/call') {
         const session = this.#session({ id: mcp })
         const params = object(value)
@@ -504,7 +522,7 @@ export class DaemonServer {
             config.pollers[source] = { command }
           }
         }
-        if (this.outbox) config.pollers = this.#hostPollers()
+        config.pollers = this.#hostPollers(config.agents ?? this.usage.agents)
         const result = this.usage.configure(config)
         // Persist commands so quota polls continue without an attached editor.
         const file = join(stateDir(this.varDir), 'usage.json')
@@ -527,6 +545,13 @@ export class DaemonServer {
       case 'usage/report': return this.usage.report(params)
       case 'usage/refresh': return this.usage.refresh(params)
       case 'usage/clear': return this.usage.clear()
+      case 'sessions/history': {
+        const agent = string(params.agent, 'agent')
+        if (!['claude', 'codex', 'dsh'].includes(agent)) invalid(`Unknown history agent: ${agent}`)
+        const root = string(params.root, 'root')
+        return history(agent, root, this.configuration.value.agents[agent],
+          this.environments ? () => this.environments!.get(root) : undefined).then((items) => ({ items }))
+      }
       case 'sessions/list': return { sessions: this.#list(optionalString(params.root, 'root')) }
       case 'session/open': {
         const agent = string(params.agent, 'agent')
@@ -565,6 +590,7 @@ export class DaemonServer {
         return (async () => {
           try {
             await session.start()
+            this.#refreshRootTools(root)
           } catch (error) {
             await session.stop()
             this.sessions.delete(session.id)

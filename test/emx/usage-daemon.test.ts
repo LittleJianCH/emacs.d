@@ -1,6 +1,6 @@
 // Usage ownership, producer-only accounting, restart and fake quota polling.
 import * as assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -76,8 +76,17 @@ test('detached accounting and process exit flush once; Lisp notifications use th
 test('fake quota poll commands persist and poll without an editor after restart', async (t) => {
   const {daemon, client, dir} = await setup(t)
   const fixture = new URL('./fixtures/usage-poller.mjs', import.meta.url).pathname
-  const pollers = Object.fromEntries(['claude', 'codex', 'dsh'].map((source) => [source, {command: [process.execPath, fixture, source]}]))
-  await client.request('usage/configure', {agents: ['claude', 'codex', 'dsh'], pollInterval: 900, pollers})
+  const executables = Object.fromEntries(['claude', 'codex', 'dsh'].map((source) => {
+    const file = join(dir, source)
+    writeFileSync(file, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)} ${source} "$@"\n`)
+    chmodSync(file, 0o700)
+    return [source, { executable: file }]
+  }))
+  writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({ agents: executables,
+    usage: { pollInterval: 900 }, collab: { handleCommand: [], agentHandleCommands: {} } }))
+  await client.request('config/reload', {})
+  await client.request('usage/configure', {agents: ['claude', 'codex', 'dsh']})
+  const pollers = structuredClone(daemon.usage.pollers)
   await daemon.usage.pollAll(true)
   // configure may already have started each source; wait for its quota pushes.
   for (const source of ['claude', 'codex', 'dsh']) {
@@ -88,6 +97,9 @@ test('fake quota poll commands persist and poll without an editor after restart'
   assert.equal(daemon.usage.quotas.find((q) => q.agent === 'dsh')!.balance![0].amount, 9.03)
   await client.close()
   await daemon.stop()
+  const stored = JSON.parse(readFileSync(join(dir, 'emx/usage.json'), 'utf8'))
+  stored.pollers = { claude: { command: ['/removed/lisp/poller'] } }
+  writeFileSync(join(dir, 'emx/usage.json'), JSON.stringify(stored))
   const restarted = new DaemonServer({varDir: dir})
   try {
     await restarted.start()

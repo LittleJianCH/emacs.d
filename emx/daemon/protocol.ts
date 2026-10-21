@@ -268,6 +268,7 @@ export interface Requests {
   'mcp/call': [{ name: string, arguments?: Record<string, unknown> }, unknown]
   'config/get': [{}, { config: import('../config.ts').Config, errors: string[] }]
   'config/reload': [{}, { config: import('../config.ts').Config, errors: string[] }]
+  'sessions/history': [{ agent: string, root: string }, { items: import('../backends/history.ts').HistoryItem[] }]
   'sessions/list': [{ root?: string }, { sessions: SessionSummary[] }]
   'session/open': [OpenParams, { id: SessionId }]
   'session/attach': [AttachParams, AttachResult]

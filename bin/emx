@@ -14,12 +14,8 @@
 //
 // Methods are defined in lisp/agent/agent-ui.el; extend them with agent-ui-defmethod.
 // The config_* methods are emx's own (see "Config files" below).
-// Environment: EMACS_SOCKET_NAME selects the server (set automatically inside agent
-//              sessions), EMX_EMACSCLIENT sets the emacsclient path, EMX_REMOTE_AGENT=1
-//              (set for agents of remote projects) enables the config_* methods,
-//              EMX_TOOLS_STAMP is a file Emacs writes when the methods it offers
-//              change (set for agents it starts): emx tells its MCP client to list
-//              the tools again when the file changes.
+// Bare CLI: EMACS_SOCKET_NAME selects the server; EMX_EMACSCLIENT its client.
+// Agent MCP: EMX_DAEMON_SOCKET and EMX_SESSION bind to the owning daemon.
 
 'use strict';
 
@@ -27,7 +23,6 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const readline = require('node:readline');
 const { createHash, randomUUID } = require('node:crypto');
 
 const EMACSCLIENT = process.env.EMX_EMACSCLIENT || 'emacsclient';
@@ -464,106 +459,6 @@ const MCP_BODY = `
 - Other editor operations: eval.
 - The user reads Chinese: write page content and notifications in Chinese.`;
 
-const REMOTE_INSTRUCTIONS = `
-- Your shell and file tools run on the project's host; Emacs and its configuration
-  (${CONFIG_DIR}) are on the user's machine. Work on the configuration with
-  config_read, config_edit and config_write (read its AGENTS.md first), then reload.`;
-
-function mcpServer() {
-  const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
-  const reply = (id, result) => send({ jsonrpc: '2.0', id, result });
-  const fail = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, message } });
-
-  // Emacs writes the signature of the methods it offers to this file, which may not
-  // exist yet (or ever).
-  const STAMP = process.env.EMX_TOOLS_STAMP;
-  const readStamp = () => {
-    try {
-      return fs.readFileSync(STAMP, 'utf8').trim();
-    } catch {
-      return null;
-    }
-  };
-  // The stamp seen by the latest tools/list, whether one has happened, and the stamp
-  // last announced: never notify before the client has listed the tools at least once.
-  let seen = null;
-  let listed = false;
-  let announced = null;
-
-  const handlers = {
-    initialize: (params) => ({
-      protocolVersion: (params && params.protocolVersion) || '2025-06-18',
-      capabilities: { tools: { listChanged: true } },
-      serverInfo: { name: 'emacs', version: VERSION },
-      instructions: MCP_HEAD + (REMOTE_AGENT ? REMOTE_INSTRUCTIONS : '') + MCP_BODY,
-    }),
-    ping: () => ({}),
-    'tools/list': () => {
-      seen = readStamp();
-      listed = true;
-      // The client has caught up: any later change is news again, even one back to a
-      // stamp announced before.
-      announced = null;
-      try {
-        return { tools: [...call('describe'), ...configTools()] };
-      } catch (err) {
-        process.stderr.write(`emx: ${err.message}\n`);
-        return { tools: configTools() };
-      }
-    },
-    'tools/call': async ({ name, arguments: args }, id) => {
-      const signal = {};
-      running.set(id, signal);
-      try {
-        return { content: [{ type: 'text', text: render(await invoke(name, args || {}, signal)) }] };
-      } catch (err) {
-        return { content: [{ type: 'text', text: err.message }], isError: true };
-      } finally {
-        running.delete(id);
-      }
-    },
-  };
-  // Calls still waiting for their result, by request id, so they can be cancelled.
-  const running = new Map();
-
-  // Tell the client to list the tools again when Emacs's method set changes. persistent
-  // false so a watch of a file that does not exist still lets emx exit with stdin.
-  if (STAMP) {
-    fs.watchFile(STAMP, { interval: 1000, persistent: false }, () => {
-      const stamp = readStamp();
-      if (listed && stamp !== null && stamp !== seen && stamp !== announced) {
-        announced = stamp;
-        send({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
-      }
-    });
-  }
-
-  const rl = readline.createInterface({ input: process.stdin });
-  rl.on('line', (line) => {
-    if (!line.trim()) return;
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return fail(null, -32700, 'Parse error');
-    }
-    if (msg.id === undefined) {
-      // Notifications need no reply; a cancelled call stops waiting.
-      if (msg.method === 'notifications/cancelled') {
-        const signal = running.get(msg.params && msg.params.requestId);
-        if (signal) signal.cancelled = true;
-      }
-      return;
-    }
-    const handler = handlers[msg.method];
-    if (!handler) return fail(msg.id, -32601, `Method not found: ${msg.method}`);
-    // Handlers may be async: replies can go out in another order than the requests.
-    Promise.resolve()
-      .then(() => handler(msg.params || {}, msg.id))
-      .then((result) => reply(msg.id, result), (err) => fail(msg.id, -32603, err.message));
-  });
-}
-
 // ---------------------------------------------------------------- Entry point
 
 async function main() {
@@ -572,11 +467,10 @@ async function main() {
     await ensureBuild();
     return import('../emx/dist/daemon/main.js').then((m) => m.main(rest));
   }
-  if (method === 'mcp' && process.env.EMX_DAEMON_SOCKET) {
+  if (method === 'mcp') {
     await ensureBuild();
     return import('../emx/dist/mcp.js').then((m) => m.serve(MCP_HEAD + MCP_BODY, VERSION));
   }
-  if (method === 'mcp') return mcpServer();
   // The usage service needs no Emacs: it never goes through request().
   if (!method || method === 'help' || method === '-h' || method === '--help') {
     console.log(help(rest[0]));

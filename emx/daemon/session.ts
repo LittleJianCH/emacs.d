@@ -73,12 +73,14 @@ export class Session implements SessionHost {
   #hibernateAfter: () => number
   #hibernateTimer?: NodeJS.Timeout
   #hibernating?: Promise<void>
+  #projectEnvironment: boolean
 
   constructor(options: SessionOptions) {
     this.id = options.id
     this.agent = options.agent
     this.root = options.root
     this.daemonSocket = options.daemonSocket ?? ''
+    this.#projectEnvironment = !!options.environment
     this.environment = options.environment ?? (async () => ({ ...process.env }))
     this.agentConfig = options.agentConfig ?? (() => undefined)
     this.editorTools = options.editorTools ?? (() => ({ tools: [], readOnly: [] }))
@@ -115,6 +117,8 @@ export class Session implements SessionHost {
   }
 
   async start(): Promise<void> {
+    // Resolve project PATH before adapters capture their caller-independent tools.
+    if (this.#projectEnvironment) await this.environment()
     await this.backend.start(this.resumeId())
     await this.backend.configure(this.settings)
     this.#onChange(false)

@@ -71,3 +71,64 @@ console.log(JSON.stringify({PATH: path.resolve(env.bin) + ':' + process.env.PATH
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('host collaboration profiles and tools use the caller root PATH, shared by children', async () => {
+  const dir = mkdtempSync('/tmp/emx-env-profiles-'), savedEnv = { ...process.env }
+  const bin = join(dir, 'bin'), a = join(dir, 'a'), b = join(dir, 'b')
+  for (const path of [bin, a, b, join(a, 'bin')]) mkdirSync(path, { recursive: true })
+  writeFileSync(join(bin, 'direnv'), `#!${process.execPath}
+import path from 'node:path'; import fs from 'node:fs';
+console.log(JSON.stringify({PATH:(fs.existsSync('disabled')?'/missing':path.join(process.cwd(),'bin'))+':'+process.env.PATH}));
+`, { mode: 0o700 })
+  writeFileSync(join(a, 'bin', 'project-dsh'), `#!/bin/sh\nexec '${process.execPath}' '${checkoutRoot}/test/emx/fixtures/dsh.mjs' "$@"\n`, { mode: 0o700 })
+  process.env.PATH = bin + ':' + process.env.PATH
+  process.env.HOME = dir
+  const daemon = new DaemonServer({ varDir: join(dir, 'state'), remote: true })
+  let editor: Connection | undefined
+  const peers: Connection[] = []
+  try {
+    await daemon.start()
+    editor = new Connection(createConnection(daemon.socket))
+    editor.onRequest = () => ({ ok: true, result: { visible: false } })
+    const config = JSON.parse(readFileSync(join(checkoutRoot, 'emx/config.json'), 'utf8'))
+    config.agents.dsh.executable = 'project-dsh'
+    config.collab.handleCommand = []; config.collab.agentHandleCommands = {}
+    config.collab.closeFinished = false; config.usage.pollInterval = 0
+    config.profiles['project-worker'] = { agent: 'dsh', model: 'fake/child', mode: 'ask' }
+    await editor.request('hello', { client: 'test', version: '', config })
+    const sessions = []
+    const changes = [0, 0]
+    for (const root of [a, b]) {
+      const opened: any = await editor.request('session/open', { agent: 'echo', root, settings: { mode: 'auto' } })
+      const peer = new Connection(createConnection(daemon.socket)); peers.push(peer)
+      const index = peers.length - 1
+      peer.onNotification = (method) => { if (method === 'mcp/tools_changed') changes[index]++ }
+      await peer.request('mcp/hello', { session: opened.id })
+      const result: any = await peer.request('mcp/tools', {})
+      const description = result.tools.find((t: any) => t.name === 'session_start').description
+      assert.equal(description.includes('- project-worker:'), root === a)
+      sessions.push(daemon.sessions.get(opened.id)!)
+    }
+    const parent = sessions[0]
+    await daemon.collab.call(parent, 'session_start', { profile: 'project-worker', prompt: 'fake child' }, new AbortController().signal)
+    const child = [...daemon.sessions.values()].find((s) => s.info.parent === parent.id)!
+    assert.ok(child)
+    assert.deepEqual(child.editorTools(), parent.editorTools())
+    await assert.rejects(daemon.collab.call(sessions[1], 'session_start', { profile: 'project-worker', prompt: 'unavailable' }, new AbortController().signal), /No profile/)
+    writeFileSync(join(a, 'disabled'), '')
+    writeFileSync(join(a, '.envrc'), 'changed')
+    await editor.request('session/open', { agent: 'echo', root: a, settings: {} })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(changes[0], 1)
+    assert.equal(changes[1], 0)
+    const updated: any = await peers[0].request('mcp/tools', {})
+    assert.ok(!updated.tools.find((t: any) => t.name === 'session_start').description.includes('- project-worker:'))
+  } finally {
+    for (const peer of peers) peer.socket.destroy()
+    editor?.socket.destroy(); await daemon.stop()
+    for (const key of ['PATH', 'HOME']) {
+      if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key]
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

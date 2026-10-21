@@ -31,7 +31,7 @@ host above several harnesses, such as T3 Code or this Emacs, can.
 | Practice | From | Here |
 | --- | --- | --- |
 | A child is a full session, linked to and shown under its parent | opencode, Codex, T3, Amp; pi's "black box" critique | an ordinary agent-session with `:parent` |
-| Only the final text comes back, clipped | all | `agent-collab-text-limit` |
+| Only the final text comes back, clipped | all | `collab.textLimit` |
 | Background results wake the parent; it never polls | Claude Code, opencode, pi-subagent-manager, T3 | the mailbox |
 | Several results wake it once | pi-subagent-manager, T3 | one message per idle transition |
 | Approvals go to the user, never to an agent; a parent is never held up while a child waits for the user | T3, Claude Code, opencode | yes |
@@ -65,14 +65,15 @@ parent's last request. Numbers are cached tokens / parent's last prompt.
 
 ## Daemon migration
 
-For local sessions opted into `agent-emx-agents`, phase 5 of
-[emx-daemon.md](emx-daemon.md#phase-5b-daemon-collaboration) moves the tools,
-children and mailbox into the daemon. `emx/config.json` is the policy source;
-Lisp reads its effective config asynchronously and retains defcustoms only
-as offline fallbacks. The semantics below remain the contract. Daemon tool
-calls currently target daemon sessions only; mixed Lisp/daemon collaboration
-is not a symmetric API. Daemon children outlive an editor disconnect, and
-Emacs reattaches their views; they do not resume after a daemon crash.
+All enabled sessions use the daemon. `emx/daemon/collab.ts` owns tools,
+children, naming, policy and the persisted mailbox; `emx/config.json` plus
+its runtime override is the sole policy source. Lisp only renders views,
+links child progress and mirrors asks. Children outlive editor disconnects
+but not daemon crashes. Collaboration targets sessions in the same daemon;
+cross-daemon list/read/ask remains deferred.
+
+The design below describes that daemon contract. Historical measurements
+were made through the earlier Lisp execution path; the protocols remain.
 
 ## Design
 
@@ -92,7 +93,7 @@ Emacs reattaches their views; they do not resume after a daemon crash.
 | handoff | Emacs's text of the parent's conversation, then the task | the profile's | none from the parent; siblings started in one turn share a prefix | the task needs context but a cheaper model can do it |
 | fork | the parent's own messages, then the task | the parent's; no profile | reuses the parent's cache; output at the parent's price | the task needs the parent's own level of reasoning |
 
-A handoff keeps, within `agent-collab-handoff-limit` characters, the latest
+A handoff keeps, within `collab.handoffLimit` characters, the latest
 turn (cut from the front if need be), the first user message, then the turns
 between, newest first, noting what was left out.
 
@@ -111,7 +112,7 @@ between, newest first, noting what was left out.
 The model picks a profile, not a free harness and model pair: harness and model
 don't combine freely, model lists come from running processes, and a profile
 carries the permission mode, cost and confirmation the user set.
-`agent-collab-profiles` defaults to `coder-flash` (dsh, DeepSeek flash, auto),
+`profiles` defaults to `coder-flash` (dsh, DeepSeek flash, auto),
 `explorer` (Claude haiku, plan; short, quick questions), `explorer-flash` (dsh,
 DeepSeek flash, ask: dsh's read-only preset; simple questions that need long
 reading), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
@@ -121,13 +122,13 @@ parent's own model); the tool description lists those whose agent is enabled
 and installed where the caller runs: children start where their parent runs, so
 an agent on this machine sees the agents installed here and one in a `/rpc:dev:`
 project those of that project on dev (per project, since tramp-rpc applies its
-direnv). A remote project's programs are looked up in one round trip (`command
--v`) as a session opens there, so installing an agent shows once a session opens
-there again; the timer never makes round trips. A failed lookup keeps the last
-result and isn't retried for 5 minutes, also when sessions open there; places
-whose lookup failed still get stamp updates. A child that fails to start anyway is closed (only that one,
-found by a token in its info: others may open while it waits for the host) and
-the error returned.
+direnv). The host daemon resolves the project's environment before startup,
+then uses its cached PATH for both MCP descriptions and profile validation.
+Children in that root see the same tools as their parent. Opening another
+session refreshes that root and announces changed definitions only to its MCP
+clients; no editor stamp or host lookup timer remains. A child that fails to
+start is closed and the error returned.
+
 
 The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is
@@ -136,7 +137,7 @@ never picks a profile of its own agent and model: it forks instead, getting the
 same model with its context and prompt cache.
 The shared MCP instructions in `bin/emx` name `session_start` as the entry point
 for delegating independent work early. Its tool description opens with that
-trigger before explaining context modes. `agent-collab-start-guidance` adds the
+trigger before explaining context modes. `collab.startGuidance` adds the
 details: after brief orientation, delegate a bounded independent task before
 doing it yourself, continue a different part, and reconsider as new work appears.
 Trivial tasks, the immediate blocker on the next step, tightly coupled work and
@@ -180,19 +181,11 @@ gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 
 ### Rules
 
-1. An agent's tools and their descriptions depend on the configuration and
-   where the agent runs, never otherwise on the calling session
-   (`agent-ui-description-functions`): a fork runs where its parent does. A
-   test compares the parent's and the child's `describe` output. Each place has
-   its own stamp file, so installing an agent in one doesn't refresh (and cost
-   the prompt cache of) sessions elsewhere. Remote sessions whose emx started
-   before per-place stamps watch this machine's stamp until they restart.
-   When Emacs's tools change (a reload, a changed profile), live sessions are
-   told: emx sends `tools/list_changed` (Claude and dsh list again; Codex
-   ignores it, so a saved Codex thread resumes in a new process before its
-   next send). Every session, a fork's parent included, then sees the new
-   tools, so forks keep matching. A Codex child never refreshes: its thread
-   isn't saved, and it closes after one task anyway.
+1. Tool definitions depend on daemon configuration and installed programs,
+   never the calling session. A fork therefore sees its parent's definitions.
+   Editor registration/module loads publish `editor/tools`; the daemon sends
+   `tools/list_changed`. Codex resumes saved threads in a new process before
+   the next send when definitions change; ephemeral children keep theirs.
 2. What a child is told goes in its first user message, after any inherited
    history; never in system prompts or developer instructions.
 3. Refusals (depth, concurrency, profile, children asking) happen at call time;
@@ -216,11 +209,11 @@ gpt-6.1-sol medium, its frontier model and Opus high, and Fable premium.
 
 A child without a `handle` is named after its profile at once (`@coder-flash`,
 `@coder-flash-2`): the parent refers to it by that name. Closing a parent closes
-its children, asking first while one works. At most `agent-collab-max-active`
+its children, asking first while one works. At most `collab.maxActive`
 children of a session work at once.
 
 A child closes once its final reply has reached its parent's mailbox
-(`agent-collab-close-finished`), unless the user has it on screen or it failed.
+(`collab.closeFinished`), unless the user has it on screen or it failed.
 Its reply lists what its tools did, since it can't be read afterwards. A closed
 child can't be resumed: Claude and Codex children aren't saved, so "waking it
 up again" would only be a new session with a summary, which is what starting
@@ -235,14 +228,13 @@ there was a mailbox, but a call that waits holds up the caller's whole turn:
 the user's messages queue behind it, and an agent that waited twenty minutes
 for a review left the user unanswered. An agent that needs the reply before
 going on ends its turn; the reply starts the next one. Only a confirmation the
-user has to give is waited for (`agent-collab-confirm-timeout`).
+user has to give is waited for (`collab.confirmTimeout`).
 
-The mailbox lives in Emacs memory: children don't outlive Emacs. Each asked-for
-reply is tracked with its target, message and asker. When the target goes
-idle, exits or is closed, the clipped reply goes to
-the asker's mailbox; when the asker is idle, everything in it is sent as one
-message, with a hidden note that Emacs delivered it and the user didn't write
-it.
+The mailbox and pending deliveries persist in the daemon. When a target
+finishes, its clipped reply goes to the asker's mailbox. When the asker is
+idle, entries arrive as one message, with a hidden origin note. A child
+can finish while Emacs is disconnected and its result still reaches its
+parent; the editor reattaches views by event sequence.
 
 ### Approvals and progress
 
@@ -261,9 +253,8 @@ expand them; the user's own messages stay whole.
 ### Fork
 
 `session_start` with `context: "fork"` and no profile starts a child of the
-caller's own agent and settings (`agent-session-backend-fork-p` says which
-backends can), named `@<parent>-fork` when the caller gives no `handle`. Each
-backend forks in Emacs, the child in its own process like any other child:
+caller's own agent and settings (the daemon checks backend support), named `@<parent>-fork` when the caller gives no `handle`. Each
+daemon adapter forks the child in its own process:
 
 - Claude: `--resume <parent> --fork-session --no-session-persistence` and the
   parent's other flags.

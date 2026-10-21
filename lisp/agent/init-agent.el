@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Agent CLIs run in the background over a structured protocol; Emacs renders the
+;; Agent CLIs run under the emx daemon; Emacs renders the
 ;; conversation (agent-session).
 ;; Session buffer (modeled on telega): the conversation on top, the input area after
 ;; the separator and prompt; model and other info in the mode line.
@@ -20,7 +20,8 @@
 ;; current turn at once), C-c C-g turns the oldest queued message into a steer;
 ;; typing in the transcript jumps to the input area.
 ;;
-;; Adding an agent: implement and register it in backend/agent-NAME.el,
+;; Adding an agent: implement emx/backends/NAME.ts and register its emx view
+;; in backend/agent-NAME.el,
 ;; then add NAME to `my/agents' in init.el.
 
 ;;; Code:
@@ -59,8 +60,7 @@
   :demand t
   :after agent-canvas)
 
-;; Session handles (@name) and the sessions / session_read / session_ask methods
-;; agents use to work with each other.
+;; Daemon collaboration views: mentions and child progress in tool blocks.
 (use-package agent-collab
   :demand t
   :after agent-ui)
@@ -228,7 +228,7 @@ In visual state a is the text object prefix, so this rebinds it there."
 
   (evil-set-initial-state 'agent-review-note-mode 'insert))
 
-;; Agents call back into this instance through emacsclient / emx.
+;; Bare command-line emx operations still use the editor server.
 (use-package server
   :demand t
   :config

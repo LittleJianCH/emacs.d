@@ -1,8 +1,8 @@
 ;;; agent-emx-remote.el --- Host daemons over tramp-rpc -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Loaded by agent-emx after its connection type is defined.  The legacy
-;; keeper/relay in agent-remote remains for backends not opted into emx.
+;; Loaded by agent-emx after its connection type is defined.
+;; Every remote session runs under its host daemon.
 
 ;;; Code:
 (require 'agent-remote)

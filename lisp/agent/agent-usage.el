@@ -1,29 +1,9 @@
 ;;; agent-usage.el --- Usage and quota of the agents Emacs runs -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-
-;; How many tokens the agents started from this Emacs used, and what their
-;; accounts have left.  The bookkeeping and arithmetic run in the emx
-;; daemon (emx/usage/), the only writer of the ledger (`agent-usage-file') and
-;; of the quotas (`agent-usage-quota-file'), sums and forecasts them, and
-;; asks the agents' CLIs for their quota every `agent-usage-poll-interval'
-;; seconds.  Emacs only passes events on and draws what it gets back.
-;;
-;; Usage: backends report each turn's tokens with `agent-usage-record', one
-;; record per turn and model, so only work done from Emacs is counted:
-;; other clients of the same accounts (Claude Desktop, a terminal) are not.
-;; Subagents are sessions of their own and are counted like any other.
-;; Turning what agents report into turns needs each session's state and
-;; stays here for Lisp backends: Claude's running totals become deltas,
-;; Codex's and DeepSeek's calls are summed per turn.  Daemon backends
-;; account directly, including while Emacs is disconnected.
-;;
-;; Quota: backends pass what an agent reports about its account to
-;; `agent-usage-set-quota'; emx adds what its polls find and pushes the
-;; result.  The echo area shows it while idle (`agent-usage-echo-mode'),
-;; drawn from the pushed quotas without asking emx: it is only display,
-;; and a process per turn would make it lag.  The usage page (`agent-usage')
-;; asks emx for a report and draws it when it arrives.
+;; The daemon owns token accounting and quota polling (emx/usage/).
+;; Emacs displays pushed quotas and asynchronous usage reports.  Its durable
+;; producer transport retains pending upgrade records and relays host usage.
 
 ;;; Code:
 
@@ -57,22 +37,12 @@
   "File of the latest quota of each agent and its readings, kept by emx."
   :type 'file)
 
-(defcustom agent-usage-poll-interval 900
-  "Seconds between emx's polls of the agents' quota; 0 disables polling.
-A source that reported its quota more recently is skipped."
-  :type 'integer)
-
 (defface agent-usage-low '((t :inherit warning))
   "Quota running low.")
 (defface agent-usage-out '((t :inherit error))
   "Quota (nearly) used up.")
 
 ;;; The emx service
-
-(defvar agent-usage-pollers nil
-  "How emx polls each agent's quota: alist (AGENT . FUNCTION).
-FUNCTION returns the command (a list) emx runs, or nil not to poll; it
-is left out when its program isn't installed.  Backends add themselves.")
 
 (defvar agent-usage--connection nil "The local usage-only daemon connection.")
 (defvar agent-usage--outbox nil "Usage entries retained until acknowledged by id.")
@@ -188,16 +158,6 @@ is left out when its program isn't installed.  Backends add themselves.")
 (defvar agent-usage-change-functions nil
   "Functions called with no arguments after usage or quotas changed.")
 
-(defun agent-usage--pollers ()
-  "The `pollers' parameter of the service's initialize."
-  (let (pollers)
-    (pcase-dolist (`(,agent . ,function) agent-usage-pollers)
-      (when-let* ((command (ignore-errors (funcall function)))
-                  ((executable-find (car command))))
-        (setq pollers (plist-put pollers (intern (format ":%s" agent))
-                                 (list :command (vconcat command))))))
-    (or pollers (make-hash-table))))
-
 (defun agent-usage--lists (value)
   "Decode daemon VALUE into the lists and booleans the usage UI uses."
   (cond ((memq value '(:false :null)) nil)
@@ -222,8 +182,7 @@ is left out when its program isn't installed.  Backends add themselves.")
     (agent-emx--request
      connection "usage/configure"
      (list :agents (vconcat (mapcar #'symbol-name
-                                   (reverse (mapcar #'car agent-session-agents))))
-           :pollInterval agent-usage-poll-interval :pollers (agent-usage--pollers))
+                                   (reverse (mapcar #'car agent-session-agents)))))
      (lambda (result)
        (agent-usage--receive-quotas (plist-get result :quotas))
        (agent-usage--flush-outbox connection))
@@ -385,15 +344,6 @@ The daemon's code is updated by its normal version/restart mechanism."
 
 ;;; Records
 
-(defconst agent-usage--counters '(:input :cache-read :cache-write :output)
-  "Token counters of a record.
-:input counts input tokens that were neither read from nor written to the
-prompt cache, so the four add up to the tokens of the requests.")
-
-(defun agent-usage--tokens (counters)
-  "All the tokens in the plist COUNTERS."
-  (cl-loop for key in agent-usage--counters sum (or (plist-get counters key) 0)))
-
 (defun agent-usage-clear ()
   "Delete every usage record, after confirming in the minibuffer.
 Quotas are kept.  Deliberately bound to no key."
@@ -406,172 +356,11 @@ Quotas are kept.  Deliberately bound to no key."
                           (message "已清空用量记录")
                           (run-hooks 'agent-usage-change-functions))))
 
-(defun agent-usage-record (session &rest props)
-  "Record the usage PROPS of one turn of SESSION.
-PROPS: :model, the token counters :input :cache-read :cache-write
-:output, and :turns, the number of turns counted (default 1; 0 for
-another model the same turn used).  A record without tokens is dropped.
-Return the record sent, a plist of its JSON fields."
-  (when (> (agent-usage--tokens props) 0)
-    (let ((record (append (list :time (float-time)
-                                :agent (symbol-name (agent-session-agent session))
-                                :root (abbreviate-file-name (agent-session-root session))
-                                :session (or (agent-session-handle session) :null)
-                                :model (or (plist-get props :model) :null))
-                          (when (agent-session-child-p session) (list :child t))
-                          (list :turns (or (plist-get props :turns) 1)
-                                :input (or (plist-get props :input) 0)
-                                :cache_read (or (plist-get props :cache-read) 0)
-                                :cache_write (or (plist-get props :cache-write) 0)
-                                :output (or (plist-get props :output) 0)))))
-      (agent-usage--notify "record" (list :record record))
-      (run-hooks 'agent-usage-change-functions)
-      record)))
-
-;; Agents report usage in two ways: Claude's totals grow over the life of a
-;; process, Codex and DeepSeek report each model call.  Both are turned
-;; into one record per turn and model.  The state lives in the session's
-;; state plist, under keys of this module.
-
-(defun agent-usage--state (session key)
-  "Value of KEY in SESSION's state plist."
-  (plist-get (agent-session-state session) key))
-
-(defun agent-usage--set-state (session key value)
-  "Set KEY in SESSION's state plist to VALUE."
-  (setf (agent-session-state session) (plist-put (agent-session-state session) key value)))
-
-(defun agent-usage--add (a b)
-  "Sum of the counters of the plists A and B."
-  (cl-loop for key in agent-usage--counters
-           append (list key (+ (or (plist-get a key) 0) (or (plist-get b key) 0)))))
-
-(defun agent-usage--subtract (a b)
-  "Counters of plist A minus those of B."
-  (cl-loop for key in agent-usage--counters
-           for value = (plist-get a key)
-           when value append (list key (- value (or (plist-get b key) 0)))))
-
-(defun agent-usage-forget-totals (session)
-  "Forget the running totals last reported by SESSION's agent.
-For a conversation others added to: a process resuming it may carry on
-with totals that count their usage too."
-  (agent-usage--set-state session :usage-base nil))
-
-(defun agent-usage-totals-known-p (session)
-  "Non-nil if SESSION's process has reported its running totals before."
-  (eq (agent-usage--state session :usage-process) (agent-session-process session)))
-
-(defun agent-usage--deltas (totals base)
-  "What TOTALS add to BASE, per model: ((MODEL . PLIST) ...)."
-  (cl-loop for (model . total) in totals
-           collect (cons model (agent-usage--subtract
-                                total (alist-get model base nil nil #'equal)))))
-
-(defun agent-usage--sum (alist)
-  "Tokens of all the plists in ALIST ((KEY . PLIST) ...)."
-  (cl-loop for (_ . plist) in alist sum (agent-usage--tokens plist)))
-
-(defun agent-usage-totals (session totals turn)
-  "Turn the running TOTALS of SESSION's process into what is new.
-TOTALS is an alist (MODEL . PLIST) of counters.  Return the
-alist of what each model added since the totals last reported, or
-`unknown'.
-
-Within one process that is the difference.  A new process may start
-from zero or carry on with totals it restored, which can be older than
-the last ones reported, so its first report must prove which: TURN, a
-plist of what the turn just ended used of all models, as reported apart
-from the totals, settles it.  Totals equal to TURN started from zero;
-totals exceeding the last known ones by at least TURN carried on from
-them; anything else is `unknown'."
-  (let* ((known (agent-usage-totals-known-p session))
-         (base (agent-usage--state session :usage-base))
-         (deltas (agent-usage--deltas totals base))
-         (turn-tokens (agent-usage--tokens turn)))
-    (agent-usage--set-state session :usage-process (agent-session-process session))
-    (agent-usage--set-state session :usage-base totals)
-    (cond ((or known
-               (and base
-                    (cl-every (lambda (delta)
-                                (cl-every (lambda (key) (>= (or (plist-get (cdr delta) key) 0) 0))
-                                          agent-usage--counters))
-                              deltas)
-                    (>= (agent-usage--sum deltas) turn-tokens)))
-           (cl-remove-if-not (lambda (delta)
-                               (cl-some (lambda (key) (> (or (plist-get (cdr delta) key) 0) 0))
-                                        agent-usage--counters))
-                             deltas))
-          ((= (agent-usage--sum totals) turn-tokens) totals)
-          (t 'unknown))))
-
-(defun agent-usage-add-call (session model usage)
-  "Add the USAGE of one model call by MODEL to SESSION's current turn.
-USAGE is a plist of counters; `agent-usage-end-turn' records the
-sum.  Calls reported outside a turn, such as usage replayed when a thread
-is resumed, should not be passed here."
-  (let* ((pending (agent-usage--state session :usage-pending))
-         (cell (assoc model pending)))
-    (if cell
-        (setcdr cell (agent-usage--add (cdr cell) usage))
-      (agent-usage--set-state session :usage-pending
-                              (append pending (list (cons model usage)))))))
-
-(defun agent-usage-end-turn (session)
-  "Record what SESSION's turn used, as added by `agent-usage-add-call'.
-The first model counts the turn."
-  (let ((pending (agent-usage--state session :usage-pending))
-        (turns 1))
-    (agent-usage--set-state session :usage-pending nil)
-    (pcase-dolist (`(,model . ,usage) pending)
-      (when (apply #'agent-usage-record session :model model :turns turns usage)
-        (setq turns 0)))))
-
-(defun agent-usage--flush (session)
-  "Record what SESSION's turn used so far, if its process is gone."
-  (when (agent-usage--state session :usage-pending)
-    (agent-usage-end-turn session)))
-
-(defun agent-usage--on-status (session _previous)
-  "Keep the usage of a turn SESSION's process didn't live to end."
-  (when (eq (agent-session-status session) 'exited)
-    (agent-usage--flush session)))
-
-(defun agent-usage--on-kill ()
-  "Keep the usage of the running turn of a session buffer being killed."
-  (when-let* ((session (bound-and-true-p agent-session--current)))
-    (agent-usage--flush session)))
-
-(add-hook 'agent-session-status-functions #'agent-usage--on-status)
-(add-hook 'kill-buffer-hook #'agent-usage--on-kill)
-
-;;; Quota
-
 (defun agent-usage--json-window (window)
   "Rate-limit WINDOW, a plist from a backend, as a JSON object."
   (cl-loop for key in '(:id :label :minutes :used :resets)
            for value = (plist-get window key)
            when value append (list key value)))
-
-(defun agent-usage-set-quota (session &rest props)
-  "Note what the account of SESSION's agent has left.
-PROPS: :windows, rate-limit windows (:id ID :label LABEL :minutes N
-:used FRACTION :resets TIME), merged into the known ones by :id;
-:balance, a list of (:amount NUMBER :currency STRING), shown in the echo
-area; :plan; :credits, a number or `unlimited'.  A missing or nil value
-keeps the known one."
-  (let ((params (list :agent (symbol-name (agent-session-agent session))
-                      :host (or (file-remote-p (agent-session-root session) 'host) :null))))
-    (pcase-dolist (`(,key . ,value)
-                   (list (cons :windows (when-let* ((windows (plist-get props :windows)))
-                                          (vconcat (mapcar #'agent-usage--json-window windows))))
-                         (cons :balance (when-let* ((balance (plist-get props :balance)))
-                                          (vconcat balance)))
-                         (cons :plan (plist-get props :plan))
-                         (cons :credits (let ((credits (plist-get props :credits)))
-                                          (if (eq credits 'unlimited) "unlimited" credits)))))
-      (when value (setq params (plist-put params key value))))
-    (agent-usage--notify "quota" params)))
 
 (defun agent-usage-window-label (minutes)
   "Label of a rate-limit window lasting MINUTES."

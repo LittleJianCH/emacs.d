@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Collaboration, definitions, profiles, cleanHandle, turns } from '../../emx/daemon/collab.ts'
 import { Session } from '../../emx/daemon/session.ts'
@@ -40,18 +39,15 @@ function setup() {
   const cleanup = async () => { collab.stop(); for (const s of sessions.values()) await s.stop(); rmSync(dir, { recursive: true, force: true }) }
   return { dir, config, sessions, create, collab, cleanup, closed, setVisible: (value: boolean) => { visible = value }, opened: () => opened }
 }
-test('definitions match current Lisp byte for byte and are independent of caller', () => {
+test('daemon config owns five caller-independent collaboration definitions', () => {
   const c = defaults()
-  const packages = process.env.EMX_TEST_PACKAGE_USER_DIR
-    ?? [join(checkoutRoot, 'elpa'), join(checkoutRoot, '../../../elpa')].find(existsSync)
-  assert.ok(packages, 'Install Emacs packages or set EMX_TEST_PACKAGE_USER_DIR')
-  const result = spawnSync('emacs', ['--batch', '--init-directory=' + checkoutRoot,
-    '--eval', `(setq package-user-dir ${JSON.stringify(packages)} agent-usage-poll-interval 0 my/use-evil nil)`,
-    '-l', join(checkoutRoot, 'init.el'), '--eval',
-    `(let ((agent-emx-config--value nil)) (princ (decode-coding-string (json-serialize (vconcat (seq-filter (lambda (tool) (member (plist-get tool :name) '("sessions" "session_read" "session_ask" "session_start" "session_stop"))) (append (agent-ui--describe nil) nil)))) 'utf-8)))`],
-    { cwd: checkoutRoot, encoding: 'utf8' })
-  assert.equal(result.status, 0, result.stderr)
-  assert.deepEqual(definitions(c).sort((a, b) => a.name.localeCompare(b.name)), JSON.parse(result.stdout).sort((a: any, b: any) => a.name.localeCompare(b.name)))
+  const tools = definitions(c)
+  assert.deepEqual(tools.map((tool) => tool.name).sort(),
+    ['session_ask', 'session_read', 'session_start', 'session_stop', 'sessions'])
+  assert.ok(tools.every((tool) => tool.inputSchema.type === 'object'))
+  const start = tools.find((tool) => tool.name === 'session_start')!.description
+  assert.ok(start.indexOf('Delegate independent work early') < start.indexOf('Choose how it gets context:'))
+  assert.match(start, /cannot start further sessions/)
   assert.deepEqual(definitions(c), definitions(c))
   assert.equal(cleanHandle('Reply\n`Cache Test`'), 'cache-test')
   assert.equal(cleanHandle('123'), undefined)

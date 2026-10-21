@@ -37,6 +37,10 @@ export class ProjectEnvironments {
   readonly base: NodeJS.ProcessEnv
   #cache = new Map<string, { stamp: string, at: number, env: NodeJS.ProcessEnv }>()
   constructor(base: NodeJS.ProcessEnv = process.env) { this.base = { ...base } }
+  /** Read the last resolved environment without running direnv or host work. */
+  peek(root: string): NodeJS.ProcessEnv {
+    return this.#cache.get(resolve(root))?.env ?? this.base
+  }
   async get(root: string): Promise<NodeJS.ProcessEnv> {
     root = resolve(root)
     const stamp = await fingerprint(root)

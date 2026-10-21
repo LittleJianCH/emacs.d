@@ -3,7 +3,7 @@
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 const source = process.argv[2]
-if (process.argv[3] && !['app-server', '-p'].includes(process.argv[3])) {
+if (process.argv[3] && !process.argv[3].startsWith('-') && process.argv[3] !== 'app-server') {
   appendFileSync(process.argv[3], source + '\n')
 }
 if (source === 'claude') {

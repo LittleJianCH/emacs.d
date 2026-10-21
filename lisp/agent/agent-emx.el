@@ -2,9 +2,9 @@
 
 ;;; Commentary:
 
-;; Optional backend; agent-dsh loads it to define the migration switch.
+;; All enabled agents use this daemon client.
 ;; Register agents with :backend emx and optionally :emx-agent "name".
-;; The socket belongs to the connection, never to agent-session-process.
+;; The socket belongs to the connection; session objects hold only views.
 
 ;;; Code:
 
@@ -29,42 +29,6 @@
 (defvar agent-emx--adopting nil
   "Dynamic (CONNECTION . SUMMARY) while opening a daemon child view.")
 (declare-function agent-collab--link-tool "agent-collab")
-
-(defvar agent-emx--offered nil
-  "Agents the daemon can run, with their Lisp backends: ((AGENT . BACKEND) ...).")
-
-(defvar agent-emx-agents)
-
-(defun agent-emx--apply (agent)
-  "Register AGENT's backend per `agent-emx-agents' for future sessions."
-  (when-let* ((entry (assq agent agent-session-agents))
-              (lisp (alist-get agent agent-emx--offered)))
-    (let ((daemon (memq agent agent-emx-agents)))
-      (setcdr entry (plist-put (cdr entry) :backend (if daemon 'emx lisp)))
-      (setcdr entry (plist-put (cdr entry) :emx-agent
-                               (and daemon (symbol-name agent)))))))
-
-(defun agent-emx-offer (agent)
-  "Let AGENT's sessions run through the daemon when `agent-emx-agents' says so.
-Call it after registering AGENT with `agent-session-define-agent'."
-  (unless (assq agent agent-emx--offered)
-    (push (cons agent (agent-session--get agent :backend)) agent-emx--offered))
-  (agent-emx--apply agent))
-
-(defun agent-emx--select-agents (symbol value)
-  "Set SYMBOL to VALUE and update registrations for future sessions."
-  (set-default symbol value)
-  (dolist (entry agent-emx--offered)
-    (agent-emx--apply (car entry))))
-
-(defcustom agent-emx-agents nil
-  "Agents whose new sessions run through the emx daemon.
-Only agents whose backend offers it (`agent-emx-offer') switch, and
-for local and /rpc: projects.  Nil keeps the Lisp backends.
-Customize this option before opening a session; existing sessions keep
-using the backend they started with."
-  :type '(repeat symbol)
-  :set #'agent-emx--select-agents)
 
 (defcustom agent-emx-var-directory
   (if (boundp 'my/var) (symbol-value 'my/var)
@@ -119,12 +83,12 @@ accepting the args plist.  Unknown kinds are displayed dimly as-is."
 
 (defun agent-emx--get (session key)
   "Return backend state KEY of SESSION."
-  (plist-get (agent-session-state session) key))
+  (plist-get (agent-session-client session) key))
 
 (defun agent-emx--set (session key value)
   "Set backend state KEY of SESSION to VALUE."
-  (setf (agent-session-state session)
-        (plist-put (agent-session-state session) key value))
+  (setf (agent-session-client session)
+        (plist-put (agent-session-client session) key value))
   value)
 
 (defun agent-emx--table (session key)
@@ -565,6 +529,36 @@ ROLE usage obtains a separate non-exclusive connection."
       (agent-emx--set session :emx-connection connection)
       connection)))
 
+(defun agent-emx-history (agent root callback)
+  "Fetch AGENT's past sessions in ROOT from its daemon into CALLBACK."
+  (setq root (expand-file-name root))
+  (let ((receive
+         (lambda (connection)
+           (agent-emx--request
+            connection "sessions/history"
+            (list :agent (symbol-name agent)
+                  :root (agent-session-process-directory root))
+            (lambda (result)
+              (funcall callback
+                       (mapcar (lambda (item)
+                                 (if (plist-get item :root)
+                                     (plist-put item :root
+                                                (agent-emx-remote-path connection
+                                                                       (plist-get item :root)))
+                                   item))
+                               (append (plist-get result :items) nil))))
+            (lambda (error)
+              (message "读取历史会话失败：%s" (plist-get error :message))
+              (funcall callback nil)))))
+        (fail (lambda (error)
+                (message "读取历史会话失败：%s" (plist-get error :message))
+                (funcall callback nil))))
+    (if (file-remote-p root)
+        (progn
+          (agent-session-ensure-programs root)
+          (agent-emx-remote-connection root receive fail))
+      (agent-emx--local-connection receive fail))))
+
 ;;; Transcript and asks
 
 (defun agent-emx--notice (session id notice)
@@ -792,7 +786,7 @@ ROLE usage obtains a separate non-exclusive connection."
 
 (defun agent-emx--info (session info)
   "Apply wire INFO to SESSION, preserving its Lisp parent buffer.
-The daemon parent id is not a buffer; collaboration moves in phase 5."
+The daemon parent id is not an Emacs buffer."
   (let ((props (cl-loop for (key value) on info by #'cddr
                         unless (eq key :parent) append (list key value))))
     (apply #'agent-session-set-info session props))

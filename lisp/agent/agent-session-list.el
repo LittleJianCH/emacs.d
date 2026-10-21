@@ -17,6 +17,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-session)
+(declare-function agent-emx-history "agent-emx")
 
 (defgroup agent-session-list nil
   "Agent session list."
@@ -42,8 +43,7 @@
   "Fetch each agent's past sessions in ROOT asynchronously; redraw on arrival."
   (dolist (entry agent-session-agents)
     (let ((agent (car entry)))
-      (agent-session-backend-history
-       (plist-get (cdr entry) :backend) root
+      (agent-emx-history agent root
        (lambda (items)
          (puthash (cons root agent) items agent-session-list--history)
          (agent-session-list--refresh-soon))))))

@@ -65,6 +65,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'thread/start': case 'thread/resume': case 'thread/fork':
       result(msg.id, { thread: { id: 'fake-thread' }, model: p.model ?? 'fake-cheap' })
       notify('thread/tokenUsage/updated', { tokenUsage: usage() }); break
+    case 'thread/list': result(msg.id, { data: [{ id: 'past-codex', name: 'Past Codex', updatedAt: 12, cwd: process.cwd() }] }); break
     case 'thread/turns/list':
       result(msg.id, { data: p.cursor ? [history(3)] : [history(1), history(2)], nextCursor: p.cursor ? null : 'page-2' }); break
     case 'account/rateLimits/read': result(msg.id, { rateLimits: quota }); break

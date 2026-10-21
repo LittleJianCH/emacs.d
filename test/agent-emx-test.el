@@ -37,7 +37,7 @@
           (agent-session--clock nil)
           (session (agent-session--make :agent 'test-emx :backend 'emx
                                         :root temporary-file-directory :buffer buffer
-                                        :status 'idle :state (list :emx-id "s" :emx-epoch "epoch"))))
+                                        :status 'idle :client (list :emx-id "s" :emx-epoch "epoch"))))
      (unwind-protect
          (progn
            (agent-session--setup-buffer session)
@@ -206,7 +206,7 @@
         (let ((id (plist-get (cdar sent) :block)))
           (should (equal (caar sent) "session/steer"))
           (should (equal (plist-get (agent-session--block session id) :text) "steer")))
-        (should-not (agent-session-process session))))))
+        (should (eq (agent-session-backend session) 'emx))))))
 
 (ert-deftest agent-emx-test-incremental-replay-defers-snapshot ()
   (agent-emx-test--with-session
@@ -360,7 +360,7 @@
         (agent-session-backend-stop 'emx session)
         (should (equal sent '("session/stop" :id "s")))
         (should-not (gethash "s" (agent-emx--connection-sessions connection)))
-        (should-not (agent-session-process session))))))
+        (should (eq (agent-session-backend session) 'emx))))))
 
 (ert-deftest agent-emx-test-interrupted-fresh-attach-has-no-cursor ()
   (agent-emx-test--with-session
@@ -590,8 +590,7 @@
   (unless (and (executable-find "node")
                (file-exists-p (expand-file-name "emx/daemon/main.ts" agent-emx--checkout)))
     (ert-skip "Node or the daemon implementation is not available yet"))
-  (let* ((agent-usage-poll-interval 0)
-         (agent-usage--connection nil)
+  (let* ((agent-usage--connection nil)
          (agent-emx-var-directory (agent-emx-test--var-directory "emx-"))
          (agent-emx--connections (make-hash-table :test #'equal))
          (agent-session-submit-functions nil)
@@ -661,7 +660,7 @@
                                      (eq (plist-get block :status) 'done)
                                      (equal (plist-get block :output) "tool output"))))
                             (agent-session--blocks-in-order session)))))
-          (should-not (agent-session-process session)))
+          (should (eq (agent-session-backend session) 'emx)))
       (when (buffer-live-p buffer) (agent-session-kill-quietly buffer))
       (when (timerp agent-session--clock) (cancel-timer agent-session--clock))
       (when (and connection (process-live-p (agent-emx--connection-process connection)))
@@ -774,33 +773,15 @@
     (should (string-match-p "todo validation failed" (agent-emx-test--transcript session)))
     (should-not (string-match-p "☐ proposed task" (agent-emx-test--transcript session)))))
 
-(ert-deftest agent-emx-test-dsh-switch-keeps-existing-backend ()
-  (require 'agent-dsh)
-  (let ((agent-session-agents (copy-tree agent-session-agents))
-        (agent-emx-agents nil))
-    (agent-emx-test--with-session
-      (setf (agent-session-backend session) 'dsh)
-      (agent-emx--select-agents 'agent-emx-agents '(dsh))
-      (should (eq (agent-session--get 'dsh :backend) 'emx))
-      (should (equal (agent-session--get 'dsh :emx-agent) "dsh"))
-      (should (eq (agent-session-backend session) 'dsh))
-      (agent-emx--select-agents 'agent-emx-agents nil)
-      (should (eq (agent-session--get 'dsh :backend) 'dsh))
-      (should-not (agent-session--get 'dsh :emx-agent)))))
-
 (ert-deftest agent-emx-test-open-passes-parent-without-mcp ()
   (require 'agent-dsh)
   (agent-emx-test--with-session
     (let ((agent-session-agents (copy-tree agent-session-agents))
-          (agent-emx-agents nil)
           sent)
-      (agent-emx--select-agents 'agent-emx-agents '(dsh))
       (setf (agent-session-agent session) 'dsh
             (agent-session-info session) '(:parent "parent"))
       (agent-emx--set session :emx-id nil)
-      (cl-letf (((symbol-function 'agent-dsh--mcp-servers)
-                 (lambda (_) [(:name "emacs" :command "node" :args ["emx" "mcp"])]))
-                ((symbol-function 'agent-emx--request)
+      (cl-letf (((symbol-function 'agent-emx--request)
                  (lambda (_ method params &rest _) (setq sent (cons method params)))))
         (agent-emx--attach session (agent-emx--make-connection))
         (should (equal (car sent) "session/open"))
@@ -812,8 +793,7 @@
 (ert-deftest agent-emx-test-dsh-round-trip ()
   (unless (executable-find "node") (ert-skip "Node is unavailable"))
   (require 'agent-dsh)
-  (let* ((agent-usage-poll-interval 0)
-         (agent-usage--connection nil)
+  (let* ((agent-usage--connection nil)
          (agent-emx-var-directory (agent-emx-test--var-directory "emx-dsh-"))
          (agent-emx--connections (make-hash-table :test #'equal))
          (process-environment
@@ -858,7 +838,7 @@
               (agent-emx-test--wait (lambda () report))
               (should (= (plist-get (plist-get report :total) :tokens) 14))
               (should (= (plist-get (plist-get report :total) :turns) 1)))
-            (should-not (agent-session-process session))
+            (should (eq (agent-session-backend session) 'emx))
             (should (string-match-p "dsh 版本为 test-version" (agent-emx-test--transcript session))))
         (when (buffer-live-p buffer) (agent-session-kill-quietly buffer))
         (when (timerp agent-session--clock) (cancel-timer agent-session--clock))
@@ -950,8 +930,7 @@
       (agent-emx--publish-tools)
       (should-not notices)
       (agent-ui-defmethod "test-changed" () "A new tool." :read-only t "ok")
-      ;; Run the same hook the existing signature timer uses, without stamps.
-      (run-hooks 'agent-ui-tools-change-functions)
+      ;; Registration itself publishes the updated definitions.
       (should (= 1 (length notices)))
       (should (equal (plist-get (car notices) :method) "editor/tools"))
       (should (member "test-changed" (append (plist-get (plist-get (car notices) :params)
@@ -1139,19 +1118,6 @@
                   :notice (:kind "codex-config-read-failed" :args (:message "bad"))))
     (should (string-match-p "保留原有指令：bad" (agent-emx-test--transcript session)))))
 
-(ert-deftest agent-emx-test-codex-offer-preserves-default ()
-  (require 'agent-codex)
-  (let ((agent-session-agents (copy-tree agent-session-agents))
-        (agent-emx--offered (copy-tree agent-emx--offered))
-        (agent-emx-agents nil))
-    (agent-emx--apply 'codex)
-    (should (eq (agent-session--get 'codex :backend) 'codex))
-    (agent-emx--select-agents 'agent-emx-agents '(codex))
-    (should (eq (agent-session--get 'codex :backend) 'emx))
-    (should (equal (agent-session--get 'codex :emx-agent) "codex"))
-    (agent-emx--select-agents 'agent-emx-agents nil)
-    (should (eq (agent-session--get 'codex :backend) 'codex))))
-
 (ert-deftest agent-emx-test-codex-open-skills-context ()
   (dolist (skills '(nil "/tmp/emx-skills/"))
     (agent-emx-test--with-session
@@ -1171,19 +1137,6 @@
           (should (eq (not (null (plist-member context :skillsRoot))) (not (null skills)))))))))
 
 ;;; Claude daemon integration
-
-(ert-deftest agent-emx-test-claude-offer-preserves-default ()
-  (require 'agent-claude)
-  (let ((agent-session-agents (copy-tree agent-session-agents))
-        (agent-emx--offered (copy-tree agent-emx--offered))
-        (agent-emx-agents nil))
-    (agent-emx--apply 'claude)
-    (should (eq (agent-session--get 'claude :backend) 'claude))
-    (agent-emx--select-agents 'agent-emx-agents '(claude))
-    (should (eq (agent-session--get 'claude :backend) 'emx))
-    (should (equal (agent-session--get 'claude :emx-agent) "claude"))
-    (agent-emx--select-agents 'agent-emx-agents nil)
-    (should (eq (agent-session--get 'claude :backend) 'claude))))
 
 (ert-deftest agent-emx-test-claude-open-skills-context ()
   (dolist (skills '(nil "/tmp/emx-claude-skills/"))
@@ -1266,3 +1219,18 @@
         (let ((id (gethash "q" (agent-emx--table session :emx-asks))))
           (agent-session--resolve-questions session id 'cancel)
           (should (equal sent '("session/answer" :ask "q"))))))))
+
+(ert-deftest agent-emx-test-history-routes-agent-and-maps-host-root ()
+  (let ((connection (agent-emx--make-connection)) result sent)
+    (cl-letf (((symbol-function 'agent-emx--local-connection)
+               (lambda (callback _fail &optional _role) (funcall callback connection)))
+              ((symbol-function 'agent-emx-remote-path)
+               (lambda (_ path) (concat "/rpc:fake:" path)))
+              ((symbol-function 'agent-emx--request)
+               (lambda (_ method params callback &optional _fail)
+                 (setq sent (list method params))
+                 (funcall callback '(:items [(:id "old" :title "Past" :time 1
+                                                 :root "/other/" :worktree "other")])))))
+      (agent-emx-history 'codex "/project/" (lambda (items) (setq result items))))
+    (should (equal sent '("sessions/history" (:agent "codex" :root "/project/"))))
+    (should (equal (plist-get (car result) :root) "/rpc:fake:/other/"))))

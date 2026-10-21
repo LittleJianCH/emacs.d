@@ -35,6 +35,7 @@ lines.on('line', (line) => {
     return
   }
   switch (msg.method) {
+    case 'sessions/list': result(msg.id, { sessions: [{ id: 'past-dsh', title: 'Past dsh', time: 13, cwd: process.cwd() }] }); break
     case 'initialize':
       // Resume restores the logged route, ignoring initialize's model/effort.
       config = { model: p.resume ? 'fake/chat' : p.model ?? 'fake/chat',

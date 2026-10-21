@@ -2,20 +2,16 @@
 
 ;;; Commentary:
 
-;; The agent CLI runs as a background process (Claude: stream-json, Codex:
-;; app-server), and the conversation is rendered here into an Emacs buffer:
+;; The daemon owns agent execution; this module renders its conversation:
 ;; a read-only transcript on top, an input area below.
 ;;
 ;; Layers:
 ;;   - This file: session management, UI, input; exposes a "UI API" to backends
 ;;     (agent-session-text, agent-session-tool, agent-session-ask ...) and does
 ;;     not care about the concrete protocol.
-;;   - Backends (agent-claude.el, agent-codex.el): implement the
-;;     agent-session-backend-* generic functions, translating their protocol's
-;;     messages into UI API calls.
 ;;
-;; To add an agent: implement a backend, then register it with
-;; `agent-session-define-agent'.
+;;   - agent-emx.el: one backend implementing the view/daemon connection.
+;;     Agent registrations live in backend/agent-NAME.el.
 
 ;;; Code:
 
@@ -44,10 +40,6 @@
 (defcustom agent-session-window-width 0.42
   "Width of the session window; a fraction means a ratio of the frame width."
   :type 'number)
-
-(defcustom agent-session-bin-directory (expand-file-name "bin" user-emacs-directory)
-  "Directory prepended to the background process's PATH; it holds emx."
-  :type 'directory)
 
 (defcustom agent-session-output-lines 20
   "Maximum lines of tool output shown when expanded (the tail is shown)."
@@ -85,10 +77,9 @@
   backend        ; backend symbol, used for generic dispatch
   root           ; project root directory
   buffer
-  process
   (status 'starting)   ; starting / idle / running / disconnected / exited
   info           ; info plist shown in the header line: :model :tokens ...
-  state          ; backend-private state plist
+  client         ; emx view/transport state, never native backend protocol state
   (blocks (make-hash-table :test #'equal))
   tail           ; end of the transcript (where new blocks are inserted)
   input          ; start of the input area (after the footer)
@@ -109,12 +100,13 @@ PLIST supports :backend :title :key.")
   (plist-get (alist-get agent agent-session-agents) prop))
 
 (defun agent-session--program (agent)
-  "Program AGENT runs: a string, `none' if it names none, nil if unset."
-  (let ((variable (agent-session--get agent :executable)))
-    (if (null variable)
-        'none
-      (let ((program (and (boundp variable) (symbol-value variable))))
-        (and (stringp program) (not (string-empty-p program)) program)))))
+  "Program AGENT runs, from cached daemon config or its registration."
+  (or (and (fboundp 'agent-emx-config-agent)
+           (funcall 'agent-emx-config-agent agent :executable))
+      (let ((value (agent-session--get agent :executable)))
+        (cond ((null value) 'none)
+              ((stringp value) value)
+              ((boundp value) (symbol-value value))))))
 
 (defun agent-session-place (root)
   "Where agents of project ROOT run, as far as their tools go: nil for this
@@ -218,7 +210,7 @@ text [图片])."
 (defun agent-session-resume-id (session)
   "The agent-native session id of SESSION, possibly nil.
 That is the Claude session id or the Codex thread id."
-  (and session (plist-get (agent-session-state session) :resume)))
+  (and session (plist-get (agent-session-client session) :resume)))
 
 (defun agent-session-title (session)
   "Display name of SESSION, e.g. Claude."
@@ -305,7 +297,7 @@ They are killed with it (see `agent-session-open')."
 ;;; Backend interface
 
 (cl-defgeneric agent-session-backend-start (backend session)
-  "Start the background process of SESSION.  BACKEND is the backend symbol.")
+  "Open SESSION through BACKEND, the view adapter symbol.")
 
 (cl-defgeneric agent-session-backend-send (backend session text)
   "Send user message TEXT to the agent.")
@@ -313,21 +305,9 @@ They are killed with it (see `agent-session-open')."
 (cl-defgeneric agent-session-backend-interrupt (backend session)
   "Interrupt the current turn.")
 
-(cl-defgeneric agent-session-backend-handle (backend session message)
-  "Handle one JSON MESSAGE (a plist) output by the background process.")
-
 (cl-defgeneric agent-session-backend-stop (backend session)
-  "End the session.  By default just kill the process."
-  (ignore backend)
-  (when-let* ((process (agent-session-process session)))
-    ;; Detach first, so the old process's sentinel ignores this exit.
-    (setf (agent-session-process session) nil)
-    (when (process-live-p process) (delete-process process))
-    ;; Deleting a kept agent's client (SIGKILL through tramp-rpc) stops
-    ;; the agent too, but a disconnected session has no client; and a
-    ;; client killed some other way would only detach.
-    (when-let* ((keeper (process-get process 'agent-session-keeper)))
-      (agent-session--keeper-kill session keeper))))
+  "Stop SESSION through BACKEND."
+  (ignore backend session))
 
 (cl-defgeneric agent-session-backend-models (backend session)
   "Available models.
@@ -357,25 +337,6 @@ Return non-nil if supported.  Unsupported by default, in which case the
 caller falls back to \"interrupt, then send\"."
   (ignore backend session text)
   nil)
-
-(cl-defgeneric agent-session-backend-fork-p (backend)
-  "Non-nil if sessions of BACKEND can be forked.
-A fork is a new session of the same agent that starts as a copy of its
-source's conversation, named by `:fork-from' in its info (the source's
-own session id), so its first request shares the source's prompt cache."
-  (ignore backend)
-  nil)
-
-(cl-defgeneric agent-session-backend-history (backend root callback)
-  "List past sessions in project ROOT, calling CALLBACK with the list.
-CALLBACK may be called asynchronously.  Each item is (:id ID :title TITLE
-:time SECONDS), newest first.  A session that ran in another directory
-of the project, such as a git worktree, adds :root DIRECTORY (where to
-resume it) and :worktree LABEL."
-  (ignore backend root)
-  (funcall callback nil))
-
-;;; Settings: model, reasoning effort, permission mode
 
 (defconst agent-session-modes
   '((ask "需确认" "命令和文件改动都需要确认")
@@ -429,41 +390,7 @@ auto mode in the Claude Code desktop app)."
     (or (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
         (car models))))
 
-(defun agent-session-restart-process (session)
-  "Restart the background process of SESSION.
-E.g. to switch settings that can only be given at startup."
-  (agent-session-backend-stop (agent-session-backend session) session)
-  (setf (agent-session-status session) 'starting)
-  (agent-session-backend-start (agent-session-backend session) session))
-
-;;; Background process
-
-(defun agent-session-tools-stamp (&optional place)
-  "File whose content changes when the methods agents at PLACE see change.
-PLACE is from `agent-session-place': agents can start sessions of the
-agents installed where they run.  emx watches it to have its client list
-the tools again (see agent-ui.el)."
-  (expand-file-name (concat "emx-tools-" server-name
-                            (and place (concat "-" (substring (secure-hash 'sha1 place) 0 12))))
-                    (locate-user-emacs-file "var/")))
-
-(defconst agent-session-emx-variables
-  '("PATH" "EMACS_SOCKET_NAME" "EMX_AGENT_BUFFER" "EMX_TOOLS_STAMP")
-  "Variables of `agent-session-environment' that emx needs.")
-
-(defun agent-session-environment (session)
-  "Environment of the background process: it can find emx and reach this Emacs."
-  (append
-   (list (concat "PATH=" agent-session-bin-directory path-separator (getenv "PATH"))
-         (concat "EMACS_SOCKET_NAME=" (expand-file-name server-name server-socket-dir))
-         (concat "EMX_AGENT_BUFFER=" (buffer-name (agent-session-buffer session)))
-         (concat "EMX_TOOLS_STAMP="
-                 (agent-session-tools-stamp (agent-session-place (agent-session-root session)))))
-   process-environment))
-
-(defun agent-session-emx-command ()
-  "Command line that starts the emx MCP server."
-  (list (expand-file-name "emx" agent-session-bin-directory) "mcp"))
+;;; Host paths and skills
 
 (defun agent-session-process-directory (root)
   "Project ROOT as the agent process sees it.
@@ -548,304 +475,18 @@ a restart of Emacs).")
       (puthash base hash agent-session--skills-copied)))
   (file-local-name base))
 
-;;; Git worktrees: a project's sessions may run in its other worktrees
-;;
-;; Claude Desktop and the Codex app run a session in a git worktree of the
-;; project, and the agent CLIs file it under the worktree's path.  Such a
-;; session belongs to the project's history but resumes in its worktree.
-
-(defun agent-session--parse-worktrees (output)
-  "Return the worktree paths in OUTPUT of `git worktree list --porcelain'."
-  (let (result)
-    (dolist (line (split-string output "\n" t) (nreverse result))
-      (when (string-prefix-p "worktree " line)
-        (push (substring line (length "worktree ")) result)))))
-
-(defun agent-session-worktree-dirs (root worktrees)
-  "Return the directories where sessions of project ROOT may run.
-WORKTREES are the paths of the git worktrees of ROOT's repository; they
-count only when ROOT is one of them, not a subdirectory.  Each element
-is (DIRECTORY . LABEL), ROOT first with a nil LABEL."
-  (let* ((root (file-name-as-directory (expand-file-name root)))
-         (worktrees (mapcar (lambda (path) (file-name-as-directory (expand-file-name path)))
-                            worktrees)))
-    (cons (list root)
-          (and (member root worktrees)
-               (seq-keep (lambda (path)
-                           (unless (equal path root)
-                             (cons path (file-name-nondirectory (directory-file-name path)))))
-                         worktrees)))))
-
-(defun agent-session-worktrees (root callback)
-  "Call CALLBACK with `agent-session-worktree-dirs' of project ROOT.
-Git runs asynchronously.  A remote project only gets ROOT itself:
-listing its worktrees would take more round trips to the host."
-  (if (file-remote-p root)
-      (funcall callback (list (list root)))
-    (let ((default-directory root)
-          (output ""))
-      (condition-case nil
-          (make-process
-           :name "agent-session-worktrees"
-           :command (list "git" "worktree" "list" "--porcelain")
-           :connection-type 'pipe :coding 'utf-8-unix :noquery t
-           :stderr (get-buffer-create " *agent-session-worktrees stderr*")
-           :filter (lambda (_ string) (setq output (concat output string)))
-           :sentinel (lambda (process _)
-                       (unless (process-live-p process)
-                         (funcall callback
-                                  (agent-session-worktree-dirs
-                                   root (and (zerop (process-exit-status process))
-                                             (agent-session--parse-worktrees output)))))))
-        (error (funcall callback (list (list root))))))))
-
-(defcustom agent-session-keep-remote t
-  "Whether a remote agent outlives the connection to its host.
-It then runs under a keeper there (agent-keeper.py) instead of under
-tramp-rpc's server: when the connection drops, the session shows as
-disconnected and attaches again once the connection is back, getting
-the output it missed."
-  :type 'boolean)
-
-(defconst agent-session--keeper-file
-  (expand-file-name "agent-keeper.py" (file-name-directory (or load-file-name buffer-file-name)))
-  "The keeper script, run on the host of a remote agent.")
-
-(defun agent-session--keeper-command (&rest args)
-  "Command line on the host running the keeper with ARGS."
-  (append (list "python3" "-c" (with-temp-buffer
-                                  (insert-file-contents agent-session--keeper-file)
-                                  (buffer-string)))
-          args))
-
-(defun agent-session-start-process (session command)
-  "Start the background process of SESSION with COMMAND.
-Each JSON line is handed to the backend.  For a remote project the
-process runs on its host through the file handler (tramp-rpc), where
-the project, its toolchain and the agent's own history live; with
-`agent-session-keep-remote', under a keeper that outlives the connection."
-  (if (and agent-session-keep-remote (file-remote-p (agent-session-root session)))
-      (let ((id (format "%s-%s" (agent-session-agent session)
-                        (substring (md5 (format "%s%s%s" (random) (float-time) (emacs-pid))) 0 12))))
-        (agent-session--spawn
-         session (apply #'agent-session--keeper-command "start" id "--" command)
-         ;; Shared by the processes attached to this agent in turn.
-         (list :id id :offset 0 :exit nil :status nil)))
-    (agent-session--spawn session command nil)))
-
-(defun agent-session--spawn (session command keeper)
-  "Start the process of SESSION running COMMAND.
-KEEPER, a plist, is the keeper of a kept remote agent, whose output
-comes in frames (see agent-keeper.py)."
-  (let* ((buffer (agent-session-buffer session))
-         (default-directory (agent-session-root session))
-         (remote (file-remote-p default-directory))
-         ;; The local PATH and emx variables mean nothing on the host (tramp
-         ;; forwards changed variables); a remote agent reaches emx through
-         ;; the bridge of agent-remote.el instead.
-         (process-environment (if remote
-                                  process-environment
-                                (agent-session-environment session)))
-         (stderr (get-buffer-create (format " *%s stderr*" (buffer-name buffer))))
-         (pending "")
-         (process
-          (make-process
-           :name (format "agent-%s" (agent-session-agent session))
-           :command command
-           :connection-type 'pipe
-           :coding 'utf-8-unix
-           :noquery t
-           :file-handler (and remote t)
-           :stderr stderr
-           :filter
-           (lambda (_process output)
-             (setq pending (concat pending output))
-             (let ((lines (split-string pending "\n")))
-               (setq pending (car (last lines)))
-               (dolist (line (butlast lines))
-                 (if keeper
-                     (agent-session--keeper-line session keeper stderr line)
-                   (unless (string-blank-p line)
-                     (agent-session--dispatch session line))))))
-           :sentinel
-           (lambda (process _event)
-             (unless (process-live-p process)
-               ;; A process that was replaced or stopped on purpose isn't an
-               ;; unexpected exit.
-               (when (and (buffer-live-p buffer) (eq process (agent-session-process session)))
-                 (if (and keeper (not (plist-get keeper :exit)))
-                     (agent-session--disconnected session keeper)
-                   ;; The keeper holds the agent's last output until told
-                   ;; Emacs has it.
-                   (when (numberp (plist-get keeper :exit))
-                     (agent-session--keeper-kill session keeper))
-                   (agent-session-set-status session 'exited)
-                   (agent-session-notice
-                    session (pcase (plist-get keeper :exit)
-                              ('gone "agent 已不在主机上")
-                              ('nil (format "进程已退出（%s，退出码 %s）"
-                                            (process-status process) (process-exit-status process)))
-                              (code (format "进程已退出（退出码 %s）" code)))
-                    'agent-session-error))))))))
-    (when keeper (process-put process 'agent-session-keeper keeper))
-    (setf (agent-session-process session) process)))
-
-(defun agent-session--keeper-line (session keeper stderr line)
-  "Handle frame LINE from the keeper KEEPER of SESSION.
-The agent's stderr at its exit goes into buffer STDERR."
-  (cond
-   ((string-match "\\`\\([0-9]+\\) " line)
-    (setf (plist-get keeper :offset) (string-to-number (match-string 1 line)))
-    (let ((line (substring line (match-end 0))))
-      (unless (string-blank-p line)
-        (agent-session--dispatch session line))))
-   ((string-match "\\`E \\([0-9]+\\) ?\\(.*\\)" line)
-    (setf (plist-get keeper :exit) (string-to-number (match-string 1 line)))
-    (let ((tail (match-string 2 line)))
-      (when (buffer-live-p stderr)
-        (with-current-buffer stderr
-          (goto-char (point-max))
-          (insert (decode-coding-string (base64-decode-string tail) 'utf-8))))))
-   ((equal line "G")
-    (setf (plist-get keeper :exit) 'gone))))
-
-(defun agent-session--keeper (session)
-  "The keeper plist of SESSION's agent, or nil if it has none."
-  (when-let* ((process (agent-session-process session)))
-    (process-get process 'agent-session-keeper)))
-
-(defvar agent-session--reattach-timer nil
-  "Timer attaching disconnected sessions again, while there are any.")
-
-(defun agent-session--disconnected (session keeper)
-  "Mark SESSION as cut off from its agent, which KEEPER keeps running."
-  (setf (plist-get keeper :status) (agent-session-status session))
-  (agent-session-set-status session 'disconnected)
-  (agent-session-notice session "与主机的连接断开了，agent 仍在主机上运行；连接恢复后会自动接上"
-                        'agent-session-dim)
-  (unless (timerp agent-session--reattach-timer)
-    (setq agent-session--reattach-timer
-          (run-at-time 10 10 #'agent-session--reattach-all))))
-
 (defun agent-session--host-connected-p (root)
-  "Whether the connection to the host of remote ROOT is up.
-Never opens one.  (Bound around a remote `make-process' instead,
-`non-essential' would quietly start the process on this machine.)"
-  (let ((non-essential t))
-    (tramp-connectable-p root)))
-
-(defun agent-session--reattach-all ()
-  "Attach the disconnected sessions whose host is connected again.
-Runs on a timer, so it never opens a connection."
-  (let ((waiting nil))
-    (dolist (buffer (agent-session-buffers))
-      (let ((session (buffer-local-value 'agent-session--current buffer)))
-        (when (eq (agent-session-status session) 'disconnected)
-          (when (agent-session--host-connected-p (agent-session-root session))
-            (ignore-errors (agent-session-reattach session)))
-          (when (eq (agent-session-status session) 'disconnected)
-            (setq waiting t)))))
-    (unless waiting
-      (cancel-timer agent-session--reattach-timer)
-      (setq agent-session--reattach-timer nil))))
-
-(cl-defgeneric agent-session-backend-reattached (backend session)
-  "SESSION has been attached again to its agent, kept running on its host.
-Restart what else of the session went down with the connection."
-  (ignore backend session))
+  "Whether ROOT's host is connected, without opening a connection."
+  (let ((non-essential t)) (tramp-connectable-p root)))
 
 (cl-defgeneric agent-session-backend-reconnect (backend session)
-  "Begin reconnecting SESSION; return non-nil if handled asynchronously."
-  (ignore backend session)
-  nil)
-
-(defvar agent-session-reattach-functions nil
-  "Functions called with a session attached again to its kept agent.")
-
-(defun agent-session-reattach (session)
-  "Attach SESSION again to its agent, kept running on the host.
-Signal an error if the host can't be reached."
-  (when-let* ((keeper (and (eq (agent-session-status session) 'disconnected)
-                           (agent-session--keeper session))))
-    (agent-session--spawn session
-                          (agent-session--keeper-command
-                           "attach" (plist-get keeper :id)
-                           (number-to-string (plist-get keeper :offset)))
-                          keeper)
-    (agent-session-set-status session (or (plist-get keeper :status) 'idle))
-    (agent-session-notice session "已重新接上主机上的 agent" 'agent-session-dim)
-    (agent-session-backend-reattached (agent-session-backend session) session)
-    (run-hook-with-args 'agent-session-reattach-functions session)))
+  "Begin reconnecting SESSION through BACKEND asynchronously."
+  (ignore backend session))
 
 (defun agent-session-ensure-attached (session)
-  "Attach SESSION again if it is disconnected, or signal a user error."
-  (when (and (eq (agent-session-status session) 'disconnected)
-             (not (agent-session-backend-reconnect
-                   (agent-session-backend session) session)))
-    (condition-case err
-        (agent-session-reattach session)
-      (error (user-error "与主机的连接还没恢复：%s" (error-message-string err))))
-    (when (eq (agent-session-status session) 'disconnected)
-      (user-error "与主机的连接还没恢复"))))
-
-(defun agent-session--keeper-kill (session keeper)
-  "Stop the agent of SESSION that KEEPER keeps on the host.
-Does nothing if the host is out of reach: the keeper then stops the
-agent itself after a day without a client."
-  (let ((default-directory (agent-session-root session)))
-    (when (agent-session--host-connected-p default-directory)
-      (ignore-errors
-        (make-process :name "agent-keeper-kill"
-                      :command (agent-session--keeper-command "kill" (plist-get keeper :id))
-                      :connection-type 'pipe :noquery t :file-handler t
-                      :sentinel #'ignore)))))
-
-(defun agent-session--stop-kept-agents ()
-  "Stop the kept remote agents as Emacs exits, as other agents stop with it.
-Deleting the attached process stops its agent; a client that just loses
-Emacs would leave it running."
-  (dolist (buffer (agent-session-buffers))
-    (let ((session (buffer-local-value 'agent-session--current buffer)))
-      (when (agent-session--keeper session)
-        (ignore-errors (agent-session-backend-stop (agent-session-backend session) session))))))
-
-(add-hook 'kill-emacs-hook #'agent-session--stop-kept-agents)
-
-(defvar agent-session-raw-message nil
-  "Raw JSON line of the message being handled.
-Parsing into a plist loses the difference between false / null / {}; when
-data must be sent back to the agent verbatim, re-parse it from here with
-`agent-session-raw-json'.")
-
-(defun agent-session-raw-json (&rest path)
-  "Get the value at key PATH from the current raw message.
-JSON false / null / empty objects are preserved."
-  (let ((value (json-parse-string agent-session-raw-message :object-type 'hash-table
-                                  :null-object :null :false-object :false)))
-    (dolist (key path value)
-      (setq value (and (hash-table-p value) (gethash key value))))))
-
-(defun agent-session--dispatch (session line)
-  "Parse one JSON LINE and hand it to the backend.
-Errors are recorded in the session without interrupting the process."
-  (when (buffer-live-p (agent-session-buffer session))
-    (condition-case err
-        (let ((agent-session-raw-message line))
-          (agent-session-backend-handle
-         (agent-session-backend session) session
-           (json-parse-string line :object-type 'plist :null-object nil :false-object nil)))
-      (error
-       (agent-session-notice session (truncate-string-to-width
-                                      (format "处理消息出错：%s" (error-message-string err)) 200 nil nil "…")
-                             'agent-session-error)))))
-
-(defun agent-session-write (session object)
-  "Serialize OBJECT as one JSON line and write it to the background process."
-  (agent-session-ensure-attached session)
-  (let ((process (agent-session-process session)))
-    (unless (process-live-p process) (user-error "agent 进程未运行"))
-    (process-send-string process (concat (json-serialize object :null-object :null :false-object :false)
-                                         "\n"))))
+  "Begin reattaching disconnected SESSION through its daemon."
+  (when (eq (agent-session-status session) 'disconnected)
+    (agent-session-backend-reconnect (agent-session-backend session) session)))
 
 ;;; Transcript: inserting and redrawing blocks
 
@@ -2781,7 +2422,7 @@ session carrying over the input draft."
         (agent-session-backend-stop (agent-session-backend session) session)
         (setf (agent-session-agent session) agent
               (agent-session-backend session) (agent-session--get agent :backend)
-              (agent-session-state session) nil
+              (agent-session-client session) nil
               (agent-session-info session) nil
               (agent-session-settings session)
               (copy-sequence (alist-get agent agent-session-last-settings))
@@ -2807,8 +2448,7 @@ session carrying over the input draft."
          (agent (or agent (and session (agent-session-agent session)) (agent-session--read-agent)))
          (root (if session (agent-session-root session) (agent-session--root)))
          (items 'pending))
-    (agent-session-backend-history (agent-session--get agent :backend) root
-                                   (lambda (result) (setq items result)))
+    (funcall 'agent-emx-history agent root (lambda (result) (setq items result)))
     (with-timeout (20 (user-error "获取历史会话超时"))
       (while (eq items 'pending) (accept-process-output nil 0.05)))
     (unless items (user-error "本项目没有 %s 的历史会话" agent))
@@ -3204,7 +2844,7 @@ agent's latest settings; INFO is the initial info plist."
                                 (user-error "未注册 agent：%s" agent))
                    :root root :buffer buffer
                    :info info
-                   :state (and resume (list :resume resume))
+                   :client (and resume (list :resume resume))
                    :settings (or settings
                                  (copy-sequence
                                   (alist-get agent agent-session-last-settings))))))
@@ -3347,7 +2987,7 @@ With an active region, include its line range."
   "Register agent NAME and define the command agent-session-NAME.
 PLIST: :backend the backend symbol (default NAME), :title the display
 name, :key the key that starts it in `agent-session-command-map',
-:executable the variable naming the program it runs, :emx-agent the
+:executable the default program name (or a variable naming it), :emx-agent the
 daemon's agent name when using the emx backend."
   (declare (indent 1))
   (let ((command (intern (format "agent-session-%s" name)))

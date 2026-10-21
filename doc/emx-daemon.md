@@ -1,10 +1,12 @@
 # emx daemon: agents outside Emacs
 
-Status: phases 1–7 implemented on `claude/emx-daemon`.
-Agent execution remains opt-in through `agent-emx-agents`; all usage now shares
-the daemon. Mixed Lisp/daemon and cross-daemon collaboration have the
-limitations below. Remote transport is tested with a locally simulated host;
-a real tramp-rpc/sshd test is still required.
+Status: phases 1–8 implemented on `claude/emx-daemon`.
+Every enabled agent session uses the daemon. The three Lisp backend files
+are registration modules only; `my/agents` still chooses enabled agents.
+Cross-daemon collaboration remains deferred. Remote transport is tested
+with a simulated host; actual tramp-rpc/sshd verification remains outstanding.
+Phase 8 changes the session struct once and requires restarting Emacs.
+The phase histories below record the transitional designs at the time.
 
 ## Goal
 
@@ -21,8 +23,7 @@ What we get:
   histories already had to move into python3 scripts for that reason.)
 - Sessions outlive Emacs. Restarting Emacs, a failed reload, or a
   `cl-defstruct` change that needs a restart no longer kills agents;
-  Emacs attaches again and catches up. Only remote sessions get this today,
-  through `agent-keeper.py`.
+  Emacs attaches again and catches up. The former remote-only keeper has been removed.
 - Policy lives in one place and is tested with `node --test`: approvals,
   children and their mailbox, concurrency limits, usage. The differences
   between Claude, Codex and dsh (like dsh's MCP calls needing our own gate)
@@ -752,7 +753,7 @@ bin/emx                  entry: CLI, `emx mcp`, `emx daemon`, `emx connect`
 emx/config.json          tracked configuration
 emx/daemon/              socket server, sessions, events, editor calls
 emx/backends/            claude.ts, codex.ts, dsh.ts
-emx/collab/              children, mailbox, session_* tools
+emx/daemon/collab.ts     children, mailbox, session_* tools
 emx/usage/               ledger, quota polls, forecasts and turn accounting
 emx/remote/              durable host usage outbox
 lisp/agent/backend/dsh/  the dsh plugin, unchanged in place
@@ -787,8 +788,10 @@ the end.
    reattach by `seq`, `config_*` through the local daemon, usage outbox,
    same-daemon collaboration (cross-daemon list/read/ask deferred as above).
    Keep the keeper and relay for non-opted-in agents until phase 8.
-8. **Cut over**: remove the Lisp backends and what only they used; shrink
-   `agent-session` (a `restart_required` struct change, done once).
+8. **Cut over** (implemented): all agents register with emx; remove Lisp
+   protocol adapters, keeper/relay, reverse forwards, opt-in switches, legacy
+   MCP and filesystem tool stamps. `agent-session` removes process and renames
+   state to client in one `restart_required` change.
 
 ## Phase 6: daemon-owned usage
 
@@ -1039,3 +1042,107 @@ P95 143 ms including Node startup, module imports and manifest hashing.
 Only the source freshness check is on the no-op build path; no compiler is
 started. Old immutable generations are deliberately retained until processes
 using them have exited.
+
+## Phase 8a parity audit
+
+Before the cut-over, these were the remaining Lisp-only responsibilities:
+
+- Native history discovery (the sidebar and resume picker): Claude JSONL
+  title/head/tail reads and Desktop/deleted worktrees, Codex `thread/list`,
+  dsh `sessions/list`. `sessions/history {agent, root}` now runs discovery
+  on the owning daemon, including git worktrees, newest titles and resume
+  roots; the editor maps host roots back through its transport.
+- Local quota launch commands were registered by the Lisp backends. Both
+  local and host daemons now derive them from effective agent executable
+  configuration on startup/reload; stale editor overrides cannot win.
+- `agent-session-list` called backend history generics, which cannot
+  distinguish three agents sharing `emx`. Its daemon path now names the
+  agent explicitly. The resume picker uses the same agent-specific request.
+- Host project profiles were still filtered against the daemon baseline PATH.
+  Resolve direnv before adapter startup, use the cached root environment for
+  descriptions and start validation, and refresh that root's MCP clients on
+  explicit startup. Parent/child definitions stay identical; no timer probes.
+- `agent-collab` still has naming subprocesses, session tools, text handoff,
+  fork dispatch and a mailbox for legacy sessions. All already have daemon
+  equivalents in `emx/daemon/collab.ts`; only child-tool linking and footer
+  display remain editor work. Mention expansion remains input enrichment in the editor.
+- `agent-usage` uses session process/state for legacy turn accounting;
+  `emx/usage/accounting.ts` already covers these boundaries and replay rules.
+  Its durable editor producer remains useful for forwarding host usage.
+- `agent-ui` still publishes filesystem tool stamps for legacy MCP;
+  `editor/tools` already transports changed definitions and classification.
+- `init-agent` loads enabled registration modules and wires display/keys;
+  no protocol dependency remains there. Agent registration macros preserve
+  the commands and public UI API used by canvas, review and session lists.
+- Old pure-protocol ERT tests call backend-private helpers. Their subjects
+  are covered in the daemon's Claude/Codex/dsh/accounting/collaboration tests;
+  cut-over removes those duplicates together with their implementation.
+
+History regression tests use temporary git repositories, transcripts and
+short-lived fake protocol peers, never model or account calls.
+
+
+## Phase 8 cut-over
+
+The three `backend/agent-NAME.el` registration modules remain separate so
+`my/agents` controls loading and generated UI commands. They contain no
+process, protocol or policy implementation. The shared `emx` backend is
+required for all three, locally and on host daemons.
+
+Removed: legacy Lisp adapters and quota registrations; keeper and relay
+Python programs/tests; reverse SSH bridge; byte-offset reattach and process
+JSON dispatch; Lisp collaboration tools, naming commands, mailbox and offline
+policy defaults; `agent-emx-agents`/`agent-emx-offer`; filesystem stamps and
+their repeating timer; emacsclient-based stdio MCP. The old pure-protocol ERT
+subjects were removed with their implementations; daemon suites cover them.
+
+Kept: the session UI API and generic view boundary (also used by fake UI
+backends), canvas/review/editor tools, child progress and mirrored asks,
+three registration modules, ControlMaster lookup/upload helpers, and bare
+command-line emx operations via emacsclient. Tool changes now publish on
+method registration and module loading, with no stamp files. Durable editor
+usage state remains for pending pre-cut-over entries and host delivery; no
+editor code computes model usage anymore.
+
+The `agent-session` struct drops `process` and renames `state` to `client`.
+All native backend state lives in the daemon; the remaining client plist
+holds connection, cursor, attach and rendering data. **Restart required**:
+loading the changed struct into a live Emacs is unsupported. No live reload
+was used during this worktree migration.
+
+### Phase 8 verification (2026-10-20)
+
+All verification ran in the worktree, with temporary HOME/var directories,
+fake executables, naming disabled (`collab.handleCommand: []` and
+`collab.agentHandleCommands: {}`), and fake-only quota fixtures. No live
+reload, default editor server/daemon, real host or real model was used.
+The branch was neither merged nor pushed.
+
+```text
+emx/node_modules/.bin/tsc -p emx             exit 0
+node --test test/emx/ test/emx-mcp-test.js   165 total; 164 passed, 0 failed, 1 skipped
+  skip: optional EMX_NODE_MIN binary was not supplied
+full updated AGENTS ERT                     222 total; 221 expected, 0 unexpected, 1 skipped
+  package-user-dir: shared checkout's elpa (read only)
+  skip: init-base-scroll-with-point
+byte compile, evil nil and t                exit 0 in both modes
+  only lang-agda.el:114 adjust-face / :116 protect-font-lock slot warnings
+node --check                               all 8 tracked JS/MJS files and bin entry passed
+git diff --check                            clean
+```
+
+The ERT suite includes `agent-emx-smoke-test.el`, also run standalone:
+all three real registration modules opened sessions using config-supplied
+fake CLIs, sent a message, displayed and answered an approval, started a
+fake child through stdio MCP, linked the child's view to its parent, and
+listed native past sessions through `sessions/history`. Claude used a
+synthetic JSONL transcript; Codex and dsh used short-lived protocol peers.
+The smoke completed in 1.33 seconds standalone. The final full ERT run
+completed in 26.87 seconds; the Node suite in 12.36 seconds.
+
+The additional project-PATH regression simulates two host roots locally:
+one can discover and start a project-only dsh profile, the other cannot.
+Parent/child definitions match. A direnv refresh updates only that root's
+MCP clients. This closes the last Lisp profile-discovery dependency before
+removal. Actual SSH/ControlMaster behavior still has the phase-7 real-host
+verification limitation described above.
