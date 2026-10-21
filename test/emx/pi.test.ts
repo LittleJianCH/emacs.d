@@ -69,7 +69,7 @@ test('new Pi sessions explicitly select a filtered default, advertise models and
   assert.ok(!init.argv.includes('--approve'))
   assert.match(init.argv[init.argv.indexOf('-e') + 1], /pi\/emacs-extension.js$/)
   assert.equal(init.socket, daemon.socket); assert.equal(init.session, id)
-  assert.match(init.emx, /emacs.d-pi\/bin\/emx$/)
+  assert.equal(init.emx, fileURLToPath(new URL('../../bin/emx', import.meta.url)))
   assert.deepEqual(attached.capabilities.models.map((m: any) => m.id), ['opencode-go/kimi-k3', 'opencode-go/glm-5.3-flash'])
   assert.deepEqual(attached.capabilities.models[1].efforts, ['low', 'high', 'max'])
   assert.deepEqual(attached.capabilities.modes, ['plan', 'ask', 'edits', 'auto', 'full'])
@@ -229,6 +229,10 @@ test('resume uses --session; fork uses --fork and ephemeral children keep their 
   let from = peer.notifications.length
   await peer.request('session/interrupt', { id: child }); await idle(child, from)
   peer.notify('editor/tools', { tools: [], readOnly: [] })
+  // The notification is asynchronous; send only once the daemon holds the new set.
+  const hasContext = () => session.editorTools().tools.some((tool) => tool.name === 'context')
+  for (let i = 0; i < 100 && hasContext(); i++) await new Promise((r) => setTimeout(r, 20))
+  assert.ok(!hasContext())
   from = peer.notifications.length
   await peer.request('session/send', { id: child, text: 'child' }); await idle(child, from)
   assert.equal((await requests()).filter((r) => r.session === child && r.type === 'get_available_models').length, 1)
