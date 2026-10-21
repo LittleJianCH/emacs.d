@@ -72,15 +72,15 @@ test('descriptions and summary include only enabled and available profiles and f
   const env = { PATH: '' }
   const description = (enabled?: string[]) => definitions(c, enabled, env).find((t) => t.name === 'session_start')!.description
   assert.match(description(), /\n  Claude, Codex, DeepSeek and Pi sessions can fork\.\n/)
-  c.agents.dsh.executable = '/does/not/exist'
+  c.agents.pi.executable = '/does/not/exist'
   const start = description(), summary = startSummary(c, undefined, env)
-  for (const text of [start, summary]) assert.doesNotMatch(text, /coder-flash|explorer-flash|DeepSeek|\{forkAgents\}/)
-  assert.match(start, /\n  Claude, Codex and Pi sessions can fork\.\n/)
+  for (const text of [start, summary]) assert.doesNotMatch(text, /coder-flash|explorer-flash|\bPi\b|\{forkAgents\}/)
+  assert.match(start, /\n  Claude, Codex and DeepSeek sessions can fork\.\n/)
   assert.equal(summary, '- Subagent profiles here, cheapest first: explorer (low); coder (medium); reviewer, generalist (high); expert (premium).  session_start describes each.')
   assert.match(description(['codex']), /\n  Codex sessions can fork\.\n/)
-  assert.doesNotMatch(description(['dsh']), /sessions can fork|\{forkAgents\}/)
+  assert.doesNotMatch(description(['pi']), /sessions can fork|\{forkAgents\}/)
   c.agents.claude.executable = c.agents.codex.executable = '/does/not/exist'
-  c.agents.pi.executable = '/does/not/exist'
+  c.agents.dsh.executable = '/does/not/exist'
   assert.doesNotMatch(description(), /sessions can fork|\{forkAgents\}/)
   assert.equal(startSummary(c, undefined, env), '')
   assert.equal(startSummary(defaults(), [], env), '')

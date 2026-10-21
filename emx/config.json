@@ -41,8 +41,8 @@
   },
   "profiles": {
     "coder-flash": {
-      "agent": "dsh",
-      "model": "deepseek-official/deepseek-flash",
+      "agent": "pi",
+      "model": "opencode-go/deepseek-v4.1-flash",
       "mode": "auto",
       "cost": "minimal",
       "description": "Implementation or long runs with a clear goal and verification: writes code and tests to a clear specification."
@@ -55,8 +55,8 @@
       "description": "Bounded investigations needing a few reads: finds a definition, checks a fact in a few files or docs.  Doesn't edit.  Its price rises fivefold once its context passes 100K tokens, so not for long reading."
     },
     "explorer-flash": {
-      "agent": "dsh",
-      "model": "deepseek-official/deepseek-flash",
+      "agent": "pi",
+      "model": "opencode-go/deepseek-v4.1-flash",
       "mode": "ask",
       "cost": "minimal",
       "description": "Investigations where the question is simple but the reading is long: many or large files, logs, docs.  Doesn't edit."

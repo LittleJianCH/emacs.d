@@ -114,10 +114,10 @@ between, newest first, noting what was left out.
 The model picks a profile, not a free harness and model pair: harness and model
 don't combine freely, model lists come from running processes, and a profile
 carries the permission mode, cost and confirmation the user set.
-`profiles` defaults to `coder-flash` (dsh, DeepSeek flash, auto),
-`explorer` (Claude haiku, plan; short, quick questions), `explorer-flash` (dsh,
-DeepSeek flash, ask: dsh's read-only preset; simple questions that need long
-reading), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
+`profiles` defaults to `coder-flash` (Pi, OpenCode Go DeepSeek V4.1 flash,
+auto), `explorer` (Claude haiku, plan; short, quick questions), `explorer-flash`
+(Pi, OpenCode Go DeepSeek V4.1 flash, ask: reads pass, commands and edits ask;
+simple questions that need long reading), `coder` (Codex gpt-6.1-sol, auto), `reviewer`
 (Codex gpt-6-astra, plan), `generalist` (Claude Opus, auto) and `expert`
 (Claude Fable, plan, confirmed by the user each time: a fork only reaches the
 parent's own model); the tool description lists those whose agent is enabled
