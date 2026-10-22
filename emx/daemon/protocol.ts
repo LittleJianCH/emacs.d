@@ -9,7 +9,7 @@
 // labels carry a kind that Emacs maps to its own (Chinese) text; agent
 // text (replies, tool output, questions an agent asks) is passed through.
 
-import type { ReportParams, UsageRecord, QuotaReading } from '../usage/types.ts'
+import type { ReportParams, UsageRecord, QuotaReading, QuotaAvailability } from '../usage/types.ts'
 import type { UsageConfig, UsageService } from '../usage/service.ts'
 
 /** A session's id, assigned by the daemon. */
@@ -289,6 +289,8 @@ export interface CollabProfiles {
       disabledBy: string[]
       /** Runtime availability, independent of the disabled flag. */
       available: boolean
+      /** Account evidence; unknown/external states do not exclude a candidate. */
+      availability?: QuotaAvailability
       unavailable?: string
       strained?: string
       quotaSkip: number

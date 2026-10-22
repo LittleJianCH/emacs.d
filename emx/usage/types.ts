@@ -23,7 +23,15 @@ export interface UsageWindow {
   history?: number[][]
   [key: string]: any
 }
+/** Sanitized evidence from an asynchronous account/quota probe. */
+export interface QuotaAvailability {
+  state: 'available' | 'unavailable' | 'unknown' | 'external'
+  reason?: 'unauthenticated' | 'unsupported-subscription' | 'probe-failed' | 'not-checked' | 'different-environment'
+  checkedAt?: number
+}
 export interface QuotaReading {
+  /** Probe evidence is runtime-only; it is not restored from stored quotas. */
+  availability?: QuotaAvailability
   agent: string
   host?: string | null
   windows?: UsageWindow[]

@@ -125,7 +125,7 @@ export interface CollabHost {
   config(): Config
   hub?(caller: { id: string, root: string }, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
   environment?(root: string): NodeJS.ProcessEnv
-  usage?: Pick<UsageService, 'quotas'>
+  usage?: Pick<UsageService, 'quotas'> & Partial<Pick<UsageService, 'candidateAvailability'>>
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
   close(session: Session): Promise<void>
@@ -403,11 +403,17 @@ export class Collaboration {
   }
   #candidateStatus(name: string, candidate: ProfileCandidate, env: NodeJS.ProcessEnv): Omit<CollabProfiles['profiles'][number]['candidates'][number], 'agent' | 'model' | 'effort'> {
     const { agent } = candidate
-    const unavailable = candidateUnavailable(this.config, candidate, this.enabled, env)
+    const availability = this.host.usage?.candidateAvailability?.(agent, agentExecutable(this.config, agent, env), env)
+    const accountUnavailable = availability?.state === 'unavailable'
+      ? availability.reason === 'unauthenticated' ? 'Claude is not logged in'
+        : 'The current Claude subscription does not support Claude Code'
+      : undefined
+    const unavailable = candidateUnavailable(this.config, candidate, this.enabled, env) ?? accountUnavailable
     const disabledBy = candidateDisabledBy(this.config, name, candidate)
     const quotaSkip = this.config.agents[agent].quotaSkip ?? this.config.collab.quotaSkip
     return { disabled: disabledBy.length > 0, disabledBy, available: !unavailable,
-      unavailable, strained: this.#strain(candidate, quotaSkip), quotaSkip }
+      ...(availability ? {availability} : {}), unavailable,
+      strained: availability && availability.state !== 'available' ? undefined : this.#strain(candidate, quotaSkip), quotaSkip }
   }
   profiles(overridden: string[] = [], root?: string): CollabProfiles {
     const env = this.#environment(root)

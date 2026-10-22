@@ -43,11 +43,12 @@
 // since (start of the readings the rate comes from)}.
 
 import * as fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import * as childProcess from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import type { UsageRecord, QuotaReading, QuotaEntry, UsageWindow, ReportParams } from './types.ts';
+import type { UsageRecord, QuotaReading, QuotaEntry, QuotaAvailability, UsageWindow, ReportParams } from './types.ts';
 
 type Json = Record<string, any>;
 type Spawn = typeof childProcess.spawn;
@@ -188,6 +189,11 @@ function mergeQuota(quotas: QuotaEntry[], reading: QuotaReading, now: number) {
   const host = reading.host ?? null;
   const index = quotas.findIndex((q) => q.agent === reading.agent && (q.host ?? null) === host);
   const entry: QuotaEntry = index >= 0 ? { ...quotas[index] } : { agent: reading.agent, host, windows: [] };
+  // A confirmed logout or provider switch invalidates the old account's quota.
+  if (reading.availability && ['unavailable', 'external'].includes(reading.availability.state)) {
+    entry.windows = [];
+    for (const key of ['balance', 'plan', 'credits']) delete entry[key];
+  }
   for (const key of ['windows', 'balance', 'plan', 'title', 'credits']) {
     const value = reading[key];
     if (value == null) continue;
@@ -560,8 +566,8 @@ function converse(spawn: Spawn, command: string[], steps: Json[], timeout = POLL
 }
 
 // Run COMMAND to its end; resolve with its stdout.
-function capture(spawn: Spawn, command: string[], timeout = POLL_TIMEOUT): Promise<string> {
-  return new Promise<any>((resolve, reject) => {
+function captureResult(spawn: Spawn, command: string[], timeout = POLL_TIMEOUT): Promise<{out: string, code: number | null}> {
+  return new Promise((resolve, reject) => {
     const child = start(spawn, command, ['ignore', 'pipe', 'ignore']);
     let out = '';
     const timer = setTimeout(() => { terminate(child); reject(new Error('timed out')); }, timeout * 1000);
@@ -569,10 +575,44 @@ function capture(spawn: Spawn, command: string[], timeout = POLL_TIMEOUT): Promi
     child.on('error', (err) => { clearTimeout(timer); reject(err); });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve(out);
-      else reject(new Error(`exit ${code}`));
+      resolve({out, code});
     });
   });
+}
+
+async function capture(spawn: Spawn, command: string[], timeout = POLL_TIMEOUT): Promise<string> {
+  const {out, code} = await captureResult(spawn, command, timeout);
+  if (code !== 0) throw new Error(`exit ${code}`);
+  return out;
+}
+
+// Check presence only; never retain or publish authentication values.
+function externalClaudeEnvironment(env: NodeJS.ProcessEnv) {
+  return Boolean(env.ANTHROPIC_BASE_URL || env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN
+    || ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
+      .some((key) => /^(1|true)$/i.test(env[key] ?? '')));
+}
+
+// Resolve the actual file selected by PATH, including configured symlinks.
+function executableIdentity(command: string, env: NodeJS.ProcessEnv): string | undefined {
+  const candidates = path.isAbsolute(command) || command.includes(path.sep)
+    ? [command] : (env.PATH ?? '').split(path.delimiter).map((dir) => path.join(dir, command));
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return fs.realpathSync(candidate);
+    } catch { /* Try the next PATH entry. */ }
+  }
+}
+
+// These variables can select a different account even for the same installation.
+const CLAUDE_ACCOUNT_ENV = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'];
+
+function claudeAccountIdentity(env: NodeJS.ProcessEnv): string {
+  // Keep only a fingerprint; credential values never enter the evidence cache.
+  return createHash('sha256').update(JSON.stringify(CLAUDE_ACCOUNT_ENV.map((key) => env[key]))).digest('hex');
 }
 
 // OpenCode Go's undocumented usage endpoint (verified 2026-10-21).
@@ -597,11 +637,42 @@ function piReading(body: Json): QuotaReading {
 
 const FETCHERS: Record<string, Fetcher> = {
   async claude(command, { spawn, now }) {
-    const out = await capture(spawn, [...command, '-p', '/usage', '--output-format', 'json',
-                                      '--no-session-persistence']);
-    const windows = parseClaudeUsage(JSON.parse(out).result, now());
-    if (!windows.length) throw new Error('no usage in /usage');
-    return { agent: 'claude', host: null, windows };
+    const reading = (state: QuotaAvailability['state'], reason?: QuotaAvailability['reason'],
+                     windows: UsageWindow[] = []): QuotaReading => ({
+      agent: 'claude', host: null, windows, availability: {state, ...(reason ? {reason} : {}), checkedAt: now()},
+    });
+    let auth: Json | undefined;
+    try {
+      // Claude emits useful status JSON with exit 1 when signed out.
+      const status = await captureResult(spawn, [...command, 'auth', 'status', '--json']);
+      if (status.code === 0 || status.code === 1) {
+        const value = JSON.parse(status.out);
+        if (value && typeof value.loggedIn === 'boolean') auth = value;
+      }
+    } catch { /* Older CLIs may not support status; quota can still provide evidence. */ }
+    if (externalClaudeEnvironment(process.env) || auth?.authMethod === 'api_key'
+      || (typeof auth?.apiProvider === 'string' && auth.apiProvider !== 'firstParty')) {
+      return reading('external');
+    }
+    if (auth?.loggedIn === false) return reading('unavailable', 'unauthenticated');
+    try {
+      const {out, code} = await captureResult(spawn, [...command, '-p', '/usage', '--output-format', 'json',
+                                                    '--no-session-persistence']);
+      const body = JSON.parse(out);
+      const result = typeof body?.result === 'string' ? body.result.trim() : '';
+      // Only explicit account responses exclude candidates. HTTP codes alone do not.
+      if (body?.error?.type === 'authentication_error' || /^Not logged in[.!]?(?: Run .*)?$/i.test(result)) {
+        return reading('unavailable', 'unauthenticated');
+      }
+      if (auth?.authMethod === 'claude.ai' && (body?.error?.type === 'unsupported_subscription'
+        || /^Usage is only available for subscription (?:plans|users)\.?$/i.test(result))) {
+        // Subscription-only quota is not an eligibility test for unknown API routes.
+        return reading('unavailable', 'unsupported-subscription');
+      }
+      const windows = parseClaudeUsage(result, now());
+      if (code === 0 && !body?.is_error && windows.length) return reading('available', undefined, windows);
+    } catch { /* Do not log raw CLI output or JSON parser excerpts. */ }
+    throw new Error('Claude usage unavailable');
   },
   async codex(command, { spawn }) {
     const result = await converse(spawn, [...command, 'app-server'], [
@@ -675,6 +746,10 @@ class UsageService {
   watermarks: Record<string, number> = {};
   watermarkFile!: string;
   quotas: QuotaEntry[] = [];
+  // Runtime evidence is deliberately not restored from the on-disk quota cache.
+  #availability = new Map<string, {
+    command: string, executable?: string, account: string, status: QuotaAvailability,
+  }>();
   // OPTIONS: send (message -> void), now (() -> epoch s), spawn, fetchers,
   // log.
   constructor(options: Options = {}) {
@@ -721,7 +796,16 @@ class UsageService {
     this.timer = null;
     if (params.agents) this.agents = params.agents;
     if (params.pollInterval !== undefined) this.pollInterval = params.pollInterval;
-    if (params.pollers) this.pollers = params.pollers;
+    if (params.pollers) {
+      for (const source of Object.keys(this.pollers)) {
+        if (JSON.stringify(params.pollers[source]?.command) !== JSON.stringify(this.pollers[source].command)) {
+          this.#availability.delete(source);
+          this.failures[source] = 0;
+          this.retryAt[source] = 0;
+        }
+      }
+      this.pollers = params.pollers;
+    }
     if (this.pollInterval > 0 && Object.keys(this.pollers).length) {
       this.timer = setInterval(() => { void this.pollAll(false); }, Math.min(this.pollInterval, 60) * 1000);
       this.timer.unref();
@@ -732,6 +816,7 @@ class UsageService {
 
   stop() {
     this.generation++;
+    this.#availability.clear();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     killChildren();
@@ -819,6 +904,21 @@ class UsageService {
     return {};
   }
 
+  /** Cached evidence only: catalog reads and selection never spawn a probe. */
+  candidateAvailability(source: string, executable: string, env: NodeJS.ProcessEnv = process.env): QuotaAvailability | undefined {
+    if (source !== 'claude') return;
+    if (externalClaudeEnvironment(env)) return {state: 'external'};
+    const cached = this.#availability.get(source);
+    // Compare with the probed account, not a possibly changed host environment.
+    if (claudeAccountIdentity(env) !== (cached?.account ?? claudeAccountIdentity(process.env))) {
+      return {state: 'unknown', reason: 'different-environment'};
+    }
+    const command = this.pollers[source]?.command;
+    if (cached?.executable && cached.command === JSON.stringify(command)
+      && executableIdentity(executable, env) === cached.executable) return cached.status;
+    return {state: 'unknown', reason: 'not-checked'};
+  }
+
   // The latest reading of SOURCE on this machine.
   latest(source: string) {
     const entry = this.loadQuotas().find((q) => q.agent === source && !q.host);
@@ -834,19 +934,43 @@ class UsageService {
     const now = this.now();
     const latest = this.latest(source);
     if (!force) {
-      if (latest != null && now - latest < this.pollInterval) return;
+      // A historical quota must not suppress the first current auth check.
+      const needsAuth = source === 'claude' && this.fetchers[source] === FETCHERS.claude
+        && !this.#availability.has(source);
+      if (!needsAuth && latest != null && now - latest < this.pollInterval) return;
       if (this.retryAt[source] && now < this.retryAt[source]) return;
     }
     const generation = this.generation;
+    const command = this.pollers[source]?.command;
+    if (!command) return;
+    const identity = JSON.stringify(command);
+    const evidence = {
+      command: identity, executable: executableIdentity(command[0], process.env),
+      account: claudeAccountIdentity(process.env),
+    };
+    const current = () => generation === this.generation && identity === JSON.stringify(this.pollers[source]?.command);
+    // A multi-step fetcher must not start another child after stop/reconfigure.
+    const spawn = ((...args: Parameters<Spawn>) => {
+      if (!current()) throw new Error('quota poll cancelled');
+      return this.spawn(...args);
+    }) as Spawn;
     this.busy.add(source);
     try {
-      const reading = await this.fetchers[source](this.pollers[source].command,
-                                                  { spawn: this.spawn, now: this.now });
-      if (generation !== this.generation) return;
+      const reading = await this.fetchers[source](command,
+                                                  { spawn, now: this.now });
+      if (generation !== this.generation || identity !== JSON.stringify(this.pollers[source]?.command)) return;
+      if (reading.availability) this.#availability.set(source, {...evidence, status: reading.availability});
       this.failures[source] = 0;
       this.retryAt[source] = 0;
       this.quota(reading);
     } catch (err: any) {
+      if (generation !== this.generation || identity !== JSON.stringify(this.pollers[source]?.command)) return;
+      if (source === 'claude') {
+        this.#availability.set(source, {...evidence, status: {
+          state: 'unknown', reason: 'probe-failed', checkedAt: this.now(),
+        }});
+        this.send({method: 'changed', params: {}});
+      }
       const failures = (this.failures[source] || 0) + 1;
       this.failures[source] = failures;
       this.retryAt[source] = this.now() + Math.min(3600, this.pollInterval * 2 ** failures);

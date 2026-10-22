@@ -207,15 +207,34 @@ When both indices are nil, append a candidate."
 
 (defun agent-profiles--status (candidate profile-disabled)
   "Return CANDIDATE's status, respecting PROFILE-DISABLED."
-  (cond ((or profile-disabled (eq (plist-get candidate :disabled) t))
-         (let ((entries (append (plist-get candidate :disabledBy) nil)))
-           (concat "已停用" (when entries
-                              (format "（%s）" (string-join entries "、"))))))
-        ((not (eq (plist-get candidate :available) t))
-         (concat "不可用：" (or (plist-get candidate :unavailable) "原因未知")))
-        ((plist-get candidate :strained)
-         (concat "余量紧张：" (plist-get candidate :strained)))
-        (t "可用")))
+  (let* ((availability (plist-get candidate :availability))
+         (state (or (plist-get availability :state)
+                    (when (equal (plist-get candidate :agent) "claude")
+                      "unknown")))
+         (reason (plist-get availability :reason)))
+    (cond ((or profile-disabled (eq (plist-get candidate :disabled) t))
+           (let ((entries (append (plist-get candidate :disabledBy) nil)))
+             (concat "已停用" (when entries
+                                (format "（%s）" (string-join entries "、"))))))
+          ((not (eq (plist-get candidate :available) t))
+           (concat "不可用："
+                   (if (equal state "unavailable")
+                       (pcase reason
+                         ("unauthenticated" "未登录")
+                         ("unsupported-subscription" "当前订阅不支持 Claude Code")
+                         (_ (or (plist-get candidate :unavailable) "原因未知")))
+                     (or (plist-get candidate :unavailable) "原因未知"))))
+          ((equal state "unknown")
+           (concat "未确认："
+                   (pcase reason
+                     ("probe-failed" "查询失败")
+                     ("different-environment" "项目凭据环境不同")
+                     (_ "尚未查询"))))
+          ((equal state "external") "API／外部提供商（订阅未核验）")
+          ((plist-get candidate :strained)
+           (concat "余量紧张：" (plist-get candidate :strained)))
+          ((equal state "available") "可用（额度已核验）")
+          (t "可用"))))
 
 (defun agent-profiles--threshold-label (threshold)
   "Format the used quota fraction THRESHOLD for display."
@@ -431,7 +450,14 @@ When both indices are nil, append a candidate."
 			  (face (cond (disabled 'agent-session-dim)
 				      ((not (eq (plist-get candidate :available) t))
                                        'agent-session-error)
-				      ((plist-get candidate :strained) 'warning)
+				      ((or (plist-get candidate :strained)
+                                           (member (plist-get
+                                                    (or (plist-get candidate :availability)
+                                                        (when (equal agent "claude")
+                                                          '(:state "unknown")))
+                                                    :state)
+                                                   '("unknown" "external")))
+                                       'warning)
 				      (t 'agent-session-ok)))
 			  (cells (list
 				  (if (= index 0)

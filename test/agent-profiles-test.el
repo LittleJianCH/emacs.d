@@ -109,6 +109,61 @@
          (agent-profiles--describe))
        (should (equal description "Review work"))))))
 
+(ert-deftest agent-profiles-test-quota-availability-and-recovery ()
+  (agent-profiles-test--with-page
+    (let* ((candidates (plist-get
+                        (aref (plist-get agent-profiles--snapshot :profiles) 0)
+                        :candidates))
+           (candidate (aref candidates 1)))
+      ;; Reuse one row to cover recovery without retaining old text or faces.
+      (dolist (case '(("unavailable" "unauthenticated" nil
+                      "不可用：未登录" agent-session-error)
+                     ("unavailable" "unsupported-subscription" nil
+                      "不可用：当前订阅不支持 Claude Code" agent-session-error)
+                     ("unknown" "probe-failed" nil
+                      "未确认：查询失败" warning)
+                     ("unknown" "not-checked" nil
+                      "未确认：尚未查询" warning)
+                     ("unknown" "different-environment" nil
+                      "未确认：项目凭据环境不同" warning)
+                     ("external" nil nil
+                      "API／外部提供商（订阅未核验）" warning)
+                     ("available" nil nil
+                      "可用（额度已核验）" agent-session-ok)
+                     ("available" nil "5h quota 100% used"
+                      "余量紧张：5h quota 100% used" warning)
+                     ("unavailable" "unauthenticated" nil
+                      "不可用：未登录" agent-session-error)
+                     ("available" nil nil
+                      "可用（额度已核验）" agent-session-ok)))
+        (pcase-let ((`(,state ,reason ,strained ,label ,face) case))
+          (setf (plist-get candidate :available)
+                (if (equal state "unavailable") :false t)
+                (plist-get candidate :availability)
+                (list :state state :reason reason)
+                (plist-get candidate :strained) strained)
+          (aset candidates 1 candidate)
+          (agent-profiles--render)
+          (agent-profiles--goto '(candidate "coder" 1))
+          (let ((status (nth 5 (plist-get (agent-profiles--row) :cells))))
+            (should (equal status label))
+            (should (eq (get-text-property 0 'face status) face)))))
+      ;; A daemon without probe evidence must not imply a verified account.
+      (setf (plist-get candidate :availability) nil)
+      (agent-profiles--render)
+      (agent-profiles--goto '(candidate "coder" 1))
+      (let ((status (nth 5 (plist-get (agent-profiles--row) :cells))))
+        (should (equal status "未确认：尚未查询"))
+        (should (eq (get-text-property 0 'face status) 'warning)))
+      ;; Explicitly disabled candidates keep their existing precedence.
+      (setf (plist-get candidate :disabled) t
+            (plist-get candidate :disabledBy) ["coder:claude/sonnet"])
+      (agent-profiles--render)
+      (agent-profiles--goto '(candidate "coder" 1))
+      (let ((status (nth 5 (plist-get (agent-profiles--row) :cells))))
+        (should (equal status "已停用（coder:claude/sonnet）"))
+        (should (eq (get-text-property 0 'face status) 'agent-session-dim))))))
+
 (ert-deftest agent-profiles-test-pixel-columns-and-cjk ()
   (agent-profiles-test--with-page
    (setf (plist-get (aref (plist-get agent-profiles--snapshot :profiles) 1) :name)

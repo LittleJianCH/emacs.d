@@ -3,7 +3,7 @@
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 const source = process.argv[2]
-if (source !== 'pi' && process.argv[3] && !process.argv[3].startsWith('-') && process.argv[3] !== 'app-server') {
+if (source !== 'pi' && process.argv[3] && !process.argv[3].startsWith('-') && process.argv[3] !== 'app-server' && process.argv[3] !== 'auth') {
   appendFileSync(process.argv[3], source + '\n')
 }
 if (source === 'pi') {
@@ -12,7 +12,9 @@ if (source === 'pi') {
   }
   process.stdout.write('  fake-go-key\n')
 } else if (source === 'claude') {
-  console.log(JSON.stringify({result: 'Current session: 25% used'}))
+  const args = process.argv.slice(process.argv.indexOf('claude') + 1)
+  if (args.includes('auth')) console.log(JSON.stringify({loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty'}))
+  else console.log(JSON.stringify({result: 'Current session: 25% used'}))
 } else {
   createInterface({input: process.stdin}).on('line', (line) => {
     const message = JSON.parse(line)
