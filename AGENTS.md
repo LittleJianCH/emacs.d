@@ -37,6 +37,7 @@ lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in in
 lisp/agent/              shared agent support (see below)
   agent-emx.el          required daemon client, session views and editor tools
   agent-emx-remote.el   host runtime install, -L transport, config and usage relay
+  agent-profiles.el     standalone subagent profile and quota threshold controls
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       enabled-agent registration (all use :backend emx)
     pi/                 thin Pi RPC approval and direct MCP extension
@@ -66,6 +67,7 @@ test/lang-test.el           ERT suite for the language modules (toolchains mocke
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
+test/agent-profiles-test.el ERT suite for profile controls and quota thresholds
 test/agent-emx-test.el      ERT suite for the emx backend (starts a daemon on a temp var dir)
 test/agent-emx-remote-test.el ERT host simulation with stubbed tramp/SSH
 test/agent-emx-smoke-test.el Batch end-to-end fake Claude/Codex/dsh cut-over smoke
@@ -154,6 +156,11 @@ var/                     runtime state (history, backups, pasted images...); git
   forward acknowledged host usage, plus one-time old-ledger conversion.
   `C-c a u` opens the report; `agent-usage-clear` stays unbound and confirmed.
   `agent-usage-restart-service` reconnects without stopping agents.
+- `agent-profiles.el` — `C-c a p` opens a standalone local daemon profile page.
+  It reads `collab/profiles` and writes the user overlay through `config/set`:
+  whole-profile and candidate switches, global and per-agent quota thresholds,
+  and a shortcut allowing an agent to exhaust its quota. Successful writes
+  refresh the page; `g` refreshes manually and `q` quits.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
   An `elisp` block runs the agent's Lisp at point on every redraw (resize, theme change,
@@ -212,7 +219,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
-      -l test/agent-usage-test.el \
+      -l test/agent-usage-test.el -l test/agent-profiles-test.el \
       -l test/agent-emx-test.el -l test/agent-emx-config-test.el \
       -l test/agent-emx-collab-test.el -l test/agent-emx-remote-test.el \
       -l test/agent-emx-smoke-test.el \
