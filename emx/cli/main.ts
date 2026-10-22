@@ -52,6 +52,10 @@ const MCP_BODY = `
 - Atomic review (原子审查): follow the emacs-atomic-review skill.
 - @handles name other agent sessions in this Emacs: sessions, session_read, session_ask.
 - After editing Lisp or emx/ code in this Emacs configuration, call reload.
+- When you finish a user-requested task, call alert once before your final reply,
+  with a short Chinese reason saying what is complete. Do not wait for the user
+  to ask. Do not alert for progress updates, brief conversational replies, or a
+  subagent's completion report to its parent.
 - Other editor operations: eval.
 - The user reads Chinese: write page content and notifications in Chinese.`
 
