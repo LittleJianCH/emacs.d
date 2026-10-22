@@ -12,6 +12,7 @@
 ;;   C-c a f  input with current file ref    C-c a r  input with region code block
 ;;   C-c a k  end session                    C-c a v  back to agent's last page
 ;;   C-c a u  usage and quota of the agents
+;;   C-x p a  new session in the project; also `a' after C-x p p
 ;; In a session buffer: C-c C-c sends the input area, RET inserts a newline,
 ;; M-p / M-n history, TAB completes (/ commands, @ files);
 ;; C-c C-k clears input or interrupts, C-c C-o settings menu, C-c C-y / C-c C-n
@@ -31,6 +32,7 @@
   :config
   (keymap-global-set "C-c a" agent-session-command-map)
   (with-eval-after-load 'project
+    (keymap-set project-prefix-map "a" #'agent-session-create)
     (add-to-list 'project-switch-commands '(agent-session-create "Agent" ?a) t)))
 
 (defvar my/agents)
