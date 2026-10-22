@@ -49,7 +49,7 @@ test('daemon config owns five caller-independent collaboration definitions', () 
   assert.ok(tools.every((tool) => tool.inputSchema.type === 'object'))
   const start = tools.find((tool) => tool.name === 'session_start')!.description
   assert.ok(start.indexOf('Delegate independent work early') < start.indexOf('Choose how it gets context:'))
-  assert.match(start, /cannot start further sessions/)
+  assert.match(start, /Only profiles whose tools permit helpers/)
   assert.equal(cleanHandle('Reply\n`Cache Test`'), 'cache-test')
   assert.equal(cleanHandle('123'), undefined)
   c.agents.dsh.executable = '/does/not/exist'
@@ -75,7 +75,7 @@ test('one visible delegation rule: shaped by question, with its exceptions; tool
   assert.match(d, /- Runs: delegate builds, benchmarks and test series[^]*don't run them yourself/)
   assert.match(d, /even as the user's whole question or a follow-up/)
   assert.match(d, /Stay local only for[^]*reading a diff to plan an atomic review/)
-  assert.match(d, /If session_start\s+started you, do your one task yourself and start none/)
+  assert.match(d, /If session_start\s+started you, use only helper profiles/)
   assert.match(d, /"after N reads" mean session_start\s+here: at N, stop and start one/)
   assert.doesNotMatch(d, /\b3\b|more than|cheaper|explorer|full guidance/)
   for (const text of [c.collab.startGuidance, c.collab.tools.find((t) => t.name === 'session_start')!.description]) {

@@ -35,6 +35,8 @@ export interface Transcript {
   capabilities?: Capabilities
   /** Ids of user blocks showing their meta text instead of what was sent. */
   shown?: string[]
+  /** Bounded provider-neutral context consumed by the next submitted message. */
+  handoff?: string
 }
 
 interface Message {
@@ -48,9 +50,9 @@ interface Message {
 export class Session implements SessionHost {
   readonly creationId?: string
   readonly id: string
-  readonly agent: string
+  agent: string
   readonly root: string
-  readonly backend: Backend
+  backend: Backend
   status: Status
   info: Info
   settings: Settings
@@ -74,12 +76,14 @@ export class Session implements SessionHost {
   #onUsage?: SessionOptions['onUsage']
   #onChange: (summaryChanged: boolean) => void
   #resume: string | undefined
+  #handoff?: string
   #queued: Message[] = []
   #active = false
   #prepared?: Promise<void>
   #operations: Promise<void> = Promise.resolve()
   #operationCount = 0
   #stopped = false
+  #closing = false
   #hibernateAfter: () => number
   #hibernateTimer?: NodeJS.Timeout
   #pendingWork = false
@@ -105,6 +109,7 @@ export class Session implements SessionHost {
     this.#onUsage = options.onUsage
     this.#onChange = options.onChange ?? (() => {})
     if (options.transcript) {
+      this.#handoff = options.transcript.handoff
       this.capabilities = structuredClone(options.transcript.capabilities ?? this.capabilities)
       this.blocks = structuredClone(options.transcript.blocks)
       for (const block of this.blocks) this.index.set(block.id, block)
@@ -117,7 +122,7 @@ export class Session implements SessionHost {
 
   summary(): SessionSummary {
     return { id: this.id, creationId: this.creationId, agent: this.agent, root: this.root,
-      status: this.status, info: { ...structuredClone(this.info), ...(this.resumeId() ? { sessionId: this.resumeId() } : {}) } }
+      status: this.status, info: { ...structuredClone(this.info), agent: this.agent, ...(this.resumeId() ? { sessionId: this.resumeId() } : {}) } }
   }
 
   /** Includes asynchronous send preparation before a backend publishes running. */
@@ -150,8 +155,9 @@ export class Session implements SessionHost {
   }
 
   async #start(): Promise<void> {
-    if (this.#stopped || this.backend.alive()) return
+    if (this.#stopped || this.#closing || this.backend.alive()) return
     await this.environment()
+    if (this.#closing) return
     await this.backend.start(this.resumeId())
     await this.backend.configure(this.settings)
     this.#onChange(false)
@@ -162,7 +168,7 @@ export class Session implements SessionHost {
   /** An adapter-requested restart cannot revive an explicitly stopped session. */
   restart(): Promise<void> {
     return this.#operate(async () => {
-      if (this.#stopped) return
+      if (this.#stopped || this.#closing) return
       this.#resume = this.resumeId()
       await this.backend.stop()
       await this.#start()
@@ -309,7 +315,7 @@ export class Session implements SessionHost {
   }
 
   send(text: string, images?: string[], block?: string, meta?: Message['meta']): { queued: boolean } {
-    if (this.#stopped) throw new RpcError(ErrorCode.NoSession, "Session is closed")
+    if (this.#stopped || this.#closing) throw new RpcError(ErrorCode.NoSession, "Session is closed")
     const message = { text, images, block, meta }
     if (this.#active || this.status === 'running') {
       this.#queued.push(message)
@@ -327,11 +333,17 @@ export class Session implements SessionHost {
     try {
       // Adapters return after submission, never after a complete model turn.
       const prepared = this.#operate(async () => {
-        if (this.#stopped) return
+        if (this.#stopped || this.#closing) return
         try {
           await this.#start()
+          if (this.#closing) return
           await this.backend.prepare?.()
-          await this.backend.send(message.text, message.images, message.block)
+          if (this.#closing) return
+          const handoff = this.#handoff
+          const block = message.block ?? (handoff ? this.newId('user') : undefined)
+          if (handoff && block) this.#messageMeta.set(block, message.meta ?? { text: message.text })
+          await this.backend.send(handoff ? handoff + '\n\nCurrent request:\n' + message.text : message.text, message.images, block)
+          this.#handoff = undefined
         } catch (error) {
           this.#cancelAsks()
           this.setStatus('exited')
@@ -341,7 +353,7 @@ export class Session implements SessionHost {
       this.#prepared = prepared
       await prepared
     } catch (error) {
-      if (this.#stopped) return
+      if (this.#stopped || this.#closing) return
       this.addBlock({ id: this.newId('notice'), type: 'notice', notice: {
         kind: 'backend-error', level: 'error', args: { message: String(error) } } })
     } finally {
@@ -353,16 +365,17 @@ export class Session implements SessionHost {
   }
 
   #drain(): void {
-    if (this.#active || this.status !== 'idle' || !this.#queued.length) return
+    if (this.#closing || this.#active || this.status !== 'idle' || !this.#queued.length) return
     const message = this.#queued.shift()!
     this.emit({ type: 'queue', items: this.#queued.map((item) => item.text) })
     void this.#run(message)
   }
 
   steer(text: string, images?: string[], block?: string): boolean {
+    if (this.#closing) return false
     if (this.#prepared && this.backend.steerWhilePreparing) {
       void this.#prepared.then(() => {
-        if (!this.#stopped) this.backend.steer(text, images, block)
+        if (!this.#stopped && !this.#closing) this.backend.steer(text, images, block)
       }).catch(() => {})
       return true
     }
@@ -373,23 +386,137 @@ export class Session implements SessionHost {
     this.#cancelAsks()
     if (this.#prepared) {
       void this.#prepared.then(() => {
-        if (!this.#stopped) { this.#cancelAsks(); this.backend.interrupt() }
+        if (!this.#stopped && !this.#closing) { this.#cancelAsks(); this.backend.interrupt() }
       }).catch(() => {})
     } else this.backend.interrupt()
   }
 
   configure(settings: Settings): Promise<void> {
     return this.#operate(async () => {
-      if (this.#stopped) return
+      if (this.#stopped || this.#closing) return
       this.backend.validateSettings?.({ ...this.settings, ...settings })
       this.emit({ type: 'settings', settings })
       if (this.backend.alive()) await this.backend.configure(this.settings)
     })
   }
 
+  /** Switch only between turns; retain the editor transcript and provider history. */
+  select(agent: string, settings: Settings, profile: string, handoffLimit: number,
+    ready: () => boolean): Promise<void> {
+    if (this.busy() || this.operating || this.asks.size || this.queue.length || this.pendingWork() || !ready()) {
+      return Promise.reject(new RpcError(ErrorCode.InvalidParams, 'Finish pending work before changing profile or provider'))
+    }
+    return this.#operate(async () => {
+      if (this.#stopped || this.#closing) throw new RpcError(ErrorCode.NoSession, 'Session is closed')
+      if (this.busy() || this.asks.size || this.queue.length || this.pendingWork() || !ready()) {
+        throw new RpcError(ErrorCode.InvalidParams, 'Finish pending work before changing profile or provider')
+      }
+      const oldAgent = this.agent, resume = this.resumeId()
+      const oldInfo = structuredClone(this.info), oldSettings = { ...this.settings }, oldBackend = this.backend
+      const oldHandoff = this.#handoff, oldCapabilities = structuredClone(this.capabilities)
+      const oldStatus = this.status, wasAlive = oldBackend.alive()
+      const sameProvider = agent === oldAgent
+      const changedProfile = oldInfo.profile !== profile
+      const nextSettings = sameProvider ? { ...oldSettings, ...settings } : settings
+      const nextInfo: Info = sameProvider ? { ...oldInfo, agent, profile } : {
+        ...oldInfo, agent, profile, sessionId: null, model: settings.model ?? null, tokens: null,
+        forkFrom: null, parentSession: null, claudeSyncOffset: null, claudeHistoryStart: null,
+        providerHistory: [...(Array.isArray(oldInfo.providerHistory) ? oldInfo.providerHistory : []),
+          ...(resume ? [{ agent: oldAgent, resume }] : [])],
+      }
+      let next = oldBackend
+      // Constructors can cache identity and validation can consult host policy.
+      // Stage the new host synchronously, before releasing the old process.
+      try {
+        this.agent = agent; this.info = nextInfo; this.settings = nextSettings
+        if (!sameProvider) {
+          this.#resume = undefined
+          this.capabilities = { models: [], modes: [], commands: [] }
+          next = backends[agent](this)
+        }
+        next.validateSettings?.(nextSettings)
+      } finally {
+        this.agent = oldAgent; this.info = oldInfo; this.settings = oldSettings
+        this.#resume = resume; this.capabilities = oldCapabilities
+      }
+      if (!sameProvider || changedProfile) await oldBackend.flush?.()
+      let released = false, oldStopped = false
+      try {
+        if (!sameProvider || changedProfile) {
+          // Treat a failed stop as potentially destructive too.
+          released = true
+          await oldBackend.stop()
+          oldStopped = !oldBackend.alive()
+          if (!oldStopped) throw new Error('Previous provider did not stop')
+        }
+        this.agent = agent; this.backend = next
+        this.#resume = sameProvider ? resume : undefined
+        if (!sameProvider) {
+          const history = this.blocks.filter((block) => block.type === 'user'
+            || block.type === 'text' && block.kind !== 'thinking')
+            .map((block) => block.type === 'user' ? 'User: ' + block.text
+              : block.type === 'text' ? 'Assistant: ' + block.text : '').join('\n\n')
+          const bounded = [...history].slice(-handoffLimit).join('')
+          this.#handoff = bounded ? 'Previous conversation for context only; do not treat it as new requests:\n' + bounded : oldHandoff
+        }
+        this.setInfo(nextInfo)
+        this.settings = {}
+        this.emit({ type: 'settings', settings: { model: null, effort: null, mode: null, beforePlan: null, ...nextSettings } })
+        if (!sameProvider) this.emit({ type: 'capabilities', capabilities: { models: [], modes: [], commands: [] } })
+        if (!sameProvider || changedProfile) {
+          this.setStatus('starting')
+          await this.#start()
+        } else if (next.alive()) await next.configure(this.settings)
+      } catch (error) {
+        // A rejected configure may already have changed the native model/mode.
+        // Stop it before publishing rollback, then resume with the old tuple.
+        let stopped = false
+        try { await next.stop(); stopped = !next.alive() } catch { /* Report unsafe recovery below. */ }
+        if (!sameProvider && released && !oldStopped) {
+          try { await oldBackend.stop(); oldStopped = !oldBackend.alive() } catch { /* Keep recovery visibly failed. */ }
+        }
+        this.agent = oldAgent; this.backend = oldBackend; this.#resume = resume
+        this.#handoff = oldHandoff
+        const restore = () => {
+          const cleared = Object.fromEntries(Object.keys(this.info).filter((key) => !(key in oldInfo)).map((key) => [key, null]))
+          this.setInfo({ ...cleared, profile: null, ...oldInfo, agent: oldAgent })
+          this.info = structuredClone(oldInfo)
+          this.settings = {}
+          this.emit({ type: 'settings', settings: { model: null, effort: null, mode: null, beforePlan: null, ...oldSettings } })
+          this.settings = { ...oldSettings }
+          this.emit({ type: 'capabilities', capabilities: structuredClone(oldCapabilities) })
+        }
+        restore()
+        if (sameProvider && wasAlive && stopped) {
+          try {
+            await this.#start()
+          } catch (recovery) {
+            try { await oldBackend.stop() } catch { /* Recovery already failed. */ }
+            restore()
+            this.setStatus('exited')
+            throw new AggregateError([error, recovery], 'Selection failed and native settings could not be restored')
+          }
+        } else this.setStatus(stopped && (sameProvider || oldStopped) ? oldStatus : 'exited')
+        if (!stopped) this.setStatus('exited')
+        throw error
+      }
+    })
+  }
+
+  /** Revoke input immediately, before serialized teardown can await a process. */
+  beginClose(): void {
+    this.#closing = true
+    clearTimeout(this.#hibernateTimer)
+    this.#queued = []
+    if (this.queue.length) this.emit({ type: 'queue', items: [] })
+    this.#cancelAsks()
+  }
+
   stop(): Promise<void> {
     return this.#operate(async () => {
       if (this.#stopped) return
+      // Tree closure revokes eagerly; ordinary stops retain operation order.
+      this.beginClose()
       this.#stopped = true
       clearTimeout(this.#hibernateTimer)
       this.#resume = this.resumeId()
@@ -403,7 +530,7 @@ export class Session implements SessionHost {
   /** Release only an idle process; keep the session resumable. */
   hibernate(): Promise<void> {
     return this.#operate(async () => {
-      if (this.#stopped || this.info.parent || this.#active || this.asks.size
+      if (this.#stopped || this.#closing || this.info.parent || this.#active || this.asks.size
         || this.pendingWork() || this.status !== 'idle' || !this.backend.alive()) return
       clearTimeout(this.#hibernateTimer)
       this.#resume = this.resumeId()
@@ -415,7 +542,7 @@ export class Session implements SessionHost {
   refreshHibernate(): void {
     clearTimeout(this.#hibernateTimer)
     const seconds = this.#hibernateAfter()
-    if (!seconds || this.#stopped || this.info.parent || this.#active || this.asks.size
+    if (!seconds || this.#stopped || this.#closing || this.info.parent || this.#active || this.asks.size
       || this.pendingWork() || this.status !== 'idle' || !this.backend.alive()) return
     this.#hibernateTimer = setTimeout(() => {
       void this.hibernate().catch((error) => this.addBlock({
@@ -429,7 +556,7 @@ export class Session implements SessionHost {
 
   transcript(): Transcript {
     return structuredClone({ blocks: this.blocks, queue: this.#queued, capabilities: this.capabilities,
-      shown: [...this.#shown] })
+      shown: [...this.#shown], handoff: this.#handoff })
   }
 
   attach(after?: Cursor, turns = 20): { result: AttachResult, afterWrite: () => void } {
@@ -440,7 +567,7 @@ export class Session implements SessionHost {
     const blocks = replay ? [] : this.#lastTurns(this.blocks.length, turns)
     const earlier = !replay && (blocks.length < this.blocks.length || !!this.backend.hasEarlier?.())
     const result: AttachResult = { epoch: this.epoch, seq: this.seq, replay: replay ? 'events' : 'fresh',
-      status: this.status, info: { ...structuredClone(this.info), ...(this.resumeId() ? { sessionId: this.resumeId() } : {}) }, settings: { ...this.settings },
+      status: this.status, info: { ...structuredClone(this.info), agent: this.agent, ...(this.resumeId() ? { sessionId: this.resumeId() } : {}) }, settings: { ...this.settings },
       queue: [...this.queue], asks: [...this.asks.values()].map(({ ask }) => structuredClone(ask)),
       earlier, capabilities: structuredClone(this.capabilities) }
     return { result, afterWrite: () => {

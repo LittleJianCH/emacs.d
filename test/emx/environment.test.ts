@@ -72,7 +72,7 @@ console.log(JSON.stringify({PATH: path.resolve(env.bin) + ':' + process.env.PATH
   }
 })
 
-test('host collaboration profiles and tools use the caller root PATH, shared by children', async () => {
+test('host collaboration inherits root PATH while enforcing role-specific MCP tools', async () => {
   const dir = mkdtempSync('/tmp/emx-env-profiles-'), savedEnv = { ...process.env }
   const bin = join(dir, 'bin'), a = join(dir, 'a'), b = join(dir, 'b')
   for (const path of [bin, a, b, join(a, 'bin')]) mkdirSync(path, { recursive: true })
@@ -113,7 +113,16 @@ console.log(JSON.stringify({PATH:(fs.existsSync('disabled')?'/missing':path.join
     await daemon.collab.call(parent, 'session_start', { profile: 'project-worker', prompt: 'fake child' }, new AbortController().signal)
     const child = [...daemon.sessions.values()].find((s) => s.info.parent === parent.id)!
     assert.ok(child)
-    assert.deepEqual(child.editorTools(), parent.editorTools())
+    assert.equal(child.root, parent.root)
+    assert.equal(daemon.collab.projectEnvironment(child.root).PATH,
+      daemon.collab.projectEnvironment(parent.root).PATH)
+    const parentTools = parent.editorTools(), childTools = child.editorTools()
+    assert.deepEqual(childTools.tools, parentTools.tools.filter((tool) =>
+      tool.name !== 'session_start' && tool.name !== 'session_ask'))
+    assert.deepEqual(childTools.readOnly, parentTools.readOnly)
+    await assert.rejects(daemon.collab.call(child, 'session_start',
+      { profile: 'project-worker', prompt: 'not allowed' }, new AbortController().signal),
+    /not allowed|can't start sessions/)
     await assert.rejects(daemon.collab.call(sessions[1], 'session_start', { profile: 'project-worker', prompt: 'unavailable' }, new AbortController().signal), /No candidate available for profile project-worker: DeepSeek fake\/child: unavailable here/)
     writeFileSync(join(a, 'disabled'), '')
     writeFileSync(join(a, '.envrc'), 'changed')

@@ -249,6 +249,22 @@ crash turns unfinished openings into failures. Intentional new opens use
 fresh keys; only transport retries reuse one. Terminal records expire after
 30 days, while active records do not expire.
 
+Top-level conversations may be opened with a profile and no explicit agent.
+The default is `orchestrator`; configured candidate availability and quota
+policy choose the initial backend. The profile is saved in `info.profile`
+and returned in attach, info and session-list events. Explicit legacy
+agent/resume opens retain their backend identity and use orchestrator MCP
+policy when no profile is present.
+
+`session/models` lists the current profile candidates across providers, or
+all enabled provider catalogs with `scope: "all"`. `session/select` validates
+candidate membership, disabled entries and availability. An unrestricted
+selection uses orchestrator capabilities. A provider change keeps the
+daemon session ID and transcript but clears provider-specific resume state
+and hands bounded recent context to a new native conversation. Selection
+requires an idle session with no queued work, asks or pending collaboration.
+`session/configure` cannot bypass profile model validation.
+
 Statuses are `starting`, `idle`, `running`, `disconnected` and `exited`.
 `disconnected` is an editor-side condition for a remote session whose
 transport is down; the agent itself keeps running under its daemon.
@@ -294,7 +310,7 @@ Requests may flow both ways; the contract is `emx/daemon/protocol.ts`.
 | `hello` | `{client, version, agents?, config?, tools?}` | `{daemon, version, capabilities, config, sessions}` |
 | `sessions/list` | `{root?}` | `{sessions}` |
 | `sessions/history` | `{agent, root}` | `{items}` |
-| `session/open` | `{agent, root, settings?, resume?, parent?, handle?, skills?, claude?, codex?}` | `{id}` |
+| `session/open` | `{agent?, profile?, root, settings?, resume?, parent?, handle?, skills?, claude?, codex?}` | `{id}` |
 | `session/attach` | `{id, after?, turns?}` | snapshot (below) |
 | `session/detach` | `{id}` | `{}` |
 | `session/send` | `{id, text, images?, block?, handle?}` | `{queued}` |
@@ -302,6 +318,8 @@ Requests may flow both ways; the contract is `emx/daemon/protocol.ts`.
 | `session/interrupt` | `{id}` | `{}` |
 | `session/context` | `{id, skills}` | `{}` |
 | `session/configure` | `{id, model?, effort?, mode?, beforePlan?}` | `{}` |
+| `session/models` | `{id, scope?: "profile"\|"all"}` | `{profile, scope, models}` |
+| `session/select` | `{id, agent, model, profile?, unrestricted?, effort?, mode?}` | `{id, agent, profile, settings}` |
 | `session/answer` | `{id, ask, choice?, answers?}` | `{stale}` |
 | `session/earlier` | `{id, before, turns?}` | `{earlier}` |
 | `session/stop` | `{id}` | `{}` |
@@ -628,8 +646,8 @@ answer. There are two ask types:
 The first answer wins; a late answer gets `{stale: true}`. An interrupted or
 stopped session cancels its asks.
 
-The daemon builds one sorted, caller-independent read-only set for each
-place: editor methods explicitly audited with `:read-only` (`context`,
+The daemon builds a sorted read-only set from each session's allowed
+profile tools: editor methods explicitly audited with `:read-only` (`context`,
 `buffers`, `read_buffer`, `diagnostics`), collaboration's `sessions` and
 `session_read`, and `config_read` on host daemons. These calls need no
 approval. Claude receives exact comma-separated `mcp__emacs__<name>` entries
@@ -667,9 +685,10 @@ The daemon serves the five collaboration tools directly:
 `sessions`, `session_read`, `session_ask`, `session_start` and
 `session_stop`. Their definitions come from `collab.tools` in configuration;
 `session_start`'s description is extended with `collab.startGuidance` and
-the profiles available at the caller's place. Definitions depend on
-configuration and where the caller runs, never on who is calling: a forked
-session must see exactly its parent's tools to keep its prompt cache.
+the helper profiles allowed by the caller's role and available at its place.
+The session profile controls both advertised MCP tools and daemon-side
+call authorization. Role capability boundaries take precedence over sharing
+prompt caches across different roles.
 
 Profiles are roles with ordered `candidates` (`agent`, optional `model`, `mode`
 and `effort`), a static `cost` tier, `description`, a short `use`, optional
@@ -678,8 +697,9 @@ remain a single candidate; top-level legacy overrides take precedence over an
 inherited candidates array. A role is listed if any candidate's agent is enabled
 by Emacs on `hello` and its executable is runnable in the caller root's
 environment. Lines are `- role: tier cost.  description`, without agents or
-models. Roles are sorted by `profileCost`, preserving configuration order within
-a tier. Quotas and caller identity never alter tool definitions.
+models. Roles are sorted by `profileCost`, preserving configuration order
+within a tier. Quotas do not alter tool definitions; the role's tool and
+delegation policies determine which definitions a session receives.
 
 At each `session_start`, selection skips unavailable candidates and Pi models
 outside `agents.pi.models`, reusing `allowedModel`. It reads the daemon's current
@@ -719,12 +739,13 @@ count, whether it is the caller's own, and its parent and children.
 | `handoff` | a text copy of the parent's conversation, then the task | the profile's |
 | `fork` | the parent's own conversation, up to the `session_start` call | the caller's agent, model and settings |
 
-Only sessions the user opened can start sessions. A child can start no
-further sessions, takes no `session_ask`, and sends none; it does one task
-and reports its final reply. Its mode is capped at the caller's. At most
-`collab.maxActive` children of one parent may be working at once, counting
-pending starts; `collab.confirm` or a profile's `confirm` asks the user
-first. A dsh fork flushes the parent's native log first; every fork requires
+Profiles explicitly grant delegation to named helper profiles. The default
+coder can use coder-flash and explorer-flash; leaf profiles do not receive
+`session_start`. Children take no `session_ask` and send none. Their mode is
+capped at the caller's. Active descendants and pending starts share the
+root's `collab.maxActive` limit. A delegating child waits for helper work and
+results before its own task can complete. `collab.confirm` or a profile's
+`confirm` asks the user first. A dsh fork flushes the parent's native log first; every fork requires
 a live native conversation. Children inherit the caller's skills context.
 
 A handoff is cached per parent turn. Within `collab.handoffLimit`

@@ -1835,7 +1835,9 @@ HELP is the help echo."
      " " (agent-session-status-label session) "  "
      (agent-session--mode-line-control
       (propertize (agent-session-title session) 'face 'agent-session-assistant)
-      #'agent-session-select-agent "切换 agent")
+      #'agent-session-menu "会话配置")
+     (when-let* ((profile (plist-get info :profile)))
+       (concat sep (propertize profile 'face 'agent-session-dim)))
      sep
      (agent-session--mode-line-control (agent-session--model-label session)
                                        #'agent-session-select-model "切换模型（m）")
@@ -2417,29 +2419,37 @@ CANDIDATES is ((VALUE . NOTE) ...)."
                    (concat "  " (propertize note 'face 'completions-annotations)))))))
     (completing-read prompt (mapcar #'car candidates) nil t nil nil default)))
 
+(declare-function agent-session-profile-model-completion "agent-session-profile")
+
+(autoload 'agent-session-profile-select-model "agent-session-profile")
+(autoload 'agent-session-profile-create "agent-session-profile")
+(autoload 'agent-session-select-any-model "agent-session-profile")
+
 (defun agent-session-select-model (&optional model)
   "Switch the model of the current session to MODEL."
   (interactive)
-  (let* ((session (agent-session--this))
-         (models (or (agent-session-backend-models (agent-session-backend session) session)
-                     (user-error "%s 还没有返回模型列表" (agent-session-title session))))
-         (model (or model
-                    (agent-session--completing-read
-                     "模型: "
-                     (mapcar (lambda (m) (cons (plist-get m :id)
-                                               (string-join (delq nil (list (plist-get m :name)
-                                                                            (plist-get m :description)))
-                                                            " · ")))
-                             models)
-                     (agent-session-setting session :model)))))
-    (unless (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
-      (user-error "没有模型 %s" model))
-    (agent-session-configure session :model model)
-    ;; Reset to the default if the new model doesn't support the current effort.
-    (let ((efforts (plist-get (agent-session-model-info session) :efforts))
-          (effort (agent-session-setting session :effort)))
-      (when (and effort efforts (not (member effort efforts)))
-        (agent-session-configure session :effort nil)))))
+  (if (eq (agent-session-backend (agent-session--this)) 'emx)
+      (agent-session-profile-select-model model)
+    (let* ((session (agent-session--this))
+           (models (or (agent-session-backend-models (agent-session-backend session) session)
+                       (user-error "%s 还没有返回模型列表" (agent-session-title session))))
+           (model (or model
+                      (agent-session--completing-read
+                       "模型: "
+                       (mapcar (lambda (m) (cons (plist-get m :id)
+                                                 (string-join (delq nil (list (plist-get m :name)
+                                                                              (plist-get m :description)))
+                                                              " · ")))
+                               models)
+                       (agent-session-setting session :model)))))
+      (unless (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
+        (user-error "没有模型 %s" model))
+      (agent-session-configure session :model model)
+      ;; Reset to the default if the new model doesn't support the current effort.
+      (let ((efforts (plist-get (agent-session-model-info session) :efforts))
+            (effort (agent-session-setting session :effort)))
+        (when (and effort efforts (not (member effort efforts)))
+          (agent-session-configure session :effort nil))))))
 
 (defun agent-session-select-effort (&optional effort)
   "Switch the reasoning effort of the current session to EFFORT."
@@ -2544,10 +2554,9 @@ session carrying over the input draft."
         (agent-session-backend-start (agent-session-backend session) session)))))
 
 (defun agent-session-new ()
-  "Open a new session in the same project with the same agent."
+  "Choose a profile for a new session in the same project."
   (interactive)
-  (let ((session (agent-session--this)))
-    (agent-session-start (agent-session-agent session) t nil (agent-session-root session))))
+  (agent-session-profile-create (agent-session-root (agent-session--this))))
 
 (defun agent-session-resume (&optional agent)
   "Resume a past session of AGENT (default the current one) in this project."
@@ -2676,7 +2685,12 @@ shares a line with the input."
        ((and (string-match "\\`/\\([[:alnum:]-]+\\)[ \t]+\\([^ \t\n]*\\)\\'" text)
              (nth 3 (assoc (match-string 1 text) agent-session-local-commands)))
         (list (+ start (match-beginning 2)) (point)
-              (funcall (nth 3 (assoc (match-string 1 text) agent-session-local-commands)) session)
+              (if (and (equal (match-string 1 text) "model")
+                       (eq (agent-session-backend session) 'emx))
+                  (progn
+                    (require 'agent-session-profile)
+                    (agent-session-profile-model-completion session))
+                (funcall (nth 3 (assoc (match-string 1 text) agent-session-local-commands)) session))
               :exclusive 'no))
        ;; /command at line start
        ((string-match "\\`/[^ \t\n]*\\'" text)
@@ -2730,8 +2744,7 @@ shares a line with the input."
 (transient-define-prefix agent-session-menu ()
   "Session settings (agent, model, effort, permission mode) and actions."
   [["设置"
-    ("a" agent-session-select-agent
-     :description (lambda () (concat "Agent     " (agent-session--menu-value :agent))))
+    ("a" "任意模型（orchestrator 能力）" agent-session-select-any-model)
     ("m" agent-session-select-model
      :description (lambda () (concat "模型      " (agent-session--menu-value :model))))
     ("e" agent-session-select-effort
@@ -2970,8 +2983,9 @@ agent's latest settings; INFO is the initial info plist."
                    :info info
                    :client (and resume (list :resume resume))
                    :settings (or settings
-                                 (copy-sequence
-                                  (alist-get agent agent-session-last-settings))))))
+                                 (unless (plist-get info :profile)
+                                   (copy-sequence
+                                    (alist-get agent agent-session-last-settings)))))))
     ;; A placeholder name until one is made from the topic (see agent-collab.el).
     (agent-session-set-handle session (symbol-name agent))
     (agent-session--setup-buffer session)
@@ -3008,25 +3022,16 @@ agent's latest settings; INFO is the initial info plist."
     buffer)))
 
 ;;;###autoload
-(defun agent-session-create (&optional choose)
-  "Create a session in the current project with the most recently used agent.
-With CHOOSE (prefix arg), choose the agent first.  Within a session, agent,
-model and reasoning effort can be switched any time with /agent or the
-toolbar."
+(defun agent-session-create (&optional _choose)
+  "Choose a daemon profile for a new session in the current project.
+The default profile is orchestrator.  Agent-specific start commands remain
+available for native history and legacy provider entry points."
   (interactive "P")
-  (let ((buffer (agent-session-start
-                 (if (or choose (not (assq agent-session-default-agent agent-session-agents)))
-                     (agent-session--read-agent)
-                   agent-session-default-agent)
-                 t)))
-    ;; When called interactively, start typing the first message right away.
-    (when (called-interactively-p 'interactive)
-      (agent-session-focus-input (buffer-local-value 'agent-session--current buffer)))
-    buffer))
+  (agent-session-profile-create))
 
 ;;;###autoload
 (defun agent-session-toggle ()
-  "Show or hide the agent column; without sessions, choose an agent to start."
+  "Show or hide the agent column; without sessions, choose a profile."
   (interactive)
   (if-let* ((window (agent-session--visible-window)))
       (if (one-window-p) (switch-to-buffer (other-buffer)) (delete-window window))

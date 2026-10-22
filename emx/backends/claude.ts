@@ -323,6 +323,7 @@ export class ClaudeBackend implements Backend {
     if (skills?.skillsDir) args.push('--add-dir', skills.skillsDir)
     if (skills?.supersededSkills?.length) args.push('--settings', JSON.stringify({ skillOverrides: Object.fromEntries(skills.supersededSkills.map((s) => [s, 'off'])) }))
     args.push(...config.extraArgs ?? [])
+    // The caller's role intentionally controls MCP approvals, including forks.
     const readOnly = this.host.editorTools().readOnly
     if (readOnly.length) args.push('--allowedTools', readOnly.map((name) => `mcp__emacs__${name}`).join(','))
     const env = await this.host.environment?.()

@@ -59,13 +59,32 @@ const MCP_BODY = `
 - Other editor operations: eval.
 - The user reads Chinese: write page content and notifications in Chinese.`
 
+/** Instructions mention only capabilities actually exposed to this caller. */
+export function mcpInstructions(tools: string[]): string {
+  const has = (name: string) => tools.includes(name)
+  if (['context', 'render', 'open', 'show', 'sessions', 'session_read', 'session_ask', 'reload', 'alert', 'eval'].every(has)) {
+    return MCP_HEAD + MCP_BODY
+  }
+  const lines = ["Your session is hosted in the user's Emacs; these tools operate that Emacs."]
+  if (has('context')) lines.push('When the user means the current editor or window, call context first.')
+  if (has('render')) lines.push('Use render for formatted pages and diagrams. Write page content in Chinese.')
+  if (has('open')) lines.push('Use open to point the user at code.')
+  if (has('show')) lines.push('Use show to display a document or diff.')
+  if (has('session_read')) lines.push('Read other sessions with session_read when relevant.')
+  if (has('session_ask')) lines.push('Ask another session with session_ask when relevant.')
+  if (has('reload')) lines.push('After editing Lisp or emx/ in this configuration, call reload.')
+  if (has('alert')) lines.push('Call alert once before a final user-requested completion, with a short Chinese reason. Do not alert for a subagent completion report.')
+  if (has('eval')) lines.push('Use eval for other editor operations.')
+  return lines.join('\n')
+}
+
 export async function main(args: string[]): Promise<void> {
   const [method, ...rest] = args
   if (method === 'daemon') {
     return (await import('../daemon/main.ts')).main(rest)
   }
   if (method === 'mcp') {
-    return (await import('../mcp.ts')).serve(MCP_HEAD + MCP_BODY, VERSION)
+    return (await import('../mcp.ts')).serve(mcpInstructions, VERSION)
   }
   if (!method || method === 'help' || method === '-h' || method === '--help') {
     console.log(help(rest[0]))

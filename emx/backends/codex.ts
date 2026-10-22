@@ -20,7 +20,7 @@ export const modes: Record<string, [string, string, string, string]> = {
 }
 
 /** Preserve configured instructions verbatim, including whitespace. */
-export function developerInstructions(result: any): string {
+export function developerInstructions(result: any, tools?: string[]): string {
   const config = result?.config
   if (!config || typeof config !== 'object' || Array.isArray(config)
     || (config.developer_instructions != null && typeof config.developer_instructions !== 'string')) {
@@ -28,7 +28,9 @@ export function developerInstructions(result: any): string {
   }
   return (config.developer_instructions == null ? '' : config.developer_instructions + '\n\n')
     + "This session is hosted by the user's Emacs; the conversation UI is an Emacs buffer.\n"
-    + 'Unless the user explicitly refers to another application, references to the current page, window, editor, or input box mean Emacs; first discover and call the emacs MCP context tool.\n'
+    + (tools === undefined || tools.includes('context')
+      ? 'Unless the user explicitly refers to another application, references to the current page, window, editor, or input box mean Emacs; first discover and call the emacs MCP context tool.\n'
+      : 'Unless the user explicitly refers to another application, references to the current page, window, editor, or input box mean Emacs. Use only the available editor tools.\n')
     + 'Use the emacs MCP tools to inspect and operate that UI.'
 }
 
@@ -67,6 +69,7 @@ export function launchArgs(host: SessionHost, readOnly = host.editorTools().read
     'mcp_servers.emacs.args': [join(checkoutRoot, 'bin/emx'), 'mcp'],
     'mcp_servers.emacs.tool_timeout_sec': 1800,
   }
+  // Profile-specific sets intentionally differ, even for forks sharing native context.
   for (const name of readOnly) {
     // Quote non-bare names so a dot cannot turn one tool into nested tables.
     const key = /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)
@@ -178,7 +181,7 @@ export class CodexBackend implements Backend {
     const context = sessionSkills(this.host)
     if (context?.skillsDir) await this.#request('skills/extraRoots/set', { extraRoots: [join(context.skillsDir, '.claude/skills')] })
     let instructions: string | undefined
-    try { instructions = developerInstructions(await this.#request('config/read', { cwd: this.host.root })) }
+    try { instructions = developerInstructions(await this.#request('config/read', { cwd: this.host.root }), this.host.editorTools().tools.map((tool) => tool.name)) }
     catch (error) { this.#notice('codex-config-read-failed', (error as Error).message) }
     const mode = modes[this.host.settings.mode ?? 'edits'] ?? modes.edits
     const fork = this.host.info.forkFrom as string | undefined

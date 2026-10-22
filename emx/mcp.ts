@@ -3,7 +3,7 @@ import { createConnection } from 'node:net'
 import { createInterface } from 'node:readline'
 import { Connection } from './daemon/rpc.ts'
 
-export async function serve(instructions: string, version: string): Promise<void> {
+export async function serve(instructions: string | ((tools: string[]) => string), version: string): Promise<void> {
   const socket = process.env.EMX_DAEMON_SOCKET
   const session = process.env.EMX_SESSION
   if (!socket || !session) throw new Error('Daemon MCP requires EMX_DAEMON_SOCKET and EMX_SESSION')
@@ -37,12 +37,12 @@ export async function serve(instructions: string, version: string): Promise<void
     if (method === 'tools/call') running.set(id, controller)
     active++
     void (async () => {
-      const host = await hello as { remote: boolean, instructions: string }
+      const host = await hello as { remote: boolean, tools: string[], instructions: string }
       switch (method) {
         case 'initialize': return { protocolVersion: params.protocolVersion ?? '2025-06-18',
-          capabilities: { tools: { listChanged: true } }, serverInfo: { name: 'emacs', version }, instructions: instructions
+          capabilities: { tools: { listChanged: true } }, serverInfo: { name: 'emacs', version }, instructions: (typeof instructions === 'function' ? instructions(host.tools) : instructions)
             + (host.instructions ? '\n' + host.instructions : '') + (host.remote
-            ? '\nYour shell and file tools run on the project host. Emacs and its configuration live on the user machine; use config_read, config_edit and config_write for that checkout (read its AGENTS.md first), then reload.' : '') }
+            ? '\nYour shell and file tools run on the project host. Emacs and its configuration live on the user machine. Use the available config tools for that checkout; inspect its AGENTS.md first.' : '') }
         case 'ping': return {}
         case 'tools/list': return connection.request('mcp/tools', {})
         case 'tools/call':

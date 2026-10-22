@@ -182,7 +182,9 @@ export interface OpenParams {
   /** Backend-neutral editor context, inherited by every child. */
   skills?: SkillsContext
   handle?: string
-  agent: string
+  /** Omit agent for a profile-selected new conversation. */
+  agent?: string
+  profile?: string
   root: string
   settings?: Settings
   /** A session to resume, in the agent's own terms. */
@@ -298,6 +300,16 @@ export interface CollabProfiles {
   }[]
 }
 
+/** Cross-provider model choices for an editor's restricted or unrestricted picker. */
+export interface SessionModels {
+  profile: string
+  scope: 'profile' | 'all'
+  models: (import('../config.ts').ProfileCandidate & {
+    model: string | null, label: string, available: boolean, disabled: boolean,
+    disabledBy: string[], selectable: boolean, strained?: string, unavailable?: string
+  })[]
+}
+
 export interface Requests {
   'config/push': [{ config: import('../config.ts').Config }, { config: import('../config.ts').Config, errors: string[] }]
   'config/call': [{ method: string, arguments: Record<string, unknown> }, string]
@@ -306,7 +318,7 @@ export interface Requests {
   'ping': [{}, HelloResult]
   /** Makes this connection the daemon's Emacs; a previous one gets `replaced`. */
   'hello': [HelloParams, HelloResult]
-  'mcp/hello': [{ session: SessionId }, { remote: boolean, instructions: string }]
+  'mcp/hello': [{ session: SessionId }, { remote: boolean, tools: string[], instructions: string }]
   'mcp/tools': [{}, { tools: EditorTools['tools'] }]
   'mcp/call': [{ name: string, arguments?: Record<string, unknown> }, unknown]
   'config/get': [{}, { config: import('../config.ts').Config, errors: string[] }]
@@ -335,6 +347,9 @@ export interface Requests {
   'session/interrupt': [{ id: SessionId }, {}]
   'session/context': [{ id: SessionId, skills: SkillsContext }, {}]
   'session/configure': [{ id: SessionId } & Settings, {}]
+  'session/models': [{ id: SessionId, scope?: 'profile' | 'all' }, SessionModels]
+  'session/select': [{ id: SessionId, agent: string, model: string | null, profile?: string,
+    unrestricted?: boolean } & Settings, { id: SessionId, agent: string, profile: string, settings: Settings }]
   'session/answer': [{ id: SessionId, ask: string } & Answer, { stale: boolean }]
   'session/earlier': [EarlierParams, { earlier: boolean }]
   'session/stop': [{ id: SessionId }, {}]

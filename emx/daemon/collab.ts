@@ -1,4 +1,5 @@
 import { sessionSkills } from '../backends/backend.ts'
+import { delegationProfiles, profileTools, sessionProfile } from './profiles.ts'
 // collab.ts --- daemon-owned tools, children, mailbox and task context.
 import { spawn } from 'node:child_process'
 import { accessSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -49,7 +50,7 @@ function candidateUnavailable(c: Config, candidate: ProfileCandidate, enabled: s
 }
 export function profiles(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): [string, Profile][] {
   const rank = ([name, p]: [string, Profile]) => costRanks[profileCost(name, p)] ?? costRanks.unknown
-  return Object.entries(c.profiles).filter(([name, p]) => profileCandidates(p).some((candidate) =>
+  return Object.entries(c.profiles).filter(([name, p]) => name !== 'orchestrator' && profileCandidates(p).some((candidate) =>
     !candidateDisabledBy(c, name, candidate).length && !candidateUnavailable(c, candidate, enabled, env)))
     .sort((a, b) => rank(a) - rank(b))
 }
@@ -119,7 +120,7 @@ export function formatTurn(n: number, turn: Block[], tools: string, running: boo
 export interface RemoteRoute { daemon: string, session: string }
 interface Pending { target: string, asker: string, block: string, handle?: string, route?: RemoteRoute }
 interface Outgoing { id: string, route: RemoteRoute, mail: Mail }
-interface Mail { handle: string, text: string }
+interface Mail { handle: string, text: string, source?: string }
 export interface CollabHost {
   sessions: Map<string, Session>
   config(): Config
@@ -128,7 +129,7 @@ export interface CollabHost {
   usage?: Pick<UsageService, 'quotas'> & Partial<Pick<UsageService, 'candidateAvailability'>>
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
-  close(session: Session): Promise<void>
+  close(session: Session, completed?: boolean): Promise<void>
   view(session: Session): Promise<void>
   visible(session: Session): Promise<boolean>
   changed(): void
@@ -143,7 +144,9 @@ export class Collaboration {
   #handoffs = new Map<string, { turn: string, text: string }>()
   #reservations = new Map<string, number>()
   #closing = new WeakSet<Session>()
+  #deliveries = new Map<Outgoing, AbortController>()
   #starts = new Map<Session, Set<Promise<unknown>>>()
+  #startControllers = new Map<Session, Set<AbortController>>()
   #timer?: NodeJS.Timeout
   #stopped = false
   #settling = false
@@ -155,7 +158,7 @@ export class Collaboration {
   #handle(s: Session): string { return String(s.info.handle ?? s.agent) }
   #title(s: Session): string { return this.config.agents[s.agent]?.title ?? s.agent }
   #status(s: Session): string { return s.asks.size ? 'awaiting-approval' : s.status }
-  #working(s: Session): boolean { return s.busy() }
+  #working(s: Session): boolean { return s.busy() || s.pendingWork() }
   #target(name: unknown): Session {
     if (typeof name !== 'string') throw new Error('Name a session by its @handle; list them with sessions')
     const s = [...this.host.sessions.values()].find((s) => this.#handle(s) === name.replace(/^@/, '') || s.id === name)
@@ -192,15 +195,45 @@ export class Collaboration {
     }
     next(0)
   }
-  tools(editor: EditorTools, root?: string): EditorTools {
-    return { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, this.#environment(root))],
+  tools(editor: EditorTools, root?: string, caller?: Session): EditorTools {
+    const source: EditorTools = { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, this.#environment(root))],
       readOnly: [...new Set([...editor.readOnly.filter((name) =>
         !toolNames.includes(name) && editor.tools.some((tool) => tool.name === name)),
         'sessions', 'session_read'])].sort() }
+    if (!caller) return source
+    const filtered = profileTools(this.config, caller, source)
+    const targets = delegationProfiles(this.config, caller)
+    if (!caller.info.parent && targets === undefined) return filtered
+    for (const tool of filtered.tools) if (tool.name === 'session_start') {
+      const allowed = profiles(this.config, this.enabled, this.#environment(root))
+        .filter(([name]) => name !== 'orchestrator' && (!targets || targets.includes(name)))
+      if (!allowed.length && (caller.info.parent || targets)) {
+        filtered.tools = filtered.tools.filter((entry) => entry !== tool)
+        continue
+      }
+      const description = caller.info.parent
+        ? 'Start one bounded helper task. Only context fresh or handoff is allowed; forks are forbidden. The final reply arrives automatically.'
+        : 'Start a bounded task with context fresh, handoff or fork. A fork inherits your own provider conversation and profile.'
+      tool.description = description + '\n' + this.config.collab.startGuidance + '\n'
+        + this.config.collab.prompts.profileHeader + profileLines(allowed)
+      if (targets || caller.info.parent) tool.inputSchema = { ...tool.inputSchema,
+        properties: { ...(tool.inputSchema.properties as object),
+          profile: { type: 'string', enum: allowed.map(([name]) => name) },
+          ...(caller.info.parent ? { context: { type: 'string', enum: ['fresh', 'handoff'],
+            description: 'How the helper gets context: fresh (default) or bounded text handoff' } } : {}) } }
+    }
+    return filtered
   }
-  startSummary(root?: string): string {
+  startSummary(root?: string, caller?: Session): string {
+    if (!caller) return startSummary(this.config, this.enabled, this.#environment(root))
+    const tools = this.tools({ tools: [], readOnly: [] }, root, caller)
+    if (!tools.tools.some((tool) => tool.name === 'session_start')) {
+      return 'Do the assigned work with your available tools. Delegation is unavailable; report through your final reply.'
+    }
+    if (caller.info.parent || delegationProfiles(this.config, caller)) return 'You may delegate bounded helper tasks only to the listed profiles. Wait for their results before your final reply.'
     return startSummary(this.config, this.enabled, this.#environment(root))
   }
+  projectEnvironment(root: string): NodeJS.ProcessEnv { return this.#environment(root) }
   #environment(root?: string): NodeJS.ProcessEnv {
     return (root === undefined ? undefined : this.host.environment?.(root)) ?? process.env
   }
@@ -221,13 +254,37 @@ export class Collaboration {
       throw new Error('The calling session is closing or has been closed')
     }
   }
-  /** Mark synchronously; closing waits until no start can register another child. */
-  beginClose(session: Session): Promise<unknown> {
-    this.#closing.add(session)
-    return Promise.allSettled(this.#starts.get(session) ?? [])
+  /** Revoke the entire subtree before any persistence or visibility await. */
+  beginClose(session: Session, completed = false): Promise<unknown> {
+    const subtree = new Set([session])
+    for (const node of subtree) {
+      this.#closing.add(node)
+      node.beginClose()
+      for (const controller of this.#startControllers.get(node) ?? []) controller.abort(new Error('Session is closing'))
+      for (const child of this.host.sessions.values()) if (child.info.parent === node.id) subtree.add(child)
+    }
+    const ids = new Set([...subtree].map((node) => node.id))
+    this.pending = this.pending.filter((entry) => !ids.has(entry.target) && (!!entry.route || !ids.has(entry.asker)))
+    const cancelledSource = (source?: string) => !!source && ids.has(source) && !(completed && source === session.id)
+    for (const [id, mail] of this.mailbox) {
+      const kept = mail.filter((entry) => !cancelledSource(entry.source))
+      if (ids.has(id) || !kept.length) this.mailbox.delete(id)
+      else this.mailbox.set(id, kept)
+    }
+    this.outgoing = this.outgoing.filter((entry) => {
+      if (!cancelledSource(entry.mail.source)) return true
+      this.#deliveries.get(entry)?.abort(new Error('Session is closing'))
+      return false
+    })
+    this.save()
+    return Promise.allSettled([...subtree].flatMap((node) => [...this.#starts.get(node) ?? []]))
   }
+
   async call(caller: Session, name: string, p: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted()
+    if (!this.tools({ tools: [], readOnly: [] }, caller.root, caller).tools.some((tool) => tool.name === name)) {
+      throw new Error(`Tool ${name} is not allowed for profile ${sessionProfile(caller)}${name === 'session_start' ? "; this profile can't start sessions" : name === 'session_ask' ? "; a task session doesn't ask other sessions" : ''}`)
+    }
     switch (name) {
       case 'sessions': {
         const sessions = this.list(caller)
@@ -248,11 +305,17 @@ export class Collaboration {
       case 'session_ask': this.assertOpen(caller); return this.#ask(caller, p, signal)
       case 'session_start': {
         this.assertOpen(caller)
-        const start = this.#start(caller, p, signal)
+        const controller = new AbortController()
+        let controllers = this.#startControllers.get(caller)
+        if (!controllers) this.#startControllers.set(caller, controllers = new Set())
+        controllers.add(controller)
+        const start = this.#start(caller, p, AbortSignal.any([signal, controller.signal]))
         let starts = this.#starts.get(caller)
         if (!starts) this.#starts.set(caller, starts = new Set())
         starts.add(start)
         try { return await start } finally {
+          controllers.delete(controller)
+          if (!controllers.size) this.#startControllers.delete(caller)
           starts.delete(start)
           if (!starts.size) this.#starts.delete(caller)
         }
@@ -280,6 +343,7 @@ export class Collaboration {
   }
   /** Editor-only ingress; confirmation belongs to the asking daemon. */
   remoteAsk(target: Session, prompt: string, route: RemoteRoute, origin: { handle: string, agent: string }): string {
+    this.assertOpen(target)
     if (target.info.parent) throw new Error('Task sessions take no messages; start another session')
     if (target.status !== 'idle' || this.pending.some((e) => e.target === target.id)) throw new Error(`@${this.#handle(target)} is busy; try later`)
     const block = target.newId('user')
@@ -291,7 +355,8 @@ export class Collaboration {
   receive(id: string, route: RemoteRoute, mail: Mail): void {
     if (this.receipts.has(id)) return
     this.receipts.add(id)
-    if (this.host.sessions.has(route.session)) this.mailbox.set(route.session,
+    const target = this.host.sessions.get(route.session)
+    if (target && !this.#closing.has(target)) this.mailbox.set(route.session,
       [...this.mailbox.get(route.session) ?? [], mail])
     this.save(); this.schedule()
   }
@@ -371,6 +436,7 @@ export class Collaboration {
     const target = local ?? this.#target(p.session)
     const check = () => {
       this.assertOpen(caller)
+      this.assertOpen(target)
       if (target === caller) throw new Error('That is your own session')
       if (caller.info.parent) throw new Error("A session started for a task reports through its final reply; it doesn't ask other sessions")
       if (target.info.parent) throw new Error(`@${this.#handle(target)} works on a task it was started for and takes no messages; for more work, start another session (context handoff passes your conversation)`)
@@ -401,7 +467,7 @@ export class Collaboration {
       : this.#prompt('candidateQuotaUsed', window.id, Math.round(window.used! * 100))
     if (quota.balance?.length && quota.balance.every((b) => b.amount <= 0)) return this.#prompt('candidateBalanceExhausted')
   }
-  #candidateStatus(name: string, candidate: ProfileCandidate, env: NodeJS.ProcessEnv): Omit<CollabProfiles['profiles'][number]['candidates'][number], 'agent' | 'model' | 'effort'> {
+  candidateStatus(name: string, candidate: ProfileCandidate, env: NodeJS.ProcessEnv): Omit<CollabProfiles['profiles'][number]['candidates'][number], 'agent' | 'model' | 'effort'> {
     const { agent } = candidate
     const availability = this.host.usage?.candidateAvailability?.(agent, agentExecutable(this.config, agent, env), env)
     const accountUnavailable = availability?.state === 'unavailable'
@@ -420,7 +486,7 @@ export class Collaboration {
     return { quotaSkip: this.config.collab.quotaSkip, profiles: Object.entries(this.config.profiles).map(([name, role]) => {
       const candidates = profileCandidates(role).map((candidate) => ({ agent: candidate.agent, model: candidate.model ?? null,
         ...(candidate.effort != null ? { effort: candidate.effort } : {}),
-        ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.#candidateStatus(name, candidate, env) }))
+        ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.candidateStatus(name, candidate, env) }))
       return { name, cost: profileCost(name, role), description: role.description ?? '',
         disabled: candidates.every((candidate) => candidate.disabled), overridden: overridden.includes(name), candidates }
     }) }
@@ -429,7 +495,7 @@ export class Collaboration {
     const env = this.#environment(caller.root)
     const candidates = profileCandidates(role).filter((candidate) => !candidateDisabledBy(this.config, name, candidate).length).map((candidate) => ({
       candidate, label: (this.config.agents[candidate.agent]?.title ?? candidate.agent) + (candidate.model ? ' ' + candidate.model : ''),
-      ...this.#candidateStatus(name, candidate, env),
+      ...this.candidateStatus(name, candidate, env),
     }))
     if (!candidates.length) throw new Error(`Profile ${name} is disabled`)
     const available = candidates.filter((c) => !c.unavailable)
@@ -441,11 +507,56 @@ export class Collaboration {
     const skipped = candidates.slice(0, candidates.indexOf(chosen)).map(reason)
     return { candidate: chosen.candidate, note: skipped.length ? this.#prompt('candidatesSkipped', skipped.join('; ')) : '' }
   }
+  /** Availability for a project, shared by open, model lists and selection. */
+  profileCandidate(name: string, root: string, agent?: string, model?: string | null, settings: Settings = {}): ProfileCandidate {
+    const role = this.config.profiles[name]
+    if (!role) throw new Error(`Unknown profile: ${name}`)
+    const candidates = profileCandidates(role).filter((candidate) =>
+      (agent === undefined || candidate.agent === agent) && (model === undefined || (candidate.model ?? null) === model)
+      && (settings.effort === undefined || (candidate.effort ?? null) === settings.effort)
+      && (settings.mode === undefined || (candidate.mode ?? null) === settings.mode))
+    const candidate = candidates.find((candidate) => {
+      const status = this.candidateStatus(name, candidate, this.#environment(root))
+      return status.available && !status.disabled && !status.strained
+    })
+    if (!candidate) throw new Error(`No selectable candidate for profile ${name}`)
+    return structuredClone(candidate)
+  }
+  modelStatus(name: string, root: string, candidate: ProfileCandidate) {
+    return this.candidateStatus(name, candidate, this.#environment(root))
+  }
+  /** Descendant creation and undelivered results keep a task alive. */
+  hasDependencies(session: Session): boolean {
+    return this.#starts.has(session) || this.mailbox.has(session.id)
+      || this.pending.some((entry) => entry.asker === session.id)
+      || [...this.host.sessions.values()].some((child) => child.info.parent === session.id
+        && (child.busy() || child.operating || child.asks.size > 0 || child.queue.length > 0 || this.hasDependencies(child)))
+  }
+  rootSession(session: Session): Session {
+    const seen = new Set<string>()
+    while (typeof session.info.parent === 'string') {
+      if (seen.has(session.id)) throw new Error('Invalid session ancestry')
+      seen.add(session.id)
+      const parent = this.host.sessions.get(session.info.parent)
+      if (!parent) throw new Error('Parent session is closed')
+      this.assertOpen(parent)
+      session = parent
+    }
+    return session
+  }
   async #start(caller: Session, p: Record<string, unknown>, signal: AbortSignal): Promise<string> {
     const prompt = this.#text(p), context = p.context ?? 'fresh'
-    if (caller.info.parent) throw new Error("A session started by another session can't start sessions; do the task yourself")
+    const targets = delegationProfiles(this.config, caller)
+    if (targets?.length === 0) throw new Error("This profile cannot start sessions; do the task yourself")
+    if (caller.info.parent && context === 'fork') throw new Error('Nested task sessions cannot fork')
+    if (context !== 'fork' && (p.profile === 'orchestrator' || targets && !targets.includes(String(p.profile)))) {
+      throw new Error(`Profile ${String(p.profile)} is not an allowed delegation target`)
+    }
     if (!['fresh', 'handoff', 'fork'].includes(String(context))) throw new Error(`context must be fresh, handoff or fork, not ${context}`)
-    const count = [...this.host.sessions.values()].filter((s) => s.info.parent === caller.id && this.#working(s)).length + (this.#reservations.get(caller.id) ?? 0)
+    const root = this.rootSession(caller)
+    const count = [...this.host.sessions.values()].filter((s) => s.info.parent && this.rootSession(s) === root
+      && (this.#working(s) || this.hasDependencies(s) || this.pending.some((entry) => entry.target === s.id))).length
+      + (this.#reservations.get(root.id) ?? 0)
     if (count >= this.config.collab.maxActive) throw new Error(`${count} sessions you started are still working, the most at once; wait for one to finish`)
     let name: string, profile: ProfileCandidate, fork: string | undefined, confirm = false, note = ''
     if (context === 'fork') {
@@ -461,14 +572,14 @@ export class Collaboration {
       const selected = this.#select(caller, name, role)
       profile = selected.candidate; note = selected.note; confirm = !!role.confirm
     }
-    this.#reservations.set(caller.id, (this.#reservations.get(caller.id) ?? 0) + 1)
+    this.#reservations.set(root.id, (this.#reservations.get(root.id) ?? 0) + 1)
     let reserved = true
     const release = () => {
       if (!reserved) return
       reserved = false
-      const remaining = (this.#reservations.get(caller.id) ?? 1) - 1
-      if (remaining) this.#reservations.set(caller.id, remaining)
-      else this.#reservations.delete(caller.id)
+      const remaining = (this.#reservations.get(root.id) ?? 1) - 1
+      if (remaining) this.#reservations.set(root.id, remaining)
+      else this.#reservations.delete(root.id)
     }
     let child: Session | undefined
     try {
@@ -481,18 +592,22 @@ export class Collaboration {
       const requested = modes.indexOf(profile.mode ?? '')
       const settings = { model: profile.model, effort: profile.effort, mode: modes[Math.min(cap, requested < 0 ? cap : requested)] }
       child = this.host.create(profile.agent, caller.root, settings, { parent: caller.id,
-        parentSession: caller.resumeId(), profile: name, named: true, title: p.title ?? prompt.slice(0, 80),
+        parentSession: caller.resumeId(), profile: context === 'fork' ? sessionProfile(caller) : name, named: true, title: p.title ?? prompt.slice(0, 80),
         handle: this.unique(cleanHandle(String(p.handle ?? '')) ?? name), ...(fork ? { forkFrom: fork } : {}),
         skills: sessionSkills(caller) })
       // The registered starting session now owns the concurrency slot.
       release()
       await this.host.view(child)
-      signal.throwIfAborted(); this.assertOpen(caller)
+      signal.throwIfAborted(); this.assertOpen(caller); this.assertOpen(child)
       await child.start()
-      signal.throwIfAborted(); this.assertOpen(caller)
+      signal.throwIfAborted(); this.assertOpen(caller); this.assertOpen(child)
       const history = context === 'handoff' ? this.#handoff(caller) : ''
       const text = (history ? this.#prompt('handoff', this.#handle(caller), this.#handle(caller), history) : '') + this.#prompt('task') + prompt
-      this.#send(child, caller, text, fork ? this.#prompt('forkNote', this.#handle(caller)) : this.#prompt('taskNote', this.#title(caller), this.#handle(caller)))
+      const taskNote = fork ? this.#prompt('forkNote', this.#handle(caller)) : this.#prompt('taskNote', this.#title(caller), this.#handle(caller))
+      const canDelegate = this.tools({ tools: [], readOnly: [] }, child.root, child).tools.some((tool) => tool.name === 'session_start')
+      this.#send(child, caller, text, canDelegate
+        ? taskNote.replace("You can't start sessions yourself.", 'You may start only the bounded helper profiles listed in your session_start tool. Wait for their results before your final reply.')
+        : taskNote)
       return this.#prompt('started', this.#handle(child), this.#title(child), profile.model ? ' ' + profile.model : '', context) + note
     } catch (error) {
       if (child) await this.host.close(child)
@@ -500,6 +615,7 @@ export class Collaboration {
     } finally { release() }
   }
   #send(target: Session, asker: Session, text: string, hidden: string): void {
+    this.assertOpen(target); this.assertOpen(asker)
     const block = target.newId('user')
     this.pending.push({ target: target.id, asker: asker.id, block, handle: this.#handle(target) })
     this.save()
@@ -521,10 +637,20 @@ export class Collaboration {
         // A prior visibility query may have let session_stop revoke this entry.
         if (!this.pending.includes(entry)) continue
         const target = this.host.sessions.get(entry.target), asker = this.host.sessions.get(entry.asker)
-        if (target && (this.#working(target) || target.queue.length)) continue
-        this.pending = this.pending.filter((e) => e !== entry)
-        if (!asker && !entry.route) continue
-        const turn = target && turns(target).find((t) => t[0].id === entry.block)
+        if (target && this.#closing.has(target) || asker && this.#closing.has(asker) && !entry.route) {
+          this.pending = this.pending.filter((e) => e !== entry)
+          continue
+        }
+        if (target && (this.#working(target) || target.operating || target.queue.length || target.asks.size || this.hasDependencies(target))) continue
+        if (!asker && !entry.route) {
+          this.pending = this.pending.filter((e) => e !== entry)
+          continue
+        }
+        const history = target ? turns(target) : []
+        const first = history.findIndex((turn) => turn[0].id === entry.block)
+        // A nested helper result starts a continuation turn in its coder.
+        // Deliver the coder's last integrated reply, not its pre-helper answer.
+        const turn = first < 0 ? undefined : target?.info.parent ? history.slice(first).flat() : history[first]
         const text = turn?.findLast((b) => b.type === 'text' && b.kind !== 'thinking') as Extract<Block, {type: 'text'}> | undefined
         const handle = target ? this.#handle(target) : entry.handle ?? entry.target
         const errors = (turn ?? []).filter((b): b is Extract<Block, {type: 'notice'}> => b.type === 'notice' && b.notice.level === 'error')
@@ -543,25 +669,34 @@ export class Collaboration {
         const summary = tools.length ? 'What it did:\n' + tools.slice(0, 12).join('\n') + (tools.length > 12 ? `\n- … ${tools.length - 12} more` : '') + '\n\n' : ''
         reply = target ? this.#prompt('reply', handle, this.#title(target), target.status === 'exited' ? ', which then exited' : '', reply,
           target.info.parent ? summary + this.#prompt('childFollowup') : this.#prompt('followup', handle)) : `"@${handle}" ended without replying: it was closed before it replied`
-        if (entry.route) this.outgoing.push({ id: entry.block, route: entry.route, mail: { handle, text: reply } })
-        else this.mailbox.set(asker!.id, [...this.mailbox.get(asker!.id) ?? [], { handle, text: reply }])
+        // Keep the pending entry revocable while visibility is in flight.
+        const close = asker && target?.info.parent === asker.id && target.status === 'idle'
+          && this.config.collab.closeFinished && !errors.length && !await this.host.visible(target)
+        if (!this.pending.includes(entry) || target && this.#closing.has(target)
+          || asker && this.#closing.has(asker) && !entry.route) continue
+        this.pending = this.pending.filter((e) => e !== entry)
+        const mail = { handle, text: reply, source: entry.target }
+        if (entry.route) this.outgoing.push({ id: entry.block, route: entry.route, mail })
+        else this.mailbox.set(asker!.id, [...this.mailbox.get(asker!.id) ?? [], mail])
         this.save()
-        if (asker && target?.info.parent === asker.id && target.status === 'idle' && this.config.collab.closeFinished
-          && !errors.length && !await this.host.visible(target)) {
-          await this.host.close(target)
-        }
+        // Persist the reply before teardown, preserving this completed result.
+        if (close) await this.host.close(target!, true)
       }
       for (const entry of [...this.outgoing]) {
+        if (!this.outgoing.includes(entry)) continue
+        const controller = new AbortController()
+        this.#deliveries.set(entry, controller)
         try {
           if (!this.host.hub) continue
-          await this.host.hub({ id: '', root: '' }, '_collab_deliver', { ...entry }, AbortSignal.timeout(5000))
+          await this.host.hub({ id: '', root: '' }, '_collab_deliver', { ...entry }, AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]))
           this.outgoing = this.outgoing.filter((e) => e !== entry)
           this.save()
         } catch { /* Keep durable mail until both daemon connections are attached. */ }
+        finally { this.#deliveries.delete(entry) }
       }
       for (const [id, mail] of this.mailbox) {
         const s = this.host.sessions.get(id)
-        if (!s) { this.mailbox.delete(id); continue }
+        if (!s || this.#closing.has(s)) { this.mailbox.delete(id); continue }
         if (s.status !== 'idle' || s.queue.length) continue
         this.mailbox.delete(id); this.save()
         s.sendMessage(mail.map((m) => m.text).join('\n\n---\n\n'), mail.length > 1 ? '会话回复' : '@' + mail[0].handle, this.#prompt('mailbox'))

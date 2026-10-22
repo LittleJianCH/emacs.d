@@ -385,10 +385,10 @@ Status changes often while output streams, so coalesce them into one redraw."
 
 (defun agent-session-list-create (&optional choose)
   "Create a session in the list's project.
-With CHOOSE (prefix argument), choose the agent first."
+CHOOSE is retained for compatibility; creation always chooses a profile."
   (interactive "P")
   (let ((default-directory agent-session-list--root))
-    (select-window (or (get-buffer-window (agent-session-create choose)) (selected-window)))))
+    (agent-session-create choose)))
 
 (defun agent-session-list-kill ()
   "End the session at point."

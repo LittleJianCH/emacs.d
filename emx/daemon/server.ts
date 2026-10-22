@@ -25,6 +25,8 @@ import { UsageService } from '../usage/service.ts'
 import type { UsageConfig } from '../usage/service.ts'
 import { Accounting } from '../usage/accounting.ts'
 import { Session } from './session.ts'
+import { sessionProfile } from './profiles.ts'
+import { profileCandidates } from '../config.ts'
 import type { Transcript } from './session.ts'
 
 interface SavedSession {
@@ -163,7 +165,7 @@ export class DaemonServer {
       create: (agent, root, settings, info) => {
         const s = this.#make({ id: `session-${randomUUID()}`, agent, root, settings, info })
         this.sessions.set(s.id, s); this.#changed(); return s
-      }, close: (s) => this.#closeSession(s),
+      }, close: (s, completed) => this.#closeSession(s, completed),
       view: async (s) => {
         if (this.client) await this.client.request('editor/call', { method: '_session_open',
           params: { session: s.summary() }, caller: { session: s.id, root: s.root, place: null } }, AbortSignal.timeout(5000))
@@ -277,7 +279,7 @@ export class DaemonServer {
       }))
       this.#refreshRootTools(saved.root)
       return env
-    } : undefined, agentConfig: () => this.configuration.value.agents[saved.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    } : undefined, agentConfig: () => this.configuration.value.agents[session.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root, session), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
     return session
   }
 
@@ -465,6 +467,72 @@ export class DaemonServer {
     }
   }
 
+  async #models(session: Session, scope: unknown = 'profile') {
+    if (scope !== 'profile' && scope !== 'all') invalid('Expected scope profile or all')
+    if (this.environments) await this.environments.get(session.root)
+    const profile = sessionProfile(session), config = this.configuration.value
+    const role = config.profiles[profile]
+    if (!role && scope === 'profile') invalid(`Unknown profile: ${profile}`)
+    const candidates = scope === 'profile' ? profileCandidates(role!) : []
+    const models = candidates.map((candidate) => {
+      const status = this.collab.modelStatus(profile, session.root, candidate)
+      return { ...candidate, model: candidate.model ?? null,
+        label: config.agents[candidate.agent].title + ' ' + (candidate.model ?? 'default'),
+        ...status, selectable: status.available && !status.disabled && !status.strained }
+    })
+    if (scope === 'all') {
+      const results = await Promise.allSettled(Object.entries(config.agents).map(async ([agent, agentConfig]) => {
+        const status = this.collab.modelStatus('orchestrator', session.root, { agent })
+        if (!status.available) return []
+        const env = this.collab.projectEnvironment(session.root)
+        const catalog = await agentModels(agent, agentConfig, session.root, env)
+        const configured = Object.values(config.profiles).flatMap(profileCandidates).filter((c) => c.agent === agent)
+        const choices = [null, ...new Set([...catalog.map((model) => model.id),
+          ...configured.flatMap((c) => c.model ? [c.model] : []),
+          ...(session.agent === agent ? session.capabilities.models.map((m) => m.id) : [])])]
+        return choices.map((model) => {
+          const state = this.collab.modelStatus('orchestrator', session.root, { agent, model })
+          return { agent, model, label: agentConfig.title + ' ' + (catalog.find((m) => m.id === model)?.label ?? model ?? 'default'),
+            ...state, selectable: state.available && !state.disabled && !state.strained }
+        })
+      }))
+      for (const result of results) if (result.status === 'fulfilled') models.push(...result.value)
+    }
+    return { profile, scope, models }
+  }
+
+  async #select(session: Session, params: Record<string, unknown>) {
+    const agent = string(params.agent, 'agent'), model = params.model === null ? null : string(params.model, 'model')
+    if (!Object.hasOwn(backends, agent) || !this.configuration.value.agents[agent]) invalid(`Unknown agent: ${agent}`)
+    if (params.unrestricted !== undefined && typeof params.unrestricted !== 'boolean') invalid('Expected boolean: unrestricted')
+    const explicit = optionalString(params.profile, 'profile')
+    const profile = explicit ?? (params.unrestricted ? 'orchestrator' : sessionProfile(session))
+    if (this.environments) await this.environments.get(session.root)
+    const currentMode = session.settings.mode ?? (session.agent === 'claude' ? 'ask' : session.agent === 'codex' ? 'edits' : 'plan')
+    const requested = settings(params)
+    let selected: Settings
+    if (!params.unrestricted || explicit !== undefined) {
+      const candidate = this.collab.profileCandidate(profile, session.root, agent, model, requested)
+      selected = { ...requested, model, effort: candidate.effort ?? null, mode: candidate.mode ?? currentMode }
+    } else {
+      const catalog = await this.#models(session, 'all')
+      if (!catalog.models.some((m) => m.agent === agent && m.model === model && m.selectable)) {
+        invalid('Model is unavailable, disabled or quota-limited')
+      }
+      selected = { model, effort: null, mode: currentMode, ...requested }
+    }
+    if (session.info.parent) {
+      const modes = ['plan', 'ask', 'edits', 'auto', 'full']
+      const cap = Math.max(0, modes.indexOf(session.settings.mode ?? 'plan'))
+      selected.mode = modes[Math.min(cap, Math.max(0, modes.indexOf(selected.mode ?? 'plan')))]
+    }
+    await session.select(agent, selected, profile, this.configuration.value.collab.handoffLimit,
+      () => !this.collab.hasDependencies(session) && !this.collab.pending.some((p) => p.target === session.id))
+    for (const [peer, id] of this.#mcp) if (id === session.id) peer.notify('mcp/tools_changed', {})
+    await this.persist()
+    return { id: session.id, agent: session.agent, profile: sessionProfile(session), settings: { ...session.settings } }
+  }
+
   #request(connection: Connection, method: string, value: unknown, requestId?: unknown): unknown {
     if (this.#stopping) throw new RpcError(ErrorCode.Internal, 'Daemon is stopping')
     if (method === 'usage/hello') {
@@ -483,7 +551,7 @@ export class DaemonServer {
       const bound = this.#session({ id: session })
       if (connection === this.client) invalid('An editor connection cannot become an MCP connection')
       this.#mcp.set(connection, session)
-      return { remote: !!this.outbox, instructions: this.collab.startSummary(bound.root) }
+      return { remote: !!this.outbox, tools: bound.editorTools().tools.map((tool) => tool.name), instructions: this.collab.startSummary(bound.root, bound) }
     }
     const mcp = this.#mcp.get(connection)
     if (mcp !== undefined) {
@@ -491,11 +559,14 @@ export class DaemonServer {
       if (method === 'mcp/call') {
         const session = this.#session({ id: mcp })
         const params = object(value)
+        const name = string(params.name, 'name'), args = object(params.arguments ?? {})
+        if (!session.editorTools().tools.some((tool) => tool.name === name)) {
+          invalid(`Tool ${name} is not allowed for profile ${sessionProfile(session)}`)
+        }
         const controller = new AbortController()
         let calls = this.#calls.get(connection)
         if (!calls) this.#calls.set(connection, calls = new Map())
         calls.set(requestId, controller)
-        const name = string(params.name, 'name'), args = object(params.arguments ?? {})
         return (toolNames.includes(name) ? this.collab.call(session, name, args, controller.signal)
           : this.editor.call(name, args, { session: mcp, root: session.root, place: null }, controller.signal))
           .finally(() => calls!.delete(requestId))
@@ -650,11 +721,17 @@ export class DaemonServer {
           throw new RpcError(ErrorCode.NoSession,
             `Session creation ${creationId} is ${existing.state}: ${existing.error ?? existing.id}`)
         }
-        const agent = string(params.agent, 'agent')
-        if (!Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
         const root = string(params.root, 'root')
-        const handle = optionalString(params.handle, 'handle')
         const resume = optionalString(params.resume, 'resume')
+        let agent = optionalString(params.agent, 'agent')
+        let profile = optionalString(params.profile, 'profile')
+        let selected = settings(params.settings ?? {})
+        if (resume && !agent) invalid('Native resume requires its original agent')
+        const useProfile = !agent || profile !== undefined
+        if (useProfile) profile ??= 'orchestrator'
+        if (agent !== undefined && !Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
+        if (profile && !Object.hasOwn(this.configuration.value.profiles, profile)) invalid(`Unknown profile: ${profile}`)
+        const handle = optionalString(params.handle, 'handle')
         const parent = optionalString(params.parent, 'parent')
         if (resume && !parent) {
           const live = [...this.sessions.values()].find((s) => !s.info.parent && s.agent === agent
@@ -666,18 +743,28 @@ export class DaemonServer {
         }
         // Forks are created by collaboration rather than editor open requests.
         if (params.fork !== undefined) invalid('Session forks are not supported yet')
-        const session = this.#make({ id: `session-${randomUUID()}`, creationId, agent, root, resume,
-          settings: settings(params.settings ?? {}),
-          info: { handle: this.collab.unique(handle ?? agent), ...(parent ? { parent, parentSession: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
-            ...(params.skills !== undefined ? { skills: skillContext(params.skills) } : {}) } })
-        this.sessions.set(session.id, session)
-        return this.#openCreation(creationId, session.id, async () => {
+        const id = `session-${randomUUID()}`
+        const skills = params.skills === undefined ? undefined : skillContext(params.skills)
+        let session: Session | undefined
+        return this.#openCreation(creationId, id, async () => {
+          if (useProfile) {
+            if (this.environments) await this.environments.get(root)
+            const candidate = this.collab.profileCandidate(profile!, root, agent, selected.model)
+            agent = candidate.agent
+            selected = { model: candidate.model, effort: candidate.effort, mode: candidate.mode, ...selected }
+          }
+          if (this.#creations.get(creationId)?.state === 'closed') throw new Error('Session creation was cancelled')
+          session = this.#make({ id, creationId, agent: agent!, root, resume, settings: selected,
+            info: { ...(profile ? { profile } : {}), handle: this.collab.unique(handle ?? agent!),
+              ...(parent ? { parent, parentSession: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
+              ...(skills ? { skills } : {}) } })
+          this.sessions.set(id, session)
           await session.start()
           this.#refreshRootTools(root)
           this.#changed()
         }, async () => {
-          try { await session.stop() } finally {
-            this.sessions.delete(session.id)
+          try { await session?.stop() } finally {
+            this.sessions.delete(id)
             this.#changed()
           }
         })
@@ -729,7 +816,15 @@ export class DaemonServer {
       }
       case 'session/interrupt': this.#session(params).interrupt(); return {}
       case 'session/context': this.#session(params).setInfo({ skills: skillContext(params.skills) }); return {}
-      case 'session/configure': return this.#session(params).configure(settings(params)).then(() => ({}))
+      case 'session/models': return this.#models(this.#session(params), params.scope)
+      case 'session/select': return this.#select(this.#session(params), params)
+      case 'session/configure': {
+        const session = this.#session(params), choices = settings(params)
+        if (typeof session.info.profile === 'string' && Object.hasOwn(choices, 'model')) {
+          this.collab.profileCandidate(sessionProfile(session), session.root, session.agent, choices.model)
+        }
+        return session.configure(choices).then(() => ({}))
+      }
       case 'session/answer': {
         const session = this.#session(params)
         const id = string(params.ask, 'ask')
@@ -831,23 +926,23 @@ export class DaemonServer {
     return task
   }
 
-  #closeSession(session: Session): Promise<void> {
+  #closeSession(session: Session, completed = false): Promise<void> {
     let closing = this.#closing.get(session)
     if (!closing) {
-      closing = this.#finishCloseSession(session)
+      closing = this.#finishCloseSession(session, completed)
       this.#closing.set(session, closing)
     }
     return closing
   }
 
-  async #finishCloseSession(session: Session): Promise<void> {
+  async #finishCloseSession(session: Session, completed: boolean): Promise<void> {
     for (const record of this.#creations.values()) {
       if (record.id === session.id) {
         record.state = 'closed'
         record.updated = Date.now()
       }
     }
-    const starts = this.collab.beginClose(session)
+    const starts = this.collab.beginClose(session, completed)
     // Record the cancellation before waiting for initialization to finish.
     await this.persist()
     for (const [peer, owner] of this.#mcp) {

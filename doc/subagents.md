@@ -85,9 +85,10 @@ were made through the earlier Lisp execution path; the protocols remain.
   `session_read` and ask each other with `session_ask`; conversations happen
   here.
 - Child sessions are started by an agent with `session_start`. A child does
-  one task and reports its final reply. It takes no messages from agents, asks
-  no one and starts no sessions. It lives with its buffer and its parent. The
-  user can still type in it.
+  one task and reports its final reply. It takes no messages from agents and
+  asks no other sessions. A profile may delegate bounded parts to explicitly
+  allowed helpers; leaf profiles cannot start sessions. It lives with its
+  buffer and parent. The user can still type in it.
 
 | Context | The child gets | Harness and model | Cache | Use it when |
 | --- | --- | --- | --- | --- |
@@ -106,14 +107,16 @@ between, newest first, noting what was left out.
 | `sessions` | lists open sessions with parent and children | anyone |
 | `session_read` | latest turns of a session, paged | anyone |
 | `session_ask` | asks an idle session; the reply goes to the mailbox | between sessions the user opened |
-| `session_start` | starts a child: `profile`, `context`, `prompt`, `handle`, `title` | sessions the user opened |
+| `session_start` | starts a child: `profile`, `context`, `prompt`, `handle`, `title` | profiles with delegation capability |
 | `session_stop` | stops and closes a child | its parent |
 
 ### Profiles
 
-The model picks a role, not a free harness and model pair. Each role has a
-static display `cost`, a `description`, optional `confirm` and
-`preferOtherAgent` flags, and an ordered, nonempty `candidates` array:
+Users and agents select a role rather than a free harness and model pair.
+New user conversations default to `orchestrator`. Profile identity is saved
+with the session and restored on reconnect. Roles define ordered model
+`candidates`, a `cost`, `description`, optional `confirm` and
+`preferOtherAgent`, and a profile-specific MCP tool policy:
 
 ```json
 "reviewer": {
@@ -132,10 +135,14 @@ Candidates carry `agent`, optional `model`, `mode` and `effort`, and no cost.
 Legacy profiles with top-level `agent`, `model`, `mode` and `effort` still mean
 one candidate. A legacy override's top-level agent takes precedence over an
 inherited candidates array, so old local overrides keep working.
-The shipped roles, in cost order, are `coder-flash` and `explorer-flash`
-(minimal), `explorer` (low), `coder` (medium), `researcher` (high;
-investigation written up as reports, design notes or pages), `reviewer`
-(high, prefers another agent), and `expert` (premium, confirmed each time).
+The user-facing `orchestrator` role owns dialogue, task clarification,
+decisions, delegation, integration and final acceptance. Its candidates are
+Claude `opus` with `high` effort and Codex `gpt-6.1-sol` with `xhigh`
+effort. `opus` is the supported CLI alias; no versioned ID is invented.
+
+Task roles are `coder-flash` and `explorer-flash` (minimal), `explorer`
+(low), `coder` (medium), `researcher` (high; reports, design notes or pages),
+`reviewer` (high, prefers another agent), and `expert` (premium, confirmed).
 Each has fallbacks across subscriptions and an explicit reasoning effort per
 candidate, chosen from published effort/benchmark data (2026-10); the exact
 order lives in `emx/config.json`. Quota windows whose reading predates their
@@ -150,8 +157,48 @@ as `/rpc:dev:`. The host daemon resolves the project's environment before
 startup, then uses its cached PATH for MCP descriptions and candidate checks.
 Opening another session refreshes that root and announces changed definitions
 only to its MCP clients; no editor stamp or host lookup timer remains.
-Definitions never depend on the caller's agent or on current quotas, so a
-child in the same root sees the same tools as its parent.
+Definitions follow the caller's profile and project environment, rather
+than its selected model or transient quotas. Sessions with the same role
+receive stable capability definitions; different roles may receive
+different tools even when they use the same model.
+
+### User conversations and model selection
+
+New-conversation commands select a profile, defaulting to `orchestrator`.
+The normal `/model` picker lists that profile's candidates, including their
+provider and reasoning effort. A candidate carries its own mode/effort;
+switching within a provider uses its normal configuration path. Switching
+providers keeps the daemon session ID and visible transcript, starts a
+fresh native conversation and hands off bounded recent text. Native resume
+IDs never cross providers. Switching is rejected while work, approvals,
+queued messages or collaboration results remain pending.
+
+`M-x agent-session-select-any-model` (also `a` in the session menu) selects
+from all enabled providers' model catalogs.
+It permits a model outside the profile candidates and uses orchestrator's
+MCP policy. Legacy sessions retain their provider and model; absent profile
+identity defaults to orchestrator capability policy rather than forcing a
+model change. Profile identity travels in session info, including reconnect
+snapshots and persisted records.
+
+### MCP capabilities
+
+`profiles.NAME.tools` is independent of the role's model candidates:
+
+```json
+"tools": {
+  "allow": ["context", "buffers", "read_buffer", "diagnostics", "sessions", "session_read"],
+  "delegate": []
+}
+```
+
+`allow: "*"` allows the current MCP tools; a list permits only named tools.
+`delegate` restricts the profiles that `session_start` may create. A role
+without delegation does not receive that tool. Missing policy on legacy or
+custom profiles uses orchestrator's policy. MCP listing and direct calls
+use the same policy; a hidden tool cannot be invoked by guessing its name.
+Profiles define capability boundaries for the injected MCP server, not a
+sandbox around the agent's native CLI or filesystem tools.
 
 `collab.disabled` defaults to `[]` and accepts strings in four forms:
 `"reviewer"` disables the whole profile, `"reviewer:claude"` disables all of
@@ -364,15 +411,15 @@ role display tier; profiles themselves remain in `emx/config.json`.
 
 ### Rules
 
-1. Tool definitions depend on daemon configuration and installed programs,
-   never the calling session. A fork therefore sees its parent's definitions.
-   Editor registration/module loads publish `editor/tools`; the daemon sends
-   `tools/list_changed`. Codex resumes saved threads in a new process before
-   the next send when definitions change; ephemeral children keep theirs.
+1. Tool definitions depend on the profile, configuration and project
+   environment. Editor registration/module loads publish `editor/tools`;
+   the daemon sends `tools/list_changed`. Role capability boundaries take
+   precedence over sharing prompt caches across different roles.
 2. What a child is told goes in its first user message, after any inherited
    history; never in system prompts or developer instructions.
-3. Refusals (depth, concurrency, profile, children asking) happen at call time;
-   the tools stay listed.
+3. MCP lists only the profile's allowed tools and helper profiles. The
+   daemon independently validates every call, including hidden tool names.
+   Depth, concurrency, candidate and collaboration checks remain enforced.
 4. A handoff is fixed per turn: children started in the same turn get the same
    text, the task last.
 5. A child's mode never exceeds its parent's: plan < ask < edits < auto < full.
@@ -392,11 +439,13 @@ role display tier; profiles themselves remain in `emx/config.json`.
 
 A child without a `handle` is named after its profile at once (`@coder-flash`,
 `@coder-flash-2`): the parent refers to it by that name. Closing a parent closes
-its children, asking first while one works. At most `collab.maxActive`
-children of a session work at once.
+its subtree, asking first while one works. The root task shares
+`collab.maxActive` across active descendants and pending starts.
 
-A child closes once its final reply has reached its parent's mailbox
-(`collab.closeFinished`), unless the user has it on screen or it failed.
+A delegating child remains unfinished while helper work or results remain.
+After integrating them and completing, its reply reaches its direct
+parent's mailbox. It closes with `collab.closeFinished`, unless the user
+has it on screen or it failed.
 Its reply lists what its tools did, since it can't be read afterwards. A closed
 child can't be resumed: Claude and Codex children aren't saved, so "waking it
 up again" would only be a new session with a summary, which is what starting
@@ -509,10 +558,11 @@ it does not visit a file and run its hooks.
 
 We deliberately do not emit `readOnlyHint`: Codex uses it to skip approval
 in its default MCP auto mode, and Claude maps it to the tool's read-only
-and concurrency properties. No Claude `--allowedTools` or Codex per-tool
-`approval_mode="approve"` is injected. The installed dsh 0.2.0-rc.2 client
-discards the annotation, but emitting it only for one backend would make
-the policy misleading.
+and concurrency properties. Audited read-only tools that remain in the
+profile's tool set receive exact Claude `--allowedTools` entries and Codex
+per-tool `approval_mode="approve"` overrides. The installed dsh
+0.2.0-rc.2 client discards the annotation, but emitting it only for one
+backend would make the policy misleading.
 
 dsh itself asks about a tool call only when a hook or a sandbox escalation
 does, so its MCP calls, `eval` included, ran unchecked in every preset. The
@@ -521,8 +571,9 @@ Emacs passes it (`readOnly` per server), unless the preset is Full access
 or Auto: Auto's reviewer judges each call first, and in the installed
 version asks the user when it denies one.
 
-The same tools and descriptions are available to parents and children.
-Internal classification changes do not alter the published tool signature.
+The private read-only approval set is intersected with the profile's
+allowed MCP tools. Hidden tools receive no backend approval override.
+Internal classification does not change a tool's published signature.
 Parent-side approval delegation requires a separate, explicit decision for
 each pending request; being classified as read-only is not sufficient to
 approve one.

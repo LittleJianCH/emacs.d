@@ -30,6 +30,8 @@ export interface Profile extends Partial<ProfileCandidate> {
   /** A few words on when to start it, shown in every session's MCP instructions. */
   use?: string
   confirm?: boolean
+  /** Explicit MCP allow list; delegation targets are roles, independent of models. */
+  tools?: { allow: '*' | string[], delegate?: string[] }
 }
 /** A legacy override takes precedence over an inherited candidates array. */
 export function profileCandidates(p: Profile): ProfileCandidate[] {
@@ -152,7 +154,7 @@ export function validate(value: unknown): Config {
   for (const [name, a] of Object.entries(obj(c.profiles, 'profiles'))) {
     const p = `profiles.${name}`
     if (!name || name.includes(':')) fail(p, 'nonempty profile name without :')
-    keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'use', 'confirm', 'preferOtherAgent', 'candidates'], p)
+    keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'use', 'confirm', 'preferOtherAgent', 'candidates', 'tools'], p)
     const candidate = (v: any, path: string) => {
       obj(v, path)
       str(v.agent, path + '.agent')
@@ -174,6 +176,16 @@ export function validate(value: unknown): Config {
     if (a.preferOtherAgent !== undefined) bool(a.preferOtherAgent, p + '.preferOtherAgent')
     if (a.cost !== undefined && !['minimal', 'low', 'medium', 'high', 'premium'].includes(a.cost)) fail(p + '.cost', 'cost tier')
     if (a.confirm !== undefined) bool(a.confirm, p + '.confirm')
+    if (a.tools !== undefined) {
+      keys(a.tools, ['allow', 'delegate'], p + '.tools')
+      if (a.tools.allow !== '*') array(a.tools.allow, p + '.tools.allow')
+      if (a.tools.delegate !== undefined) {
+        array(a.tools.delegate, p + '.tools.delegate')
+        for (const target of a.tools.delegate) if (!Object.hasOwn(c.profiles, target)) {
+          fail(p + '.tools.delegate', 'configured profile names')
+        }
+      }
+    }
   }
   const collab = obj(c.collab, 'collab')
   keys(collab, ['startGuidance', 'quotaSkip', 'disabled', 'maxActive', 'handoffLimit', 'closeFinished', 'confirm', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout', 'handleCommand', 'agentHandleCommands', 'tools', 'prompts'], 'collab')

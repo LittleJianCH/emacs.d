@@ -7,7 +7,7 @@
 ;; Session buffer (modeled on telega): the conversation on top, the input area after
 ;; the separator and prompt; model and other info in the mode line.
 ;; Global commands live under the C-c a prefix:
-;;   C-c a a  show / hide the agent column  C-c a n  new session (C-u: pick agent)
+;;   C-c a a  show / hide the agent column  C-c a n  new session (choose profile)
 ;;   C-c a i  message the project's session  C-c a s  session list (live + history)
 ;;   C-c a f  input with current file ref    C-c a r  input with region code block
 ;;   C-c a k  end session                    C-c a v  back to agent's last page
@@ -39,6 +39,10 @@
 
 (dolist (agent my/agents)
   (require (intern (format "agent-%s" agent))))
+
+(use-package agent-session-profile
+  :demand t
+  :after agent-emx)
 
 (use-package agent-session-list
   :after agent-session

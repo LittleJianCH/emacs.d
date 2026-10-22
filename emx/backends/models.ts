@@ -7,13 +7,13 @@ import { allowedModel } from './pi.ts'
 export interface ModelChoice { id: string, label?: string }
 
 /** Query only capabilities; never create a thread or send a model prompt. */
-export async function agentModels(agent: string, config: AgentConfig, root: string): Promise<ModelChoice[]> {
+export async function agentModels(agent: string, config: AgentConfig, root: string, env: NodeJS.ProcessEnv = process.env): Promise<ModelChoice[]> {
   if (agent === 'claude') return ['default', 'sonnet', 'opus', 'haiku'].map((id) => ({ id }))
   if (!['codex', 'pi'].includes(agent)) return []
   const pi = agent === 'pi'
   const args = pi ? ['--mode', 'rpc', '--no-session', '--no-extensions', '--no-skills'] : ['app-server']
-  const child = spawn(process.env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? config.executable,
-    [...args, ...config.extraArgs ?? []], { cwd: root, stdio: 'pipe' })
+  const child = spawn(env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? config.executable,
+    [...args, ...config.extraArgs ?? []], { cwd: root, env, stdio: 'pipe' })
   child.stdin.on('error', () => {})
   child.stderr.resume()
   const lines = createInterface({ input: child.stdout })

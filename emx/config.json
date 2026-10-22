@@ -45,7 +45,18 @@
     }
   },
   "profiles": {
+    "orchestrator": {
+      "cost": "high",
+      "use": "coordinate the conversation and delegate bounded tasks",
+      "description": "Coordinates user conversations, implementation and bounded helper tasks.",
+      "tools": {"allow": "*"},
+      "candidates": [
+        {"agent": "claude", "model": "opus", "mode": "auto", "effort": "high"},
+        {"agent": "codex", "model": "gpt-6.1-sol", "mode": "auto", "effort": "xhigh"}
+      ]
+    },
     "coder-flash": {
+      "tools": {"allow":["context","buffers","read_buffer","diagnostics","describe","sessions","session_read","config_read","canvas_guide","open","show","notify"],"delegate":[]},
       "cost": "minimal",
       "use": "implementation to a clear spec; builds, benchmarks and test series",
       "description": "Implementation or long runs with a clear goal and verification: writes code and tests to a clear specification.",
@@ -71,6 +82,7 @@
       ]
     },
     "explorer-flash": {
+      "tools": {"allow":["context","buffers","read_buffer","diagnostics","describe","sessions","session_read","config_read","canvas_guide"],"delegate":[]},
       "cost": "minimal",
       "use": "bulk extraction and long reading: many or large files, logs, docs",
       "description": "Bulk extraction and long reading where the question is simple: many or large files, logs, docs.  Doesn't edit.",
@@ -90,6 +102,7 @@
       ]
     },
     "explorer": {
+      "tools": {"allow":["context","buffers","read_buffer","diagnostics","describe","sessions","session_read","config_read","canvas_guide"],"delegate":[]},
       "cost": "low",
       "use": "where something is used, how a path works, what another codebase does there",
       "description": "Code archaeology: traces where something is used, how a path works or what another codebase does there, and returns file:line refs with what the code does.  Doesn't edit.  Bulk extraction over many or large files, logs or docs belongs to a profile meant for long reading.",
@@ -115,6 +128,7 @@
       ]
     },
     "coder": {
+      "tools": {"allow":"*","delegate":["coder-flash","explorer-flash"]},
       "cost": "medium",
       "use": "implementation or debugging that needs judgment",
       "description": "Implementation that needs more judgment: changes across files, debugging, refactoring.",
@@ -140,6 +154,7 @@
       ]
     },
     "researcher": {
+      "tools": {"allow":["context","buffers","read_buffer","diagnostics","describe","sessions","session_read","config_read","canvas_guide","open","show","render","patch","notify"],"delegate":[]},
       "cost": "high",
       "use": "open questions written up as a report or design note",
       "description": "Investigates open questions across code, docs and the web, compares options and writes up findings (reports, design notes, pages).  Edits documents; code changes stay small.",
@@ -165,6 +180,7 @@
       ]
     },
     "reviewer": {
+      "tools": {"allow":["context","buffers","read_buffer","diagnostics","describe","sessions","session_read","config_read","canvas_guide","review_snapshot","review_reply"],"delegate":[]},
       "cost": "high",
       "use": "review of substantive changes before delivery, even uncommitted ones",
       "description": "Reviews substantive changes before delivery; reproduces what it finds and reports findings without editing files.",
@@ -190,6 +206,7 @@
       ]
     },
     "expert": {
+      "tools": {"allow":["context","buffers","read_buffer","diagnostics","describe","sessions","session_read","config_read","canvas_guide"],"delegate":[]},
       "cost": "premium",
       "use": "when you are stuck or the user asks for it",
       "description": "Works through the hardest problems: subtle bugs, tricky designs.  Use it when you are stuck or the user asks for it, not for routine work.",
@@ -314,7 +331,7 @@
       },
       {
         "name": "session_start",
-        "description": "Start a subagent to do one bounded task and report back.\nA child assigned one task cannot start further sessions.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n{forkAgents}\nChoose the least costly profile likely to complete the task reliably.\nemx selects an available candidate for the role using current quotas.\nFor reasoning on your own conversation, use fork.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
+        "description": "Start a subagent to do one bounded task and report back.\nOnly profiles whose tools permit helpers can delegate further tasks.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n{forkAgents}\nChoose the least costly profile likely to complete the task reliably.\nemx selects an available candidate for the role using current quotas.\nFor reasoning on your own conversation, use fork.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -380,7 +397,7 @@
       "handlePrompt": "Name this coding conversation with a short English handle: one or two lowercase words joined by '-', at most 16 characters, about its topic. Reply with the handle only.\n\nFirst message:\n",
       "task": "Your task:\n",
       "forkAgents": "  %s sessions can fork.",
-      "delegation": "- Subagents: start them with session_start (discover it if it is not listed),\n  and tell the user in one sentence which profile and why.  If session_start\n  started you, do your one task yourself and start none.\n  - Reading: when a question is where something is used, how a path works\n    across files or what another codebase does there, delegate it before your\n    second lookup, even as the user's whole question or a follow-up with\n    nothing to do in parallel.  At most one grep to pin the symbol and\n    revision; don't read the hits, don't fork.  A grep listing hits only pins\n    the symbol and never settles these questions; reading one hit is your\n    second lookup.  Brief a profile meant for reading with the symbol,\n    revision, repo and \"report file:line and what the code does\"; the turn's\n    related questions (where-used and another codebase) go in one brief.  End\n    your turn if you need the answer, and write the user's answer once it\n    reports.  Stay local only for a definition in a file you already have open,\n    a fact outside these questions that one grep settles, explaining code the\n    user already pointed at (lines just marked in an atomic review, a diff\n    already in the conversation), edit-compile-fix interleaved with your own\n    edits, reading a diff to plan an atomic review, and dialogue with the user.\n    Project rules naming Agent, Explore or \"after N reads\" mean session_start\n    here: at N, stop and start one.\n  - Runs: delegate builds, benchmarks and test series that won't interleave\n    with your own edits; don't run them yourself.\n  - Parts: other independent parts of nontrivial work; delegate a bounded part\n    early, then continue another part, never the reading half of it.",
+      "delegation": "- Subagents: start them with session_start (discover it if it is not listed),\n  and tell the user in one sentence which profile and why.  If session_start\n  started you, use only helper profiles explicitly listed by your tools; otherwise\n  do the task yourself.\n  - Reading: when a question is where something is used, how a path works\n    across files or what another codebase does there, delegate it before your\n    second lookup, even as the user's whole question or a follow-up with\n    nothing to do in parallel.  At most one grep to pin the symbol and\n    revision; don't read the hits, don't fork.  A grep listing hits only pins\n    the symbol and never settles these questions; reading one hit is your\n    second lookup.  Brief a profile meant for reading with the symbol,\n    revision, repo and \"report file:line and what the code does\"; the turn's\n    related questions (where-used and another codebase) go in one brief.  End\n    your turn if you need the answer, and write the user's answer once it\n    reports.  Stay local only for a definition in a file you already have open,\n    a fact outside these questions that one grep settles, explaining code the\n    user already pointed at (lines just marked in an atomic review, a diff\n    already in the conversation), edit-compile-fix interleaved with your own\n    edits, reading a diff to plan an atomic review, and dialogue with the user.\n    Project rules naming Agent, Explore or \"after N reads\" mean session_start\n    here: at N, stop and start one.\n  - Runs: delegate builds, benchmarks and test series that won't interleave\n    with your own edits; don't run them yourself.\n  - Parts: other independent parts of nontrivial work; delegate a bounded part\n    early, then continue another part, never the reading half of it.",
       "startSummary": "- Subagent profiles, cheapest first, and when to start each:\n%s",
       "candidateSkipped": "%s: %s",
       "candidatesSkipped": "  Skipped candidates: %s.",

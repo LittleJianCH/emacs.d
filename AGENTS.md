@@ -55,6 +55,7 @@ doc/subagents.md         design of subagents and agent collaboration, with measu
 doc/emx-daemon.md        design of the emx daemon, sessions and remote projects
 test/agent-backend-test.el  ERT suite for enabled daemon registrations
 test/agent-session-test.el  ERT suite for the agent UI (uses a fake echo backend)
+test/agent-session-profile-test.el  ERT suite for profile creation and model choices
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
 test/agent-session-link-test.el   ERT suite for clickable links in transcripts
 test/init-reload-test.el    ERT suite for reloading
@@ -207,8 +208,10 @@ Claude gets exact `--allowedTools` entries, Codex per-tool
 `mcp_servers.emacs.tools.<name>.approval_mode="approve"`, and dsh its bridge
 gate. Never publish `readOnlyHint` in MCP definitions. Persistent Claude and
 Codex sessions resume in a new process before sending after a set change;
-children retain their original set. Keep flags caller-independent so forks
-share their parent's prompt cache under the same configuration and place.
+children retain their original set. MCP capabilities follow the session's
+profile, including daemon-side call checks. Stable tool sets within a role
+preserve cache reuse; role capability boundaries take precedence over
+cross-role fork cache sharing.
 `emx mcp` requires `EMX_DAEMON_SOCKET` and `EMX_SESSION`, and uses
 `mcp/hello`, `mcp/tools`, `mcp/call`. The legacy emacsclient MCP transport
 is removed. Bare CLI commands use `emx/cli/emacsclient.ts` and temporary request/response
@@ -223,7 +226,10 @@ Run from the repo root. For an isolated worktree, set `package-user-dir`
 to the existing checkout's elpa directory before loading init.el. Run with the
 caller's real HOME: every ERT file loads test/test-helper.el, which isolates
 daemon/usage state and native history, supplies fake CLIs, disables background
-auto-revert polling, and checks that var/emx stays empty. Integration tests that
+auto-revert polling, and checks that var/emx stays empty. A checkout-local
+`custom.el` can override `my/use-evil` during startup, including native-startup
+subprocess tests. Run those checks in an isolated checkout without that local
+file, using the existing elpa directory; do not edit the user's saved settings. Integration tests that
 rebind HOME must capture expanded local paths before doing so.
 
 Tests (ERT, about half a minute). They exercise the native Emacs keys, so turn
@@ -231,7 +237,7 @@ evil off first (it is on by default and its normal state would eat typed keys):
 
 ```sh
 emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
-      -l test/agent-session-test.el \
+      -l test/agent-session-test.el -l test/agent-session-profile-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el -l test/init-evil-pinyin-test.el \
       -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \

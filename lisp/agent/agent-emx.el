@@ -292,6 +292,8 @@ Daemon events keep their distinct false value; only tool arguments use nil."
     (unless (agent-emx--cancelled-p connection summary)
       (or (when-let* ((existing
                        (agent-emx--canonical-view connection summary)))
+            (agent-emx--identity existing (plist-get summary :agent))
+            (agent-emx--info existing info)
             (agent-emx--set existing :emx-id id)
             (agent-emx--set existing :emx-creation-id (plist-get summary :creationId))
             (puthash id existing (agent-emx--connection-sessions connection))
@@ -583,7 +585,8 @@ Daemon events keep their distinct false value; only tool arguments use nil."
         (agent-emx--close-view connection (plist-get params :id)))
        ((equal method "sessions")
         (seq-doseq (summary (plist-get params :sessions))
-          (when (plist-get (plist-get summary :info) :parent)
+          (when (or (plist-get (plist-get summary :info) :parent)
+                    (agent-emx--canonical-view connection summary))
             (agent-emx--adopt connection summary))))
        ((equal method "config")
         (unless (agent-emx--connection-place connection)
@@ -1100,14 +1103,41 @@ ROLE usage obtains a separate non-exclusive connection."
           (list :id (agent-emx--get session :emx-id) :before before :turns 20)
           nil (lambda (error) (agent-emx--error session error))))))))
 
+(defun agent-emx--identity (session agent)
+  "Apply daemon provider AGENT to SESSION while retaining the view and blocks."
+  (when (and (stringp agent)
+             (not (equal agent
+                         (or (agent-session--get (agent-session-agent session) :emx-agent)
+                             (symbol-name (agent-session-agent session))))))
+    (setf (agent-session-agent session)
+          (or (car (seq-find
+                    (lambda (entry) (equal agent (plist-get (cdr entry) :emx-agent)))
+                    agent-session-agents))
+              (intern agent)))
+    ;; A native resume id belongs to exactly one provider.
+    (agent-emx--set session :resume nil)
+    (dolist (key '(:sessionId :model :tokens))
+      (setf (agent-session-info session)
+            (plist-put (agent-session-info session) key nil)))
+    (when (buffer-live-p (agent-session-buffer session))
+      (with-current-buffer (agent-session-buffer session)
+        (rename-buffer
+         (format "*%s@%s*" (agent-session-agent session)
+                 (file-name-nondirectory
+                  (directory-file-name (agent-session-root session))))
+         t)))
+    (agent-emx--set session :profile-models nil)
+    (agent-session--refresh session)))
+
 (defun agent-emx--info (session info)
   "Apply wire INFO to SESSION, preserving its Lisp parent buffer.
 The daemon parent id is not an Emacs buffer."
+  (agent-emx--identity session (plist-get info :agent))
   (let ((props (cl-loop for (key value) on info by #'cddr
                         unless (eq key :parent) append (list key value))))
     (apply #'agent-session-set-info session props))
-  (when-let* ((resume (plist-get info :sessionId)))
-    (agent-emx--set session :resume resume)))
+  (when (plist-member info :sessionId)
+    (agent-emx--set session :resume (plist-get info :sessionId))))
 
 (defun agent-emx--settings (session settings)
   "Apply daemon SETTINGS to SESSION without sending them back."
@@ -1270,6 +1300,8 @@ The daemon parent id is not an Emacs buffer."
   "Finish applying RESULT once its replay is complete."
   (agent-emx--set session :emx-replay nil)
   (agent-emx--info session (plist-get result :info))
+  (unless (plist-member (plist-get result :info) :profile)
+    (agent-emx--info session '(:profile "orchestrator")))
   (agent-emx--settings session (plist-get result :settings))
   (agent-emx--set session :emx-capabilities (plist-get result :capabilities))
   (agent-emx--set session :emx-queue (plist-get result :queue))
@@ -1291,7 +1323,12 @@ The daemon parent id is not an Emacs buffer."
   (agent-session--refresh session)
   (let ((waiters (agent-emx--get session :emx-waiters)))
     (agent-emx--set session :emx-waiters nil)
-    (dolist (callback waiters) (funcall callback))))
+    (dolist (callback waiters) (funcall callback)))
+  (when (and (fboundp 'agent-session-profile-refresh-models)
+             (when-let* ((connection (agent-emx--get session :emx-connection)))
+               (and (agent-emx--connection-ready connection)
+                    (process-live-p (agent-emx--connection-process connection)))))
+    (agent-session-profile-refresh-models session)))
 
 (defun agent-emx--skills-context (session)
   "Return backend-neutral skill context for SESSION."
@@ -1352,11 +1389,15 @@ The daemon parent id is not an Emacs buffer."
                          (agent-emx--set session :emx-creation-id
                                          (md5 (format "%s:%s:%s:%s" (emacs-pid) (current-time)
                                                       (random) (buffer-name (agent-session-buffer session))))))
-                     :agent (or (agent-session--get (agent-session-agent session) :emx-agent)
-                               (symbol-name (agent-session-agent session)))
                      :root (agent-session-process-directory (agent-session-root session))
-                     :settings (agent-emx--choices session)
                      :skills (agent-emx--skills-context session))
+               (if (and (plist-get (agent-session-info session) :profile)
+                        (not (agent-emx--get session :resume)))
+                   (list :profile (plist-get (agent-session-info session) :profile))
+                 (list :agent
+                       (or (agent-session--get (agent-session-agent session) :emx-agent)
+                           (symbol-name (agent-session-agent session)))
+                       :settings (agent-emx--choices session)))
                (when-let* ((handle (agent-session-handle session)))
                  (list :handle handle))
                (when (agent-session-child-p session)
@@ -1418,8 +1459,9 @@ The daemon parent id is not an Emacs buffer."
            (when (eq generation (agent-emx--get session :emx-generation))
              (agent-emx--error session error))))))))
 
-(defun agent-emx--rpc (session method &optional params callback)
-  "Send SESSION's METHOD and PARAMS, then call CALLBACK with the result."
+(defun agent-emx--rpc (session method &optional params callback error-callback)
+  "Send SESSION's METHOD and PARAMS, then call CALLBACK with the result.
+When supplied, ERROR-CALLBACK handles request errors without disconnecting."
   (let ((generation (agent-emx--get session :emx-generation)))
     (agent-emx--ready
      session
@@ -1436,7 +1478,8 @@ The daemon parent id is not an Emacs buffer."
               (funcall callback result)))
           (lambda (error)
             (when (eq generation (agent-emx--get session :emx-generation))
-              (agent-emx--error session error)))))))))
+              (if error-callback (funcall error-callback error)
+                (agent-emx--error session error))))))))))
 
 (defun agent-emx--choices (session)
   "Return SESSION's settings in wire form."

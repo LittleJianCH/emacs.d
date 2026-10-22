@@ -35,9 +35,12 @@ async function setup(t: TestContext, candidates: ProfileCandidate[] = [claude, c
     else process.env.EMX_CLAUDE_LOG = oldLog
   })
   await daemon.start()
+  // Exercise candidate/quota policy independently of account evidence probes.
+  t.mock.method(daemon.usage, 'candidateAvailability', () => undefined)
   // These tests mutate effective policy directly; file watching is tested elsewhere.
   daemon.configuration.close()
-  const parent = new Session({ id: 'parent', agent: caller, root: dir, settings: { mode: 'auto' }, info: { handle: 'parent' } })
+  const parent = new Session({ id: 'parent', agent: caller, root: dir, settings: { mode: 'auto' }, info: { handle: 'parent' },
+    editorTools: () => daemon.collab.tools(daemon.editor.tools, dir, parent) })
   parent.setStatus('running'); daemon.sessions.set(parent.id, parent)
   const start = async (profile = 'worker') => {
     const receipt = String(await daemon.collab.call(parent, 'session_start', { profile, prompt: 'hold' }, signal()))
