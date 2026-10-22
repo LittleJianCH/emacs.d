@@ -32,6 +32,7 @@ lisp/core/               base layer
   init-dev.el            project, magit, eglot, tree-sitter
   init-remote.el         remote editing (tramp-rpc)
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
+  init-lazy.el           on-demand modules: `my/lazy-modules' triggers (files, keys, commands)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
   agent-emx.el          required daemon client, session views and editor tools
@@ -40,7 +41,7 @@ lisp/agent/              shared agent support (see below)
     agent-NAME.el       enabled-agent registration (all use :backend emx)
     pi/                 thin Pi RPC approval and direct MCP extension
     dsh/                DeepSeek Harness bridge plugin and profile patches
-lisp/app/                standalone applications
+lisp/app/                standalone applications; enabled via `my/apps' in init.el
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
 bin/emx                  minimal launcher: locate/build dist, import compiled CLI
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
@@ -60,6 +61,8 @@ test/init-base-test.el      ERT suite for base defaults
 test/init-remote-test.el    ERT suite for remote editing
 test/init-ui-test.el        ERT suite for the themes, status line and side panels
 test/init-term-test.el      ERT suite for the terminal module
+test/init-lazy-test.el      ERT suite for on-demand module loading
+test/lang-test.el           ERT suite for the language modules (toolchains mocked)
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
@@ -205,6 +208,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \
+      -l test/init-lazy-test.el -l test/lang-test.el \
       -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
@@ -358,10 +362,15 @@ Other caveats:
   the native Emacs keybindings, and every evil binding must stay inside
   `with-eval-after-load 'evil`.
 - **Modularity.** New languages go in `lisp/lang/lang-NAME.el` and are enabled in
-  `my/languages`. A new agent lives in `lisp/agent/backend/agent-NAME.el`,
-  registers itself with `agent-session-define-agent` using `:backend emx`,
-  with its protocol adapter in `emx/backends/`,
-  and is enabled via `my/agents` in init.el. New agent -> Emacs abilities are
+  `my/languages`; apps go in `lisp/app/init-NAME.el` and `my/apps`. Give each
+  optional one an entry in `my/lazy-modules` (the files, global keys and
+  commands that first use it), so it loads and installs its packages only then;
+  a test checks the file triggers match the module's own `auto-mode-alist` rules.
+  Reloading never installs new triggers or loads a module nobody used yet: a
+  table edit takes effect after a restart, or `my/lazy-require` on the feature.
+  A new agent lives in `lisp/agent/backend/agent-NAME.el`, registers itself
+  with `agent-session-define-agent` using `:backend emx`, with its protocol
+  adapter in `emx/backends/`, and is enabled via `my/agents` in init.el. New agent -> Emacs abilities are
   `agent-ui-defmethod`s; only work that needs no Emacs state (like the `config_*` file
   tools) belongs in emx itself.
 - **Packages.** use-package with GNU ELPA first, then NonGNU, then MELPA; pin to MELPA

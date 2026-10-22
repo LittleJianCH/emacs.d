@@ -9,7 +9,9 @@
 ;;   lisp/app/    standalone applications, such as the Telegram client
 ;;
 ;; To add a language: create lisp/lang/lang-NAME.el (ending with `provide'),
-;; then add NAME to `my/languages'.
+;; then add NAME to `my/languages'; an app goes in lisp/app/init-NAME.el and
+;; `my/apps'.  A module listed in `my/lazy-modules' (lisp/core/init-lazy.el)
+;; with its triggers loads, and installs its packages, only on first use.
 ;; Agent registrations live in lisp/agent/backend/; all execute via emx.
 ;; `my/agents' selects enabled agents.
 
@@ -35,7 +37,11 @@
 ;;; Modules
 
 (defvar my/languages '(elisp rust go nix agda)
-  "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.")
+  "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.
+Most load on first visiting one of their files; see `my/lazy-modules'.")
+
+(defvar my/apps '(telega)
+  "Enabled applications, each loaded from lisp/app/init-NAME.el on first use.")
 
 (defvar my/agents '(claude codex dsh pi)
   "Enabled daemon agent registrations, loaded from lisp/agent/backend/agent-NAME.el.")
@@ -50,11 +56,13 @@
 (require 'init-remote)      ; remote editing: tramp-rpc
 (require 'init-term)        ; terminals: ghostel, C-c t
 
+(require 'init-lazy)        ; optional modules, loaded on first use
 (dolist (lang my/languages)
-  (require (intern (format "lang-%s" lang))))
+  (my/lazy-require (intern (format "lang-%s" lang))))
 
 (require 'init-agent)       ; agent sessions, agent -> Emacs bridge
-(require 'init-telega)      ; Telegram client, C-c T
+(dolist (app my/apps)       ; telega: Telegram client, C-c T
+  (my/lazy-require (intern (format "init-%s" app))))
 
 ;; Restore normal GC settings once startup finishes.
 (add-hook 'emacs-startup-hook

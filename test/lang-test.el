@@ -338,6 +338,7 @@
 
 (ert-deftest lang-agda-evil-leader ()
   "Agda's leader works in command states and preserves native bindings."
+  (skip-unless (featurep 'init-evil))
   (require 'evil)
   (let ((agda2-mode-map (make-sparse-keymap)))
     (define-key agda2-mode-map (kbd "C-c C-l") 'agda2-load)
@@ -359,6 +360,7 @@
 
 (ert-deftest lang-envrc-evil-leader ()
   "The environment leader exposes reload, allow and log commands."
+  (skip-unless (featurep 'init-evil))
   (require 'evil)
   (with-temp-buffer
     (setq-local envrc-mode t)
