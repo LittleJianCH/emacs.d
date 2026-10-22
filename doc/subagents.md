@@ -142,8 +142,8 @@ order lives in `emx/config.json`. Quota windows whose reading predates their
 reset, overage windows, and windows named after another model (Claude's
 `seven_day_fable`) do not mark a candidate strained. The role's description stays stable across candidate changes.
 
-The tool lists a role when at least one candidate's agent is enabled and its
-executable is installed in the caller root's environment. Lines contain only
+The tool lists a role when at least one candidate is not disabled, its agent is
+enabled and its executable is installed in the caller root's environment. Lines contain only
 `- role: tier cost.  description`, without the selected agent or model.
 Children start where their parent runs: this machine or a remote project such
 as `/rpc:dev:`. The host daemon resolves the project's environment before
@@ -153,14 +153,26 @@ only to its MCP clients; no editor stamp or host lookup timer remains.
 Definitions never depend on the caller's agent or on current quotas, so a
 child in the same root sees the same tools as its parent.
 
+`collab.disabled` defaults to `[]` and accepts strings in three forms:
+`"reviewer"` disables the whole profile, `"reviewer:claude"` disables all of
+that profile's Claude candidates, and `"reviewer:claude/opus"` disables the
+candidate with that exact model string. Model strings may contain `/`; the
+whole string is compared, without aliases or case folding. Unknown names are
+ignored. Legacy top-level agent/model profiles count as one candidate.
+Profiles disabled outright or with every candidate disabled disappear from
+tool descriptions, profile guidance and MCP instructions. Starting one fails
+with `Profile <name> is disabled`.
+
 On each `session_start`, emx walks the role's candidates in order. It skips
-disabled agents, missing executables and Pi models rejected by
+disabled candidates, disabled agents, missing executables and Pi models rejected by
 `agents.pi.models` (the same `allowedModel` filter as the backend, including
 its default model when omitted). It then skips strained subscriptions using
 this daemon's current UsageService quota snapshot: only the agent's `host: null`
 entry counts, and duplicate entries are ignored. A subscription is strained
-when any window is `limited` or its used fraction reaches `collab.quotaSkip`
-(default `0.9`, validated from `0` through `1`), or a nonempty balance list has
+when any window is `limited` or its used fraction reaches
+`agents.<name>.quotaSkip`, falling back to `collab.quotaSkip` when the agent has
+no override (global default `0.9`; both accept numbers from `0` through `1`),
+or a nonempty balance list has
 all amounts at or below zero. Missing quota data does not exclude a candidate;
 remote readings and forecast values do not affect selection.
 
@@ -168,7 +180,8 @@ remote readings and forecast values do not affect selection.
 agent from the caller first, preserving their relative order. The shipped
 review role uses this: a Codex caller normally gets Claude Opus, while a Claude
 caller gets Codex. If every available candidate is strained, emx still uses
-the first available candidate in configuration order. If none is available,
+the first available, non-disabled candidate in configuration order. Disabled
+candidates are never eligible for this fallback. If none is available,
 the error lists every candidate and its reason. A backend startup failure closes
 the child and returns its error; selection does not retry after startup.
 
@@ -179,6 +192,30 @@ The wording, including unavailable/model-filter/quota/vendor-preference reasons
 and the no-candidate error, comes from `collab.prompts`. Child info keeps
 `profile` as the role name, with its actual agent and model in the existing
 session fields. Permission mode is still capped by the parent's mode.
+
+The editor requests `collab/profiles` with `{}` to inspect policy and current
+quota state. It returns every profile in configuration order, including disabled
+ones, as `{ profiles: [{ name, cost, description, disabled, candidates: [{ agent,
+model, effort?, disabled, available, unavailable?, strained?, quotaSkip }] }],
+quotaSkip }`. A missing candidate model is `null`; absent effort and reason
+fields are omitted. Missing cost and description become `"unknown"` and `""`.
+Profile `disabled` means all its candidates are disabled. Candidate `available`
+reflects enabled agents, installed executables and the Pi model filter,
+independently of `disabled`. The outer threshold is global; each candidate
+carries its effective threshold. `strained` uses exactly the same English
+reason computation as selection and its skipped-candidate receipt.
+
+The local editor can request `config/set` with `{ path: ["agents", "claude",
+"quotaSkip"], value: 0.8 }`. It edits only `var/emx/config.json`, preserving
+other keys and creating intermediate objects. `value: null` deletes the overlay
+key, pruning empty parent objects and restoring defaults through the normal
+merge. emx validates the would-be merged configuration before touching the file;
+invalid edits fail without changing it. Successful edits publish a temporary
+file by atomic rename, using two-space JSON with a trailing newline, immediately
+reload policy and notify clients and MCP tools. The response is `{ config }`
+with the full effective config. Host daemons reject this request with
+`config/set is only available on local daemons`; their config files continue
+to accept only executable overrides through the existing host mechanism.
 
 The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is

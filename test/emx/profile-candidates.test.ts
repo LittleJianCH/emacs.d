@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DaemonServer } from '../../emx/daemon/server.ts'
 import { Session } from '../../emx/daemon/session.ts'
-import { definitions, profileCandidates, profiles } from '../../emx/daemon/collab.ts'
+import { definitions, profileCandidates, profiles, startSummary } from '../../emx/daemon/collab.ts'
+import { SocketClient } from './client.ts'
 import { emxRoot } from '../../emx/daemon/paths.ts'
 import type { Config, ProfileCandidate } from '../../emx/config.ts'
 import type { QuotaEntry } from '../../emx/usage/types.ts'
@@ -108,10 +109,120 @@ const strainedCases: { name: string, quota: QuotaEntry, reason: string }[] = [
 ]
 for (const { name, quota, reason } of strainedCases) test(`seeded UsageService snapshot skips ${name}`, async (t) => {
   const x = await setup(t, [claude, codex], [quota])
+  assert.equal(x.daemon.collab.profiles().profiles.find((p) => p.name === 'worker')!.candidates[0].strained, reason)
   const before = definitions(x.config)
   const { child, receipt } = await x.start()
   assert.equal(child.agent, 'codex'); assert.ok(receipt.includes(`Claude sonnet: ${reason}`))
   assert.deepEqual(definitions(x.config), before)
+})
+test('per-agent quota threshold overrides global policy in both directions, including zero', async (t) => {
+  const x = await setup(t, [claude, codex], [{ agent: 'claude', windows: [{ id: '5h', used: 0.85 }] }])
+  x.config.agents.claude.quotaSkip = 0.8
+  assert.equal((await x.start()).child.agent, 'codex', 'agent threshold can be lower than global')
+  x.config.collab.quotaSkip = 0.8; x.config.agents.claude.quotaSkip = 0.95
+  assert.equal((await x.start()).child.agent, 'claude', 'agent threshold can be higher than global')
+  x.config.collab.quotaSkip = 1
+  x.config.agents.claude.quotaSkip = 0
+  assert.equal((await x.start()).child.agent, 'codex', 'zero is an override, not a missing value')
+  delete x.config.agents.claude.quotaSkip
+  assert.equal((await x.start()).child.agent, 'claude', 'deleting override restores global policy')
+})
+
+for (const disabled of [['worker'], ['worker:claude', 'worker:codex']]) {
+  test(`disabled profile ${JSON.stringify(disabled)} disappears from all guidance and errors on start`, async (t) => {
+    const x = await setup(t, [claude, codex])
+    x.config.collab.disabled = disabled
+    assert.ok(!profiles(x.config).some(([name]) => name === 'worker'))
+    assert.doesNotMatch(definitions(x.config).find((tool) => tool.name === 'session_start')!.description, /worker/)
+    assert.doesNotMatch(startSummary(x.config), /worker/)
+    const client = await SocketClient.connect(x.daemon.socket), mcp = await SocketClient.connect(x.daemon.socket)
+    try {
+      await client.request('hello', { client: 'test', version: '' })
+      const hello = await mcp.request('mcp/hello', { session: x.parent.id })
+      assert.doesNotMatch(hello.instructions, /worker/)
+      const catalog = await client.request('collab/profiles', {})
+      const worker = catalog.profiles.find((p) => p.name === 'worker')!
+      assert.equal(worker.disabled, true)
+      assert.ok(worker.candidates.every((candidate) => candidate.disabled && candidate.available))
+      await assert.rejects(mcp.request('mcp/call', { name: 'session_start', arguments: { profile: 'worker', prompt: 'hold' } }), {
+        message: 'Profile worker is disabled',
+      })
+      assert.equal(x.daemon.sessions.size, 1)
+    } finally { await mcp.close(); await client.close() }
+  })
+}
+
+test('agent disabling removes all its candidates; unknown entries do not affect selection', async (t) => {
+  const x = await setup(t, [claude, { ...claude, model: 'opus' }, codex])
+  x.config.collab.disabled = ['worker:claude', 'unknown', 'worker:missing', 'worker:codex/not-the-model']
+  assert.equal((await x.start()).child.agent, 'codex')
+  assert.ok(profiles(x.config).some(([name]) => name === 'worker'))
+  const worker = x.daemon.collab.profiles().profiles.find((p) => p.name === 'worker')!
+  assert.equal(worker.disabled, false)
+  assert.deepEqual(worker.candidates.map((candidate) => candidate.disabled), [true, true, false])
+})
+
+test('model disabling compares the full exact string, including provider slashes', async (t) => {
+  const x = await setup(t, [pi, { ...pi, model: 'opencode-go/glm-5.3-flash' }, codex])
+  x.config.collab.disabled = ['worker:pi/kimi-k3', 'worker:pi/opencode-go/KIMI-K3']
+  assert.equal((await x.start()).child.settings.model, 'opencode-go/kimi-k3')
+  x.config.collab.disabled.push('worker:pi/opencode-go/kimi-k3')
+  const { child } = await x.start()
+  assert.equal(child.agent, 'pi'); assert.equal(child.settings.model, 'opencode-go/glm-5.3-flash')
+})
+
+test('legacy top-level agent and model form one disableable candidate', async (t) => {
+  const x = await setup(t)
+  x.config.profiles.worker = { ...claude, candidates: [codex] }
+  x.config.collab.disabled = ['worker:claude/sonnet']
+  assert.ok(!profiles(x.config).some(([name]) => name === 'worker'))
+  const worker = x.daemon.collab.profiles().profiles.find((p) => p.name === 'worker')!
+  assert.equal(worker.candidates.length, 1)
+  assert.equal(worker.candidates[0].agent, 'claude'); assert.equal(worker.disabled, true)
+  await assert.rejects(x.start(), { message: 'Profile worker is disabled' })
+})
+
+for (const disabled of ['worker:claude', 'worker:claude/sonnet']) {
+  test(`strained fallback never picks disabled candidate ${disabled}`, async (t) => {
+    const x = await setup(t, [claude, codex], [
+      { agent: 'claude', windows: [{ id: '5h', used: 1 }] },
+      { agent: 'codex', windows: [{ id: 'weekly', limited: true }] },
+    ])
+    x.config.collab.disabled = [disabled]
+    assert.equal((await x.start()).child.agent, 'codex')
+  })
+}
+
+test('collab/profiles wire includes every profile in config order with candidate state and effective thresholds', async (t) => {
+  const x = await setup(t, [{ ...claude, effort: 'high' }, codex, { ...pi, model: 'other-provider/other' }, { agent: 'dsh' }], [
+    { agent: 'claude', windows: [{ id: '5h', used: 0.92 }] },
+  ])
+  x.config.collab.disabled = ['worker:claude/sonnet', 'coder']
+  x.config.agents.claude.quotaSkip = 0.8
+  x.daemon.collab.enabled = ['claude', 'pi', 'dsh']
+  const client = await SocketClient.connect(x.daemon.socket)
+  try {
+    await client.request('hello', { client: 'test', version: '' })
+    const result = await client.request('collab/profiles', {})
+    assert.deepEqual(Object.keys(result).sort(), ['profiles', 'quotaSkip'])
+    assert.equal(result.quotaSkip, 0.9)
+    assert.deepEqual(result.profiles.map((p) => p.name), Object.keys(x.config.profiles))
+    assert.equal(result.profiles.find((p) => p.name === 'coder')!.disabled, true)
+    assert.deepEqual(result.profiles.find((p) => p.name === 'worker'), {
+      name: 'worker', cost: 'medium', description: 'Test role', disabled: false,
+      candidates: [
+        { agent: 'claude', model: 'sonnet', effort: 'high', disabled: true, available: true, strained: '5h quota 92% used', quotaSkip: 0.8 },
+        { agent: 'codex', model: 'gpt-6.1-sol', disabled: false, available: false, unavailable: 'unavailable here', quotaSkip: 0.9 },
+        { agent: 'pi', model: 'other-provider/other', disabled: false, available: false, unavailable: 'model excluded by agents.pi.models', quotaSkip: 0.9 },
+        { agent: 'dsh', model: null, disabled: false, available: true, quotaSkip: 0.9 },
+      ],
+    })
+    await client.close()
+    x.config.collab.disabled = []
+    const { receipt, child } = await x.start()
+    assert.equal(child.agent, 'dsh')
+    assert.ok(receipt.includes(result.profiles.at(-1)!.candidates[0].strained!))
+  } finally { await client.close() }
 })
 for (const quota of [
   { agent: 'claude', host: 'other-host', windows: [{ id: '5h', used: 1 }] },

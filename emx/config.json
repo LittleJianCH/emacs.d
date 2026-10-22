@@ -391,7 +391,8 @@
       "candidateSameAgent": "same agent as caller; preferring another vendor",
       "noCandidate": "No candidate available for profile %s: %s"
     },
-    "quotaSkip": 0.9
+    "quotaSkip": 0.9,
+    "disabled": []
   },
   "usage": {
     "pollInterval": 900

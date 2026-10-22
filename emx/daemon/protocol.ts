@@ -267,6 +267,29 @@ export interface SendParams {
   block?: string
 }
 
+/** Config-order catalog, including disabled profiles and candidates. */
+export interface CollabProfiles {
+  quotaSkip: number
+  profiles: {
+    name: string
+    cost: string
+    description: string
+    disabled: boolean
+    candidates: {
+      agent: string
+      /** Null when the backend's default model is requested. */
+      model: string | null
+      effort?: string
+      disabled: boolean
+      /** Runtime availability, independent of the disabled flag. */
+      available: boolean
+      unavailable?: string
+      strained?: string
+      quotaSkip: number
+    }[]
+  }[]
+}
+
 export interface Requests {
   'config/push': [{ config: import('../config.ts').Config }, { config: import('../config.ts').Config, errors: string[] }]
   'config/call': [{ method: string, arguments: Record<string, unknown> }, string]
@@ -279,10 +302,12 @@ export interface Requests {
   'mcp/tools': [{}, { tools: EditorTools['tools'] }]
   'mcp/call': [{ name: string, arguments?: Record<string, unknown> }, unknown]
   'config/get': [{}, { config: import('../config.ts').Config, errors: string[] }]
+  'config/set': [{ path: string[], value: unknown }, { config: import('../config.ts').Config }]
   'config/reload': [{}, { config: import('../config.ts').Config, errors: string[] }]
   'sessions/history': [{ agent: string, root: string }, { items: import('../backends/history.ts').HistoryItem[] }]
   /** Private editor hub methods; MCP peers cannot call these directly. */
   'collab/list': [{}, { sessions: object[] }]
+  'collab/profiles': [{}, CollabProfiles]
   'collab/read': [{ id: string, last?: number, before?: number, tools?: string }, string]
   'collab/ask': [{ id: string, prompt: string, route: import('./collab.ts').RemoteRoute,
     origin: { handle: string, agent: string } }, string]

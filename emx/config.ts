@@ -1,5 +1,6 @@
 // config.ts --- validated configuration, last-good reloads and directory watches.
-import { readFileSync, watchFile, unwatchFile, mkdirSync, writeFileSync, renameSync } from 'node:fs'
+import { readFileSync, watchFile, unwatchFile, mkdirSync, writeFileSync, renameSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { emxRoot, stateDir } from './daemon/paths.ts'
 import type { EditorTools } from './daemon/protocol.ts'
@@ -12,6 +13,7 @@ export interface AgentConfig {
   disallowedTools?: string[]
   historyTurns?: number
   defaultModel?: string
+  quotaSkip?: number
   models?: { include: string[], exclude: string[] }
 }
 export interface ProfileCandidate {
@@ -35,6 +37,7 @@ export interface Config {
   collab: {
     startGuidance: string
     quotaSkip: number
+    disabled: string[]
     maxActive: number
     handoffLimit: number
     closeFinished: boolean
@@ -76,6 +79,9 @@ export function validate(value: unknown): Config {
   const array = (v: any, p: string) => {
     if (!Array.isArray(v) || !v.every((s) => typeof s === 'string')) fail(p, 'string[]')
   }
+  const threshold = (v: any, p: string) => {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) fail(p, 'number 0..1')
+  }
   const keys = (v: any, allowed: string[], p: string) => {
     obj(v, p)
     for (const key of Object.keys(v)) if (!allowed.includes(key)) throw new Error(`config.${p ? p + '.' : ''}${key}: unknown key`)
@@ -84,13 +90,14 @@ export function validate(value: unknown): Config {
   keys(c, ['agents', 'profiles', 'collab', 'usage', 'daemon', 'sessions'], '')
   for (const [name, a] of Object.entries(obj(c.agents, 'agents'))) {
     const p = `agents.${name}`
-    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'models'], p)
+    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'quotaSkip', 'models'], p)
     str(a.title, p + '.title'); str(a.executable, p + '.executable')
     if (!a.executable) fail(p + '.executable', 'nonempty string')
     if (a.extraArgs !== undefined) array(a.extraArgs, p + '.extraArgs')
     if (a.disallowedTools !== undefined) array(a.disallowedTools, p + '.disallowedTools')
     if (a.nativeSubagents !== undefined) bool(a.nativeSubagents, p + '.nativeSubagents')
     if (a.historyTurns !== undefined) num(a.historyTurns, p + '.historyTurns', 1)
+    if (a.quotaSkip !== undefined) threshold(a.quotaSkip, p + '.quotaSkip')
     if (a.defaultModel !== undefined) {
       str(a.defaultModel, p + '.defaultModel')
       if (!a.defaultModel) fail(p + '.defaultModel', 'nonempty string')
@@ -132,10 +139,10 @@ export function validate(value: unknown): Config {
     if (a.confirm !== undefined) bool(a.confirm, p + '.confirm')
   }
   const collab = obj(c.collab, 'collab')
-  keys(collab, ['startGuidance', 'quotaSkip', 'maxActive', 'handoffLimit', 'closeFinished', 'confirm', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout', 'handleCommand', 'agentHandleCommands', 'tools', 'prompts'], 'collab')
+  keys(collab, ['startGuidance', 'quotaSkip', 'disabled', 'maxActive', 'handoffLimit', 'closeFinished', 'confirm', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout', 'handleCommand', 'agentHandleCommands', 'tools', 'prompts'], 'collab')
   str(collab.startGuidance, 'collab.startGuidance')
-  if (typeof collab.quotaSkip !== 'number' || !Number.isFinite(collab.quotaSkip)
-    || collab.quotaSkip < 0 || collab.quotaSkip > 1) fail('collab.quotaSkip', 'number 0..1')
+  threshold(collab.quotaSkip, 'collab.quotaSkip')
+  array(collab.disabled, 'collab.disabled')
   for (const k of ['maxActive', 'handoffLimit', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout']) num(collab[k], 'collab.' + k, 1)
   for (const k of ['closeFinished', 'confirm']) bool(collab[k], 'collab.' + k)
   array(collab.handleCommand, 'collab.handleCommand')
@@ -199,6 +206,44 @@ export class Configuration {
       this.errors = []
     } catch (error) { this.errors = [String(error)] }
     return { config: this.value, errors: this.errors, changed }
+  }
+  /** Edit only the user overlay, validating before atomic publication. */
+  set(path: unknown, value: unknown): ReturnType<Configuration['reload']> {
+    if (this.host) throw new Error('config/set is only available on local daemons')
+    if (!Array.isArray(path) || !path.length || !path.every((key) => typeof key === 'string' && key.length)) {
+      throw new Error('config/set path: expected nonempty string[]')
+    }
+    for (const key of path) {
+      if (['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error(`Invalid config key: ${key}`)
+    }
+    if (value === undefined) throw new Error('config/set requires value (use null to delete)')
+    let overlay: Record<string, any> = {}
+    try { overlay = JSON.parse(readFileSync(this.override, 'utf8')) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    if (!object(overlay)) throw new Error(`${this.override}: expected object`)
+    const edit = (target: Record<string, any>, index: number): void => {
+      const key = path[index]
+      if (index === path.length - 1) {
+        if (value === null) delete target[key]
+        else target[key] = value
+      } else {
+        if (!object(target[key])) {
+          if (value === null) return
+          target[key] = {}
+        }
+        edit(target[key], index + 1)
+        if (value === null && !Object.keys(target[key]).length) delete target[key]
+      }
+    }
+    edit(overlay, 0)
+    validate(merge(JSON.parse(readFileSync(this.defaults, 'utf8')), overlay))
+    mkdirSync(dirname(this.override), { recursive: true, mode: 0o700 })
+    const temp = this.override + '.' + randomUUID() + '.tmp'
+    try {
+      writeFileSync(temp, JSON.stringify(overlay, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
+      renameSync(temp, this.override)
+    } finally { rmSync(temp, { force: true }) }
+    return this.reload()
   }
   /** A client daemon older than this host lacks newer keys; take them from
    * this host's defaults, as a reload after the client's own upgrade would. */

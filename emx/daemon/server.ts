@@ -552,6 +552,11 @@ export class DaemonServer {
         return { config: result.config, errors: result.errors }
       }
       case 'config/get': return { config: this.configuration.value, errors: this.configuration.errors }
+      case 'config/set': {
+        const result = this.configuration.set(params.path, params.value)
+        this.#configChanged(result)
+        return { config: result.config }
+      }
       case 'config/reload': {
         const result = this.configuration.reload()
         this.#configChanged(result)
@@ -606,6 +611,7 @@ export class DaemonServer {
       }
       case 'collab/retry': this.collab.schedule(); return {}
       case 'collab/list': return { sessions: this.collab.list() }
+      case 'collab/profiles': return this.collab.profiles()
       case 'collab/read': return this.collab.read(this.#session(params), params)
       case 'collab/ask': {
         const route = object(params.route), origin = object(params.origin)

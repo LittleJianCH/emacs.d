@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
 import type { UsageService } from '../usage/service.ts'
 import type { Config, Profile, ProfileCandidate } from '../config.ts'
-import type { Block, EditorTools, SessionEvent, Settings } from './protocol.ts'
+import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings } from './protocol.ts'
 import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop']
@@ -41,9 +41,15 @@ export function profileCost(name: string, profile: Profile): string {
 export function profileCandidates(p: Profile): ProfileCandidate[] {
   return p.agent ? [{ agent: p.agent, model: p.model, mode: p.mode, effort: p.effort }] : p.candidates!
 }
+function candidateDisabled(c: Config, name: string, candidate: ProfileCandidate): boolean {
+  const prefix = `${name}:${candidate.agent}`
+  return c.collab.disabled.includes(name) || c.collab.disabled.includes(prefix)
+    || (candidate.model != null && c.collab.disabled.includes(`${prefix}/${candidate.model}`))
+}
 export function profiles(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): [string, Profile][] {
   const rank = ([name, p]: [string, Profile]) => costRanks[profileCost(name, p)] ?? costRanks.unknown
-  return Object.entries(c.profiles).filter(([, p]) => profileCandidates(p).some((candidate) => availableAgent(c, candidate.agent, enabled, env)))
+  return Object.entries(c.profiles).filter(([name, p]) => profileCandidates(p).some((candidate) =>
+    !candidateDisabled(c, name, candidate) && availableAgent(c, candidate.agent, enabled, env)))
     .sort((a, b) => rank(a) - rank(b))
 }
 function profileLines(available: [string, Profile][]): string {
@@ -374,35 +380,49 @@ export class Collaboration {
     this.#send(target, caller, prompt, this.#prompt('messageNote', this.#title(caller), this.#handle(caller)))
     return this.#prompt('sent', this.#handle(target))
   }
+  /** Shared by selection and the editor catalog; keep quota reasons identical. */
+  #strain({ agent, model }: ProfileCandidate, quotaSkip: number): string | undefined {
+    // Only this daemon's local account matters, including on a host daemon.
+    const quota = this.host.usage?.quotas.find((q) => q.agent === agent && q.host == null && !q.duplicate)
+    if (!quota) return
+    const now = Date.now() / 1000
+    // Ignore expired readings, overage credit and windows scoped to other models.
+    const applies = (w: { id: string, resets?: number | null }) => !(w.resets != null && w.resets <= now)
+      && !/overage/.test(w.id)
+      && ((scope) => !scope || (model ?? '').includes(scope))(scopedModels.find((m) => w.id.includes(m)))
+    const window = quota.windows.find((w) => applies(w) && (w.limited || (w.used ?? -1) >= quotaSkip))
+    // Window labels belong to the Chinese UI; ids keep agent notes in English.
+    if (window) return window.limited
+      ? this.#prompt('candidateQuotaLimited', window.id)
+      : this.#prompt('candidateQuotaUsed', window.id, Math.round(window.used! * 100))
+    if (quota.balance?.length && quota.balance.every((b) => b.amount <= 0)) return this.#prompt('candidateBalanceExhausted')
+  }
+  #candidateStatus(name: string, candidate: ProfileCandidate, env: NodeJS.ProcessEnv): Omit<CollabProfiles['profiles'][number]['candidates'][number], 'agent' | 'model' | 'effort'> {
+    const { agent, model } = candidate
+    let unavailable: string | undefined
+    if (!availableAgent(this.config, agent, this.enabled, env)) unavailable = this.#prompt('candidateUnavailable')
+    else if (agent === 'pi' && !allowedModel(model || this.config.agents.pi.defaultModel || piDefaultModel, this.config.agents.pi)) {
+      unavailable = this.#prompt('candidateModelExcluded')
+    }
+    const quotaSkip = this.config.agents[agent].quotaSkip ?? this.config.collab.quotaSkip
+    return { disabled: candidateDisabled(this.config, name, candidate), available: !unavailable,
+      unavailable, strained: this.#strain(candidate, quotaSkip), quotaSkip }
+  }
+  profiles(): CollabProfiles {
+    return { quotaSkip: this.config.collab.quotaSkip, profiles: Object.entries(this.config.profiles).map(([name, role]) => {
+      const candidates = profileCandidates(role).map((candidate) => ({ agent: candidate.agent, model: candidate.model ?? null,
+        ...(candidate.effort != null ? { effort: candidate.effort } : {}), ...this.#candidateStatus(name, candidate, process.env) }))
+      return { name, cost: profileCost(name, role), description: role.description ?? '',
+        disabled: candidates.every((candidate) => candidate.disabled), candidates }
+    }) }
+  }
   #select(caller: Session, name: string, role: Profile): { candidate: ProfileCandidate, note: string } {
     const env = this.host.environment?.(caller.root) ?? process.env
-    const candidates = profileCandidates(role).map((candidate) => {
-      const { agent, model } = candidate
-      const label = (this.config.agents[agent]?.title ?? agent) + (model ? ' ' + model : '')
-      let unavailable: string | undefined, strained: string | undefined
-      if (!availableAgent(this.config, agent, this.enabled, env)) unavailable = this.#prompt('candidateUnavailable')
-      else if (agent === 'pi' && !allowedModel(model || this.config.agents.pi.defaultModel || piDefaultModel, this.config.agents.pi)) {
-        unavailable = this.#prompt('candidateModelExcluded')
-      }
-      // Only this daemon's local account matters, including on a host daemon.
-      const quota = this.host.usage?.quotas.find((q) => q.agent === agent && q.host == null && !q.duplicate)
-      if (quota) {
-        const now = Date.now() / 1000
-        // A reading from before its reset no longer applies; overage windows are
-        // extra credit, not the allowance; a window named after a model (Claude's
-        // seven_day_fable) limits only that model.
-        const applies = (w: { id: string, resets?: number | null }) => !(w.resets != null && w.resets <= now)
-          && !/overage/.test(w.id)
-          && ((scope) => !scope || (model ?? '').includes(scope))(scopedModels.find((m) => w.id.includes(m)))
-        const window = quota.windows.find((w) => applies(w) && (w.limited || (w.used ?? -1) >= this.config.collab.quotaSkip))
-        // Window labels belong to the Chinese UI; ids keep agent notes in English.
-        if (window) strained = window.limited
-          ? this.#prompt('candidateQuotaLimited', window.id)
-          : this.#prompt('candidateQuotaUsed', window.id, Math.round(window.used! * 100))
-        else if (quota.balance?.length && quota.balance.every((b) => b.amount <= 0)) strained = this.#prompt('candidateBalanceExhausted')
-      }
-      return { candidate, label, unavailable, strained }
-    })
+    const candidates = profileCandidates(role).filter((candidate) => !candidateDisabled(this.config, name, candidate)).map((candidate) => ({
+      candidate, label: (this.config.agents[candidate.agent]?.title ?? candidate.agent) + (candidate.model ? ' ' + candidate.model : ''),
+      ...this.#candidateStatus(name, candidate, env),
+    }))
+    if (!candidates.length) throw new Error(`Profile ${name} is disabled`)
     const available = candidates.filter((c) => !c.unavailable)
     const healthy = available.filter((c) => !c.strained)
     const chosen = (role.preferOtherAgent && healthy.find((c) => c.candidate.agent !== caller.agent)) || healthy[0] || available[0]
