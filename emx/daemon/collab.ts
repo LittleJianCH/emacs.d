@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
 import type { UsageService } from '../usage/service.ts'
 import type { Config, Profile, ProfileCandidate } from '../config.ts'
+import { candidateDisabledBy, profileCandidates } from '../config.ts'
 import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings } from './protocol.ts'
 import type { Session } from './session.ts'
 
@@ -37,19 +38,19 @@ const scopedModels = ['fable', 'opus', 'sonnet', 'haiku']
 export function profileCost(name: string, profile: Profile): string {
   return profile.cost ?? 'unknown'
 }
-/** A legacy override takes precedence over an inherited candidates array. */
-export function profileCandidates(p: Profile): ProfileCandidate[] {
-  return p.agent ? [{ agent: p.agent, model: p.model, mode: p.mode, effort: p.effort }] : p.candidates!
-}
-function candidateDisabled(c: Config, name: string, candidate: ProfileCandidate): boolean {
-  const prefix = `${name}:${candidate.agent}`
-  return c.collab.disabled.includes(name) || c.collab.disabled.includes(prefix)
-    || (candidate.model != null && c.collab.disabled.includes(`${prefix}/${candidate.model}`))
+export { profileCandidates }
+/** Shared runtime checks for guidance, the catalog and candidate selection. */
+function candidateUnavailable(c: Config, candidate: ProfileCandidate, enabled: string[] | undefined, env: NodeJS.ProcessEnv): string | undefined {
+  const { agent, model } = candidate
+  if (!availableAgent(c, agent, enabled, env)) return c.collab.prompts.candidateUnavailable
+  if (agent === 'pi' && !allowedModel(model || c.agents.pi.defaultModel || piDefaultModel, c.agents.pi)) {
+    return c.collab.prompts.candidateModelExcluded
+  }
 }
 export function profiles(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): [string, Profile][] {
   const rank = ([name, p]: [string, Profile]) => costRanks[profileCost(name, p)] ?? costRanks.unknown
   return Object.entries(c.profiles).filter(([name, p]) => profileCandidates(p).some((candidate) =>
-    !candidateDisabled(c, name, candidate) && availableAgent(c, candidate.agent, enabled, env)))
+    !candidateDisabledBy(c, name, candidate).length && !candidateUnavailable(c, candidate, enabled, env)))
     .sort((a, b) => rank(a) - rank(b))
 }
 function profileLines(available: [string, Profile][]): string {
@@ -192,13 +193,16 @@ export class Collaboration {
     next(0)
   }
   tools(editor: EditorTools, root?: string): EditorTools {
-    return { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, root ? this.host.environment?.(root) : undefined)],
+    return { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, this.#environment(root))],
       readOnly: [...new Set([...editor.readOnly.filter((name) =>
         !toolNames.includes(name) && editor.tools.some((tool) => tool.name === name)),
         'sessions', 'session_read'])].sort() }
   }
   startSummary(root?: string): string {
-    return startSummary(this.config, this.enabled, root ? this.host.environment?.(root) : undefined)
+    return startSummary(this.config, this.enabled, this.#environment(root))
+  }
+  #environment(root?: string): NodeJS.ProcessEnv {
+    return (root === undefined ? undefined : this.host.environment?.(root)) ?? process.env
   }
   /** Include asynchronous visibility/hub delivery after pending entries are removed. */
   restartBlockers(): { session?: string, reason: string }[] {
@@ -398,28 +402,26 @@ export class Collaboration {
     if (quota.balance?.length && quota.balance.every((b) => b.amount <= 0)) return this.#prompt('candidateBalanceExhausted')
   }
   #candidateStatus(name: string, candidate: ProfileCandidate, env: NodeJS.ProcessEnv): Omit<CollabProfiles['profiles'][number]['candidates'][number], 'agent' | 'model' | 'effort'> {
-    const { agent, model } = candidate
-    let unavailable: string | undefined
-    if (!availableAgent(this.config, agent, this.enabled, env)) unavailable = this.#prompt('candidateUnavailable')
-    else if (agent === 'pi' && !allowedModel(model || this.config.agents.pi.defaultModel || piDefaultModel, this.config.agents.pi)) {
-      unavailable = this.#prompt('candidateModelExcluded')
-    }
+    const { agent } = candidate
+    const unavailable = candidateUnavailable(this.config, candidate, this.enabled, env)
+    const disabledBy = candidateDisabledBy(this.config, name, candidate)
     const quotaSkip = this.config.agents[agent].quotaSkip ?? this.config.collab.quotaSkip
-    return { disabled: candidateDisabled(this.config, name, candidate), available: !unavailable,
+    return { disabled: disabledBy.length > 0, disabledBy, available: !unavailable,
       unavailable, strained: this.#strain(candidate, quotaSkip), quotaSkip }
   }
-  profiles(overridden: string[] = []): CollabProfiles {
+  profiles(overridden: string[] = [], root?: string): CollabProfiles {
+    const env = this.#environment(root)
     return { quotaSkip: this.config.collab.quotaSkip, profiles: Object.entries(this.config.profiles).map(([name, role]) => {
       const candidates = profileCandidates(role).map((candidate) => ({ agent: candidate.agent, model: candidate.model ?? null,
         ...(candidate.effort != null ? { effort: candidate.effort } : {}),
-        ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.#candidateStatus(name, candidate, process.env) }))
+        ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.#candidateStatus(name, candidate, env) }))
       return { name, cost: profileCost(name, role), description: role.description ?? '',
         disabled: candidates.every((candidate) => candidate.disabled), overridden: overridden.includes(name), candidates }
     }) }
   }
   #select(caller: Session, name: string, role: Profile): { candidate: ProfileCandidate, note: string } {
-    const env = this.host.environment?.(caller.root) ?? process.env
-    const candidates = profileCandidates(role).filter((candidate) => !candidateDisabled(this.config, name, candidate)).map((candidate) => ({
+    const env = this.#environment(caller.root)
+    const candidates = profileCandidates(role).filter((candidate) => !candidateDisabledBy(this.config, name, candidate).length).map((candidate) => ({
       candidate, label: (this.config.agents[candidate.agent]?.title ?? candidate.agent) + (candidate.model ? ' ' + candidate.model : ''),
       ...this.#candidateStatus(name, candidate, env),
     }))

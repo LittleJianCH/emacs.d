@@ -157,9 +157,13 @@ var/                     runtime state (history, backups, pasted images...); git
   `C-c a u` opens the report; `agent-usage-clear` stays unbound and confirmed.
   `agent-usage-restart-service` reconnects without stopping agents.
 - `agent-profiles.el` — `C-c a p` opens a standalone local daemon profile page.
-  It reads `collab/profiles` and writes the user overlay through `config/set`:
-  whole-profile and candidate switches, global and per-agent quota thresholds,
-  and a shortcut allowing an agent to exhaust its quota. Candidate editing,
+  It reads `collab/profiles {root}` using the invoking buffer's project root
+  (or default-directory), remembers it for refresh and shows it in the header.
+  Whole-profile and candidate switches use `collab/disable`, which mutates
+  current policy in the daemon; candidate `disabledBy` lists matching entries.
+  Exact default-model entries end in `profile:agent/`; named models may contain
+  colons and slashes. Global and per-agent quota thresholds and a shortcut
+  allowing an agent to exhaust its quota use `config/set`. Candidate editing,
   insertion, deletion and reordering write the full candidates array, preserving
   mode and effort; restoring defaults deletes the profile overlay. Model completion
   uses `agents/models` with configured models as fallback and accepts free text.

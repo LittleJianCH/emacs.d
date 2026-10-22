@@ -1,7 +1,7 @@
 import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import { test, type TestContext } from 'node:test'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DaemonServer } from '../../emx/daemon/server.ts'
@@ -47,14 +47,14 @@ async function setup(t: TestContext, candidates: ProfileCandidate[] = [claude, c
   return { dir, daemon, config: daemon.configuration.value, parent, start }
 }
 
-test('roles are listed while any agent is available, independently of quotas, caller or Pi filter', () => {
+test('roles are listed while any agent is available, independently of quotas or caller, respecting the Pi filter', () => {
   const c = defaults(), env = { PATH: '', EMX_CODEX_EXECUTABLE: process.execPath }
   assert.equal(profiles(c, ['codex'], env).length, 7)
   assert.deepEqual(profiles(c, [], env), [])
   assert.deepEqual(profiles(c, ['claude'], env), [])
   c.profiles.onlyPi = { candidates: [{ agent: 'pi', model: 'other-provider/other' }] }
   const piEnv = { PATH: '', EMX_PI_EXECUTABLE: process.execPath }
-  assert.ok(profiles(c, ['pi'], piEnv).some(([name]) => name === 'onlyPi'))
+  assert.ok(!profiles(c, ['pi'], piEnv).some(([name]) => name === 'onlyPi'))
   assert.deepEqual(profileCandidates({ agent: 'claude', model: 'haiku', candidates: [codex] }),
     [{ agent: 'claude', model: 'haiku', mode: undefined, effort: undefined }])
 })
@@ -87,6 +87,43 @@ test('session_start checks enabled agents and executable availability in the cal
   environment = { ...process.env, EMX_CODEX_EXECUTABLE: process.execPath }
   assert.equal((await x.start()).child.agent, 'codex')
   assert.ok(roots.every((root) => root === x.dir))
+})
+
+test('collab/profiles, guidance and selection share root-specific executable and Pi availability', async (t) => {
+  const x = await setup(t, [claude, codex, { ...pi, model: 'other-provider/other' }])
+  x.config.profiles.onlyPi = { candidates: [{ agent: 'pi', model: 'other-provider/other' }] }
+  const otherRoot = join(x.dir, 'other'), roots: string[] = []
+  mkdirSync(otherRoot)
+  // This socket peer tests the catalog, not the editor's child-view RPC.
+  x.daemon.collab.host.view = async () => {}
+  let environment: NodeJS.ProcessEnv = { ...process.env, EMX_CLAUDE_EXECUTABLE: '/missing-claude' }
+  x.daemon.collab.host.environment = (root) => {
+    roots.push(root)
+    return root === otherRoot ? { ...process.env, EMX_CODEX_EXECUTABLE: '/missing-codex' } : environment
+  }
+  const client = await SocketClient.connect(x.daemon.socket)
+  try {
+    await client.request('hello', { client: 'test', version: '' })
+    const catalog = async (root?: string) => (await client.request('collab/profiles', root === undefined ? {} : { root }))
+      .profiles.find((p) => p.name === 'worker')!
+    assert.deepEqual((await catalog()).candidates.map((c) => c.available), [true, true, false])
+    assert.equal(roots.length, 0, 'omitting root retains the process environment fallback')
+    assert.deepEqual((await catalog(x.dir)).candidates.map((c) => c.available), [false, true, false])
+    assert.equal((await x.start()).child.agent, 'codex')
+    assert.deepEqual((await catalog(otherRoot)).candidates.map((c) => c.available), [true, false, false])
+    const otherParent = new Session({ id: 'other-parent', agent: 'echo', root: otherRoot, settings: { mode: 'auto' } })
+    x.daemon.sessions.set(otherParent.id, otherParent)
+    await x.daemon.collab.call(otherParent, 'session_start', { profile: 'worker', prompt: 'hold' }, signal())
+    assert.equal([...x.daemon.sessions.values()].find((s) => s.info.parent === otherParent.id)!.agent, 'claude')
+    assert.ok(roots.includes(x.dir) && roots.includes(otherRoot))
+    assert.doesNotMatch(x.daemon.collab.startSummary(x.dir), /onlyPi/)
+    assert.doesNotMatch(x.daemon.collab.tools({ tools: [], readOnly: [] }, x.dir).tools
+      .find((tool) => tool.name === 'session_start')!.description, /onlyPi/)
+    environment = { ...process.env, EMX_CODEX_EXECUTABLE: '/missing-codex' }
+    assert.deepEqual((await catalog(x.dir)).candidates.map((c) => c.available), [true, false, false])
+    assert.equal((await x.start()).child.agent, 'claude', 'each call uses the current root environment')
+    await assert.rejects(client.request('collab/profiles', { root: 42 } as any), /root/)
+  } finally { await client.close() }
 })
 
 for (const model of ['other-provider/other', 'opencode-go/model-free']) test(`Pi filter skips ${model}`, async (t) => {
@@ -171,6 +208,21 @@ test('model disabling compares the full exact string, including provider slashes
   assert.equal(child.agent, 'pi'); assert.equal(child.settings.model, 'opencode-go/glm-5.3-flash')
 })
 
+test('exact default and colon/slash model entries affect selection without disabling same-agent siblings', async (t) => {
+  const model = 'provider/model:version/variant'
+  const x = await setup(t, [{ agent: 'codex' }, { ...codex, model }, codex])
+  x.config.collab.disabled = ['worker:codex/']
+  assert.equal((await x.start()).child.settings.model, model)
+  x.config.collab.disabled.push(`worker:codex/${model}`)
+  assert.equal((await x.start()).child.settings.model, codex.model)
+  x.config.collab.disabled = [`worker:codex/${model}`]
+  assert.equal((await x.start()).child.settings.model, undefined)
+  x.config.profiles.worker = { agent: 'codex' }
+  x.config.collab.disabled = ['worker:codex/']
+  assert.ok(!profiles(x.config).some(([name]) => name === 'worker'))
+  await assert.rejects(x.start(), /Profile worker is disabled/)
+})
+
 test('legacy top-level agent and model form one disableable candidate', async (t) => {
   const x = await setup(t)
   x.config.profiles.worker = { ...claude, candidates: [codex] }
@@ -211,10 +263,10 @@ test('collab/profiles wire includes every profile in config order with candidate
     assert.deepEqual(result.profiles.find((p) => p.name === 'worker'), {
       name: 'worker', cost: 'medium', description: 'Test role', disabled: false, overridden: false,
       candidates: [
-        { agent: 'claude', model: 'sonnet', effort: 'high', mode: 'auto', disabled: true, available: true, strained: '5h quota 92% used', quotaSkip: 0.8 },
-        { agent: 'codex', model: 'gpt-6.1-sol', mode: 'auto', disabled: false, available: false, unavailable: 'unavailable here', quotaSkip: 0.9 },
-        { agent: 'pi', model: 'other-provider/other', mode: 'auto', disabled: false, available: false, unavailable: 'model excluded by agents.pi.models', quotaSkip: 0.9 },
-        { agent: 'dsh', model: null, disabled: false, available: true, quotaSkip: 0.9 },
+        { agent: 'claude', model: 'sonnet', effort: 'high', mode: 'auto', disabled: true, disabledBy: ['worker:claude/sonnet'], available: true, strained: '5h quota 92% used', quotaSkip: 0.8 },
+        { agent: 'codex', model: 'gpt-6.1-sol', mode: 'auto', disabled: false, disabledBy: [], available: false, unavailable: 'unavailable here', quotaSkip: 0.9 },
+        { agent: 'pi', model: 'other-provider/other', mode: 'auto', disabled: false, disabledBy: [], available: false, unavailable: 'model excluded by agents.pi.models', quotaSkip: 0.9 },
+        { agent: 'dsh', model: null, disabled: false, disabledBy: [], available: true, quotaSkip: 0.9 },
       ],
     })
     await client.close()

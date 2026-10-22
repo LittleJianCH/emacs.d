@@ -7,12 +7,14 @@
 
 (require 'agent-emx)
 (require 'button)
+(require 'project)
 (require 'seq)
 
 (defconst agent-profiles--buffer "*agent-profiles*")
 (defvar-local agent-profiles--snapshot nil "Last profiles response.")
 (defvar-local agent-profiles--generation 0 "Newest refresh request number.")
 (defvar-local agent-profiles--writing nil "Non-nil while a config write is pending.")
+(defvar-local agent-profiles--root nil "Project root used for availability checks.")
 
 (defun agent-profiles--error (error)
   "Show a daemon ERROR with a localized prefix."
@@ -31,12 +33,13 @@
   "Fetch the local daemon's effective subagent profiles asynchronously."
   (interactive)
   (let ((buffer (current-buffer))
+        (root (or agent-profiles--root default-directory))
         (generation (cl-incf agent-profiles--generation)))
     (agent-emx--local-connection
      (lambda (connection)
        (when (buffer-live-p buffer)
          (agent-emx--request
-          connection "collab/profiles" (make-hash-table :test #'equal)
+          connection "collab/profiles" (list :root root)
           (lambda (result)
             (when (buffer-live-p buffer)
               (with-current-buffer buffer
@@ -46,9 +49,8 @@
           #'agent-profiles--error)))
      #'agent-profiles--error)))
 
-(defun agent-profiles--set (path value)
-  "Write VALUE at config PATH, then refresh this page.
-VALUE may be a function reading the latest config cache before the write."
+(defun agent-profiles--write (method params)
+  "Send a config mutation with METHOD and PARAMS, then refresh this page."
   (when agent-profiles--writing (user-error "正在保存配置，请稍候"))
   (setq agent-profiles--writing t)
   (cl-incf agent-profiles--generation)
@@ -63,9 +65,7 @@ VALUE may be a function reading the latest config cache before the write."
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
            (agent-emx--request
-            connection "config/set"
-            (list :path (vconcat path)
-                  :value (if (functionp value) (funcall value) value))
+            connection method params
             (lambda (result)
               (when-let* ((config (plist-get result :config)))
                 (agent-emx-config-receive config))
@@ -76,15 +76,16 @@ VALUE may be a function reading the latest config cache before the write."
             failure))))
      failure)))
 
-(defun agent-profiles--toggle (token)
-  "Toggle the exact disabled TOKEN while preserving other config entries."
-  (agent-profiles--set
-   '("collab" "disabled")
-   (lambda ()
-     (let ((disabled (append (agent-emx-config-collab :disabled) nil)))
-       (vconcat (if (member token disabled)
-                    (delete token disabled)
-                  (append disabled (list token))))))))
+(defun agent-profiles--set (path value)
+  "Write VALUE at config PATH, then refresh this page."
+  (agent-profiles--write "config/set" (list :path (vconcat path) :value value)))
+
+(defun agent-profiles--disable (profile disabled &optional candidate)
+  "Set PROFILE's DISABLED state, optionally for CANDIDATE's index only."
+  (agent-profiles--write
+   "collab/disable"
+   (append (list :profile profile :disabled (if disabled t :false))
+           (when candidate (list :candidate candidate)))))
 
 (defun agent-profiles--candidates (name)
   "Copy NAME's candidates, keeping only writable configuration fields."
@@ -212,7 +213,10 @@ VALUE may be a function reading the latest config cache before the write."
 
 (defun agent-profiles--status (candidate profile-disabled)
   "Return CANDIDATE's status, respecting PROFILE-DISABLED."
-  (cond ((or profile-disabled (eq (plist-get candidate :disabled) t)) "已停用")
+  (cond ((or profile-disabled (eq (plist-get candidate :disabled) t))
+         (let ((entries (append (plist-get candidate :disabledBy) nil)))
+           (concat "已停用" (when entries
+                              (format "（%s）" (string-join entries "、"))))))
         ((not (eq (plist-get candidate :available) t))
          (concat "不可用：" (or (plist-get candidate :unavailable) "原因未知")))
         ((plist-get candidate :strained)
@@ -229,24 +233,28 @@ VALUE may be a function reading the latest config cache before the write."
   "Render the last daemon snapshot without changing this buffer's mode."
   (let ((inhibit-read-only t)
         (position (point))
-        (disabled (append (agent-emx-config-collab :disabled) nil))
         agents)
     (erase-buffer)
     (insert (propertize "子代理配置\n\n" 'face 'agent-session-assistant)
+            (format "项目：%s\n" (or agent-profiles--root default-directory))
             "g 刷新 · TAB 选择按钮 · RET 执行 · q 返回\n\n")
     (if (null agent-profiles--snapshot)
         (insert "加载中…\n")
       (seq-doseq (profile (plist-get agent-profiles--snapshot :profiles))
         (let* ((name (plist-get profile :name))
-               (off (eq (plist-get profile :disabled) t)))
+               (off (eq (plist-get profile :disabled) t))
+               (profile-off
+                (seq-some (lambda (candidate)
+                            (member name (append (plist-get candidate :disabledBy) nil)))
+                          (plist-get profile :candidates))))
           (insert (propertize name 'face 'agent-session-assistant)
                   (format " · 成本：%s · %s  " (plist-get profile :cost)
                           (if off "已停用" "已启用")))
           ;; A profile is also off when every candidate is; only its own
           ;; token toggles it as a whole.
           (agent-profiles--button
-           (if (member name disabled) "启用" "停用")
-           (lambda () (agent-profiles--toggle name)))
+           (if profile-off "启用" "停用")
+           (lambda () (agent-profiles--disable name (not profile-off))))
           (insert "  ")
           (agent-profiles--button "编辑" (lambda () (agent-profiles--edit-profile name)))
           (when (eq (plist-get profile :overridden) t)
@@ -260,15 +268,16 @@ VALUE may be a function reading the latest config cache before the write."
                    (model (and (stringp (plist-get candidate :model))
                                (plist-get candidate :model)))
                    (effort (plist-get candidate :effort))
-                   (token (concat name ":" agent (and model (concat "/" model)))))
+                   (candidate-off (eq (plist-get candidate :disabled) t))
+                   (i index))
               (unless (assoc agent agents)
                 (push (cons agent (plist-get candidate :quotaSkip)) agents))
               (insert (format "  %s · %s%s  %s  " agent (or model "默认模型")
                               (if effort (format " (%s)" effort) "")
                               (agent-profiles--status candidate off)))
               (agent-profiles--button
-               (if (member token disabled) "启用" "停用")
-               (lambda () (agent-profiles--toggle token)))
+               (if candidate-off "启用" "停用")
+               (lambda () (agent-profiles--disable name (not candidate-off) i)))
               (let ((i index))
                 (dolist (action
                          (append
@@ -328,9 +337,15 @@ VALUE may be a function reading the latest config cache before the write."
 (defun agent-profiles ()
   "Show the local daemon's subagent profiles and quota thresholds."
   (interactive)
-  (let ((buffer (get-buffer-create agent-profiles--buffer)))
+  (let ((root (if (derived-mode-p 'agent-profiles-mode)
+                  (or agent-profiles--root default-directory)
+                (or (when-let* ((project (project-current nil)))
+                      (project-root project))
+                    default-directory)))
+        (buffer (get-buffer-create agent-profiles--buffer)))
     (with-current-buffer buffer
       (unless (derived-mode-p 'agent-profiles-mode) (agent-profiles-mode))
+      (setq agent-profiles--root root)
       (agent-profiles--render)
       (agent-profiles-refresh))
     (pop-to-buffer buffer)))

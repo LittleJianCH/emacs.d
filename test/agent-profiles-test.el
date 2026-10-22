@@ -17,14 +17,14 @@
     [(:name "coder" :cost "medium" :description "Implementation work"
       :disabled :false :overridden t
       :candidates
-      [(:agent "codex" :model "gpt-6" :effort "medium" :mode "auto" :disabled :false
+      [(:agent "codex" :model "gpt-6" :effort "medium" :mode "auto" :disabled :false :disabledBy []
         :available t :strained "5h quota 92% used" :quotaSkip 0.97)
-       (:agent "claude" :model "sonnet" :disabled :false
+       (:agent "claude" :model "sonnet" :disabled :false :disabledBy []
         :available :false :unavailable "CLI not found" :quotaSkip 0.9)
-       (:agent "pi" :model "flash" :disabled t :available t :quotaSkip 0.9)])
+       (:agent "pi" :model "flash" :disabled t :disabledBy ["coder:pi/flash"] :available t :quotaSkip 0.9)])
      (:name "reviewer" :cost "high" :description "Review work" :disabled :false
       :candidates
-      [(:agent "codex" :model "gpt-6" :effort "high" :disabled :false
+      [(:agent "codex" :model "gpt-6" :effort "high" :disabled :false :disabledBy []
         :available t :quotaSkip 0.97)])]))
 
 (defvar agent-profiles-test--sent nil)
@@ -51,16 +51,16 @@
                   (push (cons method params) agent-profiles-test--sent)
                   (pcase method
                     ("collab/profiles"
-                     (should (hash-table-p params))
-                     (should (= (hash-table-count params) 0))
+                     (should (equal params (list :root agent-profiles--root)))
                      (funcall callback agent-profiles-test--response))
                     ("agents/models"
                      (funcall callback '(:models [(:id "opencode-go/grok" :label "Grok")])))
-                    ("config/set"
+                    ((or "config/set" "collab/disable")
                      (funcall callback (list :config agent-emx-config--value)))
                     (_ (ert-fail (format "Unexpected request: %s" method)))))))
        (with-temp-buffer
          (agent-profiles-mode)
+         (setq agent-profiles--root "/test/project/")
          (agent-profiles-refresh)
          ,@body))))
 
@@ -113,32 +113,56 @@
     (goto-char (point-min))
     (search-forward "默认模型  可用  ")
     (push-button (point))
-    (should (equal (plist-get (agent-profiles-test--write) :value)
-                   ["coder:pi/flash" "other:claude" "coder:codex"]))))
+    (should (equal (cdr (assoc "collab/disable" agent-profiles-test--sent))
+                   '(:profile "coder" :disabled t :candidate 0)))
+    (should-not (agent-profiles-test--write))))
 
-(ert-deftest agent-profiles-test-toggle-candidate-preserves-other-entries ()
+(ert-deftest agent-profiles-test-toggle-candidate-ignores-stale-cache ()
   (agent-profiles-test--with-page
-    (agent-profiles--toggle "coder:codex/gpt-6")
-    (should (equal (agent-profiles-test--write)
-                   '(:path ["collab" "disabled"]
-                     :value ["coder:pi/flash" "other:claude" "coder:codex/gpt-6"])))
-    (should (equal (caar agent-profiles-test--sent) "collab/profiles"))
-    ;; The returned config, rather than a stale page snapshot, drives the next edit.
-    (setq agent-emx-config--value
-          '(:collab (:disabled ["coder:codex/gpt-6" "reviewer:codex/gpt-6"])))
-    (agent-profiles--toggle "coder:codex/gpt-6")
-    (should (equal (plist-get (agent-profiles-test--write) :value)
-                   ["reviewer:codex/gpt-6"]))))
+    ;; The page trusts daemon reasons even when the config cache says otherwise.
+    (setq agent-emx-config--value '(:collab (:disabled [])))
+    (goto-char (point-min))
+    (search-forward "pi · flash  已停用（coder:pi/flash）  ")
+    (push-button (point))
+    (should (equal (cdr (assoc "collab/disable" agent-profiles-test--sent))
+                   '(:profile "coder" :disabled :false :candidate 2)))
+    (should-not (agent-profiles-test--write))
+    (should (equal (caar agent-profiles-test--sent) "collab/profiles"))))
 
-(ert-deftest agent-profiles-test-toggle-whole-profile-and-empty-array ()
+(ert-deftest agent-profiles-test-enable-agent-wide-candidate ()
   (agent-profiles-test--with-page
-    (agent-profiles--toggle "reviewer")
-    (should (equal (plist-get (agent-profiles-test--write) :value)
-                   ["coder:pi/flash" "other:claude" "reviewer"]))
-    (setq agent-emx-config--value '(:collab (:disabled ["reviewer"])))
-    (agent-profiles--toggle "reviewer")
-    (should (equal (agent-profiles-test--write)
-                   '(:path ["collab" "disabled"] :value [])))))
+    (setq agent-profiles--snapshot
+          '(:quotaSkip 0.9 :profiles
+            [(:name "coder" :cost "medium" :disabled t
+              :candidates [(:agent "codex" :model "gpt-6" :disabled t
+                            :disabledBy ["coder:codex" "coder:codex/gpt-6"]
+                            :available t :quotaSkip 0.9)])]))
+    (agent-profiles--render)
+    (goto-char (point-min))
+    (search-forward "已停用（coder:codex、coder:codex/gpt-6）  ")
+    (should (equal (button-label (button-at (point))) "启用"))
+    (push-button (point))
+    (should (equal (cdr (assoc "collab/disable" agent-profiles-test--sent))
+                   '(:profile "coder" :disabled :false :candidate 0)))))
+
+(ert-deftest agent-profiles-test-toggle-whole-profile-uses-daemon-reasons ()
+  (agent-profiles-test--with-page
+    (agent-profiles--disable "reviewer" t)
+    (should (equal (cdr (assoc "collab/disable" agent-profiles-test--sent))
+                   '(:profile "reviewer" :disabled t)))
+    (setq agent-profiles--snapshot
+          '(:quotaSkip 0.9 :profiles
+            [(:name "reviewer" :cost "high" :disabled t
+              :candidates [(:agent "codex" :model :null :disabled t
+                            :disabledBy ["reviewer"] :available t :quotaSkip 0.9)])]))
+    (agent-profiles--render)
+    (goto-char (point-min))
+    (search-forward "已停用  ")
+    (should (equal (button-label (button-at (point))) "启用"))
+    (push-button (point))
+    (should (equal (cdr (assoc "collab/disable" agent-profiles-test--sent))
+                   '(:profile "reviewer" :disabled :false)))
+    (should-not (agent-profiles-test--write))))
 
 (ert-deftest agent-profiles-test-threshold-edit-remove-and-global ()
   (agent-profiles-test--with-page
@@ -181,13 +205,13 @@
       (cl-letf (((symbol-function 'agent-emx--request)
                  (lambda (_connection method _params &optional callback error-callback)
                    (pcase method
-                     ("config/set" (funcall callback (list :config returned)))
+                     ("collab/disable" (funcall callback (list :config returned)))
                      ("collab/profiles"
                       (funcall error-callback '(:message "Unsupported method"))))))
                 ((symbol-function 'message)
                  (lambda (format &rest args)
                    (setq captured-message (apply #'format format args)))))
-        (agent-profiles--toggle "coder")
+        (agent-profiles--disable "coder" t)
         (should (equal agent-emx-config--value returned))
         (should-not agent-profiles--writing)
         (should (equal captured-message
@@ -198,7 +222,7 @@
                 ((symbol-function 'message)
                  (lambda (format &rest args)
                    (setq captured-message (apply #'format format args)))))
-        (agent-profiles--toggle "coder")
+        (agent-profiles--disable "coder" t)
         (should-not agent-profiles--writing)
         (should (equal agent-emx-config--value returned))
         (should (equal captured-message "子代理配置操作失败：Invalid config"))))))
@@ -212,8 +236,8 @@
         (should (eq (key-binding (kbd "C-c a p")) #'agent-profiles))
         (goto-char (point-min))
         (execute-kbd-macro (kbd "TAB RET"))
-        (should (equal (plist-get (agent-profiles-test--write) :value)
-                       ["coder:pi/flash" "other:claude" "coder"]))
+        (should (equal (cdr (assoc "collab/disable" agent-profiles-test--sent))
+                       '(:profile "coder" :disabled t)))
         (let ((before (length agent-profiles-test--sent)))
           (execute-kbd-macro (kbd "g"))
           (should (= (length agent-profiles-test--sent) (1+ before))))
@@ -324,6 +348,37 @@
       (cl-incf agent-profiles--generation)
       (funcall reply '(:models []))
       (should-not (agent-profiles-test--write)))))
+
+(ert-deftest agent-profiles-test-remembers-invocation-root ()
+  (dolist (project '(nil test-project))
+    (let* ((agent-profiles--buffer (generate-new-buffer-name " *profiles-root*"))
+           (origin (generate-new-buffer " *profiles-origin*"))
+           (expected (if project "/test/project/" temporary-file-directory))
+           requests)
+      (unwind-protect
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) project))
+                    ((symbol-function 'project-root) (lambda (_) "/test/project/"))
+                    ((symbol-function 'pop-to-buffer) (lambda (&rest _)))
+                    ((symbol-function 'agent-emx--local-connection)
+                     (lambda (callback &rest _) (funcall callback 'local)))
+                    ((symbol-function 'agent-emx--request)
+                     (lambda (_ method params callback &rest _)
+                       (should (equal method "collab/profiles"))
+                       (push params requests)
+                       (funcall callback agent-profiles-test--fixture))))
+            (with-current-buffer origin
+              (setq default-directory temporary-file-directory)
+              (agent-profiles))
+            (kill-buffer origin)
+            (with-current-buffer agent-profiles--buffer
+              (should (equal agent-profiles--root expected))
+              (should (string-match-p (regexp-quote (concat "项目：" expected))
+                                      (buffer-string)))
+              (setq default-directory "/")
+              (agent-profiles-refresh))
+            (should (equal requests (list (list :root expected) (list :root expected)))))
+        (when (buffer-live-p origin) (kill-buffer origin))
+        (when (get-buffer agent-profiles--buffer) (kill-buffer agent-profiles--buffer))))))
 
 (provide 'agent-profiles-test)
 ;;; agent-profiles-test.el ends here

@@ -153,12 +153,19 @@ only to its MCP clients; no editor stamp or host lookup timer remains.
 Definitions never depend on the caller's agent or on current quotas, so a
 child in the same root sees the same tools as its parent.
 
-`collab.disabled` defaults to `[]` and accepts strings in three forms:
+`collab.disabled` defaults to `[]` and accepts strings in four forms:
 `"reviewer"` disables the whole profile, `"reviewer:claude"` disables all of
 that profile's Claude candidates, and `"reviewer:claude/opus"` disables the
-candidate with that exact model string. Model strings may contain `/`; the
-whole string is compared, without aliases or case folding. Unknown names are
-ignored. Legacy top-level agent/model profiles count as one candidate.
+candidate with that exact model string. `"reviewer:claude/"` disables only
+Claude candidates with an unspecified model (omitted, null or empty), leaving
+named-model siblings enabled. Parsing splits at the first `:` and then the
+first `/` after it; the rest is an opaque model string, including any `:` or
+`/`. Comparisons use no aliases or case folding. Profile and agent names must
+be nonempty; profile names cannot contain `:`, and agent names cannot contain
+`/`. Empty profile or agent parts are invalid; an empty model suffix is valid.
+Unknown names are ignored. Candidates with the same agent/model identity share
+an exact entry, even when mode or effort differs. Legacy top-level agent/model
+profiles count as one candidate.
 Profiles disabled outright or with every candidate disabled disappear from
 tool descriptions, profile guidance and MCP instructions. Starting one fails
 with `Profile <name> is disabled`.
@@ -193,20 +200,39 @@ and the no-candidate error, comes from `collab.prompts`. Child info keeps
 `profile` as the role name, with its actual agent and model in the existing
 session fields. Permission mode is still capped by the parent's mode.
 
-The editor requests `collab/profiles` with `{}` to inspect policy and current
-quota state. It returns every profile in configuration order, including disabled
+The editor requests `collab/profiles` with `{ root?: string }` to inspect policy
+and current quota state. Availability uses the same cached environment for that
+root as selection, guidance and tool descriptions; omitting root uses the
+daemon's process environment. All share the enabled-agent, executable and Pi
+model checks. It returns every profile in configuration order, including disabled
 ones, as `{ profiles: [{ name, cost, description, disabled, overridden,
-candidates: [{ agent, model, effort?, mode?, disabled, available, unavailable?,
+candidates: [{ agent, model, effort?, mode?, disabled, disabledBy, available, unavailable?,
 strained?, quotaSkip }] }], quotaSkip }`. A missing candidate model is `null`;
 absent effort, mode and reason
 fields are omitted. Missing cost and description become `"unknown"` and `""`.
-Profile `disabled` means all its candidates are disabled. Candidate `available`
+Profile `disabled` means all its candidates are disabled. Candidate `disabledBy`
+is an array of every matching `collab.disabled` entry, including a bare profile
+entry, or `[]` when enabled. Candidate `available`
 reflects enabled agents, installed executables and the Pi model filter,
 independently of `disabled`. The outer threshold is global; each candidate
 carries its effective threshold. `strained` uses exactly the same English
 reason computation as selection and its skipped-candidate receipt.
 `overridden` is true when the last successfully loaded user overlay contains
 an entry at `profiles.<name>`, even when it has the same values as the defaults.
+
+The local editor toggles policy with `collab/disable`:
+`{ profile: string, candidate?: number, disabled: boolean }`, returning
+`{ config }`. `candidate` is a zero-based index into the profile's current
+candidates (including a legacy single candidate). The daemon reads current
+defaults and overlay, mutates the disabled list synchronously and uses the
+same validated atomic write and notification path as `config/set`; a stale
+page cannot overwrite another writer's entries. Disabling a candidate always
+adds an exact `profile:agent/model` entry, including the trailing slash for an
+unspecified model. Enabling it removes every covering non-profile entry; when
+an agent-wide entry is removed, exact entries are added for the siblings it
+covered so those siblings stay disabled. Enabling a profile removes only its
+bare entry; candidate entries remain. Invalid profile names, indices or
+non-boolean states fail without publication. Host daemons reject mutations.
 
 The local editor can request `config/set` with `{ path: ["agents", "claude",
 "quotaSkip"], value: 0.8 }`. It edits only `var/emx/config.json`, preserving
@@ -220,7 +246,11 @@ with the full effective config. Host daemons reject this request with
 `config/set is only available on local daemons`; their config files continue
 to accept only executable overrides through the existing host mechanism.
 
-The profile page (`C-c a p`) offers 编辑 and, for overridden profiles,
+The profile page (`C-c a p`) remembers the invoking buffer's project root,
+falling back to its `default-directory`, passes it to `collab/profiles` on
+every refresh (including `g`), and shows it in the header. Candidate status
+shows matching entries, for example 已停用（coder:codex）. All profile/candidate
+switches use `collab/disable`. The page offers 编辑 and, for overridden profiles,
 恢复默认. Each candidate has 修改, 删除 and ordering buttons; 添加候选 appends
 a candidate. Agent completion uses the effective config's agents. Models accept
 free text, including model ids absent from the choices; empty model or effort

@@ -31,6 +31,29 @@ export interface Profile extends Partial<ProfileCandidate> {
   use?: string
   confirm?: boolean
 }
+/** A legacy override takes precedence over an inherited candidates array. */
+export function profileCandidates(p: Profile): ProfileCandidate[] {
+  return p.agent ? [{ agent: p.agent, model: p.model, mode: p.mode, effort: p.effort }] : p.candidates!
+}
+/** Split only the first colon and the first following slash; models are opaque. */
+function disabledEntry(entry: string): { profile: string, agent?: string, model?: string } {
+  const colon = entry.indexOf(':')
+  if (colon < 0) return { profile: entry }
+  const slash = entry.indexOf('/', colon + 1)
+  return { profile: entry.slice(0, colon),
+    agent: entry.slice(colon + 1, slash < 0 ? undefined : slash),
+    ...(slash < 0 ? {} : { model: entry.slice(slash + 1) }) }
+}
+export function candidateDisabledBy(c: Config, name: string, candidate: ProfileCandidate): string[] {
+  return c.collab.disabled.filter((entry) => {
+    const { profile, agent, model } = disabledEntry(entry)
+    return profile === name && (agent === undefined || (agent === candidate.agent
+      && (model === undefined || model === (candidate.model ?? ''))))
+  })
+}
+function candidateEntry(name: string, candidate: ProfileCandidate): string {
+  return `${name}:${candidate.agent}/${candidate.model ?? ''}`
+}
 export interface Config {
   agents: Record<string, AgentConfig>
   profiles: Record<string, Profile>
@@ -102,6 +125,7 @@ export function validate(value: unknown): Config {
   keys(c, ['agents', 'profiles', 'collab', 'usage', 'daemon', 'sessions'], '')
   for (const [name, a] of Object.entries(obj(c.agents, 'agents'))) {
     const p = `agents.${name}`
+    if (!name || name.includes('/')) fail(p, 'nonempty agent name without /')
     keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'quotaSkip', 'models'], p)
     str(a.title, p + '.title'); str(a.executable, p + '.executable')
     if (!a.executable) fail(p + '.executable', 'nonempty string')
@@ -127,6 +151,7 @@ export function validate(value: unknown): Config {
   }
   for (const [name, a] of Object.entries(obj(c.profiles, 'profiles'))) {
     const p = `profiles.${name}`
+    if (!name || name.includes(':')) fail(p, 'nonempty profile name without :')
     keys(a, ['agent', 'model', 'effort', 'mode', 'cost', 'description', 'use', 'confirm', 'preferOtherAgent', 'candidates'], p)
     const candidate = (v: any, path: string) => {
       obj(v, path)
@@ -155,6 +180,12 @@ export function validate(value: unknown): Config {
   str(collab.startGuidance, 'collab.startGuidance')
   threshold(collab.quotaSkip, 'collab.quotaSkip')
   array(collab.disabled, 'collab.disabled')
+  for (const entry of collab.disabled) {
+    const { profile, agent } = disabledEntry(entry)
+    if (!profile || agent === '') {
+      fail('collab.disabled', 'profile, profile:agent or profile:agent/model (empty model means default)')
+    }
+  }
   for (const k of ['maxActive', 'handoffLimit', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout']) num(collab[k], 'collab.' + k, 1)
   for (const k of ['closeFinished', 'confirm']) bool(collab[k], 'collab.' + k)
   array(collab.handleCommand, 'collab.handleCommand')
@@ -223,6 +254,43 @@ export class Configuration {
   }
   /** Edit only the user overlay, validating before atomic publication. */
   set(path: unknown, value: unknown): ReturnType<Configuration['reload']> {
+    return this.#edit(path, () => value)
+  }
+  /** Mutate the current policy synchronously, never a client's cached array. */
+  disable(profile: unknown, candidate: unknown, disabled: unknown): ReturnType<Configuration['reload']> {
+    if (typeof profile !== 'string' || !profile) throw new Error('collab/disable profile: expected nonempty string')
+    if (typeof disabled !== 'boolean') throw new Error('collab/disable disabled: expected boolean')
+    if (candidate !== undefined && (!Number.isSafeInteger(candidate) || (candidate as number) < 0)) {
+      throw new Error('collab/disable candidate: expected nonnegative integer')
+    }
+    return this.#edit(['collab', 'disabled'], (current) => {
+      const c = validate(current())
+      if (!Object.hasOwn(c.profiles, profile)) throw new Error(`Unknown profile: ${profile}`)
+      let entries = [...c.collab.disabled]
+      const add = (entry: string) => { if (!entries.includes(entry)) entries.push(entry) }
+      if (candidate === undefined) {
+        if (disabled) add(profile)
+        else entries = entries.filter((entry) => entry !== profile)
+      } else {
+        const candidates = profileCandidates(c.profiles[profile]), selected = candidates[candidate as number]
+        if (!selected) throw new Error('collab/disable candidate: index out of range')
+        if (disabled) add(candidateEntry(profile, selected))
+        else {
+          const removed = candidateDisabledBy(c, profile, selected).filter((entry) => entry !== profile)
+          entries = entries.filter((entry) => !removed.includes(entry))
+          // Expand broad agent entries so enabling one model preserves siblings.
+          const covered = { ...c, collab: { ...c.collab, disabled: removed } }
+          for (const sibling of candidates) {
+            if (candidateEntry(profile, sibling) !== candidateEntry(profile, selected)
+              && candidateDisabledBy(covered, profile, sibling).length) add(candidateEntry(profile, sibling))
+          }
+        }
+      }
+      return entries
+    })
+  }
+  /** Share the synchronous read/modify/validate/publish path with config/set. */
+  #edit(path: unknown, change: (current: () => unknown) => unknown): ReturnType<Configuration['reload']> {
     if (this.host) throw new Error('config/set is only available on local daemons')
     if (!Array.isArray(path) || !path.length || !path.every((key) => typeof key === 'string' && key.length)) {
       throw new Error('config/set path: expected nonempty string[]')
@@ -230,11 +298,13 @@ export class Configuration {
     for (const key of path) {
       if (['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error(`Invalid config key: ${key}`)
     }
-    if (value === undefined) throw new Error('config/set requires value (use null to delete)')
     let overlay: Record<string, any> = {}
     try { overlay = JSON.parse(readFileSync(this.override, 'utf8')) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     if (!object(overlay)) throw new Error(`${this.override}: expected object`)
+    const base = JSON.parse(readFileSync(this.defaults, 'utf8'))
+    const value = change(() => mergeConfiguration(base, overlay))
+    if (value === undefined) throw new Error('config/set requires value (use null to delete)')
     const edit = (target: Record<string, any>, index: number): void => {
       const key = path[index]
       if (index === path.length - 1) {
@@ -254,7 +324,7 @@ export class Configuration {
     if (path[0] === 'profiles' && path[2] === 'candidates' && value !== null) {
       for (const key of ['agent', 'model', 'effort', 'mode']) delete overlay.profiles[path[1]][key]
     }
-    validate(mergeConfiguration(JSON.parse(readFileSync(this.defaults, 'utf8')), overlay))
+    validate(mergeConfiguration(base, overlay))
     mkdirSync(dirname(this.override), { recursive: true, mode: 0o700 })
     const temp = this.override + '.' + randomUUID() + '.tmp'
     try {

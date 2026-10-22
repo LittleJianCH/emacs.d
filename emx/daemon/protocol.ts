@@ -283,6 +283,8 @@ export interface CollabProfiles {
       effort?: string
       mode?: string
       disabled: boolean
+      /** All matching policy entries, including the bare profile entry. */
+      disabledBy: string[]
       /** Runtime availability, independent of the disabled flag. */
       available: boolean
       unavailable?: string
@@ -310,7 +312,8 @@ export interface Requests {
   'agents/models': [{ agent: string }, { models: { id: string, label?: string }[] }]
   /** Private editor hub methods; MCP peers cannot call these directly. */
   'collab/list': [{}, { sessions: object[] }]
-  'collab/profiles': [{}, CollabProfiles]
+  'collab/profiles': [{ root?: string }, CollabProfiles]
+  'collab/disable': [{ profile: string, candidate?: number, disabled: boolean }, { config: import('../config.ts').Config }]
   'collab/read': [{ id: string, last?: number, before?: number, tools?: string }, string]
   'collab/ask': [{ id: string, prompt: string, route: import('./collab.ts').RemoteRoute,
     origin: { handle: string, agent: string } }, string]

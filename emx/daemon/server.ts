@@ -558,6 +558,11 @@ export class DaemonServer {
         this.#configChanged(result)
         return { config: result.config }
       }
+      case 'collab/disable': {
+        const result = this.configuration.disable(params.profile, params.candidate, params.disabled)
+        this.#configChanged(result)
+        return { config: result.config }
+      }
       case 'config/reload': {
         const result = this.configuration.reload()
         this.#configChanged(result)
@@ -618,7 +623,8 @@ export class DaemonServer {
         const config = this.configuration.value.agents[agent]
         return agentModels(agent, config, this.varDir).then((models) => ({ models }))
       }
-      case 'collab/profiles': return this.collab.profiles(this.configuration.overriddenProfiles)
+      case 'collab/profiles': return this.collab.profiles(this.configuration.overriddenProfiles,
+        params.root === undefined ? undefined : string(params.root, 'root'))
       case 'collab/read': return this.collab.read(this.#session(params), params)
       case 'collab/ask': {
         const route = object(params.route), origin = object(params.origin)
