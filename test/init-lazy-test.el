@@ -597,7 +597,9 @@ Everything the modules and triggers touch is restored afterwards."
 ;;; The real table
 
 (defconst init-lazy-test--packages
-  '((lang-nix nix-mode) (lang-agda poly-markdown) (init-telega telega))
+  '((lang-nix nix-mode) (lang-agda poly-markdown)
+    (lang-haskell haskell-mode) (lang-coq proof-general)
+    (lang-lean lean4-mode) (init-telega telega))
   "Packages the real modules install, per feature.
 The tests need them installed already and skip without them.")
 

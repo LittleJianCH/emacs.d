@@ -51,6 +51,15 @@
              :commands (go-ts-mode go-mod-ts-mode go-work-ts-mode))
     (lang-nix :files (("\\.nix\\'" . nix-mode))
               :commands (nix-mode))
+    (lang-haskell :files (("\\.hs\\'" . haskell-mode)
+                         ("\\.lhs\\'" . haskell-literate-mode)
+                         ("\\.cabal\\'" . haskell-cabal-mode))
+                  :commands (haskell-mode haskell-literate-mode
+                             haskell-cabal-mode))
+    (lang-coq :files (("\\.v\\'" . my/coq-mode))
+              :commands (my/coq-mode))
+    (lang-lean :files (("\\.lean\\'" . lean4-select-mode))
+               :commands (lean4-select-mode lean4-mode))
     ;; The pattern is `my/agda-file-pattern', which needs lang-agda loaded.
     (lang-agda :files (("\\.\\(?:agda\\|lagda\\(?:\\.\\(?:md\\|rst\\|tex\\|org\\|typ\\|tree\\)\\)?\\)\\'"
                         . my/agda-mode))

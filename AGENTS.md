@@ -64,6 +64,8 @@ test/init-ui-test.el        ERT suite for the themes, status line and side panel
 test/init-term-test.el      ERT suite for the terminal module
 test/init-lazy-test.el      ERT suite for on-demand module loading
 test/lang-test.el           ERT suite for the language modules (toolchains mocked)
+test/lang-functional-test.el Haskell and Lean startup, environments and keys
+test/lang-coq-test.el       Proof General bootstrap and proof workflows (mocked)
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
@@ -226,6 +228,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/init-reload-test.el -l test/init-base-test.el -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \
       -l test/init-lazy-test.el -l test/lang-test.el \
+      -l test/lang-functional-test.el -l test/lang-coq-test.el \
       -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
