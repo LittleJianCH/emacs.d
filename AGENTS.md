@@ -59,6 +59,7 @@ test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
 test/agent-session-link-test.el   ERT suite for clickable links in transcripts
 test/init-reload-test.el    ERT suite for reloading
 test/init-base-test.el      ERT suite for base defaults
+test/init-evil-pinyin-test.el ERT suite for Microsoft double-pinyin Evil motions
 test/init-remote-test.el    ERT suite for remote editing
 test/init-ui-test.el        ERT suite for the themes, status line and side panels
 test/init-term-test.el      ERT suite for the terminal module
@@ -231,7 +232,8 @@ evil off first (it is on by default and its normal state would eat typed keys):
 ```sh
 emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-test.el \
-      -l test/init-reload-test.el -l test/init-base-test.el -l test/init-remote-test.el \
+      -l test/init-reload-test.el -l test/init-base-test.el -l test/init-evil-pinyin-test.el \
+      -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \
       -l test/init-lazy-test.el -l test/lang-test.el \
       -l test/agent-review-test.el \

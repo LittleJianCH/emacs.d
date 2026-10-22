@@ -25,8 +25,22 @@
 ;; byte-compiler (they are loaded along with evil at runtime).
 (declare-function evil-set-leader "evil-core")
 (declare-function evil-define-key* "evil-core")
+(declare-function global-evil-pinyin-mode "evil-pinyin")
+(declare-function evil-pinyin--get-char-table "evil-pinyin")
+(defvar evil-pinyin-scheme)
 (defvar magit-mode-map)
 (defvar magit-blame-read-only-mode-map)
+
+(defun my/evil-pinyin--microsoft-char-table ()
+  "Copy upstream's Microsoft table, grouping zero initials under o."
+  (let* ((evil-pinyin-scheme 'simplified-weiruan-all)
+         (table (copy-sequence (evil-pinyin--get-char-table))))
+    (setf (nth (- ?o ?a) table)
+          (concat (nth 0 table) (nth (- ?e ?a) table)
+                  (nth (- ?o ?a) table))
+          (nth 0 table) ""
+          (nth (- ?e ?a) table) "")
+    table))
 
 (use-package evil
   :ensure t
@@ -65,6 +79,17 @@
     (kbd "C-k") #'my/scroll-up-with-point))
 
 (with-eval-after-load 'evil
+  (use-package evil-pinyin
+    :ensure t
+    :demand t
+    :init
+    (setq-default evil-pinyin-scheme nil
+                  evil-pinyin-with-search-rule 'never
+                  evil-pinyin-with-punctuation nil)
+    :config
+    (setq-default evil-pinyin-char-table
+                  (my/evil-pinyin--microsoft-char-table))
+    (global-evil-pinyin-mode 1))
   ;; SPC w and C-w share the window map.
   (define-key evil-window-map (kbd "u") #'winner-undo)
   (define-key evil-window-map (kbd "U") #'winner-redo))
