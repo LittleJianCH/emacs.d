@@ -1135,6 +1135,91 @@ question unanswered, and quitting halfway keeps the answers so far."
     (funcall (plist-get (alist-get method agent-ui--methods nil nil #'equal) :function)
              params)))
 
+(defun agent-session-test--context-preserves-windows (caller expected)
+  "Check repeated context calls as CALLER inspect EXPECTED without display changes."
+  (let* ((frame (selected-frame))
+         (windows (window-list frame 'no-minibuf))
+         (buffers (mapcar #'window-buffer windows))
+         (contents (mapcar (lambda (buffer)
+                            (with-current-buffer buffer (buffer-string)))
+                          buffers))
+         (state (window-state-get (frame-root-window frame) t))
+         (selected (selected-window))
+         (current (current-buffer)))
+    (dotimes (_ 3)
+      (let ((context (agent-session-test--call "context" caller)))
+        (should (equal (plist-get context :buffer) (buffer-name expected)))
+        (should (equal (mapcar (lambda (info) (plist-get info :buffer))
+                              (append (plist-get context :visible) nil))
+                       (mapcar #'buffer-name buffers))))
+      (should (equal (window-list frame 'no-minibuf) windows))
+      (should (equal (mapcar #'window-buffer windows) buffers))
+      (should (equal (mapcar (lambda (buffer)
+                              (with-current-buffer buffer (buffer-string)))
+                            buffers)
+                     contents))
+      (should (equal (window-state-get (frame-root-window frame) t) state))
+      (should (eq (selected-window) selected))
+      (should (eq (current-buffer) current)))))
+
+(ert-deftest agent-session-test-context-agent-only-layout ()
+  "Context never splits when only agent windows and a sidebar are visible."
+  (save-window-excursion
+    (agent-session-test--with-session
+     (let ((sidebar (generate-new-buffer " *context-sidebar*"))
+           (hidden (generate-new-buffer " *context-hidden-file*")))
+       (unwind-protect
+           (progn
+             (delete-other-windows)
+             (set-window-buffer (selected-window) buffer)
+             (set-window-buffer (split-window-right) buffer)
+             (display-buffer-in-side-window sidebar '((side . left)))
+             ;; A hidden ordinary buffer must not be displayed as a fallback.
+             (with-current-buffer hidden (insert "Hidden working buffer\n"))
+             (should-not (get-buffer-window hidden t))
+             (agent-session-test--context-preserves-windows buffer buffer)
+             (should-not (get-buffer-window hidden t)))
+         (kill-buffer sidebar)
+         (kill-buffer hidden))))))
+
+(ert-deftest agent-session-test-diagnostics-agent-only-layout ()
+  "Default diagnostics inspect an agent-only layout without creating a window."
+  (save-window-excursion
+    (agent-session-test--with-session
+     (delete-other-windows)
+     (set-window-buffer (selected-window) buffer)
+     (let ((window (selected-window))
+           (state (window-state-get (frame-root-window) t)))
+       (dotimes (_ 3)
+         (should (equal (agent-session-test--call "diagnostics" buffer) []))
+         (should (equal (window-list nil 'no-minibuf) (list window)))
+         (should (eq (window-buffer window) buffer))
+         (should (equal (window-state-get (frame-root-window) t) state)))))))
+
+(ert-deftest agent-session-test-context-unselected-working-window ()
+  "Context reads the working window while an agent or sidebar is selected."
+  (save-window-excursion
+    (agent-session-test--with-session
+     (let ((work (generate-new-buffer " *context-work*"))
+           (sidebar (generate-new-buffer " *context-sidebar*")))
+       (unwind-protect
+           (progn
+             (delete-other-windows)
+             (set-window-buffer (selected-window) buffer)
+             (let ((window (split-window-right))
+                   (side (display-buffer-in-side-window sidebar '((side . left)))))
+               (with-current-buffer work (insert "First\nSecond line\n"))
+               (set-window-buffer window work)
+               (set-window-point window 10)
+               (dolist (selected (list (selected-window) side))
+                 (select-window selected)
+                 (agent-session-test--context-preserves-windows buffer work)
+                 (let ((context (agent-session-test--call "context" buffer)))
+                   (should (= (plist-get context :line) 2))
+                   (should (= (plist-get context :column) 3))))))
+         (kill-buffer work)
+         (kill-buffer sidebar))))))
+
 (ert-deftest agent-session-test-handles ()
   (agent-session-test--with-session
    (let* ((agent-emx-config--value

@@ -220,9 +220,10 @@ Used by emx."
                 (cons (selected-frame) (frame-list)))
       (selected-frame)))
 
-(defun agent-ui--main-window ()
-  "Return the user's working window: the most recently used non-agent window.
-If there is none, split a new one to the left of the agent column."
+(defun agent-ui--main-window (&optional read-only)
+  "Return the user's most recently used non-agent working window.
+If none exists, split a new one to the left of the agent column.
+With READ-ONLY, return the frame's selected window instead of splitting."
   (let* ((frame (agent-ui--frame))
          (windows (seq-remove (lambda (window)
                                 (or (agent-session-buffer-p (window-buffer window))
@@ -230,7 +231,9 @@ If there is none, split a new one to the left of the agent column."
                                     (window-dedicated-p window)))
                               (window-list frame 'no-minibuf))))
     (or (car (sort windows :key #'window-use-time :reverse t))
-        (split-window (frame-root-window frame) nil 'left))))
+        (if read-only
+            (frame-selected-window frame)
+          (split-window (frame-root-window frame) nil 'left)))))
 
 (defun agent-ui--show-buffer (buffer)
   "Show BUFFER in the working window without stealing focus; return the window."
@@ -286,7 +289,7 @@ files on its host."
   "Return what the user is looking at: the file in the main window, cursor line and column,
 selected text, project root, and every visible window."
   :read-only t
-  (let* ((window (agent-ui--main-window))
+  (let* ((window (agent-ui--main-window t))
          (buffer (window-buffer window)))
     (with-current-buffer buffer
       (let ((point (window-point window)))
@@ -355,7 +358,7 @@ or start a diagnostic process."
   (let ((buffer (if path
                     (or (find-buffer-visiting (agent-ui--abs path))
                         (error "File is not open: %s; use open first (diagnostics only reads open buffers)" path))
-                  (window-buffer (agent-ui--main-window)))))
+                  (window-buffer (agent-ui--main-window t)))))
     (with-current-buffer buffer
       (vconcat
        (mapcar (lambda (diag)
