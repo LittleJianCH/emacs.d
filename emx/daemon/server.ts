@@ -1,4 +1,5 @@
 import { history } from '../backends/history.ts'
+import { agentModels } from '../backends/models.ts'
 import { ProjectEnvironments } from '../remote/environment.ts'
 // server.ts --- one socket, one editor client, and a persistent session table.
 
@@ -611,7 +612,13 @@ export class DaemonServer {
       }
       case 'collab/retry': this.collab.schedule(); return {}
       case 'collab/list': return { sessions: this.collab.list() }
-      case 'collab/profiles': return this.collab.profiles()
+      case 'agents/models': {
+        const agent = string(params.agent, 'agent')
+        if (!Object.hasOwn(this.configuration.value.agents, agent)) invalid(`Unknown agent: ${agent}`)
+        const config = this.configuration.value.agents[agent]
+        return agentModels(agent, config, this.varDir).then((models) => ({ models }))
+      }
+      case 'collab/profiles': return this.collab.profiles(this.configuration.overriddenProfiles)
       case 'collab/read': return this.collab.read(this.#session(params), params)
       case 'collab/ask': {
         const route = object(params.route), origin = object(params.origin)

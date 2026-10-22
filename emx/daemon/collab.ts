@@ -408,12 +408,13 @@ export class Collaboration {
     return { disabled: candidateDisabled(this.config, name, candidate), available: !unavailable,
       unavailable, strained: this.#strain(candidate, quotaSkip), quotaSkip }
   }
-  profiles(): CollabProfiles {
+  profiles(overridden: string[] = []): CollabProfiles {
     return { quotaSkip: this.config.collab.quotaSkip, profiles: Object.entries(this.config.profiles).map(([name, role]) => {
       const candidates = profileCandidates(role).map((candidate) => ({ agent: candidate.agent, model: candidate.model ?? null,
-        ...(candidate.effort != null ? { effort: candidate.effort } : {}), ...this.#candidateStatus(name, candidate, process.env) }))
+        ...(candidate.effort != null ? { effort: candidate.effort } : {}),
+        ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.#candidateStatus(name, candidate, process.env) }))
       return { name, cost: profileCost(name, role), description: role.description ?? '',
-        disabled: candidates.every((candidate) => candidate.disabled), candidates }
+        disabled: candidates.every((candidate) => candidate.disabled), overridden: overridden.includes(name), candidates }
     }) }
   }
   #select(caller: Session, name: string, role: Profile): { candidate: ProfileCandidate, note: string } {

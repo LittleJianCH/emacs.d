@@ -86,6 +86,114 @@ VALUE may be a function reading the latest config cache before the write."
                     (delete token disabled)
                   (append disabled (list token))))))))
 
+(defun agent-profiles--candidates (name)
+  "Copy NAME's candidates, keeping only writable configuration fields."
+  (let ((profile (seq-find (lambda (p) (equal (plist-get p :name) name))
+                           (plist-get agent-profiles--snapshot :profiles))))
+    (unless profile (user-error "配置已更新，请刷新页面"))
+    (mapcar (lambda (candidate)
+              (let ((result (list :agent (plist-get candidate :agent))))
+                (dolist (key '(:model :effort :mode))
+                  (when (stringp (plist-get candidate key))
+                    (setq result (plist-put result key (plist-get candidate key)))))
+                result))
+            (append (plist-get profile :candidates) nil))))
+
+(defun agent-profiles--save-candidates (name candidates)
+  "Write the whole CANDIDATES array for profile NAME."
+  (agent-profiles--set (list "profiles" name "candidates") (vconcat candidates)))
+
+(defun agent-profiles--move-candidate (name index delta)
+  "Move NAME's candidate at INDEX by DELTA places."
+  (let* ((candidates (vconcat (agent-profiles--candidates name)))
+         (target (+ index delta)))
+    (unless (<= 0 target (1- (length candidates)))
+      (user-error "候选已在边界"))
+    (cl-rotatef (aref candidates index) (aref candidates target))
+    (agent-profiles--save-candidates name candidates)))
+
+(defun agent-profiles--delete-candidate (name index)
+  "Delete NAME's candidate at INDEX, retaining at least one candidate."
+  (let ((candidates (agent-profiles--candidates name)))
+    (when (= (length candidates) 1) (user-error "至少保留一个候选"))
+    (agent-profiles--save-candidates
+     name (append (seq-take candidates index) (seq-drop candidates (1+ index))))))
+
+(defun agent-profiles--model-fallback (agent)
+  "Collect AGENT's models already present in the effective configuration."
+  (let ((profiles (plist-get agent-emx-config--value :profiles)) models)
+    (while profiles
+      (let* ((profile (cadr profiles))
+             (candidates (if (plist-get profile :agent) (list profile)
+                           (append (plist-get profile :candidates) nil))))
+        (dolist (candidate candidates)
+          (when (and (equal (plist-get candidate :agent) agent)
+                     (stringp (plist-get candidate :model)))
+            (push (plist-get candidate :model) models))))
+      (setq profiles (cddr profiles)))
+    (delete-dups (nreverse models))))
+
+(defun agent-profiles--edit-candidate (name &optional index)
+  "Edit NAME's candidate at INDEX, or append a new one when INDEX is nil."
+  (when agent-profiles--writing (user-error "正在保存配置，请稍候"))
+  (let* ((buffer (current-buffer))
+         (generation agent-profiles--generation)
+         (candidates (agent-profiles--candidates name))
+         (old (and index (nth index candidates)))
+         (agents (let ((config (plist-get agent-emx-config--value :agents)) names)
+                   (while config
+                     (push (substring (symbol-name (car config)) 1) names)
+                     (setq config (cddr config)))
+                   (nreverse names)))
+         (agent (completing-read "代理：" agents nil t nil nil
+                                 (plist-get old :agent)))
+         (finish
+          (lambda (choices)
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (if (/= generation agent-profiles--generation)
+                    (message "配置已更新，请重新编辑")
+                  (let* ((model (string-trim
+                                 (completing-read
+                                  "模型（留空使用默认，可自由输入）："
+                                  (delete-dups
+                                   (append choices (agent-profiles--model-fallback agent)))
+                                  nil nil (and (equal agent (plist-get old :agent))
+                                               (plist-get old :model)))))
+                         (effort (string-trim
+                                  (read-string "推理强度（可选，留空不指定）："
+                                               (plist-get old :effort))))
+                         (candidate (list :agent agent)))
+                    (unless (string-empty-p model)
+                      (setq candidate (plist-put candidate :model model)))
+                    (unless (string-empty-p effort)
+                      (setq candidate (plist-put candidate :effort effort)))
+                    (when (plist-get old :mode)
+                      (setq candidate (plist-put candidate :mode (plist-get old :mode))))
+                    (if index (setf (nth index candidates) candidate)
+                      (setq candidates (append candidates (list candidate))))
+                    (agent-profiles--save-candidates name candidates))))))))
+    (agent-emx--local-connection
+     (lambda (connection)
+       (agent-emx--request
+        connection "agents/models" (list :agent agent)
+        (lambda (result)
+          (funcall finish (mapcar (lambda (m) (plist-get m :id))
+                                 (append (plist-get result :models) nil))))
+        (lambda (_) (funcall finish nil))))
+     (lambda (_) (funcall finish nil)))))
+
+(defun agent-profiles--edit-profile (name)
+  "Choose and edit a candidate in profile NAME."
+  (let* ((candidates (agent-profiles--candidates name))
+         (choices (cl-loop for candidate in candidates for index from 0
+                           collect (cons (format "%d · %s · %s" (1+ index)
+                                                 (plist-get candidate :agent)
+                                                 (or (plist-get candidate :model)
+                                                     "默认模型")) index)))
+         (choice (completing-read "编辑候选：" choices nil t)))
+    (agent-profiles--edit-candidate name (cdr (assoc choice choices)))))
+
 (defun agent-profiles--edit-threshold (&optional agent)
   "Edit AGENT's quota threshold, or the global threshold when nil."
   (let* ((input (string-trim
@@ -139,8 +247,15 @@ VALUE may be a function reading the latest config cache before the write."
           (agent-profiles--button
            (if (member name disabled) "启用" "停用")
            (lambda () (agent-profiles--toggle name)))
+          (insert "  ")
+          (agent-profiles--button "编辑" (lambda () (agent-profiles--edit-profile name)))
+          (when (eq (plist-get profile :overridden) t)
+            (insert "  ")
+            (agent-profiles--button
+             "恢复默认" (lambda () (agent-profiles--set (list "profiles" name) nil))))
           (insert "\n  " (or (plist-get profile :description) "") "\n")
-          (seq-doseq (candidate (plist-get profile :candidates))
+          (cl-loop for candidate across (plist-get profile :candidates)
+                   for index from 0 do
             (let* ((agent (plist-get candidate :agent))
                    (model (and (stringp (plist-get candidate :model))
                                (plist-get candidate :model)))
@@ -154,7 +269,25 @@ VALUE may be a function reading the latest config cache before the write."
               (agent-profiles--button
                (if (member token disabled) "启用" "停用")
                (lambda () (agent-profiles--toggle token)))
+              (let ((i index))
+                (dolist (action
+                         (append
+                          (when (> i 0)
+                            (list (cons "上移" (lambda ()
+                                                 (agent-profiles--move-candidate name i -1)))))
+                          (when (< i (1- (length (plist-get profile :candidates))))
+                            (list (cons "下移" (lambda ()
+                                                 (agent-profiles--move-candidate name i 1)))))
+                          (list (cons "删除" (lambda ()
+                                               (agent-profiles--delete-candidate name i)))
+                                (cons "修改" (lambda ()
+                                               (agent-profiles--edit-candidate name i))))))
+                  (insert "  ")
+                  (agent-profiles--button (car action) (cdr action))))
               (insert "\n")))
+          (insert "  ")
+          (agent-profiles--button
+           "添加候选" (lambda () (agent-profiles--edit-candidate name)))
           (insert "\n")))
       (let ((global (plist-get agent-profiles--snapshot :quotaSkip)))
         (insert (propertize "配额阈值\n" 'face 'agent-session-assistant)

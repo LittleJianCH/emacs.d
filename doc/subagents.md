@@ -195,15 +195,18 @@ session fields. Permission mode is still capped by the parent's mode.
 
 The editor requests `collab/profiles` with `{}` to inspect policy and current
 quota state. It returns every profile in configuration order, including disabled
-ones, as `{ profiles: [{ name, cost, description, disabled, candidates: [{ agent,
-model, effort?, disabled, available, unavailable?, strained?, quotaSkip }] }],
-quotaSkip }`. A missing candidate model is `null`; absent effort and reason
+ones, as `{ profiles: [{ name, cost, description, disabled, overridden,
+candidates: [{ agent, model, effort?, mode?, disabled, available, unavailable?,
+strained?, quotaSkip }] }], quotaSkip }`. A missing candidate model is `null`;
+absent effort, mode and reason
 fields are omitted. Missing cost and description become `"unknown"` and `""`.
 Profile `disabled` means all its candidates are disabled. Candidate `available`
 reflects enabled agents, installed executables and the Pi model filter,
 independently of `disabled`. The outer threshold is global; each candidate
 carries its effective threshold. `strained` uses exactly the same English
 reason computation as selection and its skipped-candidate receipt.
+`overridden` is true when the last successfully loaded user overlay contains
+an entry at `profiles.<name>`, even when it has the same values as the defaults.
 
 The local editor can request `config/set` with `{ path: ["agents", "claude",
 "quotaSkip"], value: 0.8 }`. It edits only `var/emx/config.json`, preserving
@@ -216,6 +219,33 @@ reload policy and notify clients and MCP tools. The response is `{ config }`
 with the full effective config. Host daemons reject this request with
 `config/set is only available on local daemons`; their config files continue
 to accept only executable overrides through the existing host mechanism.
+
+The profile page (`C-c a p`) offers 编辑 and, for overridden profiles,
+恢复默认. Each candidate has 修改, 删除 and ordering buttons; 添加候选 appends
+a candidate. Agent completion uses the effective config's agents. Models accept
+free text, including model ids absent from the choices; empty model or effort
+means unspecified. Edits preserve existing permission modes and other candidates'
+fields. Every candidate edit writes the whole nonempty array to
+`["profiles", name, "candidates"]`, since arrays replace rather than merge.
+An explicit `candidates` array in an overlay takes precedence over top-level
+`agent`, `model`, `effort` and `mode` inherited from single-candidate defaults.
+Writing that array through `config/set` also removes those conflicting fields
+from that profile's overlay. Legacy single-agent overlays without an explicit
+array continue to override default arrays. 恢复默认 sends
+`{ path: ["profiles", name], value: null }`, removing the whole profile override.
+
+`agents/models` takes `{ agent: string }` and returns
+`{ models: [{ id: string, label?: string }] }` without opening a daemon session
+or submitting a model turn. Codex uses a short-lived app-server to initialize
+and page through `model/list`, excluding hidden entries. Pi uses a short-lived
+RPC process with `--no-session`, extensions and skills disabled, requests
+`get_available_models`, and applies the backend's `agents.pi.models`
+include/exclude filter. Both queries have a ten-second deadline and close their
+process afterward. Claude offers the aliases `default`, `sonnet`, `opus`,
+`haiku`; other configured agents currently return an empty array. Unknown agents
+fail. Queries use the configured executable, extra arguments and normal
+`EMX_<AGENT>_EXECUTABLE` override. The page supplements choices with models
+already present in config profiles and falls back to those on query failure.
 
 The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is

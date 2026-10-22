@@ -15,9 +15,9 @@
   '(:quotaSkip 0.9
     :profiles
     [(:name "coder" :cost "medium" :description "Implementation work"
-      :disabled :false
+      :disabled :false :overridden t
       :candidates
-      [(:agent "codex" :model "gpt-6" :effort "medium" :disabled :false
+      [(:agent "codex" :model "gpt-6" :effort "medium" :mode "auto" :disabled :false
         :available t :strained "5h quota 92% used" :quotaSkip 0.97)
        (:agent "claude" :model "sonnet" :disabled :false
         :available :false :unavailable "CLI not found" :quotaSkip 0.9)
@@ -38,7 +38,9 @@
           (copy-tree agent-profiles-test--fixture t))
          (agent-emx-config--value
           '(:collab (:disabled ["coder:pi/flash" "other:claude"] :quotaSkip 0.9)
-            :agents (:codex (:quotaSkip 0.97)))))
+            :agents (:codex (:quotaSkip 0.97) :claude (:title "Claude")
+                     :pi (:title "Pi"))
+            :profiles (:coder (:candidates [(:agent "pi" :model "opencode-go/grok")])))))
      (cl-letf (((symbol-function 'agent-emx--local-connection)
                 (lambda (callback _error-callback &optional role)
                   (should-not role)
@@ -52,6 +54,8 @@
                      (should (hash-table-p params))
                      (should (= (hash-table-count params) 0))
                      (funcall callback agent-profiles-test--response))
+                    ("agents/models"
+                     (funcall callback '(:models [(:id "opencode-go/grok" :label "Grok")])))
                     ("config/set"
                      (funcall callback (list :config agent-emx-config--value)))
                     (_ (ert-fail (format "Unexpected request: %s" method)))))))
@@ -218,6 +222,108 @@
                      (lambda (&rest _) (interactive) (setq quit t))))
             (execute-kbd-macro (kbd "q")))
           (should quit))))))
+
+
+(defun agent-profiles-test--press (label &optional occurrence)
+  "Press the OCCURRENCE of a button with LABEL using native RET."
+  (goto-char (point-min))
+  (let ((remaining (or occurrence 1)) button)
+    (while (and (> remaining 0) (setq button (next-button (point))))
+      (goto-char (button-end button))
+      (when (equal (button-label button) label) (cl-decf remaining)))
+    (should (= remaining 0))
+    (goto-char (button-start button))
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (when (bound-and-true-p evil-local-mode) (evil-local-mode -1))
+      (execute-kbd-macro (kbd "RET")))))
+
+(ert-deftest agent-profiles-test-move-delete-and-preserve-fields ()
+  (agent-profiles-test--with-page
+    (let* ((original (vconcat (agent-profiles--candidates "coder")))
+           (first (aref original 0)) (second (aref original 1))
+           (third (aref original 2)))
+      (agent-profiles-test--press "下移")
+      (should (equal (agent-profiles-test--write)
+                     (list :path ["profiles" "coder" "candidates"]
+                           :value (vector second first third))))
+      (agent-profiles-test--press "上移")
+      (should (equal (plist-get (agent-profiles-test--write) :value)
+                     (vector second first third)))
+      (agent-profiles-test--press "删除" 2)
+      (should (equal (plist-get (agent-profiles-test--write) :value)
+                     (vector first third)))
+      (should (equal original (vconcat (agent-profiles--candidates "coder")))))))
+
+(ert-deftest agent-profiles-test-restore-and-last-candidate ()
+  (agent-profiles-test--with-page
+    (agent-profiles-test--press "恢复默认")
+    (should (equal (agent-profiles-test--write)
+                   '(:path ["profiles" "coder"] :value nil)))
+    (setq agent-profiles-test--sent nil)
+    (should-error (agent-profiles--delete-candidate "reviewer" 0) :type 'user-error)
+    (should-not (agent-profiles-test--write))))
+
+(ert-deftest agent-profiles-test-edit-model-agent-effort-and-add ()
+  (agent-profiles-test--with-page
+    (let ((answers '("pi" "opencode-go/grok")))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection _predicate require-match &rest _)
+                   (if (equal (car answers) "pi")
+                       (progn (should require-match)
+                              (should (equal collection '("codex" "claude" "pi"))))
+                     (should-not require-match)
+                     (should (member "opencode-go/grok" collection)))
+                   (pop answers)))
+                ((symbol-function 'read-string) (lambda (&rest _) "high")))
+        (agent-profiles-test--press "修改")))
+    (should (equal (cdr (assoc "agents/models" agent-profiles-test--sent)) '(:agent "pi")))
+    (should (equal (agent-profiles-test--write)
+                   '(:path ["profiles" "coder" "candidates"]
+                     :value [(:agent "pi" :model "opencode-go/grok" :effort "high" :mode "auto")
+                             (:agent "claude" :model "sonnet")
+                             (:agent "pi" :model "flash")])))
+    (let ((answers '("claude" "a-new-free-text-model")))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (pop answers)))
+                ((symbol-function 'read-string) (lambda (&rest _) "")))
+        (agent-profiles-test--press "添加候选")))
+    (should (equal (plist-get (agent-profiles-test--write) :value)
+                   [(:agent "codex" :model "gpt-6" :effort "medium" :mode "auto")
+                    (:agent "claude" :model "sonnet") (:agent "pi" :model "flash")
+                    (:agent "claude" :model "a-new-free-text-model")]))))
+
+(ert-deftest agent-profiles-test-edit-profile-clear-optionals-and-fallback ()
+  (agent-profiles-test--with-page
+    (let ((answers '("1 · codex · gpt-6" "pi" ""))
+          (request (symbol-function 'agent-emx--request)))
+      (cl-letf (((symbol-function 'agent-emx--request)
+                 (lambda (connection method params &optional callback error-callback)
+                   (if (equal method "agents/models")
+                       (funcall error-callback '(:message "Unavailable"))
+                     (funcall request connection method params callback error-callback))))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt collection _predicate require-match &rest _)
+                   (when (= (length answers) 1)
+                     (should-not require-match)
+                     (should (equal collection '("opencode-go/grok"))))
+                   (pop answers)))
+                ((symbol-function 'read-string) (lambda (&rest _) "")))
+        (agent-profiles-test--press "编辑")))
+    (should (equal (aref (plist-get (agent-profiles-test--write) :value) 0)
+                   '(:agent "pi" :mode "auto")))))
+
+(ert-deftest agent-profiles-test-model-reply-after-refresh-is-ignored ()
+  (agent-profiles-test--with-page
+    (let (reply)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "pi"))
+                ((symbol-function 'agent-emx--request)
+                 (lambda (_connection method _params &optional callback _error)
+                   (should (equal method "agents/models"))
+                   (setq reply callback))))
+        (agent-profiles--edit-candidate "coder" 0))
+      (cl-incf agent-profiles--generation)
+      (funcall reply '(:models []))
+      (should-not (agent-profiles-test--write)))))
 
 (provide 'agent-profiles-test)
 ;;; agent-profiles-test.el ends here

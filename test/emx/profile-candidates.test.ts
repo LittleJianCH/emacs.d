@@ -209,11 +209,11 @@ test('collab/profiles wire includes every profile in config order with candidate
     assert.deepEqual(result.profiles.map((p) => p.name), Object.keys(x.config.profiles))
     assert.equal(result.profiles.find((p) => p.name === 'coder')!.disabled, true)
     assert.deepEqual(result.profiles.find((p) => p.name === 'worker'), {
-      name: 'worker', cost: 'medium', description: 'Test role', disabled: false,
+      name: 'worker', cost: 'medium', description: 'Test role', disabled: false, overridden: false,
       candidates: [
-        { agent: 'claude', model: 'sonnet', effort: 'high', disabled: true, available: true, strained: '5h quota 92% used', quotaSkip: 0.8 },
-        { agent: 'codex', model: 'gpt-6.1-sol', disabled: false, available: false, unavailable: 'unavailable here', quotaSkip: 0.9 },
-        { agent: 'pi', model: 'other-provider/other', disabled: false, available: false, unavailable: 'model excluded by agents.pi.models', quotaSkip: 0.9 },
+        { agent: 'claude', model: 'sonnet', effort: 'high', mode: 'auto', disabled: true, available: true, strained: '5h quota 92% used', quotaSkip: 0.8 },
+        { agent: 'codex', model: 'gpt-6.1-sol', mode: 'auto', disabled: false, available: false, unavailable: 'unavailable here', quotaSkip: 0.9 },
+        { agent: 'pi', model: 'other-provider/other', mode: 'auto', disabled: false, available: false, unavailable: 'model excluded by agents.pi.models', quotaSkip: 0.9 },
         { agent: 'dsh', model: null, disabled: false, available: true, quotaSkip: 0.9 },
       ],
     })

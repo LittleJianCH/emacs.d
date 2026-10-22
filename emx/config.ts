@@ -68,6 +68,18 @@ export function merge(base: any, override: any): any {
   }
   return result
 }
+/** Keep one candidate form so effective config can also be pushed to hosts. */
+function mergeConfiguration(base: any, override: any): any {
+  const result = merge(base, override)
+  if (object(override?.profiles)) for (const [name, profile] of Object.entries(override.profiles)) {
+    if (object(profile) && Object.hasOwn(profile, 'candidates')) {
+      for (const key of ['agent', 'model', 'effort', 'mode']) delete result.profiles[name][key]
+    } else if (object(profile) && Object.hasOwn(profile, 'agent')) {
+      delete result.profiles[name].candidates
+    }
+  }
+  return result
+}
 export function validate(value: unknown): Config {
   const fail = (path: string, type: string): never => { throw new Error(`config.${path}: expected ${type}`) }
   const obj = (v: any, p: string) => { if (!object(v)) fail(p, 'object'); return v as Record<string, any> }
@@ -163,6 +175,7 @@ export function validate(value: unknown): Config {
 export class Configuration {
   value: Config
   errors: string[] = []
+  overriddenProfiles: string[] = []
   readonly defaults: string
   readonly override: string
   #base?: Config
@@ -200,9 +213,10 @@ export class Configuration {
           }
         }
       }
-      const next = validate(merge(base, override))
+      const next = validate(mergeConfiguration(base, override))
       changed = JSON.stringify(next) !== JSON.stringify(this.value)
       this.value = next
+      this.overriddenProfiles = Object.keys(override.profiles ?? {})
       this.errors = []
     } catch (error) { this.errors = [String(error)] }
     return { config: this.value, errors: this.errors, changed }
@@ -236,7 +250,11 @@ export class Configuration {
       }
     }
     edit(overlay, 0)
-    validate(merge(JSON.parse(readFileSync(this.defaults, 'utf8')), overlay))
+    // Do not leave dormant legacy fields in an edited candidate override.
+    if (path[0] === 'profiles' && path[2] === 'candidates' && value !== null) {
+      for (const key of ['agent', 'model', 'effort', 'mode']) delete overlay.profiles[path[1]][key]
+    }
+    validate(mergeConfiguration(JSON.parse(readFileSync(this.defaults, 'utf8')), overlay))
     mkdirSync(dirname(this.override), { recursive: true, mode: 0o700 })
     const temp = this.override + '.' + randomUUID() + '.tmp'
     try {
@@ -248,7 +266,7 @@ export class Configuration {
   /** A client daemon older than this host lacks newer keys; take them from
    * this host's defaults, as a reload after the client's own upgrade would. */
   #complete(value: unknown): Config {
-    return validate(merge(JSON.parse(readFileSync(this.defaults, 'utf8')), value))
+    return validate(mergeConfiguration(JSON.parse(readFileSync(this.defaults, 'utf8')), value))
   }
   push(value: unknown): ReturnType<Configuration['reload']> {
     if (!this.baseFile) throw new Error('Only host daemons accept config/push')

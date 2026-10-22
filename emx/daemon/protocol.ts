@@ -275,11 +275,13 @@ export interface CollabProfiles {
     cost: string
     description: string
     disabled: boolean
+    overridden: boolean
     candidates: {
       agent: string
       /** Null when the backend's default model is requested. */
       model: string | null
       effort?: string
+      mode?: string
       disabled: boolean
       /** Runtime availability, independent of the disabled flag. */
       available: boolean
@@ -305,6 +307,7 @@ export interface Requests {
   'config/set': [{ path: string[], value: unknown }, { config: import('../config.ts').Config }]
   'config/reload': [{}, { config: import('../config.ts').Config, errors: string[] }]
   'sessions/history': [{ agent: string, root: string }, { items: import('../backends/history.ts').HistoryItem[] }]
+  'agents/models': [{ agent: string }, { models: { id: string, label?: string }[] }]
   /** Private editor hub methods; MCP peers cannot call these directly. */
   'collab/list': [{}, { sessions: object[] }]
   'collab/profiles': [{}, CollabProfiles]

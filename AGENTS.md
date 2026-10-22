@@ -159,7 +159,11 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-profiles.el` — `C-c a p` opens a standalone local daemon profile page.
   It reads `collab/profiles` and writes the user overlay through `config/set`:
   whole-profile and candidate switches, global and per-agent quota thresholds,
-  and a shortcut allowing an agent to exhaust its quota. Successful writes
+  and a shortcut allowing an agent to exhaust its quota. Candidate editing,
+  insertion, deletion and reordering write the full candidates array, preserving
+  mode and effort; restoring defaults deletes the profile overlay. Model completion
+  uses `agents/models` with configured models as fallback and accepts free text.
+  Successful writes
   refresh the page; `g` refreshes manually and `q` quits.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
