@@ -169,7 +169,7 @@ export class Configuration {
     this.override = hostOverride ?? join(stateDir(varDir), 'config.json')
     if (this.host) {
       this.baseFile = join(stateDir(varDir), 'client-config.json')
-      try { this.#base = validate(JSON.parse(readFileSync(this.baseFile, 'utf8'))) }
+      try { this.#base = this.#complete(JSON.parse(readFileSync(this.baseFile, 'utf8'))) }
       catch { /* First connection supplies the effective local config. */ }
     }
     this.value = validate(JSON.parse(readFileSync(defaults, 'utf8')))
@@ -200,9 +200,14 @@ export class Configuration {
     } catch (error) { this.errors = [String(error)] }
     return { config: this.value, errors: this.errors, changed }
   }
+  /** A client daemon older than this host lacks newer keys; take them from
+   * this host's defaults, as a reload after the client's own upgrade would. */
+  #complete(value: unknown): Config {
+    return validate(merge(JSON.parse(readFileSync(this.defaults, 'utf8')), value))
+  }
   push(value: unknown): ReturnType<Configuration['reload']> {
     if (!this.baseFile) throw new Error('Only host daemons accept config/push')
-    const base = validate(structuredClone(value))
+    const base = this.#complete(value)
     mkdirSync(dirname(this.baseFile), { recursive: true, mode: 0o700 })
     writeFileSync(this.baseFile + '.tmp', JSON.stringify(base), { mode: 0o600 })
     renameSync(this.baseFile + '.tmp', this.baseFile)

@@ -241,6 +241,27 @@ test('host overrides are limited to executables and bad pushes retain the last g
   } finally { c.close(); fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('host fills keys an older client config lacks from its own defaults', () => {
+  const dir = fs.mkdtempSync('/tmp/emx-host-skew-')
+  const override = join(dir, 'host.json')
+  const c = new Configuration(dir, undefined, override)
+  try {
+    const older: any = config(); older.collab.maxActive = 7
+    delete older.collab.prompts.delegation
+    const result = c.push(older)
+    assert.deepEqual(result.errors, [])
+    assert.equal(c.value.collab.maxActive, 7)
+    assert.equal(c.value.collab.prompts.delegation, config().collab.prompts.delegation)
+    // The persisted base predates this host too after an upgrade.
+    fs.writeFileSync(c.baseFile!, JSON.stringify(older))
+    const restarted = new Configuration(dir, undefined, override)
+    try {
+      assert.equal(restarted.value.collab.maxActive, 7)
+      assert.equal(restarted.value.collab.prompts.delegation, config().collab.prompts.delegation)
+    } finally { restarted.close() }
+  } finally { c.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('delayed remote quota delivery preserves the sampling time and forecast history', () => {
   const dir = fs.mkdtempSync('/tmp/emx-quota-outbox-')
   const outbox = new Outbox(join(dir, 'outbox.json'))
