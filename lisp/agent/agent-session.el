@@ -1727,8 +1727,62 @@ Send queued messages when idle."
   "Display name of the current model of SESSION."
   (let ((info (agent-session-model-info session)))
     (or (plist-get info :name)
-        (plist-get (agent-session-info session) :model)
+        (when-let* ((model (plist-get (agent-session-info session) :model)))
+          (agent-session-model-short-name model))
         "默认模型")))
+
+(defcustom agent-session-model-abbrevs '(("DeepSeek" . "DS"))
+  "Words abbreviated in short model names, as (WORD . ABBREV).
+WORD matches whole words, ignoring case."
+  :type '(alist :key-type string :value-type string))
+
+(defun agent-session-model-short-name (name &optional agent-title)
+  "Model NAME or id shortened for narrow places such as the session list.
+Drops a provider prefix (opencode-go/), a trailing note in parentheses
+and a date, spells an id like claude-opus-5-5 as Claude Opus 5.5, puts
+spaces for dashes, drops a leading AGENT-TITLE and applies
+`agent-session-model-abbrevs'."
+  (let ((case-fold-search nil)
+        (name (string-trim
+               (replace-regexp-in-string
+                "-20[0-9]\\{6\\}\\'" ""
+                (replace-regexp-in-string
+                 "[ \t]*([^)]*)\\'" ""
+                 (replace-regexp-in-string "\\`.*/" "" name))))))
+    ;; An id: words joined by -, with version digits as separate words.
+    (when (string-match-p "\\`[a-z0-9.-]+\\'" name)
+      (setq name (upcase-initials
+                  (replace-regexp-in-string
+                   "\\([0-9]\\)-\\([0-9]\\)" "\\1.\\2" name nil nil))))
+    ;; Words apart as in most names: GPT-6.1-Sol reads GPT 6.1 Sol.
+    (setq name (replace-regexp-in-string "-" " " name nil t))
+    (when-let* ((agent-title)
+                (prefix (concat agent-title " "))
+                ((string-prefix-p prefix name t))
+                ((> (length name) (length prefix))))
+      (setq name (substring name (length prefix))))
+    (pcase-dolist (`(,word . ,abbrev) agent-session-model-abbrevs)
+      (setq name (let ((case-fold-search t))
+                   (replace-regexp-in-string
+                    (concat "\\b" (regexp-quote word) "\\b") abbrev name t t))))
+    name))
+
+(defun agent-session-short-model-label (session)
+  "Short name of the model SESSION runs, else the agent's title.
+A model chosen in the session wins over the one the agent reports, as
+in the mode line; the alias \"default\" says nothing and is skipped."
+  (let* ((models (agent-session-backend-models (agent-session-backend session) session))
+         (find (lambda (id)
+                 (and id (not (equal id "default"))
+                      (seq-find (lambda (m) (equal (plist-get m :id) id)) models))))
+         (chosen (agent-session-setting session :model))
+         (actual (plist-get (agent-session-info session) :model))
+         (name (or (plist-get (or (funcall find chosen) (funcall find actual)) :name)
+                   actual
+                   (unless (equal chosen "default") chosen))))
+    (if name
+        (agent-session-model-short-name name (agent-session-title session))
+      (agent-session-title session))))
 
 (defun agent-session-background-tasks (session)
   "Running background tasks of SESSION, as a list of plists.

@@ -337,6 +337,43 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
      (agent-session-set-info session :backgroundTasks (vector))
      (should-not (string-match-p "后台" (agent-session-test--mode-line))))))
 
+(ert-deftest agent-session-test-model-short-name ()
+  "Model names and ids shrink to a short name for the session list."
+  (pcase-dolist (`(,name ,title ,short)
+                 '(("Opus 5.5" "Claude" "Opus 5.5")
+                   ("GPT-6.1-Sol" "Codex" "GPT 6.1 Sol")
+                   ("MiMo-V2.6-Pro" "Pi" "MiMo V2.6 Pro")
+                   ("DeepSeek V4 Pro (New)" "Pi" "DS V4 Pro")
+                   ("opencode-go/deepseek-v4.1-flash" "Pi" "DS V4.1 Flash")
+                   ("opencode-go/qwen3.8-max" "Pi" "Qwen3.8 Max")
+                   ("claude-opus-5-5" "Claude" "Opus 5.5")
+                   ("claude-haiku-4-5-20251001" "Claude" "Haiku 4.5")
+                   ;; Another agent's Claude keeps its vendor.
+                   ("Claude Haiku 5.5" "Pi" "Claude Haiku 5.5")
+                   ("Claude" "Claude" "Claude")))
+    (should (equal (agent-session-model-short-name name title) short))))
+
+(ert-deftest agent-session-test-list-shows-model ()
+  "The session list names the model a session runs, not just its agent."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (buffer (current-buffer))
+         (line (lambda ()
+                 (with-temp-buffer
+                   (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 100)))
+                     (agent-session-list--insert-live buffer "  "))
+                   (buffer-string)))))
+     ;; Nothing known about the model yet: the agent's title.
+     (should (string-match-p "空闲  Echo · " (funcall line)))
+     (agent-session-set-info session :model "opencode-go/deepseek-v4.1-flash")
+     (should (string-match-p "空闲  DS V4.1 Flash · " (funcall line)))
+     ;; A chosen model wins, and the tooltip names agent and model in full.
+     (agent-session-configure session :model "big")
+     (let ((text (funcall line)))
+       (should (string-match-p "空闲  Big · " text))
+       (should (equal (get-text-property (string-match "Big" text) 'help-echo text)
+                      "Echo · Big"))))))
+
 (ert-deftest agent-session-test-approval ()
   "Pending requests show only in the footer.
 The transcript only marks waiting and the outcome on the related tool."

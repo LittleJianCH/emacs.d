@@ -4,7 +4,7 @@
 
 ;; A session list on the left (modeled on T3 Code's thread sidebar):
 ;;   Active   all open sessions: status (working / awaiting approval / done /
-;;            idle), agent, title
+;;            idle), model, title
 ;;   History  past sessions of each agent (Claude and Codex) in the current
 ;;            project; they can be resumed directly
 ;;
@@ -274,8 +274,12 @@ HEAD is cut first, so the handle stays readable."
                 (concat "  " (propertize
                               (agent-session--background-tasks-label tasks)
                               'agent-session-list-own-help t)))
-              (propertize (format "  %s · %s" (agent-session-title session) project)
-                          'face 'agent-session-dim))
+              "  "
+              (propertize (agent-session-short-model-label session)
+                          'face 'agent-session-dim 'agent-session-list-own-help t
+                          'help-echo (format "%s · %s" (agent-session-title session)
+                                             (agent-session--model-label session)))
+              (propertize (format " · %s" project) 'face 'agent-session-dim))
       (if-let* ((handle (agent-session-handle session)))
           (propertize (concat "  @" handle) 'face 'agent-session-dim)
         ""))
