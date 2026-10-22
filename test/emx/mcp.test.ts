@@ -75,6 +75,8 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
   assert.ok(summary.startsWith('- Subagent profiles here, cheapest first'))
   assert.ok(init.instructions.endsWith('\n' + summary))
   assert.match(init.instructions, /run_in_background[^\n]*a multi-step job around runs[^\n]*session_start/)
+  assert.match(init.instructions, /investigation needing more than 3 reads[^]*even when it is the user's\s+whole question/)
+  assert.match(init.instructions, /spawn an Agent, Explore[^]*mean session_start here/)
   assert.match(summary, /\n  - coder-flash \(minimal\): [^\n]*benchmarks/)
   assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(tools).tools })
   assert.equal(daemon.client?.socket.destroyed, false, 'MCP hello does not replace editor')
@@ -115,7 +117,7 @@ test('initialize uses enabled profiles in the bound session root environment bef
     return { PATH: '', EMX_CODEX_EXECUTABLE: process.execPath }
   } })
   const init = await request('initialize')
-  const summary = '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): a fact or definition found in a few reads\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it'
+  const summary = '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): code archaeology: where something is used, how a path works\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it'
   assert.ok(init.instructions.endsWith('\n' + summary))
   assert.doesNotMatch(init.instructions, /DeepSeek|\bPi\b|\bClaude\b/)
   assert.ok(roots.length > 0)

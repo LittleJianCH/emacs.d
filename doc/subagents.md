@@ -201,8 +201,17 @@ modes, and lists only enabled, executable fork backends by title.
 profile's `use` and description. It adds the
 details: after brief orientation, delegate a bounded independent task before
 doing it yourself, continue a different part, and reconsider as new work appears.
-Trivial tasks, the immediate blocker on the next step, tightly coupled work and
-work needing user dialogue stay local. Split by outcome and file ownership,
+Trivial tasks (a few reads or edits), a short immediate blocker on the next
+step, tightly coupled work and work needing user dialogue stay local.
+
+An investigation needing more than 3 reads is the second trigger, even when it
+is the user's whole question. Framing delegation only as parallelism left such
+questions local: a session asked where a field is used read a dozen files and
+compared them with Go's sources itself, though it saw the profile summary and
+its project's own rule to hand archaeology over 3 reads to a subagent. That rule
+named Claude's built-in Agent and Explore, which emx disables, so the shared
+instructions say such project rules mean `session_start`. The parent ends its
+turn when it needs the answer; the child's reply starts the next one. Split by outcome and file ownership,
 not automatically into code, tests and docs; the parent must not edit files
 assigned to a child either.
 
