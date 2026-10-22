@@ -42,7 +42,7 @@ function help(name?: string): string {
 // tool's own description.
 const MCP_HEAD = `Your session is hosted in the user's Emacs: this conversation is an Emacs buffer, and these tools operate that Emacs.
 - When the user means the current page, window, input box or editor, that is Emacs unless they name another app: call context first.
-- Long-running commands, when your Bash tool has run_in_background: use it rather than a detached shell waiter; this session's process stays alive while they run, and their completion starts a new turn for you to report back.  It is for one long command; a multi-step job around runs (implement, build, measure, compare) is independent work for session_start.`
+- Long-running commands, when your Bash tool has run_in_background: use it rather than a detached shell waiter; this session's process stays alive while they run, and their completion starts a new turn for you to report back.`
 
 const MCP_BODY = `
 - Formatted content (option comparisons, plans, review results, diagrams, progress):
@@ -51,17 +51,6 @@ const MCP_BODY = `
   document or diff.
 - Atomic review (原子审查): follow the emacs-atomic-review skill.
 - @handles name other agent sessions in this Emacs: sessions, session_read, session_ask.
-- Delegate with session_start (discover it if it is not listed); the available
-  profiles and when to start each are listed below.  Two triggers:
-  - An investigation needing more than 3 reads (where something is used, how a
-    path works, comparing with another codebase), even when it is the user's
-    whole question: a cheaper profile reads and returns a focused summary with
-    file:line refs.  End your turn if you need its answer first.
-  - Nontrivial work with independent parts: delegate a bounded part early,
-    then continue another part yourself.
-  Project instructions that say to spawn an Agent, Explore or other built-in
-  subagent mean session_start here.
-  If you are a subagent assigned one task, do it yourself without starting sessions.
 - After editing Lisp or emx/ code in this Emacs configuration, call reload.
 - Other editor operations: eval.
 - The user reads Chinese: write page content and notifications in Chinese.`

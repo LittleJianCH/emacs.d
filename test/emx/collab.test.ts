@@ -65,14 +65,26 @@ test('delegation guidance names no profiles and profile descriptions name no oth
     }
   }
 })
-test('guidance sends multi-read investigations to a profile even as the whole question', () => {
-  const g = defaults().collab.startGuidance
-  assert.match(g, /investigation needing more than 3 reads[^\n]*even when it is the user's whole question/)
-  assert.doesNotMatch(g, /Keep trivial tasks, the immediate blocker/)
+test('one visible delegation rule: shaped by question, with its exceptions; tool text only says how', () => {
+  const c = defaults(), d = c.collab.prompts.delegation
+  assert.match(d, /where something is used, how a path works or\s+what another codebase does there, delegate it before your second lookup/)
+  assert.match(d, /even as the user's whole question or a follow-up/)
+  assert.match(d, /Stay local only for[^]*reading a diff to plan an atomic review/)
+  assert.match(d, /If session_start\s+started you, do your one task yourself and start none/)
+  assert.match(d, /"after N reads" mean session_start\s+here: at N, stop and start one/)
+  assert.doesNotMatch(d, /\b3\b|more than|cheaper|explorer|full guidance/)
+  for (const text of [c.collab.startGuidance, c.collab.tools.find((t) => t.name === 'session_start')!.description]) {
+    assert.doesNotMatch(text, /Delegate independent work|immediate blocker|more than 3 reads|Keep trivial/)
+  }
+  const uses = Object.values(c.profiles).map((p) => p.use).join('\n')
+  for (const shape of ['where something is used', 'how a path works', 'what another codebase does there', 'builds, benchmarks and test series']) {
+    assert.ok(uses.includes(shape), shape)
+  }
+  assert.doesNotMatch(c.profiles.explorer.description!, /not for long reading|price rises/)
 })
 test('every default profile says when to start it in a few words', () => {
   for (const [name, p] of Object.entries(defaults().profiles)) {
-    assert.ok(p.use && p.use.split(/\s+/).length <= 12, `${name} use`)
+    assert.ok(p.use && p.use.split(/\s+/).length <= 14, `${name} use`)
   }
 })
 test('descriptions and summary include only enabled and available profiles and fork agents', () => {
@@ -85,7 +97,7 @@ test('descriptions and summary include only enabled and available profiles and f
   const start = description(), summary = startSummary(c, undefined, env)
   for (const text of [start, summary]) assert.doesNotMatch(text, /\bPi\b|\{forkAgents\}/)
   assert.match(start, /\n  Claude, Codex and DeepSeek sessions can fork\.\n/)
-  assert.equal(summary, '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): code archaeology: where something is used, how a path works\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it')
+  assert.equal(summary, defaults().collab.prompts.delegation + '\n- Subagent profiles, cheapest first, and when to start each:\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): bulk extraction and long reading: many or large files, logs, docs\n  - explorer (low): where something is used, how a path works, what another codebase does there\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery, even uncommitted ones\n  - expert (premium): when you are stuck or the user asks for it')
   assert.match(description(['codex']), /\n  Codex sessions can fork\.\n/)
   assert.doesNotMatch(description(['pi']), /sessions can fork|\{forkAgents\}/)
   c.agents.claude.executable = c.agents.codex.executable = '/does/not/exist'
@@ -107,10 +119,10 @@ test('profiles, rendered lines and summary share stable cost order including unk
   const lines = definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description.split(c.collab.prompts.profileHeader)[1]
   assert.doesNotMatch(lines, /Claude|Codex|Pi|haiku|gpt-|opencode-go\//)
   assert.equal(profileCost('unpriced', c.profiles.unpriced), 'unknown')
-  assert.equal(startSummary(c, undefined, env), '- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): simple questions over long reading: many files, logs, docs\n  - explorer (low): code archaeology: where something is used, how a path works\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery\n  - expert (premium): when you are stuck or the user asks for it\n  - unpriced (unknown)')
+  assert.equal(startSummary(c, undefined, env), defaults().collab.prompts.delegation + '\n- Subagent profiles, cheapest first, and when to start each:\n  - coder-flash (minimal): implementation to a clear spec; builds, benchmarks and test series\n  - explorer-flash (minimal): bulk extraction and long reading: many or large files, logs, docs\n  - explorer (low): where something is used, how a path works, what another codebase does there\n  - coder (medium): implementation or debugging that needs judgment\n  - researcher (high): open questions written up as a report or design note\n  - reviewer (high): review of substantive changes before delivery, even uncommitted ones\n  - expert (premium): when you are stuck or the user asks for it\n  - unpriced (unknown)')
   c.profiles.explorer.cost = 'premium'
   assert.deepEqual(renderedNames(), ['coder-flash', 'explorer-flash', 'coder', 'researcher', 'reviewer', 'explorer', 'expert', 'unpriced'])
-  assert.match(startSummary(c, undefined, env), /\n  - explorer \(premium\): code archaeology[^\n]*\n  - expert \(premium\)/)
+  assert.match(startSummary(c, undefined, env), /\n  - explorer \(premium\): where something[^\n]*\n  - expert \(premium\)/)
   assert.match(definitions(c, undefined, env).find((t) => t.name === 'session_start')!.description, /- explorer: premium cost\./)
 })
 test('every daemon collaboration tool works; origin and hidden notes survive separately; child closes after mailbox', async () => {

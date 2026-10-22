@@ -71,8 +71,8 @@
     },
     "explorer-flash": {
       "cost": "minimal",
-      "use": "simple questions over long reading: many files, logs, docs",
-      "description": "Investigations where the question is simple but the reading is long: many or large files, logs, docs.  Doesn't edit.",
+      "use": "bulk extraction and long reading: many or large files, logs, docs",
+      "description": "Bulk extraction and long reading where the question is simple: many or large files, logs, docs.  Doesn't edit.",
       "candidates": [
         {
           "agent": "pi",
@@ -90,8 +90,8 @@
     },
     "explorer": {
       "cost": "low",
-      "use": "code archaeology: where something is used, how a path works",
-      "description": "Code archaeology and bounded investigations: traces where something is used or how a path works across files and returns file:line refs.  Doesn't edit.  Its price rises fivefold once its context passes 100K tokens, so not for long reading.",
+      "use": "where something is used, how a path works, what another codebase does there",
+      "description": "Code archaeology: traces where something is used, how a path works or what another codebase does there, and returns file:line refs with what the code does.  Doesn't edit.  Bulk extraction over many or large files, logs or docs belongs to a profile meant for long reading.",
       "candidates": [
         {
           "agent": "claude",
@@ -165,7 +165,7 @@
     },
     "reviewer": {
       "cost": "high",
-      "use": "review of substantive changes before delivery",
+      "use": "review of substantive changes before delivery, even uncommitted ones",
       "description": "Reviews substantive changes before delivery; reproduces what it finds and reports findings without editing files.",
       "preferOtherAgent": true,
       "candidates": [
@@ -216,7 +216,7 @@
     }
   },
   "collab": {
-    "startGuidance": "When to start a session: after brief orientation on a nontrivial task, identify work that can proceed independently.  Delegate it before doing that work yourself, then continue a different part.  Reconsider when new independent work appears, not just at the start of the user's request.\nAn investigation needing more than 3 reads goes to a profile meant for it even when it is the user's whole question: it returns a focused summary with file:line refs, and your context stays small.  End your turn if you need the answer first.\nEach profile below says what it is for; choose the least costly one likely to complete the task reliably.  Reasoning that depends heavily on your conversation: fork.\nSubstantive changes: get a separate review before final delivery, even if no commit was requested: start a profile meant for review; emx prefers another vendor for it.  Ask for findings, not edits.\nKeep trivial tasks (a few reads or edits), a short immediate blocker on your next step, tightly coupled work and work needing user dialogue local.  Split by independent outcome and file ownership; code, tests and docs are not automatically independent.  Never have two sessions edit the same files, including yourself.\nGive the goal, relevant context, file scope, constraints, verification and expected report.  A concise brief is enough: don't finish the investigation or implementation merely to prepare it.  For long runs, pass known commands and inputs rather than forking just to preserve them.  For nontrivial work whose context is costly to summarize, fork instead of doing it all locally.\nTell the user the profile and why.  While the child works, do not duplicate its task.  Integrate its report and verify the claims that matter before relying on them.  If you are a child assigned one task, complete it yourself; do not start sessions, including for review.",
+    "startGuidance": "How to brief a session: give the goal, relevant context, file scope, constraints, verification and expected report.  A concise brief is enough: don't finish the work merely to prepare it.  Split by independent outcome and file ownership; code, tests and docs are not automatically independent.  Never have two sessions edit the same files, including yourself.\nFork only for reasoning that depends heavily on your conversation and is costly to summarize: never to read, and not to keep a long run's known commands and inputs, which you can pass instead.\nFor a review, ask for findings, not edits; emx prefers another vendor for it.\nWhile the child works, do not duplicate its task.  Integrate its report and verify the claims that matter before relying on them.",
     "maxActive": 4,
     "handoffLimit": 60000,
     "closeFinished": true,
@@ -313,7 +313,7 @@
       },
       {
         "name": "session_start",
-        "description": "Start a subagent to do one bounded task and report back.\nDelegate independent work early on nontrivial tasks, before doing it\nyourself, and continue another part.  Keep trivial or tightly coupled\nwork local.  A child assigned one task cannot start further sessions.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n{forkAgents}\nChoose the least costly profile likely to complete the task reliably.\nemx selects an available candidate for the role using current quotas.\nFor reasoning on your own conversation, use fork.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
+        "description": "Start a subagent to do one bounded task and report back.\nA child assigned one task cannot start further sessions.\nChoose how it gets context:\n- fresh: a profile gets your prompt alone; make it self-contained.\n- handoff: a profile gets a text copy of recent conversation, without\n  prompt cache and with tool output cut.  Include essential facts in the task.\n- fork: your own agent and model inherit the conversation through the\n  prompt cache; output costs what yours does.  Use for reasoning that\n  depends heavily on your context.  Omit profile.\n{forkAgents}\nChoose the least costly profile likely to complete the task reliably.\nemx selects an available candidate for the role using current quotas.\nFor reasoning on your own conversation, use fork.  It returns the session's @handle at once, and\nits final reply reaches you as a message when it finishes: don't poll it;\nkeep working, or end your turn if you need the reply first.  A session you\nstart does one task, takes no follow-ups and closes once its reply reaches\nyou; for more work start another.  Stop one with session_stop.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -379,7 +379,8 @@
       "handlePrompt": "Name this coding conversation with a short English handle: one or two lowercase words joined by '-', at most 16 characters, about its topic. Reply with the handle only.\n\nFirst message:\n",
       "task": "Your task:\n",
       "forkAgents": "  %s sessions can fork.",
-      "startSummary": "- Subagent profiles here, cheapest first, and when to start each (session_start has the full guidance):\n%s",
+      "delegation": "- Subagents: start them with session_start (discover it if it is not listed),\n  and tell the user in one sentence which profile and why.  If session_start\n  started you, do your one task yourself and start none.\n  - Reading: when a question is where something is used, how a path works or\n    what another codebase does there, delegate it before your second lookup,\n    even as the user's whole question or a follow-up with nothing to do in\n    parallel.  At most one grep to pin the symbol and revision; don't read the\n    hits, don't fork.  Brief a profile meant for reading with the symbol,\n    revision, repo and \"report file:line and what the code does\"; the turn's\n    related questions (where-used and another codebase) go in one brief.  End\n    your turn if you need the answer, and write the user's answer once it\n    reports.  Stay local only for a definition in a file you already have open,\n    a fact one grep settles, edit-compile-fix interleaved with your own edits,\n    reading a diff to plan an atomic review, and dialogue with the user.\n    Project rules naming Agent, Explore or \"after N reads\" mean session_start\n    here: at N, stop and start one.\n  - Runs: builds, benchmarks and test series that won't interleave with your\n    own edits.\n  - Parts: other independent parts of nontrivial work; delegate a bounded part\n    early, then continue another part, never the reading half of it.",
+      "startSummary": "- Subagent profiles, cheapest first, and when to start each:\n%s",
       "candidateSkipped": "%s: %s",
       "candidatesSkipped": "  Skipped candidates: %s.",
       "candidateUnavailable": "unavailable here",

@@ -51,7 +51,7 @@ function profileLines(available: [string, Profile][]): string {
 }
 export function startSummary(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): string {
   const lines = profiles(c, enabled, env).map(([name, p]) => `  - ${name} (${profileCost(name, p)})${p.use ? ': ' + p.use : ''}`)
-  return lines.length ? format(c.collab.prompts.startSummary, lines.join('\n')) : ''
+  return lines.length ? c.collab.prompts.delegation + '\n' + format(c.collab.prompts.startSummary, lines.join('\n')) : ''
 }
 export function definitions(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): EditorTools['tools'] {
   const titles = forkAgents.filter((a) => availableAgent(c, a, enabled, env)).map((a) => c.agents[a].title)

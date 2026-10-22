@@ -184,51 +184,61 @@ The caller names a child after its task (`handle`, such as `cgu-measure`); it
 knows the task best and needs no model call to do it. Without one the child is
 named after its role. Use a fork when the task needs the caller's conversation
 and prompt cache; emx chooses a candidate when a role is requested.
-The shared MCP instructions in `emx/cli/main.ts` name `session_start` as the entry
-point for delegating independent work early. `mcp/hello` appends a summary
-of available profiles in cost order, each with its `use`: a few words on when
-to start it. Claude Code defers MCP tool schemas behind ToolSearch, so the
-`session_start` description, with the guidance and profile descriptions, stays
-unseen until an agent loads it; sessions that never did delegated nothing,
-while the summary named only roles and costs. The triggers therefore live in
-the always visible instructions. The bullet on `run_in_background` limits it to
-one long command: once background runs could wake the session, an
-agent implemented a change and ran a series of benchmarks itself (hundreds of
-Bash calls, no child), work the guidance hands to a cheap coder. The tool
-description opens with the delegation trigger before explaining context
-modes, and lists only enabled, executable fork backends by title.
-`collab.startGuidance` names no profiles; per-profile use belongs in each
-profile's `use` and description. It adds the
-details: after brief orientation, delegate a bounded independent task before
-doing it yourself, continue a different part, and reconsider as new work appears.
-Trivial tasks (a few reads or edits), a short immediate blocker on the next
-step, tightly coupled work and work needing user dialogue stay local.
+When to delegate lives in one place: `collab.prompts.delegation`, which
+`mcp/hello` puts in front of the generated profile list, one line per available
+role with its `use`. Both are always visible, so an agent can decide there;
+neither appears when no profile is available. Claude Code defers MCP tool
+schemas behind ToolSearch, so the `session_start` description and
+`collab.startGuidance` stay unseen until an agent loads the tool; they only say
+how to call it and how to brief, and never restate when. Codex repeats the
+instructions before every tool, so the rule stays short.
 
-An investigation needing more than 3 reads is the second trigger, even when it
-is the user's whole question. Framing delegation only as parallelism left such
-questions local: a session asked where a field is used read a dozen files and
-compared them with Go's sources itself, though it saw the profile summary and
-its project's own rule to hand archaeology over 3 reads to a subagent. That rule
-named Claude's built-in Agent and Explore, which emx disables, so the shared
-instructions say such project rules mean `session_start`. The parent ends its
-turn when it needs the answer; the child's reply starts the next one. Split by outcome and file ownership,
+The rule is shaped by the question, not by a count or by parallelism. Where
+something is used, how a path works and what another codebase does there are
+delegated before the second lookup, even as the user's whole question or a
+follow-up with nothing else to do: at most one grep pins the symbol and
+revision, the brief gives symbol, revision, repo and asks for file:line and what
+the code does, and related questions of the turn share one brief. The parent
+tells the user the profile and why in one sentence, ends its turn when it needs
+the answer, and writes the user's answer from the report. Its exceptions sit in
+the same item: a definition in a file already open, a fact one grep settles,
+edit-compile-fix interleaved with the agent's own edits, reading a diff to plan
+an atomic review, and dialogue with the user. Children start nothing. Project
+rules naming Claude's Agent or Explore, which emx disables, or "after N reads"
+mean `session_start` here. Builds, benchmarks and test series that won't
+interleave with the agent's edits are their own item, and independent parts of
+nontrivial work a third, without keeping the reading half. Every shape the rule
+names matches some profile's `use`; the rule names no profile.
+
+Earlier versions failed in ways that motivated this. With only "nontrivial work
+with independent parts" and "keep the immediate blocker local", a session asked
+where a field is used grepped, read the call sites and compared Go's sources
+itself: the lookup was the next step and had no other half. That held after
+the profile list was made visible and with its project's own rule to hand over
+archaeology past 3 reads. A trigger of "more than 3 reads" did not help either:
+the count is unknown before reading, underestimated, easy to game with `git
+grep` / `git show`, and blurred into the "few reads" exemption; 3 was one
+project's threshold besides. Separately, once background runs could wake the
+session, an agent implemented a change and ran a series of benchmarks itself in
+hundreds of Bash calls; a note inside the `run_in_background` bullet is skipped
+by an agent not thinking of background runs, hence the runs item.
+
+`collab.startGuidance` names no profiles; per-profile use belongs in each
+profile's `use` and description. Split by outcome and file ownership,
 not automatically into code, tests and docs; the parent must not edit files
 assigned to a child either.
 
 Give a concise brief with the goal, context, scope, constraints, verification
 and expected report. Do not complete the work merely to specify it. Choose a
 profile by its description; reasoning that depends heavily on the conversation
-goes to a fork. Long runs with known commands
-and inputs do not need a fork just to preserve context. For nontrivial work whose
-context is costly to summarize, fork instead of doing it all locally. Choose the
-least costly profile likely to finish reliably, tell the user why, avoid
+goes to a fork, never reading. Long runs with known commands
+and inputs do not need a fork just to preserve context. Choose the
+least costly profile likely to finish reliably, avoid
 duplicating the child's task, and verify the important claims in its report.
 
 Substantive changes get a separate review before final delivery, even when no
-commit was requested. Use a profile meant for review; emx prefers another
-vendor for it. Explicitly ask for findings, not edits. Children still do
-only their assigned task and cannot delegate, including for review; this
-exception is explicit in the shared instructions and tool description.
+commit was requested; the reviewer's `use` says so. emx prefers another
+vendor for it. Explicitly ask for findings, not edits.
 
 Earlier observations motivated these boundaries: "fork when it needs your
 context" led to an hour of builds and measurements on a fork despite known
@@ -236,7 +246,8 @@ commands being enough for a cheaper profile. Agents also decided several tasks
 at once, or did every piece themselves when writing a spec seemed expensive.
 
 These instructions aim to make delegation timely, not maximize child counts.
-Protocol tests check that the trigger and child exception are exposed; they do
+Protocol tests check that the rule, its exceptions and the child exception are
+exposed; they do
 not establish how often models follow them. Compare new sessions on a trivial
 edit, independent investigations and a substantive change, checking delegation
 timing, duplicate work, result quality, usage and elapsed time. Shared MCP
