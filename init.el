@@ -36,7 +36,7 @@
 
 ;;; Modules
 
-(defvar my/languages '(elisp rust go nix agda)
+(defvar my/languages '(elisp rust go nix agda c)
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.
 Most load on first visiting one of their files; see `my/lazy-modules'.")
 

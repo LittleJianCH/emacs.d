@@ -32,7 +32,7 @@ lisp/core/               base layer
   init-dev.el            project, magit, eglot, tree-sitter
   init-remote.el         remote editing (tramp-rpc)
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
-  init-lazy.el           on-demand modules: `my/lazy-modules' triggers (files, keys, commands)
+  init-lazy.el           on-demand modules: `my/lazy-modules' triggers (files, modes, keys, commands)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
   agent-emx.el          required daemon client, session views and editor tools
@@ -64,6 +64,7 @@ test/init-ui-test.el        ERT suite for the themes, status line and side panel
 test/init-term-test.el      ERT suite for the terminal module
 test/init-lazy-test.el      ERT suite for on-demand module loading
 test/lang-test.el           ERT suite for the language modules (toolchains mocked)
+test/lang-c-test.el         C/C++ modes, clangd environments and keys (mocked)
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
@@ -225,7 +226,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-test.el \
       -l test/init-reload-test.el -l test/init-base-test.el -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \
-      -l test/init-lazy-test.el -l test/lang-test.el \
+      -l test/init-lazy-test.el -l test/lang-test.el -l test/lang-c-test.el \
       -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
       -l test/agent-session-link-test.el -l test/agent-backend-test.el \
