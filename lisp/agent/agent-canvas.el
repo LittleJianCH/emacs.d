@@ -29,6 +29,7 @@
 (require 'color)
 (require 'ansi-color)
 (require 'svg)
+(require 'image)
 (require 'dom)
 (require 'button)
 (require 'bytecomp)
@@ -494,14 +495,31 @@ With several items, the bars are aligned."
             "\n")
     (agent-canvas--decorate start)))
 
+(defun agent-canvas--insert-image (image string)
+  "Insert IMAGE as a column of seamless slices using fallback STRING.
+Slices follow the normal text line height, so scrolling never has to
+move an entire tall image as one display line."
+  (let* ((size (image-size image t))
+         (line-height (max 1 (default-line-height)))
+         (rows (max 1 (floor (cdr size) line-height)))
+         ;; Centered slices share the baseline of section and callout prefixes.
+         (image (cons 'image (plist-put (copy-sequence (cdr image)) :ascent 'center))))
+    ;; Integer boundaries preserve every pixel; fractional slices round down.
+    ;; Keep the remainder in the last row to avoid a short slice with font padding.
+    (dotimes (row rows)
+      (let* ((y (* row line-height))
+             (height (if (= row (1- rows)) (- (cdr size) y) line-height)))
+        (insert-image image string nil (list 0 y (car size) height))
+        (insert (propertize "\n" 'line-height t))))))
+
 (defun agent-canvas--image (block)
   "Render an image BLOCK: {path, width}."
   (let ((start (point))
         (width (min (agent-canvas--avail) (or (plist-get block :width) most-positive-fixnum))))
-    (insert-image (create-image (agent-canvas--resolve (plist-get block :path)) nil nil
-                                :max-width width)
-                  "[图片]")
-    (insert "\n")
+    (agent-canvas--insert-image
+     (create-image (agent-canvas--resolve (plist-get block :path)) nil nil
+                   :max-width width)
+     "[图片]")
     (agent-canvas--decorate start)))
 
 ;;; Section folding
@@ -608,8 +626,8 @@ When SUBMIT is nil, only put it in the input area."
 
 (defun agent-canvas--insert-svg (svg)
   "Insert the SVG image, no wider than the available width."
-  (insert-image (svg-image svg :ascent 'center :max-width (agent-canvas--avail)) "[图]")
-  (insert "\n"))
+  (agent-canvas--insert-image
+   (svg-image svg :ascent 'center :max-width (agent-canvas--avail)) "[图]"))
 
 (defun agent-canvas--num (value)
   "Axis label text for VALUE."
