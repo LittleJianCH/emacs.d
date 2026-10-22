@@ -16,7 +16,7 @@ import { diff } from './dsh.ts'
 
 export const permissionModes = ['plan', 'ask', 'edits', 'auto', 'full']
 export const defaultModel = 'opencode-go/kimi-k3'
-const defaultFilter = { include: ['^opencode-go/'], exclude: ['contributor', 'free', 'preview'] }
+const defaultFilter = { include: ['^opencode-go/', '^magpie/'], exclude: ['contributor', 'free', 'preview'] }
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 interface Model {
   id: string, provider: string, name?: string, thinkingLevelMap?: Record<string, unknown>

@@ -95,6 +95,8 @@ createInterface({ input: process.stdin }).on('line', line => {
  : {data:[{model:'first',displayName:'First'},{model:'hidden',hidden:true}],nextCursor:'page2'};
  if(m.type === 'get_available_models') result = {models:[
  {provider:'opencode-go',id:'grok',name:'Grok'}, {provider:'opencode-go',id:'free'},
+ {provider:'magpie',id:'remote-magpie/antigravity/gemini-3.8-flash',name:'Gemini'},
+ {provider:'magpie',id:'remote-magpie/model-preview'},
  {provider:'other',id:'paid',name:'Paid'}]};
  process.stdout.write(JSON.stringify(m.type ? {type:'response',id:m.id,success:true,data:result}
  : {jsonrpc:'2.0',id:m.id,result})+'\\n');
@@ -111,7 +113,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   assert.deepEqual(await client.request('agents/models', { agent: 'codex' }),
     { models: [{ id: 'first', label: 'First' }, { id: 'second', label: 'Second' }] })
   assert.deepEqual(await client.request('agents/models', { agent: 'pi' }),
-    { models: [{ id: 'opencode-go/grok', label: 'Grok' }] })
+    { models: [{ id: 'opencode-go/grok', label: 'Grok' },
+      { id: 'magpie/remote-magpie/antigravity/gemini-3.8-flash', label: 'Gemini' }] })
   await client.request('config/set', { path: ['agents', 'pi', 'models'], value: { include: ['^other/'], exclude: [] } })
   assert.deepEqual(await client.request('agents/models', { agent: 'pi' }),
     { models: [{ id: 'other/paid', label: 'Paid' }] })

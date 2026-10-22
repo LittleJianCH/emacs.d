@@ -33,7 +33,8 @@
       "defaultModel": "opencode-go/kimi-k3",
       "models": {
         "include": [
-          "^opencode-go/"
+          "^opencode-go/",
+          "^magpie/"
         ],
         "exclude": [
           "contributor",

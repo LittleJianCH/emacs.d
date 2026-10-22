@@ -304,7 +304,12 @@ test('model filter configuration validates regexes and tool views include all Pi
     { models: { include: [1], exclude: [] } }, { models: { include: [], exclude: ['('] } }]) {
     assert.throws(() => validate(merge(defaults, { agents: { pi: patch } })), /config.agents.pi/)
   }
-  assert.equal(allowedModel('opencode-go/kimi-k3'), true)
+  for (const config of [undefined, defaults.agents.pi]) {
+    assert.equal(allowedModel('opencode-go/kimi-k3', config), true)
+    assert.equal(allowedModel('magpie/remote-magpie/antigravity/gemini-3.8-flash', config), true)
+    assert.equal(allowedModel('magpie/remote-magpie/model-preview', config), false)
+    assert.equal(allowedModel('other/chat', config), false)
+  }
   assert.equal(allowedModel('opencode-go/FREE'), false)
   assert.equal(allowedModel('other/chat'), false)
   assert.equal(toolView('/root', 'edit', { path: '/root/a', edits: [
