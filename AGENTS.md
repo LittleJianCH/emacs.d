@@ -167,8 +167,16 @@ var/                     runtime state (history, backups, pasted images...); git
   insertion, deletion and reordering write the full candidates array, preserving
   mode and effort; restoring defaults deletes the profile overlay. Model completion
   uses `agents/models` with configured models as fallback and accepts free text.
-  Successful writes
-  refresh the page; `g` refreshes manually and `q` quits.
+  The page uses pixel-aligned candidate and threshold tables with no buttons.
+  `n`/`p` move rows, `TAB`/`S-TAB` switch profile groups, `M-up`/`M-down`
+  (or `M-p`/`M-n`) reorder candidates, `SPC`/`x` toggle a candidate and `X`
+  toggles the profile. `RET`/`e` edit the row, `a` inserts after it, `D`
+  deletes and `R` restores defaults (both confirmed); threshold rows also
+  accept `z` to exhaust quota. `?` shows help, `g` refreshes and `q` quits.
+  Evil normal state adds `J`/`K` for reordering and `gr` for refresh.
+  Profile descriptions appear in the echo area; `*` marks overrides and
+  disabled groups are dimmed. Writes and refresh restore the logical row,
+  following moved candidates and clamping indices when a row disappears.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks
   (text, tables, SVG charts and diagrams, buttons that send prompts back to the session).
   An `elisp` block runs the agent's Lisp at point on every redraw (resize, theme change,

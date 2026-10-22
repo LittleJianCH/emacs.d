@@ -201,10 +201,32 @@ In visual state a is the text object prefix, so this rebinds it there."
 
   (evil-set-initial-state 'agent-profiles-mode 'normal)
   (evil-define-key* '(normal motion) agent-profiles-mode-map
-    (kbd "RET") #'push-button
-    (kbd "TAB") #'forward-button
-    (kbd "<backtab>") #'backward-button
-    "gr" #'revert-buffer
+    (kbd "RET") #'agent-profiles-edit
+    (kbd "TAB") #'agent-profiles-next-group
+    (kbd "S-TAB") #'agent-profiles-previous-group
+    (kbd "<backtab>") #'agent-profiles-previous-group
+    (kbd "SPC") #'agent-profiles-toggle
+    (kbd "M-<up>") #'agent-profiles-move-up
+    (kbd "M-<down>") #'agent-profiles-move-down
+    (kbd "M-p") #'agent-profiles-move-up
+    (kbd "M-n") #'agent-profiles-move-down
+    (kbd "C-n") #'agent-profiles-next-row
+    (kbd "C-p") #'agent-profiles-previous-row
+    "j" #'agent-profiles-next-row
+    "k" #'agent-profiles-previous-row
+    "n" #'agent-profiles-next-row
+    "p" #'agent-profiles-previous-row
+    "J" #'agent-profiles-move-down
+    "K" #'agent-profiles-move-up
+    "x" #'agent-profiles-toggle
+    "X" #'agent-profiles-toggle-profile
+    "e" #'agent-profiles-edit
+    "a" #'agent-profiles-add
+    "D" #'agent-profiles-delete
+    "R" #'agent-profiles-restore
+    "z" #'agent-profiles-exhaust
+    "?" #'agent-profiles-help
+    "gr" #'agent-profiles-refresh
     "q" #'quit-window)
 
   (evil-set-initial-state 'agent-review-mode 'normal)
