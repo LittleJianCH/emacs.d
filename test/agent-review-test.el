@@ -64,6 +64,67 @@
                                    (list :file "b.el" :added_lines [1 5]))
           (or last (agent-review-test--item "b 的后半" 2 (list :file "b.el" :added_lines [6 10])))))
 
+(ert-deftest agent-review-test-request-refs ()
+  "/atomic-review turns a range, a branch, a commit or nothing into base and head."
+  (agent-review-test--with-repo repo
+    (let ((sha (agent-review--resolve repo "feature")))
+      (should (equal (agent-review-request-refs repo "main..feature") '("main" . "feature")))
+      (should (equal (agent-review-request-refs repo "main...feature") '("main" . "feature")))
+      (should (equal (agent-review-request-refs repo "main..") '("main" . "HEAD")))
+      (should (equal (agent-review-request-refs repo "feature") '("main" . "feature")))
+      (should (equal (agent-review-request-refs repo sha) (cons (concat sha "^") sha)))
+      (should (equal (agent-review-request-refs repo "HEAD") '("HEAD^" . "HEAD")))
+      ;; Nothing: the current branch, or the commit at HEAD on the default branch.
+      (should (equal (agent-review-request-refs repo "") '("main" . "feature")))
+      (agent-review-test--git repo "checkout" "-q" "main")
+      (should (equal (agent-review-request-refs repo nil) '("HEAD^" . "HEAD")))
+      ;; origin's default branch wins, as the local branch when there is one.
+      (agent-review-test--git repo "update-ref" "refs/remotes/origin/trunk" "main")
+      (agent-review-test--git repo "symbolic-ref" "refs/remotes/origin/HEAD"
+                              "refs/remotes/origin/trunk")
+      (should (equal (agent-review-request-refs repo "feature") '("origin/trunk" . "feature")))
+      (agent-review-test--git repo "branch" "trunk" "main")
+      (should (equal (agent-review-request-refs repo "feature") '("trunk" . "feature"))))))
+
+(ert-deftest agent-review-test-request ()
+  "/atomic-review pins the snapshot in Emacs and sends the agent its id, which
+review_snapshot lists without comparing refs again."
+  (agent-review-test--with-repo repo
+    (let ((session (agent-session--make :root repo))
+          sent)
+      (cl-letf (((symbol-function 'agent-session--this) (lambda () session))
+                ((symbol-function 'agent-session-submit)
+                 (lambda (_session text _origin hidden) (push (cons text hidden) sent))))
+        (agent-review-request "main..feature")
+        (should-error (agent-review-request "main..main") :type 'user-error))
+      (let* ((id (plist-get (agent-review-snapshot repo "main" "feature") :id))
+             (method (plist-get (alist-get "review_snapshot" agent-ui--methods nil nil #'equal)
+                                :function)))
+        (should (equal (length sent) 1))
+        (should (equal (caar sent) "原子审查 main → feature"))
+        (should (string-search (format "snapshot=\"%s\"" id) (cdar sent)))
+        (cl-letf (((symbol-function 'agent-ui--caller-root) (lambda () repo)))
+          (let ((result (funcall method (list :snapshot id))))
+            (should (equal (plist-get result :snapshot) id))
+            (should (equal (plist-get result :target_ref) "main"))
+            (should (equal (plist-get result :head_ref) "feature"))
+            (should (equal (length (plist-get result :files)) 2)))
+          (should-error (funcall method nil)))
+        ;; A snapshot of another project is refused.
+        (cl-letf (((symbol-function 'agent-ui--caller-root) (lambda () temporary-file-directory)))
+          (should-error (funcall method (list :snapshot id))))))))
+
+(ert-deftest agent-review-test-request-command ()
+  "/atomic-review is a local command that completes branch names."
+  (let (targets)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'agent-review-request) (lambda (target) (push target targets))))
+        (should (agent-session--run-local-command
+                 (agent-session--make :buffer (current-buffer)) "/atomic-review main..feature"))))
+    (should (equal targets '("main..feature"))))
+  (agent-review-test--with-repo repo
+    (should (member "feature" (agent-review--ref-names (agent-session--make :root repo))))))
+
 (ert-deftest agent-review-test-build-covers-every-line ()
   (agent-review-test--with-repo repo
     (let* ((snapshot (agent-review-snapshot repo "main" "feature"))

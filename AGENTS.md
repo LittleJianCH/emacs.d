@@ -184,6 +184,8 @@ var/                     runtime state (history, backups, pasted images...); git
   and writes an annotation, which is sent straight to the originating session with the
   selected code; the agent answers with `review_reply`. Git runs in the
   caller's root through its file handler, so remote projects need nothing on the host.
+  The session command `/atomic-review [BRANCH|COMMIT|A..B]` resolves the refs and
+  pins the snapshot in Emacs, then sends the agent its id (`review_snapshot {snapshot}`).
   Data lives under `var/reviews/` as Lisp data.  The workflow for agents is the
   `emacs-atomic-review` skill (`skills/`), which replaces the CLIs' web page
   `atomic-review` skill in the sessions Emacs starts.

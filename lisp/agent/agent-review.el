@@ -17,6 +17,8 @@
 ;;   review_build     assemble the agent's plan, check coverage, show the review
 ;;   review_comments  read the user's annotations
 ;;   review_reply     answer an annotation in the review buffer
+;; The session command /atomic-review pins a snapshot in Emacs and hands its
+;; id to the agent.
 ;; Git runs in the caller's project root through its file handler, so remote
 ;; (tramp-rpc) projects need nothing installed on their host.  Snapshots,
 ;; reviews and annotations are Lisp data under `agent-review-directory'.
@@ -2562,18 +2564,29 @@ N defaults to `agent-review-expand-lines'; with \\[universal-argument] alone, al
         :response (agent-ui--json-value (plist-get comment :response))))
 
 (agent-ui-defmethod "review_snapshot"
-    ((base string "Branch, tag or commit to compare against, e.g. main or origin/main" required)
-     (head string "Branch or commit under review. Default: HEAD"))
-  "Start an atomic review (原子审查) of a branch: pin the committed changes of head against its merge base with base, and list their hunks. The emacs-atomic-review skill describes the whole workflow: how to split the changes, write the plan and answer annotations; follow it. Only committed changes are compared, never uncommitted files.
+    ((base string "Branch, tag or commit to compare against, e.g. main or origin/main. Required unless snapshot is given")
+     (head string "Branch or commit under review. Default: HEAD")
+     (snapshot string "Id of a snapshot Emacs already pinned (a message names it): list it instead of comparing base and head"))
+  "Start an atomic review (原子审查) of a branch: pin the committed changes of head against its merge base with base, and list their hunks. The emacs-atomic-review skill describes the whole workflow: how to split the changes, write the plan and answer annotations; follow it. Only committed changes are compared, never uncommitted files. When the user's message says Emacs pinned a snapshot, pass only its id as snapshot.
 
 The plan you then give review_build: a summary of the whole compared change, and items {\"title\", \"intent\", \"type\", \"parts\"}. type: 0 formatting, 1 refactoring, 2 feature, 3 local fix, 5 tests. Each part names a file of this snapshot and selects exactly one of: \"hunks\": [0, 2] (zero-based hunk indexes within that file, as listed here); \"whole\": true (all its hunks, or a binary/metadata-only file); \"added_lines\": [10, 45] (inclusive line range of a newly added text file only). Every changed line must be covered exactly once. Write titles, intents and the summary in Chinese. Small diffs come with the hunks' text (fragments); otherwise run diff_command."
-  (let* ((root (or (agent-ui--caller-root) (error "No project root for this caller")))
-         (snapshot (agent-review-snapshot root base (or head "HEAD")))
-         (fragments (plist-get snapshot :fragments)))
+  (let ((root (or (agent-ui--caller-root) (error "No project root for this caller"))))
+    (agent-review--snapshot-result
+     (cond (snapshot
+            (let ((pinned (agent-review--load-snapshot snapshot)))
+              (unless (equal (plist-get pinned :root) root)
+                (error "Snapshot %s belongs to another project" snapshot))
+              pinned))
+           (base (agent-review-snapshot root base (or head "HEAD")))
+           (t (error "Give base, or the snapshot Emacs pinned"))))))
+
+(defun agent-review--snapshot-result (snapshot)
+  "What review_snapshot returns for SNAPSHOT."
+  (let ((fragments (plist-get snapshot :fragments)))
     (list :snapshot (plist-get snapshot :id)
-          :target_ref base :target_sha (plist-get snapshot :target-sha)
+          :target_ref (plist-get snapshot :target-ref) :target_sha (plist-get snapshot :target-sha)
           :merge_base (plist-get snapshot :base-sha)
-          :head_ref (or head "HEAD") :head_sha (plist-get snapshot :head-sha)
+          :head_ref (plist-get snapshot :head-ref) :head_sha (plist-get snapshot :head-sha)
           :files (vconcat
                   (mapcar (lambda (block)
                             (list :file (plist-get block :file)
@@ -2644,6 +2657,92 @@ The plan you then give review_build: a summary of the whole compared change, and
   (let ((answered (agent-review-reply review id revision text status)))
     (agent-review--refresh review (plist-get answered :item))
     (list :id id :status (plist-get answered :status))))
+
+;;; Requests from a session: /atomic-review
+
+;; /atomic-review TARGET pins the snapshot in Emacs, so which commits are
+;; compared never depends on the agent; the agent only plans the items.
+
+(defun agent-review--try-git (root &rest args)
+  "Output of git with ARGS in ROOT, or nil when it fails."
+  (ignore-errors (string-trim (apply #'agent-review--git root args))))
+
+(defun agent-review--branch-p (root name)
+  "Non-nil if NAME is a local or remote-tracking branch in ROOT."
+  (seq-some (lambda (prefix)
+              (agent-review--try-git root "show-ref" "--verify" "--quiet" (concat prefix name)))
+            '("refs/heads/" "refs/remotes/")))
+
+(defun agent-review--default-branch (root)
+  "The branch the work in ROOT merges into.
+That is origin's default branch, preferably as the local branch of the
+same name, else main or master."
+  (let* ((origin (agent-review--try-git root "symbolic-ref" "--quiet" "--short"
+                                        "refs/remotes/origin/HEAD"))
+         (name (and origin (string-remove-prefix "origin/" origin))))
+    (or (and name
+             (agent-review--try-git root "show-ref" "--verify" "--quiet" (concat "refs/heads/" name))
+             name)
+        origin
+        (seq-find (lambda (branch) (agent-review--branch-p root branch)) '("main" "master"))
+        (user-error "找不到默认分支，请写明区间，如 main..HEAD"))))
+
+(defun agent-review-request-refs (root target)
+  "The base and head, as (BASE . HEAD), of an atomic review of TARGET in ROOT.
+TARGET is a range BASE..HEAD or BASE...HEAD (an empty side means HEAD), a
+branch, compared with the default branch, or a commit, compared with its
+parent.  An empty TARGET means the current branch, or the commit at HEAD
+when HEAD is detached or on the default branch."
+  (let ((target (string-trim (or target ""))))
+    (cond
+     ((string-match "\\`\\(.*?\\)\\.\\.\\.?\\(.*\\)\\'" target)
+      (let ((base (match-string 1 target))
+            (head (match-string 2 target)))
+        (cons (if (string-empty-p base) "HEAD" base)
+              (if (string-empty-p head) "HEAD" head))))
+     ((string-empty-p target)
+      (let ((branch (agent-review--try-git root "symbolic-ref" "--quiet" "--short" "HEAD"))
+            (default (agent-review--default-branch root)))
+        (if (and branch (not (equal branch default)))
+            (cons default branch)
+          (cons "HEAD^" "HEAD"))))
+     ((agent-review--branch-p root target)
+      (cons (agent-review--default-branch root) target))
+     (t (cons (concat target "^") target)))))
+
+(defun agent-review--ref-names (session)
+  "Branch and tag names of the project of SESSION, for completion.
+None for a remote project: completion runs on every key."
+  (let ((root (agent-session-root session)))
+    (unless (file-remote-p root)
+      (when-let* ((refs (agent-review--try-git root "for-each-ref" "--format=%(refname:short)"
+                                               "refs/heads" "refs/remotes" "refs/tags")))
+        (split-string refs "\n" t)))))
+
+(defun agent-review-request (target)
+  "Ask the agent of this session for an atomic review of TARGET.
+TARGET is a branch, a commit or a range, see `agent-review-request-refs'.
+Emacs pins the snapshot itself and hands its id to the agent."
+  (interactive (list (read-string "原子审查（分支、提交或 A..B，留空为当前分支）: ")))
+  (let* ((session (agent-session--this))
+         (root (agent-session-root session))
+         (refs (agent-review-request-refs root target))
+         (snapshot (condition-case err
+                       (agent-review-snapshot root (car refs) (cdr refs))
+                     (error (user-error "无法固定 %s..%s：%s" (car refs) (cdr refs)
+                                        (error-message-string err))))))
+    (agent-session-submit
+     session (format "原子审查 %s → %s" (car refs) (cdr refs)) nil
+     (format "(Emacs pinned this atomic review (原子审查) as snapshot %s: the committed changes of %s (%s) since its merge base %s with %s, %d files. Follow the emacs-atomic-review skill on it: do not choose other refs or ask which to compare; call review_snapshot with only snapshot=\"%s\" for its hunks, then read the code, split it and call review_build.)"
+             (plist-get snapshot :id) (cdr refs)
+             (substring (plist-get snapshot :head-sha) 0 12)
+             (substring (plist-get snapshot :base-sha) 0 12)
+             (car refs) (length (plist-get snapshot :files))
+             (plist-get snapshot :id)))))
+
+(setf (alist-get "atomic-review" agent-session-local-commands nil nil #'equal)
+      '(agent-review-request "让 agent 原子审查分支、提交或区间 A..B"
+                             agent-review--ref-names))
 
 (provide 'agent-review)
 

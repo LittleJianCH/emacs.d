@@ -17,8 +17,12 @@ is involved: understand the code yourself.
    uncommitted files. For "against main", check whether local `main` or
    `origin/main` is meant; fetch first when the remote one is. Ask when the
    branch to review is unclear.
+   A single commit is base `<commit>^`, head `<commit>`; a range `A..B` is
+   base `A`, head `B`.
 2. **Pin it** with `review_snapshot` (base, head). It returns the merge base,
-   the head commit and every file's hunks. Small diffs come with the hunks'
+   the head commit and every file's hunks. When the user's message says Emacs
+   already pinned a snapshot (the `/atomic-review` command), skip step 1 and
+   call `review_snapshot` with only that `snapshot` id. Small diffs come with the hunks'
    text (`fragments`); for large ones run the returned `diff_command`
    yourself.
 3. **Read the code.** Read the hunks and, around them, the sources at the
