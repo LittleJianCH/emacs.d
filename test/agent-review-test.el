@@ -78,13 +78,28 @@
       (should (equal (agent-review-request-refs repo "") '("main" . "feature")))
       (agent-review-test--git repo "checkout" "-q" "main")
       (should (equal (agent-review-request-refs repo nil) '("HEAD^" . "HEAD")))
-      ;; origin's default branch wins, as the local branch when there is one.
+      ;; origin's default branch names the base.
       (agent-review-test--git repo "update-ref" "refs/remotes/origin/trunk" "main")
       (agent-review-test--git repo "symbolic-ref" "refs/remotes/origin/HEAD"
                               "refs/remotes/origin/trunk")
       (should (equal (agent-review-request-refs repo "feature") '("origin/trunk" . "feature")))
       (agent-review-test--git repo "branch" "trunk" "main")
-      (should (equal (agent-review-request-refs repo "feature") '("trunk" . "feature"))))))
+      (should (equal (agent-review-request-refs repo "feature") '("origin/trunk" . "feature")))
+      ;; Of the local branch and origin's, the one with the newer merge base
+      ;; wins: a local branch left behind is skipped, one ahead is taken.
+      (agent-review-test--git repo "checkout" "-q" "-b" "up" "main")
+      (agent-review-test--git repo "commit" "-q" "--allow-empty" "-m" "up")
+      (agent-review-test--git repo "checkout" "-q" "-b" "topic")
+      (agent-review-test--git repo "commit" "-q" "--allow-empty" "-m" "topic")
+      (agent-review-test--git repo "update-ref" "refs/remotes/origin/trunk" "up")
+      (should (equal (agent-review-request-refs repo "topic") '("origin/trunk" . "topic")))
+      (should (equal (agent-review-request-refs repo "") '("origin/trunk" . "topic")))
+      (agent-review-test--git repo "update-ref" "refs/remotes/origin/trunk" "main")
+      (agent-review-test--git repo "branch" "-f" "trunk" "up")
+      (should (equal (agent-review-request-refs repo "topic") '("trunk" . "topic")))
+      ;; On the default branch itself, nothing means the commit at HEAD.
+      (agent-review-test--git repo "checkout" "-q" "trunk")
+      (should (equal (agent-review-request-refs repo "") '("HEAD^" . "HEAD"))))))
 
 (ert-deftest agent-review-test-request ()
   "/atomic-review pins the snapshot in Emacs and sends the agent its id, which

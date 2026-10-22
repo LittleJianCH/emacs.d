@@ -2673,25 +2673,48 @@ The plan you then give review_build: a summary of the whole compared change, and
               (agent-review--try-git root "show-ref" "--verify" "--quiet" (concat prefix name)))
             '("refs/heads/" "refs/remotes/")))
 
-(defun agent-review--default-branch (root)
-  "The branch the work in ROOT merges into.
-That is origin's default branch, preferably as the local branch of the
-same name, else main or master."
-  (let* ((origin (agent-review--try-git root "symbolic-ref" "--quiet" "--short"
-                                        "refs/remotes/origin/HEAD"))
-         (name (and origin (string-remove-prefix "origin/" origin))))
-    (or (and name
-             (agent-review--try-git root "show-ref" "--verify" "--quiet" (concat "refs/heads/" name))
-             name)
-        origin
-        (seq-find (lambda (branch) (agent-review--branch-p root branch)) '("main" "master"))
+(defun agent-review--ref-p (root ref)
+  "Non-nil if the full REF exists in ROOT."
+  (agent-review--try-git root "show-ref" "--verify" "--quiet" ref))
+
+(defun agent-review--default-name (root)
+  "Name of the branch the work in ROOT merges into.
+That is origin's default branch, else main or master."
+  (let ((origin (agent-review--try-git root "symbolic-ref" "--quiet" "--short"
+                                       "refs/remotes/origin/HEAD")))
+    (or (seq-find (lambda (name)
+                    (or (agent-review--ref-p root (concat "refs/heads/" name))
+                        (agent-review--ref-p root (concat "refs/remotes/origin/" name))))
+                  (delq nil (list (and origin (string-remove-prefix "origin/" origin))
+                                  "main" "master")))
         (user-error "找不到默认分支，请写明区间，如 main..HEAD"))))
+
+(defun agent-review--default-branch (root head)
+  "The default branch HEAD is compared with in ROOT.
+Of the local branch and origin's, the one sharing more history with HEAD
+wins (the newer merge base), so a local branch left behind origin's is
+skipped; when both share the same, origin's."
+  (let* ((name (agent-review--default-name root))
+         (local (and (agent-review--ref-p root (concat "refs/heads/" name)) name))
+         (remote (and (agent-review--ref-p root (concat "refs/remotes/origin/" name))
+                      (concat "origin/" name))))
+    (if (and local remote)
+        (let ((local-base (agent-review--try-git root "merge-base" local head))
+              (remote-base (agent-review--try-git root "merge-base" remote head)))
+          (if (and local-base
+                   (or (null remote-base)
+                       (and (not (equal local-base remote-base))
+                            (agent-review--try-git root "merge-base" "--is-ancestor"
+                                                   remote-base local-base))))
+              local
+            remote))
+      (or local remote))))
 
 (defun agent-review-request-refs (root target)
   "The base and head, as (BASE . HEAD), of an atomic review of TARGET in ROOT.
 TARGET is a range BASE..HEAD or BASE...HEAD (an empty side means HEAD), a
-branch, compared with the default branch, or a commit, compared with its
-parent.  An empty TARGET means the current branch, or the commit at HEAD
+branch, compared with the default branch (see
+`agent-review--default-branch'), or a commit, compared with its parent.  An empty TARGET means the current branch, or the commit at HEAD
 when HEAD is detached or on the default branch."
   (let ((target (string-trim (or target ""))))
     (cond
@@ -2701,13 +2724,12 @@ when HEAD is detached or on the default branch."
         (cons (if (string-empty-p base) "HEAD" base)
               (if (string-empty-p head) "HEAD" head))))
      ((string-empty-p target)
-      (let ((branch (agent-review--try-git root "symbolic-ref" "--quiet" "--short" "HEAD"))
-            (default (agent-review--default-branch root)))
-        (if (and branch (not (equal branch default)))
-            (cons default branch)
+      (let ((branch (agent-review--try-git root "symbolic-ref" "--quiet" "--short" "HEAD")))
+        (if (and branch (not (equal branch (agent-review--default-name root))))
+            (cons (agent-review--default-branch root branch) branch)
           (cons "HEAD^" "HEAD"))))
      ((agent-review--branch-p root target)
-      (cons (agent-review--default-branch root) target))
+      (cons (agent-review--default-branch root target) target))
      (t (cons (concat target "^") target)))))
 
 (defun agent-review--ref-names (session)
