@@ -1448,9 +1448,15 @@ The daemon parent id is not an Emacs buffer."
      (list :beforePlan (symbol-name mode)))))
 
 (defun agent-emx--message (session text)
-  "Return wire fields for TEXT in SESSION, uploading remote images first."
+  "Return wire fields for TEXT in SESSION, uploading remote images first.
+A message with a hidden note also carries the text its block shows, which
+the daemon keeps when the agent echoes the whole message."
   (append (list :text (agent-session-message-text text))
           (when agent-session-outgoing-block (list :block agent-session-outgoing-block))
+          (when-let* ((id agent-session-outgoing-block)
+                      (block (agent-session--block session id))
+                      ((plist-get block :hidden)))
+            (list :display (agent-session-message-text (plist-get block :text))))
           (when-let* ((images (agent-session-message-images text)))
             (list :images (vconcat
                            (if (file-remote-p (agent-session-root session))

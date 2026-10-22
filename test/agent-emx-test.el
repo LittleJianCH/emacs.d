@@ -63,6 +63,21 @@
     (should (string-match-p "你好" (agent-emx-test--transcript session)))
     (should (= 3 (plist-get (agent-emx--get session :emx-cursor) :seq)))))
 
+(ert-deftest agent-emx-test-hidden-note-display ()
+  "A message with a hidden note sends the daemon the text its block shows."
+  (agent-emx-test--with-session
+    (let (sent)
+      (cl-letf (((symbol-function 'agent-emx--rpc)
+                 (lambda (_session method &optional params &rest _) (push (cons method params) sent))))
+        (agent-session-submit session "原子审查 main → feature" nil "(Hidden note.)")
+        (agent-session-set-status session 'idle)
+        (agent-session-submit session "plain"))
+      (pcase-let ((`((,_ . ,plain) (,method . ,params)) sent))
+        (should (equal method "session/send"))
+        (should (equal (plist-get params :text) "原子审查 main → feature\n\n(Hidden note.)"))
+        (should (equal (plist-get params :display) "原子审查 main → feature"))
+        (should-not (plist-member plain :display))))))
+
 (ert-deftest agent-emx-test-blocks-updates-and-order ()
   (agent-emx-test--with-session
     (agent-emx-test--event session 1 "block/add"

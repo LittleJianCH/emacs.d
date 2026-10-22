@@ -265,6 +265,8 @@ export interface SendParams {
   text: string
   images?: string[]
   block?: string
+  /** Text the transcript shows instead, when text ends with a hidden note. */
+  display?: string
 }
 
 /** Config-order catalog, including disabled profiles and candidates. */

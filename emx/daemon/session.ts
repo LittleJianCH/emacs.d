@@ -33,13 +33,16 @@ export interface Transcript {
   blocks: Block[]
   queue: Message[]
   capabilities?: Capabilities
+  /** Ids of user blocks showing their meta text instead of what was sent. */
+  shown?: string[]
 }
 
 interface Message {
   text: string
   images?: string[]
   block?: string
-  meta?: { text: string, origin: string }
+  /** What the transcript shows when text carries a hidden note. */
+  meta?: { text: string, origin?: string }
 }
 
 export class Session implements SessionHost {
@@ -65,7 +68,9 @@ export class Session implements SessionHost {
   readonly log: EventParams[] = []
   notify: ((event: EventParams) => void) | undefined
   #onEvent?: SessionOptions['onEvent']
-  #messageMeta = new Map<string, { text: string, origin: string }>()
+  #messageMeta = new Map<string, { text: string, origin?: string }>()
+  /** User blocks showing their meta text, which backend echoes keep. */
+  #shown = new Set<string>()
   #onUsage?: SessionOptions['onUsage']
   #onChange: (summaryChanged: boolean) => void
   #resume: string | undefined
@@ -104,6 +109,7 @@ export class Session implements SessionHost {
       this.blocks = structuredClone(options.transcript.blocks)
       for (const block of this.blocks) this.index.set(block.id, block)
       this.#queued = structuredClone(options.transcript.queue)
+      this.#shown = new Set(options.transcript.shown)
       this.queue = this.#queued.map((message) => message.text)
     }
     this.backend = backends[this.agent](this)
@@ -176,8 +182,13 @@ export class Session implements SessionHost {
     if (event.type === 'block/add' && event.block.type === 'user') {
       const previous = this.index.get(event.block.id)
       const meta = this.#messageMeta.get(event.block.id)
-        ?? (previous?.type === 'user' && previous.origin ? { text: previous.text, origin: previous.origin } : undefined)
-      if (meta) { event.block = { ...event.block, ...meta }; this.#messageMeta.delete(event.block.id) }
+        ?? (previous?.type === 'user' && (previous.origin || this.#shown.has(previous.id))
+          ? { text: previous.text, ...(previous.origin ? { origin: previous.origin } : {}) } : undefined)
+      if (meta) {
+        event.block = { ...event.block, ...meta }
+        this.#messageMeta.delete(event.block.id)
+        this.#shown.add(event.block.id)
+      }
     }
     if (event.type === 'block/add') {
       const existing = this.index.get(event.block.id)
@@ -191,7 +202,7 @@ export class Session implements SessionHost {
     }
     if (event.type === 'block/update' && typeof event.fields.text === 'string') {
       const previous = this.index.get(event.id)
-      if (previous?.type === 'user' && previous.origin) event.fields.text = previous.text
+      if (previous?.type === 'user' && (previous.origin || this.#shown.has(previous.id))) event.fields.text = previous.text
     }
     // Summary.info currently includes every info key; transcript events do not.
     const summaryChanged = event.type === 'status' ? this.status !== event.status
@@ -417,7 +428,8 @@ export class Session implements SessionHost {
   detach(): void { this.notify = undefined }
 
   transcript(): Transcript {
-    return structuredClone({ blocks: this.blocks, queue: this.#queued, capabilities: this.capabilities })
+    return structuredClone({ blocks: this.blocks, queue: this.#queued, capabilities: this.capabilities,
+      shown: [...this.#shown] })
   }
 
   attach(after?: Cursor, turns = 20): { result: AttachResult, afterWrite: () => void } {

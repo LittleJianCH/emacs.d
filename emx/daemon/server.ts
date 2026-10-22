@@ -716,8 +716,10 @@ export class DaemonServer {
         const session = this.#session(params)
         const message = this.#message(params)
         if (params.handle !== undefined) session.setInfo({ handle: string(params.handle, 'handle') })
-        this.collab.name(session, message.text)
-        return session.send(message.text, message.images, message.block)
+        const display = optionalString(params.display, 'display')
+        this.collab.name(session, display ?? message.text)
+        return session.send(message.text, message.images, message.block,
+          display === undefined ? undefined : { text: display })
       }
       case 'session/steer': {
         const session = this.#session(params)

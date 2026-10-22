@@ -57,3 +57,19 @@ test('queued mailbox metadata survives persistence and repeated user echoes cann
     assert.equal((restored.index.get('mail-block') as any).text, 'visible')
   } finally { await s.stop(); await restored.stop() }
 })
+
+test('an editor message shows its display text, also after persistence, never its hidden note', async () => {
+  const s = new Session({ id: 'display', agent: 'echo', root: '' })
+  await s.start()
+  s.send('原子审查 main → feature\n\nhidden note', undefined, 'display-block', { text: '原子审查 main → feature' })
+  await new Promise((resolve) => setImmediate(resolve))
+  const restored = new Session({ id: 'display', agent: 'echo', root: '', restored: true, transcript: s.transcript() })
+  try {
+    assert.equal((s.index.get('display-block') as any).text, '原子审查 main → feature')
+    assert.equal((s.index.get('display-block') as any).origin, undefined)
+    await restored.start()
+    restored.addBlock({ id: 'display-block', type: 'user', text: '原子审查 main → feature\n\nhidden note' })
+    restored.update('display-block', { text: '原子审查 main → feature\n\nhidden note' })
+    assert.equal((restored.index.get('display-block') as any).text, '原子审查 main → feature')
+  } finally { await s.stop(); await restored.stop() }
+})
