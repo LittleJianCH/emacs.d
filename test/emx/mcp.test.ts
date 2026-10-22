@@ -74,7 +74,7 @@ test('stdio initialize, list, caller identity, deferred polling, errors, list ch
   const summary = daemon.collab.startSummary(dir)
   assert.ok(summary.startsWith('- Subagents: start them with session_start'))
   assert.ok(init.instructions.endsWith('\n' + summary))
-  assert.match(init.instructions, /what another codebase does there, delegate it before your second lookup/)
+  assert.match(init.instructions, /what another codebase does there, delegate it before your\s+second lookup/)
   assert.doesNotMatch(init.instructions, /more than 3|full guidance|multi-step job/)
   assert.match(summary, /\n  - coder-flash \(minimal\): [^\n]*benchmarks/)
   assert.deepEqual(await request('tools/list'), { tools: daemon.collab.tools(tools).tools })

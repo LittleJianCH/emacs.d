@@ -67,7 +67,12 @@ test('delegation guidance names no profiles and profile descriptions name no oth
 })
 test('one visible delegation rule: shaped by question, with its exceptions; tool text only says how', () => {
   const c = defaults(), d = c.collab.prompts.delegation
-  assert.match(d, /where something is used, how a path works or\s+what another codebase does there, delegate it before your second lookup/)
+  assert.match(d, /where something is used, how a path works\s+across files or what another codebase does there, delegate it before your\s+second lookup/)
+  assert.match(d, /A grep listing hits only pins\s+the symbol and never settles these questions; reading one hit is your\s+second lookup/)
+  assert.match(d, /a fact outside these questions that one grep settles/)
+  assert.doesNotMatch(d, /only for[^]*, a fact one grep settles/)
+  assert.match(d, /explaining code the\s+user already pointed at/)
+  assert.match(d, /- Runs: delegate builds, benchmarks and test series[^]*don't run them yourself/)
   assert.match(d, /even as the user's whole question or a follow-up/)
   assert.match(d, /Stay local only for[^]*reading a diff to plan an atomic review/)
   assert.match(d, /If session_start\s+started you, do your one task yourself and start none/)

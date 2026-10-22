@@ -194,14 +194,16 @@ how to call it and how to brief, and never restate when. Codex repeats the
 instructions before every tool, so the rule stays short.
 
 The rule is shaped by the question, not by a count or by parallelism. Where
-something is used, how a path works and what another codebase does there are
-delegated before the second lookup, even as the user's whole question or a
+something is used, how a path works across files and what another codebase
+does there are delegated before the second lookup, even as the user's whole question or a
 follow-up with nothing else to do: at most one grep pins the symbol and
 revision, the brief gives symbol, revision, repo and asks for file:line and what
 the code does, and related questions of the turn share one brief. The parent
 tells the user the profile and why in one sentence, ends its turn when it needs
 the answer, and writes the user's answer from the report. Its exceptions sit in
-the same item: a definition in a file already open, a fact one grep settles,
+the same item: a definition in a file already open, a fact outside those
+questions that one grep settles, explaining code the user already pointed at
+(lines just marked in a review, a diff already in the conversation),
 edit-compile-fix interleaved with the agent's own edits, reading a diff to plan
 an atomic review, and dialogue with the user. Children start nothing. Project
 rules naming Claude's Agent or Explore, which emx disables, or "after N reads"
@@ -221,7 +223,11 @@ grep` / `git show`, and blurred into the "few reads" exemption; 3 was one
 project's threshold besides. Separately, once background runs could wake the
 session, an agent implemented a change and ran a series of benchmarks itself in
 hundreds of Bash calls; a note inside the `run_in_background` bullet is skipped
-by an agent not thinking of background runs, hence the runs item.
+by an agent not thinking of background runs, hence the runs item, which says
+"delegate" like the reading item. A grep listing the hits only pins the symbol:
+the session that missed delegation began with one and would have counted it as
+settling where-used, so "one grep" covers only facts outside the three shapes,
+and reading a hit is the second lookup.
 
 `collab.startGuidance` names no profiles; per-profile use belongs in each
 profile's `use` and description. Split by outcome and file ownership,
