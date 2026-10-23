@@ -287,3 +287,11 @@ test('failed configure restores confirmed settings, reports an error and permits
   assert.equal(session.settings.effort, 'low')
   assert.equal(session.settings.mode, 'full')
 })
+
+test('delegating dsh sessions pass session_rate to the audited plan-mode gate', async (t) => {
+  const { requests, session } = await setup(t, { settings: { mode: 'plan' } })
+  const initialize = (await requests()).find((r) => r.method === 'initialize')
+  assert.equal(initialize.params.plan, true)
+  assert.ok(initialize.params.mcpServers[0].readOnly.includes('session_rate'))
+  assert.ok(session.editorTools().readOnly.includes('session_rate'))
+})

@@ -44,7 +44,7 @@ for (const agent of ['claude', 'codex', 'dsh']) {
     await client.request('hello', { client: 'readonly-test', version: daemon.version,
       tools: { tools, readOnly: ['inspect.state', 'context', 'context', 'session_start', 'removed',
         ...(remote ? ['config_write', 'config_edit'] : [])] } })
-    const { id } = await client.request('session/open', { agent, root: dir })
+    const { id } = await client.request('session/open', { agent, root: dir, settings: { mode: 'plan' } })
     await client.request('session/attach', { id })
     await client.waitFor((n) => n.method === 'history/done')
     // dsh returns before its fixture has finished appending initialize to disk.
@@ -54,7 +54,7 @@ for (const agent of ['claude', 'codex', 'dsh']) {
       if (calls.some((c) => c.type === 'spawn' || c.method === 'initialize')) break
       await delay(10)
     }
-    const expected = [...(remote ? ['config_read'] : []), 'context', 'inspect.state', 'session_read', 'sessions']
+    const expected = [...(remote ? ['config_read'] : []), 'context', 'inspect.state', 'session_rate', 'session_read', 'sessions']
     if (agent === 'claude') {
       const argv = calls.find((c) => c.type === 'spawn').argv
       assert.deepEqual(argv[argv.indexOf('--allowedTools') + 1].split(','), expected.map((n) => 'mcp__emacs__' + n))

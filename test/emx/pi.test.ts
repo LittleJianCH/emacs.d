@@ -82,7 +82,7 @@ test('plan denies mutations; read-only builtins and audited Emacs MCP calls alwa
   for (const tool of ['write', 'edit', 'bash', 'mcp__emacs__open', 'unknown']) {
     assert.equal((await call(tool, { path: 'a', command: 'echo hi' })).reply.value, 'deny-plan')
   }
-  for (const tool of ['read', 'grep', 'find', 'ls', 'mcp__emacs__context', 'mcp__emacs__sessions']) {
+  for (const tool of ['read', 'grep', 'find', 'ls', 'mcp__emacs__context', 'mcp__emacs__sessions', 'mcp__emacs__session_rate']) {
     assert.equal((await call(tool)).reply.value, 'allow')
   }
   assert.equal(session.settings.beforePlan, 'full')

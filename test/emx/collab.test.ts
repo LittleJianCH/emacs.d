@@ -41,11 +41,11 @@ function setup() {
   const cleanup = async () => { collab.stop(); for (const s of sessions.values()) await s.stop(); rmSync(dir, { recursive: true, force: true }) }
   return { dir, config, sessions, create, collab, cleanup, closed, setVisible: (value: boolean) => { visible = value }, opened: () => opened }
 }
-test('daemon config owns five caller-independent collaboration definitions', () => {
+test('daemon config owns six caller-independent collaboration definitions', () => {
   const c = defaults()
   const tools = definitions(c)
   assert.deepEqual(tools.map((tool) => tool.name).sort(),
-    ['session_ask', 'session_read', 'session_start', 'session_stop', 'sessions'])
+    ['session_ask', 'session_rate', 'session_read', 'session_start', 'session_stop', 'sessions'])
   assert.ok(tools.every((tool) => tool.inputSchema.type === 'object'))
   const start = tools.find((tool) => tool.name === 'session_start')!.description
   assert.ok(start.indexOf('Delegate independent work early') < start.indexOf('Choose how it gets context:'))
@@ -365,15 +365,15 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`${agent} forks its native 
       const spawns = calls.filter((c) => c.type === 'spawn')
       const argv = spawns[1].argv
       const allowed = (args: string[]) => args[args.indexOf('--allowedTools') + 1]
-      assert.equal(allowed(argv), allowed(spawns[0].argv))
+      assert.equal(allowed(argv), allowed(spawns[0].argv).split(',').filter((name: string) => name !== 'mcp__emacs__session_rate').join(','))
       assert.equal(allowed(argv), 'mcp__emacs__context,mcp__emacs__session_read,mcp__emacs__sessions')
       assert.ok(argv.includes('--fork-session')); assert.ok(argv.includes('--no-session-persistence'))
       assert.equal(argv[argv.indexOf('--resume') + 1], parent.resumeId())
     } else if (agent === 'codex') {
       const starts = calls.filter((c) => c.method === 'initialize')
       const approvals = (args: string[]) => args.filter((s) => s.includes('.approval_mode='))
-      assert.deepEqual(approvals(starts[1].argv), approvals(starts[0].argv))
-      assert.equal(approvals(starts[0].argv).length, 3)
+      assert.deepEqual(approvals(starts[1].argv), approvals(starts[0].argv).filter((value) => !value.includes('session_rate')))
+      assert.equal(approvals(starts[0].argv).length, 4)
       assert.deepEqual(calls.find((c) => c.method === 'thread/fork').params,
         { threadId: parent.resumeId(), ephemeral: true, excludeTurns: true })
     } else {
@@ -383,7 +383,7 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`${agent} forks its native 
       assert.equal(calls[fork].params.parent, parent.resumeId())
       assert.deepEqual(calls[fork].params.mcpServers[0].readOnly, ['context', 'session_read', 'sessions'])
       assert.deepEqual(calls[fork].params.mcpServers[0].readOnly,
-        calls.find((c) => c.method === 'initialize').params.mcpServers[0].readOnly)
+        calls.find((c) => c.method === 'initialize').params.mcpServers[0].readOnly.filter((name: string) => name !== 'session_rate'))
     }
   } finally {
     await client.close(); await d.stop()
@@ -661,5 +661,66 @@ test('session_ask replies have neither a run row nor a run label', async () => {
     await until(() => !!t.collab.mailbox.get(parent.id)?.length)
     assert.doesNotMatch(t.collab.mailbox.get(parent.id)![0].text, /\[run/)
     assert.deepEqual(t.collab.runLog(), [])
+  } finally { await t.cleanup() }
+})
+
+test('session_rate follows session_start visibility even when profile allow lists omit it', async () => {
+  const t = setup()
+  try {
+    const source = { tools: [], readOnly: [] }
+    const parent = t.create()
+    const coder = t.create('echo', t.dir, {}, { parent: parent.id, profile: 'coder' })
+    const helper = t.create('echo', t.dir, {}, { parent: coder.id, profile: 'coder-flash' })
+    t.config.profiles['coder-flash'].candidates = [{ agent: 'echo' }]
+    t.config.profiles['explorer-flash'].candidates = [{ agent: 'echo' }]
+    const check = (caller: Session | undefined, expected: boolean) => {
+      const tools = t.collab.tools(source, t.dir, caller)
+      for (const name of ['session_start', 'session_rate']) assert.equal(tools.tools.some((tool) => tool.name === name), expected, name)
+      assert.equal(tools.readOnly.includes('session_rate'), expected)
+    }
+    check(undefined, true); check(parent, true); check(coder, true); check(helper, false)
+    t.config.profiles.echo.tools = { allow: ['session_start'], delegate: ['coder-flash'] }
+    const limited = t.create('echo', t.dir, {}, { profile: 'echo' })
+    check(limited, true)
+    t.config.profiles.echo.tools.delegate = []
+    check(limited, false)
+    // The last capability pass can remove start when no eligible target is available.
+    t.config.profiles.echo.tools.delegate = ['coder-flash']
+    t.config.profiles['coder-flash'].candidates = [{ agent: 'missing' }]
+    check(limited, false)
+    t.config.profiles.echo.tools.allow = ['session_rate']
+    check(limited, false)
+    await assert.rejects(t.collab.call(limited, 'session_rate', { run: 1, verdict: 'usable', verified: true }, signal()), /not allowed/)
+    for (const key of ['taskNote', 'forkNote']) assert.doesNotMatch(t.config.collab.prompts[key], /rating|session_rate/)
+  } finally { await t.cleanup() }
+})
+
+test('session_rate validates ownership and parameters and appends bounded one-line ratings', async () => {
+  const t = setup()
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    const other = t.create('echo', t.dir, {}, { handle: 'other' }); await other.start()
+    t.collab.host.view = async (s) => { s.backend.send = () => { s.setStatus('running') } }
+    await t.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task' }, signal())
+    const valid = { run: 1, verdict: 'usable', verified: true }
+    for (const params of [{ run: 0 }, { run: 1.5 }, { run: '1' }, { verdict: 'bad' }, { verified: 'yes' }, { note: 5 }]) {
+      await assert.rejects(t.collab.call(parent, 'session_rate', { ...valid, ...params }, signal()), /must be/)
+    }
+    for (const [caller, run] of [[other, 1], [parent, 999]] as const) {
+      await assert.rejects(t.collab.call(caller, 'session_rate', { ...valid, run }, signal()), new RegExp(`Run ${run} isn't one you started`))
+    }
+    assert.equal(await t.collab.call(parent, 'session_rate', { ...valid, note: '  checked\r\nclaims\n' + '😀'.repeat(250) }, signal()), 'Rated run 1.')
+    let rating = t.collab.runLog()[0]
+    assert.equal(rating.type, 'rating'); assert.equal(rating.session, parent.id)
+    assert.equal(rating.verdict, 'usable'); assert.equal(rating.verified, true)
+    assert.ok(rating.time > 0); assert.equal([...rating.note].length, 200)
+    assert.ok(rating.note.startsWith('checked claims ')); assert.doesNotMatch(rating.note, /[\r\n]/)
+    await t.collab.call(parent, 'session_stop', { session: '@echo' }, signal())
+    await t.collab.call(parent, 'session_rate', { ...valid, verdict: 'rework', verified: false }, signal())
+    assert.equal(t.collab.runLog().length, 3)
+    rating = t.collab.runLog().at(-1)!
+    assert.equal(rating.verdict, 'rework'); assert.equal(rating.verified, false)
+    assert.equal('note' in rating, false)
+    await assert.rejects(t.collab.call(other, 'session_rate', valid, signal()), /isn't one you started/)
   } finally { await t.cleanup() }
 })

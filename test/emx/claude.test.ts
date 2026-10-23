@@ -619,3 +619,10 @@ for (const child of [false, true]) test('claude snapshots read-only approvals; r
     assert.equal((await calls()).filter((r) => r.type === 'spawn').length, 2)
   }
 })
+
+test('delegating Claude sessions auto-allow session_rate in plan mode', async (t) => {
+  const { calls, session } = await setup(t, { settings: { mode: 'plan' } })
+  const argv = (await calls()).find((m) => m.type === 'spawn').argv
+  assert.ok(argv[argv.indexOf('--allowedTools') + 1].split(',').includes('mcp__emacs__session_rate'))
+  assert.ok(session.editorTools().readOnly.includes('session_rate'))
+})

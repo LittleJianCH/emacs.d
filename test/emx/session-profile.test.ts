@@ -114,6 +114,7 @@ test('profile MCP lists, direct calls, instructions and approval flags use the a
       const names = (await peer.request('mcp/tools', {})).tools.map((t) => t.name)
       assert.equal(names.includes('eval'), !readonly)
       assert.equal(names.includes('session_start'), !readonly)
+      assert.equal(names.includes('session_rate'), !readonly)
       assert.equal(names.includes('session_ask'), !readonly)
       const s = x.daemon.sessions.get(id)!
       const args = launchArgs(s).join(' ')

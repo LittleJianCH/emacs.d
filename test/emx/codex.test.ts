@@ -324,3 +324,10 @@ for (const child of [false, true]) test('codex snapshots read-only approvals; re
     assert.equal((await requests()).filter((r) => r.method === 'initialize').length, 2)
   }
 })
+
+test('delegating Codex sessions auto-approve session_rate in plan mode', async (t) => {
+  const { requests, session } = await setup(t, { settings: { mode: 'plan' } })
+  const argv = (await requests()).find((r) => r.method === 'initialize').argv
+  assert.ok(argv.includes('mcp_servers.emacs.tools.session_rate.approval_mode="approve"'))
+  assert.ok(session.editorTools().readOnly.includes('session_rate'))
+})

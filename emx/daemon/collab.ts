@@ -1,5 +1,5 @@
 import { sessionSkills } from '../backends/backend.ts'
-import { delegationProfiles, profileTools, sessionProfile } from './profiles.ts'
+import { delegationProfiles, delegationTools, profileTools, sessionProfile } from './profiles.ts'
 // collab.ts --- daemon-owned tools, children, mailbox and task context.
 import { spawn } from 'node:child_process'
 import { accessSync, appendFileSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -12,7 +12,7 @@ import { candidateDisabledBy, profileCandidates } from '../config.ts'
 import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings, Usage } from './protocol.ts'
 import type { Session } from './session.ts'
 
-export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop']
+export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop', 'session_rate']
 export const forkAgents = ['claude', 'codex', 'dsh', 'pi']
 const costRanks: Record<string, number> = { minimal: 0, low: 1, medium: 2, high: 3, premium: 4, unknown: 5 }
 const modes = ['plan', 'ask', 'edits', 'auto', 'full']
@@ -209,7 +209,7 @@ export class Collaboration {
     const source: EditorTools = { tools: [...editor.tools.filter((t) => !toolNames.includes(t.name)), ...definitions(this.config, this.enabled, this.#environment(root))],
       readOnly: [...new Set([...editor.readOnly.filter((name) =>
         !toolNames.includes(name) && editor.tools.some((tool) => tool.name === name)),
-        'sessions', 'session_read'])].sort() }
+        'sessions', 'session_read', 'session_rate'])].sort() }
     if (!caller) return source
     const filtered = profileTools(this.config, caller, source)
     const targets = delegationProfiles(this.config, caller)
@@ -232,7 +232,7 @@ export class Collaboration {
           ...(caller.info.parent ? { context: { type: 'string', enum: ['fresh', 'handoff'],
             description: 'How the helper gets context: fresh (default) or bounded text handoff' } } : {}) } }
     }
-    return filtered
+    return delegationTools(filtered)
   }
   startSummary(root?: string, caller?: Session): string {
     if (!caller) return startSummary(this.config, this.enabled, this.#environment(root))
@@ -332,6 +332,7 @@ export class Collaboration {
           if (!starts.size) this.#starts.delete(caller)
         }
       }
+      case 'session_rate': return this.#rate(caller, p)
       case 'session_stop': {
         const target = this.#target(p.session)
         if (target.info.parent !== caller.id) throw new Error(`@${this.#handle(target)} isn't a session you started`)
@@ -341,6 +342,19 @@ export class Collaboration {
       }
       default: throw new Error(`Unknown collaboration tool: ${name}`)
     }
+  }
+  #rate(caller: Session, p: Record<string, unknown>): string {
+    if (!Number.isSafeInteger(p.run) || (p.run as number) < 1) throw new Error('run must be a positive integer')
+    if (!['usable', 'rework', 'wrong'].includes(p.verdict as string)) throw new Error('verdict must be usable, rework or wrong')
+    if (typeof p.verified !== 'boolean') throw new Error('verified must be a boolean')
+    if (p.note !== undefined && typeof p.note !== 'string') throw new Error('note must be a string')
+    const own = [...this.active.values()].some((row) => row.run === p.run && row.parent.session === caller.id)
+      || this.runLog().some((row) => row.type === 'run' && row.run === p.run && row.parent?.session === caller.id)
+    if (!own) throw new Error(`Run ${p.run} isn't one you started`)
+    const note = typeof p.note === 'string' ? [...p.note.replace(/[\r\n\u2028\u2029]+/g, ' ').trim()].slice(0, 200).join('') : ''
+    this.#append({ type: 'rating', run: p.run, time: Date.now() / 1000, session: caller.id,
+      verdict: p.verdict, verified: p.verified, ...(note ? { note } : {}) })
+    return `Rated run ${p.run}.`
   }
   find(name: unknown): Session | undefined {
     if (typeof name !== 'string') throw new Error('Name a session by its @handle; list them with sessions')

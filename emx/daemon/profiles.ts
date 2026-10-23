@@ -24,10 +24,18 @@ export function delegationProfiles(config: Config, session: Pick<Session, 'info'
 export function profileTools(config: Config, session: Pick<Session, 'info'>, source: EditorTools): EditorTools {
   const policy = toolPolicy(config, sessionProfile(session))
   const tools = source.tools.filter((tool) => {
+    if (tool.name === 'session_rate') return true
     if (policy.allow !== '*' && !policy.allow.includes(tool.name)) return false
     if (tool.name === 'session_ask' && session.info.parent) return false
     if (tool.name === 'session_start' && delegationProfiles(config, session)?.length === 0) return false
     return true
   }).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
-  return { tools, readOnly: source.readOnly.filter((name) => tools.some((tool) => tool.name === name)) }
+  return delegationTools({ tools, readOnly: source.readOnly.filter((name) => tools.some((tool) => tool.name === name)) })
+}
+
+/** Rating is available exactly when a caller can start a run. */
+export function delegationTools(source: EditorTools): EditorTools {
+  if (source.tools.some((tool) => tool.name === 'session_start')) return source
+  return { tools: source.tools.filter((tool) => tool.name !== 'session_rate'),
+    readOnly: source.readOnly.filter((name) => name !== 'session_rate') }
 }
