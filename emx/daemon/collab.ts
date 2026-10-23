@@ -608,7 +608,7 @@ export class Collaboration {
       this.#send(child, caller, text, canDelegate
         ? taskNote.replace("You can't start sessions yourself.", 'You may start only the bounded helper profiles listed in your session_start tool. Wait for their results before your final reply.')
         : taskNote)
-      return this.#prompt('started', this.#handle(child), this.#title(child), profile.model ? ' ' + profile.model : '', context) + note
+      return this.#prompt('started', this.#handle(child), this.#title(child), context) + note
     } catch (error) {
       if (child) await this.host.close(child)
       throw error

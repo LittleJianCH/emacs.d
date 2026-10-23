@@ -374,6 +374,25 @@ corfu right-aligns annotations, so they need equal width to line up in a column.
        (should (equal (get-text-property (string-match "Big" text) 'help-echo text)
                       "Echo · Big"))))))
 
+(ert-deftest agent-session-test-list-shows-child-model ()
+  "A started child's row names the model its backend reports.
+The started receipt leaves the model out, so the list is where the user
+sees which model a profile ran."
+  (agent-session-test--with-session
+   (let* ((parent (current-buffer))
+          (child (agent-session-test-echo t)))
+     (with-current-buffer child
+       (agent-session-set-info agent-session--current :parent parent)
+       ;; The candidate named no model: the backend's report shows instead.
+       (agent-session-set-info agent-session--current
+                               :model "opencode-go/deepseek-v4.1-flash"))
+     (with-temp-buffer
+       (agent-session-list-mode)
+       (setq agent-session-list--root temporary-file-directory)
+       (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 100)))
+         (agent-session-list--render))
+       (should (string-match-p "↳ .*DS V4.1 Flash · " (buffer-string)))))))
+
 (ert-deftest agent-session-test-approval ()
   "Pending requests show only in the footer.
 The transcript only marks waiting and the outcome on the related tool."

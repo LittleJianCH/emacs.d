@@ -239,8 +239,9 @@ candidates are never eligible for this fallback. If none is available,
 the error lists every candidate and its reason. A backend startup failure closes
 the child and returns its error; selection does not retry after startup.
 
-The started receipt names the chosen title and model, as before, and appends
-reasons for candidates skipped before it, for example
+The started receipt names the chosen agent's title and the context, not the
+model: the caller chooses by profile, and the session list shows each child's
+model to the user.  It appends reasons for candidates skipped before it, for example
 `Skipped candidates: Claude sonnet: 5h quota 93% used; DeepSeek: balance exhausted.`
 The wording, including unavailable/model-filter/quota/vendor-preference reasons
 and the no-candidate error, comes from `collab.prompts`. Child info keeps

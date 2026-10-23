@@ -68,7 +68,8 @@ test('session_start follows candidate order and preserves role, model, effort an
   assert.equal(child.agent, 'claude'); assert.equal(child.settings.model, 'sonnet')
   assert.equal(child.settings.effort, 'high'); assert.equal(child.settings.mode, 'auto')
   assert.equal(child.info.profile, 'worker')
-  assert.match(receipt, /Started @worker \(Claude sonnet, fresh\)/)
+  assert.match(receipt, /Started @worker \(Claude, fresh\)/)
+  assert.doesNotMatch(receipt, /sonnet/)
   assert.doesNotMatch(receipt, /Skipped candidates/)
   x.config.profiles.worker.candidates = [codex, claude]
   const next = await x.start()
