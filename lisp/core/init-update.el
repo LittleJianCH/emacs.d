@@ -5,7 +5,7 @@
 ;; Two-stage update contract:
 ;; `my/update-config' is a bootstrap that may run from OLD code.  In the true
 ;; `user-emacs-directory' it asynchronously fetches the current upstream and
-;; merges --ff-only @{u}, reloads this file through `my/reload-config' if it
+;; merges --ff-only @{u}, reloads this file and init-reload.el if either
 ;; changed, then calls the NEW definition of `my/update--apply' with FROM TO.
 ;; The name and two-argument arity of `my/update--apply' are frozen forever;
 ;; everything else, including build tools and apply steps, may change.
@@ -234,13 +234,17 @@ and derive from repository state, including checks for missing artifacts.")
      (my/update--next-step))))
 
 (defun my/update--bootstrap-apply ()
-  "Reload the updater if changed, then call the new frozen apply entry point."
-  (let* ((file (expand-file-name "lisp/core/init-update.el"
-                                 (plist-get my/update--state :root)))
+  "Reload the updater if changed, then call the new frozen apply entry point.
+The reloader is reloaded with it, so the new updater never runs on the old
+reload API."
+  (let* ((root (plist-get my/update--state :root))
+         (paths '("lisp/core/init-reload.el" "lisp/core/init-update.el"))
+         (files (seq-filter #'file-exists-p
+                            (mapcar (lambda (path) (expand-file-name path root)) paths)))
          (my/reload-emx-function nil))
-    (when (or (member "lisp/core/init-update.el" (plist-get my/update--state :paths))
-              (my/reload--changed-p file))
-      (let ((report (my/reload-config (list file))))
+    (when (or (seq-intersection paths (plist-get my/update--state :paths))
+              (seq-some #'my/reload--changed-p files))
+      (let ((report (my/reload-config files)))
         (my/update--put :reload report)
         (my/update--log (concat (my/reload--summary report) "\n"))
         (unless (and report (seq-every-p (lambda (entry)

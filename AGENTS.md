@@ -371,8 +371,9 @@ Two-stage update contract:
 
 - `my/update-config` is a bootstrap that may run from OLD code. In
   `(file-truename user-emacs-directory)` it asynchronously fetches the current
-  upstream and merges `--ff-only @{u}`, reloads `init-update.el` through
-  `my/reload-config` if it changed, then calls the NEW definition of
+  upstream and merges `--ff-only @{u}`, reloads `init-update.el` and
+  `init-reload.el` through `my/reload-config` if either changed, then calls
+  the NEW definition of
   `(my/update--apply FROM TO)`.
 - The name and two-argument arity of `my/update--apply` are frozen forever;
   everything else, including build tools and apply steps, may change.

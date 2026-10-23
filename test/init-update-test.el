@@ -184,6 +184,34 @@
             (should (init-update-test--marker)))
         (fset 'my/update--apply old-apply)))))
 
+(ert-deftest init-update-test-bootstrap-reloads-reloader ()
+  "The new updater runs on the new reloader, not the one loaded before."
+  (init-update-test--fixture
+    (let ((old-apply (symbol-function 'my/update--apply))
+          (init-update-test--effect nil))
+      (unwind-protect
+          (progn
+            (init-update-test--commit
+             publisher "lisp/core/init-reload.el"
+             (concat ";;; -*- lexical-binding: t; -*-\n"
+                     "(defun init-update-test--new-reload-api () 'new-reloader)\n"))
+            (init-update-test--commit
+             publisher "lisp/core/init-update.el"
+             (concat ";;; -*- lexical-binding: t; -*-\n"
+                     "(defvar init-update-test--effect)\n"
+                     "(declare-function init-update-test--new-reload-api nil)\n"
+                     "(defun my/update--apply (_from _to)\n"
+                     "  (setq init-update-test--effect\n"
+                     "        (init-update-test--new-reload-api))\n"
+                     "  (my/update--put :remaining nil)\n"
+                     "  (my/update--next-step))\n"))
+            (init-update-test--git publisher "push" "-q")
+            (my/update-config)
+            (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+            (should (eq init-update-test--effect 'new-reloader)))
+        (fset 'my/update--apply old-apply)
+        (fmakunbound 'init-update-test--new-reload-api)))))
+
 (ert-deftest init-update-test-bootstrap-compile-failure ()
   (init-update-test--fixture
     (init-update-test--commit publisher "lisp/core/init-update.el" "(defun broken (")
