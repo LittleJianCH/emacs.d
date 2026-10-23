@@ -21,8 +21,13 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'lisp-mode)
 (require 'init-base)
 (require 'init-reload)
+
+(defvar my/languages)
+(defvar my/lazy-modules)
+(declare-function my/lazy-require "init-lazy" (feature))
 
 (defvar my/update--state nil
   "Current asynchronous update state, or nil when idle.
@@ -119,6 +124,11 @@ With ALLOW-FAILURE, CALLBACK also receives a nonzero exit status."
   "Whether PATHS require rebuilding or updating emx."
   (my/update--paths-p paths "\\`\\(?:emx/\\|bin/emx\\'\\|lisp/agent/backend/\\(?:pi\\|dsh\\)/\\)"))
 
+(defun my/update--languages-p (paths)
+  "Whether PATHS can change enabled languages or their lazy triggers."
+  (my/update--paths-p
+   paths "\\`\\(?:init\\.el\\|lisp/core/init-lazy\\.el\\|lisp/lang/.*\\.el\\)\\'"))
+
 (defun my/update--lisp ()
   "Reload changed loaded Lisp files, without invoking the daemon step."
   (let* ((root (plist-get my/update--state :root))
@@ -137,6 +147,61 @@ With ALLOW-FAILURE, CALLBACK also receives a nonzero exit status."
                                          :error "init files only run at startup"))))))
     (list :reload report)))
 
+(defun my/update--language-default (revision)
+  "Read REVISION's literal `my/languages' declaration without evaluating it.
+Only a top-level declaration with a quoted list of symbols or nil is accepted."
+  (let ((default-directory (plist-get my/update--state :root)))
+    (with-temp-buffer
+      (unless (zerop (process-file "git" nil t nil "show"
+                                  (concat revision ":init.el")))
+        (error "Cannot read init.el at %s: %s" revision (buffer-string)))
+      (goto-char (point-min))
+      (with-syntax-table emacs-lisp-mode-syntax-table
+        (let ((read-circle nil) (read-symbol-shorthands nil) seen value)
+          (while (progn (forward-comment (point-max)) (not (eobp)))
+            (let ((form (read (current-buffer))))
+              (when (and (consp form) (memq (car form) '(defvar defconst defcustom))
+                         (eq (cadr form) 'my/languages))
+                (when seen (error "Multiple my/languages declarations at %s" revision))
+                (setq seen t)
+                (let ((expression (nth 2 form)))
+                  (unless (and (cddr form)
+                               (or (null expression)
+                                   (and (eq (car-safe expression) 'quote)
+                                        (equal (length expression) 2))))
+                    (error "Nonliteral my/languages declaration at %s" revision))
+                  (setq value (cadr expression))
+                  (unless (and (proper-list-p value) (seq-every-p #'symbolp value))
+                    (error "Invalid my/languages declaration at %s" revision))))))
+          (unless seen (error "Missing my/languages declaration at %s" revision))
+          value)))))
+
+(defun my/update--languages ()
+  "Adopt changed language defaults and refresh enabled, unloaded triggers.
+Use :root, :from and :to in `my/update--state'.
+Preserve customized language selections.  Never require a language module."
+  (let* ((old (my/update--language-default (plist-get my/update--state :from)))
+         (new (my/update--language-default (plist-get my/update--state :to)))
+         (file (expand-file-name "lisp/core/init-lazy.el"
+                                 (plist-get my/update--state :root)))
+         (my/reload-emx-function nil)
+         (report
+          (when (or (not (featurep 'init-lazy))
+                    (my/reload--changed-p file))
+            (my/reload-config (list file)))))
+    ;; Leave defaults and triggers alone if the table could not be reloaded.
+    (when (seq-every-p (lambda (entry) (eq (plist-get entry :status) 'reloaded)) report)
+      (when (equal my/languages old) (setq my/languages new))
+      (dolist (language my/languages)
+        (let* ((feature (intern (format "lang-%s" language)))
+               (spec (cdr (assq feature my/lazy-modules))))
+          ;; Without a trigger, lazy-require would eagerly require the module.
+          (when (and (not (featurep feature))
+                     (or (plist-get spec :files) (plist-get spec :keys)
+                         (plist-get spec :commands)))
+            (my/lazy-require feature)))))
+    (list :reload report)))
+
 (defun my/update--emx ()
   "Apply daemon changes using the installed daemon reload function."
   (unless my/reload-emx-function
@@ -147,6 +212,7 @@ With ALLOW-FAILURE, CALLBACK also receives a nonzero exit status."
   '((:name "emx-deps" :when my/update--deps-p
      :run ("npm" "install" "--prefix" "emx"))
     (:name "lisp" :when my/update--lisp-p :run my/update--lisp)
+    (:name "languages" :when my/update--languages-p :run my/update--languages)
     (:name "emx" :when my/update--emx-p :run my/update--emx))
   "Ordered update steps owned by this revision.
 Each plist has :name, :when (a predicate of changed paths), and :run.

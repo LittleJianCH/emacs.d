@@ -8,9 +8,22 @@
          (expand-file-name "test-helper.el"
                            (file-name-directory (or load-file-name buffer-file-name))))
 (require 'init-update)
+(require 'init-lazy)
 (require 'agent-ui)
 
 (defvar init-update-test--effect nil)
+;; This built-in variable needs a special declaration for fixture bindings.
+(with-suppressed-warnings ((lexical features))
+  (defvar features))
+
+(defconst init-update-test--revision-steps my/update-steps
+  "Real revision-owned steps, before fixtures bind them.")
+
+(defconst init-update-test--updater-source
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name "lisp/core/init-update.el" emx-test--checkout))
+    (buffer-string))
+  "Updater source used to exercise the old bootstrap entry point.")
 
 (defun init-update-test--git (dir &rest args)
   "Run Git ARGS in DIR and return trimmed output."
@@ -91,6 +104,228 @@
 (defun init-update-test--mark (revision)
   "Set the fixture's applied marker to REVISION."
   (init-update-test--write my/var-dir "update/applied" revision))
+
+(defconst init-update-test--language-table
+  '((lang-update-old
+     :files (("\\.uold\\'" . init-update-test-old-mode))
+     :commands (init-update-test-old-mode init-update-test-extra-command))
+    (lang-update-new :files (("\\.unew\\'" . init-update-test-new-mode))
+                     :commands (init-update-test-new-mode))
+    (lang-update-loaded :commands (init-update-test-loaded-command))
+    (lang-update-disabled :commands (init-update-test-disabled-command)))
+  "Fake lazy declarations, including loaded and disabled languages.")
+
+(defmacro init-update-test--languages (&rest body)
+  "Run BODY with old/new language revisions and isolated lazy state."
+  (declare (indent 0))
+  `(init-update-test--fixture
+     (let* ((my/update-steps init-update-test--revision-steps)
+            (my/languages '(update-old update-eager update-loaded))
+            (my/lazy-modules nil)
+            (my/lazy--triggers nil)
+            (features (cons 'lang-update-loaded (copy-sequence features)))
+            (after-load-alist (copy-tree after-load-alist))
+            (auto-mode-alist (copy-tree auto-mode-alist))
+            before to)
+       (unwind-protect
+           (cl-letf (((symbol-function 'package-install)
+                      (lambda (&rest _) (ert-fail "No package installation")))
+                     ((symbol-function 'package-refresh-contents)
+                      (lambda (&rest _) (ert-fail "No archive refresh"))))
+             (make-directory (expand-file-name "emx/node_modules" repo) t)
+             (init-update-test--commit
+              repo "init.el"
+              (concat "(defvar my/languages '(update-old update-eager update-loaded))\n"
+                      "(error \"Never evaluate init.el\")\n"))
+             (init-update-test--commit
+              repo "lisp/core/init-lazy.el"
+              (format (concat ";;; -*- lexical-binding: t; -*-\n"
+                              "(defconst my/lazy-modules '%S)\n(provide 'init-lazy)\n")
+                      '((lang-update-old :commands (init-update-test-old-mode)))))
+             (load (expand-file-name "lisp/core/init-lazy.el" repo) nil t)
+             (my/lazy-require 'lang-update-old)
+             (setq before (init-update-test--git repo "rev-parse" "HEAD"))
+             (init-update-test--mark before)
+             (init-update-test--commit
+              repo "init.el"
+              (concat "(defvar my/languages\n"
+                      "  '(update-old update-eager update-loaded update-new))\n"
+                      "(error \"Never evaluate init.el\")\n"))
+             (init-update-test--commit
+              repo "lisp/core/init-lazy.el"
+              (format (concat ";;; -*- lexical-binding: t; -*-\n"
+                              "(defconst my/lazy-modules '%S)\n(provide 'init-lazy)\n")
+                      init-update-test--language-table))
+             (dolist (language '(old eager loaded new disabled))
+               (init-update-test--commit
+                repo (format "lisp/lang/lang-update-%s.el" language)
+                "(error \"Never eagerly load a language module\")\n"))
+             (setq to (init-update-test--git repo "rev-parse" "HEAD"))
+             (ignore to)                ; Some bodies only inspect the report.
+             (let ((load-path (cons (expand-file-name "lisp/lang/" repo) load-path)))
+               ,@body))
+         (dolist (entry (copy-sequence my/lazy--triggers))
+           (my/lazy--remove-triggers (car entry)))))))
+
+(ert-deftest init-update-test-language-default-adoption-and-idempotence ()
+  (init-update-test--languages
+    (let ((reload (symbol-function 'my/reload-config)) (calls 0)
+          (my/reload-emx-function
+           (lambda () (ert-fail "Language update must not restart daemons"))))
+      (cl-letf (((symbol-function 'my/reload-config)
+                 (lambda (&optional files)
+                   (should-not my/reload-emx-function)
+                   (cl-incf calls)
+                   (funcall reload files))))
+        (with-temp-buffer
+          (setq buffer-file-name (expand-file-name "edited.unew" repo))
+          (insert "unsaved text")
+          (setq-local init-update-test--effect 'buffer-state)
+          (my/update-config)
+          (let ((report (init-update-test--wait)))
+            (should (equal (plist-get report :status) "applied"))
+            (should (equal (mapcar (lambda (step) (plist-get step :name))
+                                  (append (plist-get report :steps) nil))
+                           '("emx-deps" "lisp" "languages" "emx")))
+            (should (equal (plist-get report :restart_required)
+                           (vector (expand-file-name "init.el" (file-truename repo))))))
+          (should (eq major-mode 'fundamental-mode))
+          (should (buffer-modified-p))
+          (should (eq init-update-test--effect 'buffer-state)))
+        ;; The Lisp step loaded the new table once; languages must reuse it.
+        (should (= calls 1))
+        (should (equal my/languages '(update-old update-eager update-loaded update-new)))
+        (should (equal my/lazy-modules init-update-test--language-table))
+        (should (equal (sort (mapcar #'car my/lazy--triggers) #'string<)
+                       '(lang-update-new lang-update-old)))
+        (should (commandp 'init-update-test-extra-command))
+        (should (commandp 'init-update-test-new-mode))
+        (should-not (fboundp 'init-update-test-loaded-command))
+        (should-not (fboundp 'init-update-test-disabled-command))
+        (should-not (featurep 'lang-update-new))
+        (should-not (featurep 'lang-update-eager))
+        (let ((rules (copy-tree auto-mode-alist)))
+          ;; Reapply the same range, including the same changed declarations.
+          (setq my/update--state
+                (list :root (file-truename repo) :from before :to to
+                      :marker (my/var "update/applied")))
+          (my/update--apply before to)
+          (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+          (should (equal auto-mode-alist rules))
+          (should (= (length my/lazy--triggers) 2))
+          (should (= calls 2))
+          ;; Updating at the applied revision skips the step altogether.
+          (my/update-config)
+          (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+          (should (= calls 2))
+          (should (equal auto-mode-alist rules))
+          (should (equal (init-update-test--marker) to)))))))
+
+(ert-deftest init-update-test-language-custom-selection-preserved ()
+  (init-update-test--languages
+    (let ((properties (copy-sequence (symbol-plist 'my/languages))))
+      (unwind-protect
+          (progn
+            (setq my/languages '(update-old))
+            (put 'my/languages 'saved-value '((quote (update-old))))
+            (my/update-config)
+            (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+            (should (equal my/languages '(update-old)))
+            (should (equal (get 'my/languages 'saved-value) '((quote (update-old)))))
+            (should (commandp 'init-update-test-extra-command))
+            (should-not (fboundp 'init-update-test-new-mode))
+            (should-not (assoc "\\.unew\\'" auto-mode-alist)))
+        (setplist 'my/languages properties)))))
+
+(ert-deftest init-update-test-language-bootstrap-owns-new-step ()
+  (init-update-test--languages
+    ;; The running bootstrap has no language step.  Reload the new updater
+    ;; through its unchanged two-argument apply entry point.
+    (setq my/update-steps nil)
+    (init-update-test--commit repo "lisp/core/init-update.el"
+                              init-update-test--updater-source)
+    (my/update-config)
+    (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+    (should (compiled-function-p (symbol-function 'my/update--language-default)))
+    (should (memq 'update-new my/languages))
+    (should (commandp 'init-update-test-new-mode))))
+
+(ert-deftest init-update-test-language-helper-compiles-table-only-as-needed ()
+  (dolist (unloaded '(nil t))
+    (init-update-test--languages
+      (when unloaded (setq features (delq 'init-lazy features)))
+      (setq my/update--state (list :root (file-truename repo) :from before :to to))
+      (let ((reload (symbol-function 'my/reload-config))
+            (dirty (not unloaded)) (calls 0)
+            (my/reload-emx-function (lambda () (ert-fail "Daemon called"))))
+        (cl-letf (((symbol-function 'my/reload--changed-p) (lambda (_file) dirty))
+                  ((symbol-function 'my/reload-config)
+                   (lambda (&optional files)
+                     (should-not my/reload-emx-function)
+                     (cl-incf calls)
+                     (prog1 (funcall reload files) (setq dirty nil)))))
+          (let ((report (plist-get (my/update--languages) :reload)))
+            (should (= (length report) 1))
+            (should (eq (plist-get (car report) :status) 'reloaded)))
+          (should (featurep 'init-lazy))
+          (should (equal my/lazy-modules init-update-test--language-table))
+          (should (memq 'update-new my/languages))
+          (should (commandp 'init-update-test-new-mode))
+          (should-not (plist-get (my/update--languages) :reload))
+          (should (= calls 1))
+          (should (= (length my/lazy--triggers) 2))))
+      (setq my/update--state nil))))
+
+(ert-deftest init-update-test-language-table-compile-failure ()
+  (init-update-test--languages
+    ;; No loaded table in this repo: the languages step must compile it itself.
+    (setq features (delq 'init-lazy features))
+    (setq load-history
+          (seq-remove (lambda (entry)
+                        (and (stringp (car entry))
+                             (equal (file-truename (car entry))
+                                    (file-truename
+                                     (expand-file-name "lisp/core/init-lazy.el" repo)))))
+                      load-history))
+    (init-update-test--commit repo "lisp/core/init-lazy.el" "(defun broken (")
+    (my/update-config)
+    (let* ((report (init-update-test--wait))
+           (step (aref (plist-get report :steps) 2)))
+      (should (equal (plist-get report :status) "failed"))
+      (should (equal (plist-get step :name) "languages"))
+      (should (equal (plist-get step :status) "failed"))
+      (should (seq-some (lambda (entry) (eq (plist-get entry :status) 'failed))
+                        (plist-get report :reload))))
+    (should (equal my/languages '(update-old update-eager update-loaded)))
+    (should-not (fboundp 'init-update-test-new-mode))
+    (should (equal (init-update-test--marker) before))))
+
+(ert-deftest init-update-test-language-declaration-is-only-data ()
+  (dolist (source '("(defvar my/languages (progn (error \"Must not evaluate\") '(x)))"
+                    "(defvar my/languages '(x . y))"
+                    "(defvar my/languages '(x \"not a symbol\"))"
+                    "(defvar my/languages '#1=(x . #1#))"
+                    "(defvar my/languages '(x)) (defvar my/languages '(y))"
+                    "(defvar my/apps '(x))"
+                    "(defvar my/languages)"
+                    "(defvar my/languages '(x)"))
+    (init-update-test--fixture
+      (let ((revision (init-update-test--commit repo "init.el" source)))
+        (setq my/update--state (list :root repo))
+        (should-error (my/update--language-default revision))
+        (setq my/update--state nil)))))
+
+(ert-deftest init-update-test-language-nonliteral-failure-keeps-marker ()
+  (init-update-test--languages
+    (init-update-test--commit
+     repo "init.el" "(defvar my/languages (error \"Must never evaluate\"))\n")
+    (my/update-config)
+    (let ((report (init-update-test--wait)))
+      (should (equal (plist-get report :status) "failed"))
+      (should (equal (plist-get (aref (plist-get report :steps) 2) :status) "failed"))
+      (should (string-match-p "Nonliteral" (plist-get report :error))))
+    (should (equal my/languages '(update-old update-eager update-loaded)))
+    (should (equal (init-update-test--marker) before))))
 
 (ert-deftest init-update-test-fast-forward ()
   (init-update-test--fixture
