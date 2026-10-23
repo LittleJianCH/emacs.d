@@ -237,6 +237,22 @@
             (should-not (assoc "\\.unew\\'" auto-mode-alist)))
         (setplist 'my/languages properties)))))
 
+(ert-deftest init-update-test-language-mode-only-trigger ()
+  "Mode-only declarations refresh without loading their language modules."
+  (init-update-test--languages
+    (let ((my/languages '(update-mode))
+          (my/lazy-modules '((lang-update-mode :modes (init-update-test-mode))))
+          (change-major-mode-after-body-hook nil))
+      (setq my/update--state (list :root (file-truename repo) :from before :to to))
+      (cl-letf (((symbol-function 'my/reload--changed-p) (lambda (_) nil)))
+        (my/update--languages)
+        (should (assq 'lang-update-mode my/lazy--triggers))
+        (should (= (length change-major-mode-after-body-hook) 1))
+        (should-not (featurep 'lang-update-mode))
+        (my/update--languages)
+        (should (= (length change-major-mode-after-body-hook) 1))
+        (my/lazy--remove-triggers 'lang-update-mode)))))
+
 (ert-deftest init-update-test-language-bootstrap-owns-new-step ()
   (init-update-test--languages
     ;; The running bootstrap has no language step.  Reload the new updater

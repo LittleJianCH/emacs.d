@@ -4,6 +4,9 @@
 Emacs 包。编译器和语言服务器需另行安装，也可以由项目的 direnv/Nix
 环境提供。配置不会自动安装系统工具链。
 
+C/C++ 也已启用，详见 [C/C++ 配置](c-cpp.md)。配置更新会注册已启用语言
+的懒加载入口；自定义的 `my/languages` 选择会保留。
+
 | 语言 | 文件 | Emacs 集成 | 外部工具 |
 | --- | --- | --- | --- |
 | Haskell | `.hs`、`.lhs`、`.cabal` | haskell-mode、GHCi、Eglot | GHC；补全和诊断需要 HLS |
@@ -58,7 +61,7 @@ Evil 的 `SPC m` 下，`i` 切换目标、`d` 刷新导入、`b` 构建、`l` �
 
 自动化测试使用模拟工具，不启动真实的 GHC/HLS、Coq 或 Lean 进程。
 运行方法见 `AGENTS.md`；本次新增的测试是 `test/lang-functional-test.el`
-和 `test/lang-coq-test.el`。真实工具链的交互体验仍需在试用分支时验证。
+和 `test/lang-coq-test.el`。真实工具链的交互体验仍需在实际项目中验证。
 
 上游说明：[HLS 配置](https://haskell-language-server.readthedocs.io/en/latest/configuration.html)、
 [Proof General 安装](https://proofgeneral.github.io/download/)、

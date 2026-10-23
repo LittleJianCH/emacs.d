@@ -18,13 +18,16 @@
 ;; - Commands, mode functions included, are stubs that load the module and
 ;;   then run the real definition with the same arguments.  Visiting a
 ;;   file, `M-x nix-mode' and a `mode: nix' cookie all end up in one.
+;; - Modes that may already be defined load the module after the selected
+;;   mode's body, before its hooks run.  Setup hooks added by the module
+;;   therefore run during that same activation, without replacing the mode.
 ;; - A global key runs a command that loads the module and types the key
 ;;   again, so the module's binding takes over.
 ;;
-;; The first use of any stub loads the module and removes all of its stubs.
-;; A module that fails to load loses its stubs too, so a broken or offline
+;; The first trigger loads the module and removes all of its triggers.
+;; A module that fails to load loses its triggers too, so a broken or offline
 ;; module is reported once and never retried in a loop; retry it with
-;; `M-x my/lazy-load'.  A quit puts the stubs back.
+;; `M-x my/lazy-load'.  A quit puts the triggers back.
 ;;
 ;; A stub replaces only an unbound or autoloaded function.  A direct
 ;; `(require 'lang-nix)' while nix-mode is not installed removes the stub
@@ -60,6 +63,12 @@
               :commands (my/coq-mode))
     (lang-lean :files (("\\.lean\\'" . lean4-select-mode))
                :commands (lean4-select-mode lean4-mode))
+    (lang-c :files (("\\.c\\'" . my/c-mode)
+                    ("\\.\\(?:cc\\|cpp\\|cxx\\|c\\+\\+\\|C\\|hh\\|hpp\\|hxx\\|h\\+\\+\\|H\\|ipp\\|inl\\|tpp\\|ixx\\|cppm\\)\\'"
+                     . my/c++-mode)
+                    ("\\.h\\'" . my/c-or-c++-mode))
+            :commands (my/c-mode my/c++-mode my/c-or-c++-mode)
+            :modes (c-mode c++-mode c-ts-mode c++-ts-mode))
     ;; The pattern is `my/agda-file-pattern', which needs lang-agda loaded.
     (lang-agda :files (("\\.\\(?:agda\\|lagda\\(?:\\.\\(?:md\\|rst\\|tex\\|org\\|typ\\|tree\\)\\)?\\)\\'"
                         . my/agda-mode))
@@ -74,19 +83,22 @@ Each value is a plist with any of these keys:
              prefix keys that the module binds to a keymap itself
   :commands  interactive commands, to run once the module has loaded;
              list the MODEs of :files here, or the files load nothing
+  :modes     major mode symbols that load the module after their bodies,
+             before mode hooks; also works for modes already defined
 A feature without an entry is required at once by `my/lazy-require'.")
 
 (defvar my/lazy--triggers nil
-  "Alist of features and the stubs currently installed for them.
-Each stub is one of
+  "Alist of features and the triggers currently installed for them.
+Each trigger is one of
   (key KEY STUB OLD)   STUB bound to KEY, replacing binding OLD
   (command COMMAND STUB OLD DOC)
                        STUB as function of COMMAND, replacing OLD, with
                        DOC as its `function-documentation'
-Kept across reloads of this file, so no stub is installed twice.")
+  (mode CALLBACK)      CALLBACK on `change-major-mode-after-body-hook'
+Kept across reloads of this file, so no trigger is installed twice.")
 
 (defun my/lazy--remove-triggers (feature)
-  "Remove every stub installed for FEATURE and restore what they replaced.
+  "Remove every trigger for FEATURE and restore what its stubs replaced.
 Only stubs that are still in place are touched: a binding or definition
 the module made itself stays."
   (let ((record (assq feature my/lazy--triggers)))
@@ -94,6 +106,8 @@ the module made itself stays."
     (setq my/lazy--triggers (delq record my/lazy--triggers))
     (dolist (trigger (cdr record))
       (pcase trigger
+        (`(mode ,callback)
+         (remove-hook 'change-major-mode-after-body-hook callback))
         (`(key ,key ,stub ,old)
          (when (eq (lookup-key (current-global-map) (key-parse key)) stub)
            (if old
@@ -111,10 +125,10 @@ the module made itself stays."
   "Load FEATURE, a module of `my/lazy-modules'; return non-nil if it worked.
 Interactively, choose among the modules that are not loaded yet.  This
 is the way to retry a load that failed, say because Emacs was offline.
-Remove FEATURE's stubs first: a package's own autoloads must not find the
-stub of its command in the way, and no failure can leave a stub behind.
+Remove FEATURE's triggers first: a package's own autoloads must not find
+the stub of its command in the way, and no failure can leave a trigger.
 An error is reported and not retried.  A quit, say during the first
-download, puts the stubs back and quits on."
+download, puts the triggers back and quits on."
   (interactive
    (let ((pending (cl-loop for (module . _) in my/lazy-modules
                            unless (featurep module)
@@ -176,6 +190,12 @@ The stub is gone by then, and so is any definition that was in the way."
     ;; A rule that is there already moves instead of appearing twice.
     (dolist (rule (reverse (plist-get spec :files)))
       (setq auto-mode-alist (cons rule (delete rule auto-mode-alist))))
+    (when-let* ((modes (plist-get spec :modes)))
+      (let ((callback (lambda ()
+                        (when (memq major-mode modes)
+                          (my/lazy-load feature)))))
+        (add-hook 'change-major-mode-after-body-hook callback)
+        (push (list 'mode callback) (cdr record))))
     (dolist (key (plist-get spec :keys))
       (let ((stub (my/lazy--key-stub feature key))
             (old (lookup-key (current-global-map) (key-parse key))))
@@ -206,12 +226,13 @@ The stub is gone by then, and so is any definition that was in the way."
   "Require FEATURE now, or on first use of one of its triggers.
 Triggers are declared in `my/lazy-modules'.  A feature that has none,
 or is loaded already, is required now.  Calling this again replaces the
-stubs of an earlier call."
+triggers of an earlier call."
   (let ((spec (cdr (assq feature my/lazy-modules))))
     (my/lazy--remove-triggers feature)
     (if (or (featurep feature)
             (not (or (plist-get spec :files)
                      (plist-get spec :keys)
+                     (plist-get spec :modes)
                      (plist-get spec :commands))))
         (require feature)
       (my/lazy--install feature spec))))

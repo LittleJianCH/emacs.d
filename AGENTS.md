@@ -33,7 +33,7 @@ lisp/core/               base layer
   init-dev.el            project, magit, eglot, tree-sitter
   init-remote.el         remote editing (tramp-rpc)
   init-term.el           terminals (ghostel, native module downloaded prebuilt)
-  init-lazy.el           on-demand modules: `my/lazy-modules' triggers (files, keys, commands)
+  init-lazy.el           on-demand modules: `my/lazy-modules' triggers (files, modes, keys, commands)
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
   agent-emx.el          required daemon client, session views and editor tools
@@ -70,6 +70,7 @@ test/init-lazy-test.el      ERT suite for on-demand module loading
 test/lang-test.el           ERT suite for the language modules (toolchains mocked)
 test/lang-functional-test.el Haskell and Lean startup, environments and keys
 test/lang-coq-test.el       Proof General bootstrap and proof workflows (mocked)
+test/lang-c-test.el         C/C++ modes, clangd environments and keys (mocked)
 test/agent-review-test.el   ERT suite for atomic reviews (builds throwaway Git repos)
 test/agent-canvas-test.el   ERT suite for agent pages (elisp blocks, state, timers)
 test/agent-usage-test.el    ERT suite for usage events, the echo line and the usage page
@@ -246,7 +247,7 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/init-base-test.el -l test/init-evil-pinyin-test.el \
       -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \
-      -l test/init-lazy-test.el -l test/lang-test.el \
+      -l test/init-lazy-test.el -l test/lang-test.el -l test/lang-c-test.el \
       -l test/lang-functional-test.el -l test/lang-coq-test.el \
       -l test/agent-review-test.el \
       -l test/agent-canvas-test.el -l test/agent-session-table-test.el \
@@ -391,7 +392,9 @@ add or edit its step in `lisp/core/init-update.el` in the same commit. Steps
 must be idempotent, derive from repository state and work when bootstrapped
 from the previous revision's `my/update-config`. `my/update-steps` is ordered:
 `emx-deps` installs changed/missing npm dependencies, `lisp` reloads changed
-already loaded files, and `emx` builds and updates local/host daemons. A future
+already loaded files, `languages` adopts changed defaults unless the selection
+was customized and refreshes enabled lazy language triggers, and `emx` builds
+and updates local/host daemons. A future
 Rust runtime can replace the relevant step with `cargo build`. The Lisp step
 suppresses the daemon reload hook so that emx runs only once. Newly required
 configuration modules are also compiled and included in reload reports.

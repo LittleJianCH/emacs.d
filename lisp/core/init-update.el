@@ -198,7 +198,7 @@ Preserve customized language selections.  Never require a language module."
           ;; Without a trigger, lazy-require would eagerly require the module.
           (when (and (not (featurep feature))
                      (or (plist-get spec :files) (plist-get spec :keys)
-                         (plist-get spec :commands)))
+                         (plist-get spec :commands) (plist-get spec :modes)))
             (my/lazy-require feature)))))
     (list :reload report)))
 

@@ -34,6 +34,20 @@
 (defvar init-lazy-test-loads 0 "Times a fake module body started.")
 (defvar init-lazy-test-configured nil "Set by a fake module when it loads.")
 (defvar init-lazy-test-result nil "What the fake package command saw.")
+(defvar init-lazy-test-events nil "Mode activation events, newest first.")
+
+(define-derived-mode init-lazy-test-native-mode prog-mode "LazyTest"
+  "A preloaded mode whose body records its activation."
+  (push 'body init-lazy-test-events))
+
+(define-derived-mode init-lazy-test-derived-mode init-lazy-test-native-mode
+  "LazyDerived"
+  "A mode that inherits from the preloaded test mode."
+  (push 'derived-body init-lazy-test-events))
+
+(defun init-lazy-test--setup ()
+  "Record a setup hook installed by the fake lazy module."
+  (push 'setup init-lazy-test-events))
 
 (defconst init-lazy-test--key "C-c Q"
   "Global key the fake modules use; it is restored after each test.")
@@ -70,11 +84,18 @@ Everything the modules and triggers touch is restored afterwards."
           (load-history load-history)
           (after-load-alist (copy-tree after-load-alist))
           (auto-mode-alist (copy-sequence auto-mode-alist))
+          (change-major-mode-after-body-hook
+           (copy-sequence change-major-mode-after-body-hook))
+          (prog-mode-hook nil)
+          (init-lazy-test-native-mode-hook nil)
+          (init-lazy-test-derived-mode-hook nil)
+          (after-change-major-mode-hook nil)
           (unread-command-events nil)
           (my/lazy--triggers nil)
           (init-lazy-test-loads 0)
           (init-lazy-test-configured nil)
           (init-lazy-test-result nil)
+          (init-lazy-test-events nil)
           (saved-key (init-lazy-test--global-key init-lazy-test--key))
           (saved-functions (mapcar (lambda (function)
                                      (and (fboundp function)
@@ -283,6 +304,139 @@ Everything the modules and triggers touch is restored afterwards."
                                     (mapconcat #'identity messages "\n")))
         (should-not (string-match-p "used to take" log))))))
 
+;;; Preloaded modes
+
+(defun init-lazy-test--mode-module ()
+  "Return a fake module that adds setup to the preloaded mode's hook."
+  (init-lazy-test--module
+   'init-lazy-test-modes
+   '(setq init-lazy-test-loads (1+ init-lazy-test-loads))
+   '(push 'load init-lazy-test-events)
+   '(add-hook 'init-lazy-test-native-mode-hook #'init-lazy-test--setup t)))
+
+(ert-deftest init-lazy-modes-preloaded-body-before-load-before-hooks ()
+  "A native mode stays intact, and new setup runs on its first activation."
+  (init-lazy-test--with-env (list (init-lazy-test--mode-module))
+    (let ((my/lazy-modules '((init-lazy-test-modes
+                             :commands (init-lazy-test-native-mode)
+                             :modes (init-lazy-test-native-mode))))
+          (definition (symbol-function 'init-lazy-test-native-mode))
+          (prog-mode-hook (list (lambda () (push 'parent init-lazy-test-events))))
+          (init-lazy-test-native-mode-hook
+           (list (lambda () (push 'mode init-lazy-test-events))))
+          (after-change-major-mode-hook
+           (list (lambda () (push 'after init-lazy-test-events))))
+          (before (copy-sequence change-major-mode-after-body-hook)))
+      (my/lazy-require 'init-lazy-test-modes)
+      (should-not (featurep 'init-lazy-test-modes))
+      (should (eq definition (symbol-function 'init-lazy-test-native-mode)))
+      (with-temp-buffer (init-lazy-test-native-mode))
+      (should (equal (reverse init-lazy-test-events)
+                     '(body load parent mode setup after)))
+      (should (eq definition (symbol-function 'init-lazy-test-native-mode)))
+      (should-not my/lazy--triggers)
+      (should (equal change-major-mode-after-body-hook before))
+      (setq init-lazy-test-events nil)
+      (with-temp-buffer (init-lazy-test-native-mode))
+      (should (equal (reverse init-lazy-test-events)
+                     '(body parent mode setup after)))
+      (should (= init-lazy-test-loads 1)))))
+
+(ert-deftest init-lazy-modes-cookie-bypasses-file-stub ()
+  "A cookie selecting a preloaded mode still loads the module and setup."
+  (init-lazy-test--with-env (list (init-lazy-test--mode-module))
+    (let ((my/lazy-modules '((init-lazy-test-modes
+                             :files (("\\.foo\\'" . init-lazy-test-foo-mode))
+                             :commands (init-lazy-test-foo-mode)
+                             :modes (init-lazy-test-native-mode)))))
+      (my/lazy-require 'init-lazy-test-modes)
+      (with-temp-buffer
+        (insert "/* -*- mode: init-lazy-test-native -*- */\n")
+        (setq buffer-file-name "/tmp/cookie.foo")
+        (set-auto-mode)
+        (should (eq major-mode 'init-lazy-test-native-mode)))
+      (should (equal (reverse init-lazy-test-events) '(body load setup)))
+      (should (= init-lazy-test-loads 1))
+      (should-not my/lazy--triggers)
+      (should-not (fboundp 'init-lazy-test-foo-mode)))))
+
+(ert-deftest init-lazy-modes-select-only-configured-final-mode ()
+  "Each feature matches its configured modes, not a mode's ancestors."
+  (init-lazy-test--with-env
+      (list (init-lazy-test--mode-module)
+            (init-lazy-test--module 'init-lazy-test-other))
+    (let ((my/lazy-modules '((init-lazy-test-modes
+                             :modes (text-mode init-lazy-test-native-mode))
+                            (init-lazy-test-other :modes (text-mode)))))
+      (my/lazy-require 'init-lazy-test-modes)
+      (my/lazy-require 'init-lazy-test-other)
+      (with-temp-buffer (init-lazy-test-derived-mode))
+      (should-not (featurep 'init-lazy-test-modes))
+      (should-not (featurep 'init-lazy-test-other))
+      (with-temp-buffer (init-lazy-test-native-mode))
+      (should (featurep 'init-lazy-test-modes))
+      (should-not (featurep 'init-lazy-test-other))
+      (should (equal (mapcar #'car my/lazy--triggers) '(init-lazy-test-other)))
+      (with-temp-buffer (text-mode))
+      (should (featurep 'init-lazy-test-other))
+      (should-not my/lazy--triggers))))
+
+(ert-deftest init-lazy-modes-direct-require-removes-callback ()
+  "Requiring a module directly removes its mode callback too."
+  (init-lazy-test--with-env (list (init-lazy-test--mode-module))
+    (let ((my/lazy-modules '((init-lazy-test-modes
+                             :modes (init-lazy-test-native-mode))))
+          (before (copy-sequence change-major-mode-after-body-hook)))
+      (my/lazy-require 'init-lazy-test-modes)
+      (should-not (equal change-major-mode-after-body-hook before))
+      (require 'init-lazy-test-modes)
+      (should-not my/lazy--triggers)
+      (should (equal change-major-mode-after-body-hook before)))))
+
+(ert-deftest init-lazy-modes-failed-load-removes-callback ()
+  "A mode-triggered failure leaves the mode usable without repeated loads."
+  (init-lazy-test--with-env
+      (list (init-lazy-test--module
+             'init-lazy-test-modes
+             '(setq init-lazy-test-loads (1+ init-lazy-test-loads))
+             '(error "Offline test module")))
+    (let ((my/lazy-modules '((init-lazy-test-modes
+                             :modes (init-lazy-test-native-mode))))
+          (before (copy-sequence change-major-mode-after-body-hook)))
+      (my/lazy-require 'init-lazy-test-modes)
+      (let ((messages (init-lazy-test--messages
+                       (lambda ()
+                         (with-temp-buffer (init-lazy-test-native-mode))))))
+        (should (string-match-p "Offline test module" (car (last messages)))))
+      (should-not my/lazy--triggers)
+      (should (equal change-major-mode-after-body-hook before))
+      (with-temp-buffer
+        (init-lazy-test-native-mode)
+        (should (eq major-mode 'init-lazy-test-native-mode)))
+      (should (= init-lazy-test-loads 1)))))
+
+(ert-deftest init-lazy-modes-quit-restores-single-callback ()
+  "A quit restores the mode callback once, ready for a later activation."
+  (init-lazy-test--with-env
+      (list (init-lazy-test--module
+             'init-lazy-test-modes
+             '(setq init-lazy-test-loads (1+ init-lazy-test-loads))
+             '(signal 'quit nil)))
+    (let ((my/lazy-modules '((init-lazy-test-modes
+                             :modes (init-lazy-test-native-mode)))))
+      (my/lazy-require 'init-lazy-test-modes)
+      (dotimes (attempt 2)
+        (should (eq (condition-case nil
+                        (with-temp-buffer (init-lazy-test-native-mode))
+                      (quit 'quit))
+                    'quit))
+        (should (= init-lazy-test-loads (1+ attempt)))
+        (let ((triggers (cdr (assq 'init-lazy-test-modes my/lazy--triggers))))
+          (should (= (length triggers) 1))
+          (should (= (cl-count (cadar triggers)
+                               change-major-mode-after-body-hook :test #'equal)
+                     1)))))))
+
 ;;; Keys
 
 (defconst init-lazy-test--key-forms
@@ -487,11 +641,12 @@ Everything the modules and triggers touch is restored afterwards."
                               :files (("\\.foo\\'" . init-lazy-test-foo-mode))
                               :keys ("C-c Q")
                               :commands (init-lazy-test-foo-mode
-                                         init-lazy-test-cmd))))
+                                         init-lazy-test-cmd)
+                              :modes (init-lazy-test-native-mode))))
           (before (copy-sequence auto-mode-alist)))
       (my/lazy-require 'init-lazy-test-all)
       (should (= (length (cdr (assq 'init-lazy-test-all my/lazy--triggers)))
-                 3))
+                 4))
       (init-lazy-test--visit "/tmp/x.foo")
       (should (featurep 'init-lazy-test-all))
       (should-not my/lazy--triggers)
@@ -548,13 +703,15 @@ Everything the modules and triggers touch is restored afterwards."
                               :files (("\\.foo\\'" . init-lazy-test-foo-mode))
                               :keys ("C-c Q")
                               :commands (init-lazy-test-foo-mode
-                                         init-lazy-test-cmd)))))
+                                         init-lazy-test-cmd)
+                              :modes (init-lazy-test-native-mode)))))
       (my/lazy-require 'init-lazy-test-all)
       (let ((rules (copy-sequence auto-mode-alist))
             (hooks (copy-tree (assq 'init-lazy-test-all after-load-alist)))
+            (mode-hooks (length change-major-mode-after-body-hook))
             (triggers (length (cdr (assq 'init-lazy-test-all
                                          my/lazy--triggers)))))
-        (should (= triggers 3))
+        (should (= triggers 4))
         (my/lazy-require 'init-lazy-test-all)
         ;; Reloading re-evaluates the table, but keeps the state.
         (let ((table my/lazy-modules))
@@ -569,6 +726,7 @@ Everything the modules and triggers touch is restored afterwards."
         (should (= (length (cdr (assq 'init-lazy-test-all my/lazy--triggers)))
                    triggers))
         (should (equal (assq 'init-lazy-test-all after-load-alist) hooks))
+        (should (= (length change-major-mode-after-body-hook) mode-hooks))
         (init-lazy-test--visit "/tmp/x.foo")
         (should-not my/lazy--triggers)
         (my/lazy-require 'init-lazy-test-all)
@@ -617,6 +775,7 @@ with `my/lazy-require'.  The functions, documentation, global keys and
 trigger state of the live Emacs come back afterwards."
   (let* ((spec (cdr (assq feature my/lazy-modules)))
          (triggers (copy-sequence my/lazy--triggers))
+         (mode-callbacks (copy-sequence change-major-mode-after-body-hook))
          (functions (mapcar (lambda (command)
                               (list command (symbol-function command)
                                     (get command 'function-documentation)))
@@ -631,6 +790,7 @@ trigger state of the live Emacs come back afterwards."
             (let ((features (remq feature (copy-sequence features))))
               (funcall thunk))))
       (setq my/lazy--triggers triggers)
+      (setq change-major-mode-after-body-hook mode-callbacks)
       (pcase-dolist (`(,command ,definition ,doc) functions)
         (fset command definition)
         (cl-remf (symbol-plist command) 'function-documentation)
@@ -674,7 +834,7 @@ the test is skipped unless the packages of the module are installed."
     (should (cdr entry))
     (let ((spec (cdr entry)))
       (while spec
-        (should (memq (car spec) '(:files :keys :commands)))
+        (should (memq (car spec) '(:files :keys :commands :modes)))
         (should (consp (cadr spec)))
         (dolist (item (cadr spec))
           (pcase (car spec)
@@ -682,7 +842,7 @@ the test is skipped unless the packages of the module are installed."
                     (should (symbolp (cdr item)))
                     (should (cdr item)))
             (:keys (should (key-valid-p item)))
-            (:commands (should (and item (symbolp item))))))
+            ((or :commands :modes) (should (and item (symbolp item))))))
         (setq spec (cddr spec))))
     ;; Files that no stub stands behind would never load the module.
     (let ((modes (mapcar #'cdr (plist-get (cdr entry) :files))))
