@@ -9,7 +9,7 @@ import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
 import type { UsageService } from '../usage/service.ts'
 import type { Config, Profile, ProfileCandidate } from '../config.ts'
 import { candidateDisabledBy, profileCandidates } from '../config.ts'
-import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings, Usage } from './protocol.ts'
+import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings, Usage, RunGroup, RunReport } from './protocol.ts'
 import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop', 'session_rate']
@@ -759,6 +759,55 @@ export class Collaboration {
       try { const row = JSON.parse(line); return row && typeof row === 'object' ? [row] : [] } catch { return [] }
     })
   }
+  /** Aggregate immutable run rows with the latest authorized rating per run. */
+  runReport(range?: number): RunReport {
+    const now = Date.now() / 1000
+    const rows = this.runLog()
+    const runs = rows.filter((row) => row.type === 'run' && (!range || row.start >= now - range))
+    const owners = new Map(runs.map((row) => [row.run, row.parent.session]))
+    const ratings = new Map<number, Record<string, any>>()
+    for (const row of rows) if (row.type === 'rating' && owners.has(row.run) && owners.get(row.run) === row.session) {
+      ratings.set(row.run, row)
+    }
+    const groups = new Map<string, RunGroup>()
+    for (const row of runs) {
+      const model = row.model ?? null
+      const key = JSON.stringify([row.profile, row.agent, model])
+      let group = groups.get(key)
+      if (!group) {
+        group = { profile: row.profile, agent: row.agent, model,
+          runs: 0, failed: 0, closed: 0, rated: 0, usable: 0, rework: 0, wrong: 0, verified: 0,
+          duration: null, tokens: { input: 0, cache_read: 0, cache_write: 0, output: 0 }, items: [] }
+        groups.set(key, group)
+      }
+      group.runs++
+      if (row.outcome === 'failed') group.failed++
+      if (row.outcome === 'closed') group.closed++
+      const rating = ratings.get(row.run)
+      if (rating) {
+        group.rated++
+        if (rating.verdict === 'usable') group.usable++
+        if (rating.verdict === 'rework') group.rework++
+        if (rating.verdict === 'wrong') group.wrong++
+        if (rating.verified) group.verified++
+      }
+      for (const token of ['input', 'cache_read', 'cache_write', 'output'] as const) group.tokens[token] += row.tokens[token]
+      group.items.push({ run: row.run, start: row.start, end: row.end, duration: row.duration,
+        handle: row.handle, title: row.title, context: row.context, outcome: row.outcome,
+        ...(row.errors ? { errors: row.errors } : {}), tools: row.tools, reply: row.reply, tokens: row.tokens,
+        effort: row.effort, mode: row.mode,
+        parent: { handle: row.parent.handle, agent: row.parent.agent, model: row.parent.model },
+        ...(rating ? { rating: { verdict: rating.verdict, verified: rating.verified,
+          ...(rating.note !== undefined ? { note: rating.note } : {}), time: rating.time } } : {}) })
+    }
+    for (const group of groups.values()) {
+      group.items.sort((a, b) => b.start - a.start || b.run - a.run)
+      const durations = group.items.map((item) => item.duration).filter(Number.isFinite).sort((a, b) => a - b)
+      const middle = Math.floor(durations.length / 2)
+      if (durations.length) group.duration = durations.length % 2 ? durations[middle] : (durations[middle - 1] + durations[middle]) / 2
+    }
+    return { now, range: range || null, groups: [...groups.values()].sort((a, b) => b.runs - a.runs || a.profile.localeCompare(b.profile)) }
+  }
   #append(row: object): void {
     mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
     appendFileSync(this.#runFile, JSON.stringify(row) + '\n', { mode: 0o600 })
@@ -824,7 +873,15 @@ export class Collaboration {
       if (Array.isArray(data.active)) this.active = new Map(data.active)
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
     // Never reuse a logged run number, even if collab.json was lost.
-    for (const row of this.runLog()) if (Number.isSafeInteger(row.run) && row.run > this.runs) this.runs = row.run
+    const logged = new Set<number>()
+    for (const row of this.runLog()) {
+      if (Number.isSafeInteger(row.run) && row.run > this.runs) this.runs = row.run
+      if (row.type === 'run') logged.add(row.run)
+    }
+    // An append may have succeeded before a crash prevented saving active state.
+    let pruned = false
+    for (const [id, start] of this.active) if (logged.has(start.run)) { this.active.delete(id); pruned = true }
+    if (pruned) this.save()
     // Children are not restored: their runs ended with the previous daemon.
     for (const id of this.active.keys()) if (!this.host.sessions.has(id)) this.#logRun(undefined, { outcome: 'closed' }, id)
     this.schedule()

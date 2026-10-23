@@ -643,6 +643,8 @@ test('run counters persist, honor the log maximum and restore lost active runs',
     replacement.stop()
     const file = join(t.dir, 'emx/collab.json')
     const state = JSON.parse(readFileSync(file, 'utf8')); state.runs = 0
+    // Simulate a crash after the append but before the active-state save.
+    state.active = [...t.collab.active]
     writeFileSync(file, JSON.stringify(state))
     replacement = new Collaboration(t.collab.host); replacement.restore()
     assert.equal(replacement.runs, 1)
@@ -722,5 +724,98 @@ test('session_rate validates ownership and parameters and appends bounded one-li
     assert.equal(rating.verdict, 'rework'); assert.equal(rating.verified, false)
     assert.equal('note' in rating, false)
     await assert.rejects(t.collab.call(other, 'session_rate', valid, signal()), /isn't one you started/)
+  } finally { await t.cleanup() }
+})
+
+test('run reports group by profile, agent and actual model and join only the latest authorized rating', (ctx) => {
+  const t = setup()
+  try {
+    ctx.mock.method(Date, 'now', () => 2000000)
+    const row = (run: number, start: number, duration: number, extra = {}) => ({
+      type: 'run', run, start, end: start + duration, duration, root: '/private/root',
+      profile: 'coder', agent: 'echo', model: 'actual', requested_model: 'requested',
+      handle: `worker-${run}`, title: `Task ${run}`, context: 'fresh', effort: 'high', mode: 'auto',
+      parent: { session: 'private-id', handle: 'parent', agent: 'claude', model: 'opus' },
+      outcome: 'ok', tools: 2, reply: 30, tokens: { input: 1, cache_read: 2, cache_write: 3, output: 4 }, ...extra,
+    })
+    const rate = (run: number, time: number, verdict: string, extra = {}) => ({ type: 'rating', run, time,
+      session: 'private-id', verdict, verified: true, ...extra })
+    const rows = [row(1, 1000, 2), row(2, 1800, 8, { outcome: 'failed', errors: ['backend-error'] }),
+      row(3, 1900, 12, { outcome: 'closed' }), row(4, 1950, 20),
+      row(5, 1950, 5, { profile: 'alpha' }), row(6, 1950, 9, { profile: 'alpha' }),
+      row(7, 1960, 7, { model: null }), row(8, 1970, 10, { agent: 'codex' }),
+      row(9, 1980, 3, { profile: 'beta' }), row(10, 1990, 11, { profile: 'beta' }),
+      rate(1, 1500, 'wrong'), rate(1, 1600, 'usable', { note: 'checked' }),
+      rate(2, 1900, 'rework', { verified: false }), rate(3, 1950, 'wrong'),
+      rate(4, 1970, 'usable', { session: 'someone-else' }),
+      rate(1, 1980, 'wrong', { session: 'someone-else' }), rate(999, 1990, 'wrong')]
+    mkdirSync(join(t.dir, 'emx'))
+    writeFileSync(join(t.dir, 'emx/subagent-runs.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n{damaged\n')
+    const report = t.collab.runReport()
+    assert.equal(report.now, 2000); assert.equal(report.range, null)
+    assert.deepEqual(report.groups.map((g) => [g.profile, g.agent, g.model, g.runs]), [
+      ['coder', 'echo', 'actual', 4], ['alpha', 'echo', 'actual', 2], ['beta', 'echo', 'actual', 2],
+      ['coder', 'echo', null, 1], ['coder', 'codex', 'actual', 1],
+    ])
+    const group = report.groups[0]
+    assert.deepEqual({ ...group, items: undefined }, {
+      profile: 'coder', agent: 'echo', model: 'actual', runs: 4, failed: 1, closed: 1,
+      rated: 3, usable: 1, rework: 1, wrong: 1, verified: 2, duration: 10,
+      tokens: { input: 4, cache_read: 8, cache_write: 12, output: 16 }, items: undefined,
+    })
+    assert.deepEqual(group.items.map((i) => i.run), [4, 3, 2, 1])
+    assert.equal(group.items[0].rating, undefined)
+    assert.deepEqual(group.items[2].errors, ['backend-error'])
+    assert.deepEqual(group.items[3], {
+      run: 1, start: 1000, end: 1002, duration: 2, handle: 'worker-1', title: 'Task 1', context: 'fresh',
+      outcome: 'ok', tools: 2, reply: 30, tokens: { input: 1, cache_read: 2, cache_write: 3, output: 4 },
+      effort: 'high', mode: 'auto', parent: { handle: 'parent', agent: 'claude', model: 'opus' },
+      rating: { verdict: 'usable', verified: true, note: 'checked', time: 1600 },
+    })
+    const ranged = t.collab.runReport(200)
+    assert.equal(ranged.range, 200)
+    assert.equal(ranged.groups[0].runs, 3, 'range includes the start boundary')
+    assert.equal(ranged.groups[0].duration, 12, 'odd medians use the middle run')
+    assert.equal(ranged.groups[0].rated, 2)
+    assert.deepEqual(t.collab.runReport(0), report)
+    assert.deepEqual(t.collab.runReport(1).groups, [])
+    writeFileSync(join(t.dir, 'emx/subagent-runs.jsonl'), '')
+    assert.deepEqual(t.collab.runReport(), { now: 2000, range: null, groups: [] })
+  } finally { t.collab.stop(); rmSync(t.dir, { recursive: true, force: true }) }
+})
+
+test('collab/runs socket RPC reports original usage after automatic child closure and validates range', async () => {
+  const t = await closingSetup()
+  try {
+    t.parent.setStatus('running')
+    t.daemon.collab.host.visible = async () => false
+    t.daemon.collab.host.view = async (child) => {
+      child.backend.send = (text, _images, block) => {
+        child.addBlock({ id: block!, type: 'user', text })
+        child.emit({ type: 'usage/call', model: 'actual', usage: { input: 10, cacheRead: 20, cacheWrite: 30, output: 40 } })
+        child.emit({ type: 'usage/end' })
+        child.addBlock({ id: 'result', type: 'text', kind: 'assistant', text: 'Done.', done: true })
+        child.setStatus('idle')
+      }
+    }
+    assert.deepEqual((await t.client.request('collab/runs', {})).groups, [])
+    await t.mcp.request('mcp/call', { name: 'session_start', arguments: { profile: 'echo', prompt: 'task' } })
+    await until(() => t.daemon.collab.runLog().length === 1 && t.daemon.sessions.size === 1)
+    assert.equal(t.daemon.accounting.totals.size, 0)
+    await t.mcp.request('mcp/call', { name: 'session_rate', arguments: { run: 1, verdict: 'usable', verified: true, note: 'Used it' } })
+    const report = await t.client.request('collab/runs', { range: 60 })
+    assert.equal(report.range, 60); assert.ok(report.now > 0)
+    assert.equal(report.groups.length, 1)
+    const group = report.groups[0]
+    assert.equal(group.profile, 'echo'); assert.equal(group.model, 'actual')
+    assert.equal(group.runs, 1); assert.equal(group.usable, 1); assert.equal(group.verified, 1)
+    assert.deepEqual(group.tokens, { input: 10, cache_read: 20, cache_write: 30, output: 40 })
+    assert.equal(group.items[0].parent.handle, t.parent.info.handle)
+    assert.equal('session' in group.items[0].parent, false)
+    assert.equal('session' in group.items[0].rating!, false)
+    assert.equal((await t.client.request('collab/runs', { range: 0 })).range, null)
+    for (const range of [-1, 1.5, '60', null, true, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(t.client.request('collab/runs', { range } as any), { code: -32602 })
+    }
   } finally { await t.cleanup() }
 })

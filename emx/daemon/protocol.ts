@@ -23,6 +23,21 @@ export interface CreationRecord {
   error?: string
 }
 
+export interface RunTokens { input: number, cache_read: number, cache_write: number, output: number }
+export interface RunRating { verdict: 'usable' | 'rework' | 'wrong', verified: boolean, note?: string, time: number }
+export interface RunItem {
+  run: number, start: number, end: number, duration: number, handle: string, title: string, context: string
+  outcome: 'ok' | 'failed' | 'closed', errors?: string[], tools: number, reply: number, tokens: RunTokens
+  effort: string | null, mode: string | null, parent: { handle: string, agent: string, model: string | null }
+  rating?: RunRating
+}
+export interface RunGroup {
+  profile: string, agent: string, model: string | null
+  runs: number, failed: number, closed: number, rated: number, usable: number, rework: number, wrong: number, verified: number
+  duration: number | null, tokens: RunTokens, items: RunItem[]
+}
+export interface RunReport { now: number, range: number | null, groups: RunGroup[] }
+
 export type Status = 'starting' | 'idle' | 'running' | 'disconnected' | 'exited'
 
 /** The user's choices for a session; null means the agent's default. */
@@ -328,6 +343,7 @@ export interface Requests {
   'agents/models': [{ agent: string }, { models: { id: string, label?: string }[] }]
   /** Private editor hub methods; MCP peers cannot call these directly. */
   'collab/list': [{}, { sessions: object[] }]
+  'collab/runs': [{ range?: number }, RunReport]
   'collab/profiles': [{ root?: string }, CollabProfiles]
   'collab/disable': [{ profile: string, candidate?: number, disabled: boolean }, { config: import('../config.ts').Config }]
   'collab/read': [{ id: string, last?: number, before?: number, tools?: string }, string]

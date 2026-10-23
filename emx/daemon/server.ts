@@ -695,6 +695,7 @@ export class DaemonServer {
         const config = this.configuration.value.agents[agent]
         return agentModels(agent, config, this.varDir).then((models) => ({ models }))
       }
+      case 'collab/runs': return this.collab.runReport(integer(params.range, 'range', 0))
       case 'collab/profiles': return this.collab.profiles(this.configuration.overriddenProfiles,
         params.root === undefined ? undefined : string(params.root, 'root'))
       case 'collab/read': return this.collab.read(this.#session(params), params)

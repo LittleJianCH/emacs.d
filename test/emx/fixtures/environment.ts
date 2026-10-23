@@ -1,7 +1,7 @@
 // Every test daemon and its descendants resolve model commands to fixtures.
 // Keep the caller's HOME; native Claude history and fixture logs stay temporary.
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, existsSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { after, afterEach } from 'node:test'
@@ -29,8 +29,21 @@ mkdirSync(process.env.EMX_PI_SESSIONS_DIR)
 // daemon's state, which keeps changing: only entries the tests add count.
 const stateNames = () => existsSync(state) ? readdirSync(state) : []
 const stateBefore = new Set(stateNames())
+export function addedStateEntries(directory: string, before: Set<string>): string[] {
+  let snapshot: string | undefined
+  if (before.has('daemon.lock')) {
+    try {
+      const lock = JSON.parse(readFileSync(join(directory, 'daemon.lock'), 'utf8'))
+      const pid = typeof lock === 'number' ? lock : lock?.pid
+      if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) snapshot = `sessions.json.${pid}.tmp`
+    } catch { /* Missing or incomplete locks do not exempt any new files. */ }
+  }
+  // The already-running daemon writes this between its snapshot and rename.
+  const names = existsSync(directory) ? readdirSync(directory) : []
+  return names.filter((name) => !before.has(name) && name !== snapshot)
+}
 function assertDefaultStateUnchanged() {
-  assert.deepEqual(stateNames().filter((name) => !stateBefore.has(name)), [],
+  assert.deepEqual(addedStateEntries(state, stateBefore), [],
     'Tests must not write to the checkout default var/emx directory')
 }
 afterEach(assertDefaultStateUnchanged)

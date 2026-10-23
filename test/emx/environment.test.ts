@@ -1,4 +1,4 @@
-import './fixtures/environment.ts'
+import { addedStateEntries } from './fixtures/environment.ts'
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
@@ -118,8 +118,8 @@ console.log(JSON.stringify({PATH:(fs.existsSync('disabled')?'/missing':path.join
       daemon.collab.projectEnvironment(parent.root).PATH)
     const parentTools = parent.editorTools(), childTools = child.editorTools()
     assert.deepEqual(childTools.tools, parentTools.tools.filter((tool) =>
-      tool.name !== 'session_start' && tool.name !== 'session_ask'))
-    assert.deepEqual(childTools.readOnly, parentTools.readOnly)
+      tool.name !== 'session_start' && tool.name !== 'session_ask' && tool.name !== 'session_rate'))
+    assert.deepEqual(childTools.readOnly, parentTools.readOnly.filter((name) => name !== 'session_rate'))
     await assert.rejects(daemon.collab.call(child, 'session_start',
       { profile: 'project-worker', prompt: 'not allowed' }, new AbortController().signal),
     /not allowed|can't start sessions/)
@@ -184,4 +184,22 @@ test('a root without an .envrc gets the base environment and no notice', async (
     process.env.PATH = savedPath
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+
+test('state isolation ignores only the existing daemon snapshot, never test writes', () => {
+  const dir = mkdtempSync('/tmp/emx-state-inventory-')
+  try {
+    const pid = process.pid + 1
+    writeFileSync(join(dir, 'daemon.lock'), JSON.stringify({ pid }))
+    const before = new Set(['daemon.lock'])
+    writeFileSync(join(dir, `sessions.json.${pid}.tmp`), '')
+    assert.deepEqual(addedStateEntries(dir, before), [])
+    writeFileSync(join(dir, 'unexpected.json'), '')
+    writeFileSync(join(dir, `sessions.json.${process.pid}.tmp`), '')
+    assert.deepEqual(addedStateEntries(dir, before).sort(), [`sessions.json.${process.pid}.tmp`, 'unexpected.json'].sort())
+    assert.ok(addedStateEntries(dir, new Set()).includes(`sessions.json.${pid}.tmp`), 'a new daemon lock grants no exemption')
+    writeFileSync(join(dir, 'daemon.lock'), JSON.stringify({ pid: process.pid }))
+    assert.ok(addedStateEntries(dir, before).includes(`sessions.json.${process.pid}.tmp`))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
