@@ -159,6 +159,7 @@ export class DaemonServer {
     this.accounting = new Accounting(this.usage)
     this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir, usage: this.usage,
       runUsage: (id) => this.accounting.totals.get(id),
+      captureRun: this.outbox ? (row) => this.outbox!.add('runs/record', { row }) : undefined,
       config: () => this.configuration.value,
       hub: (caller, method, params, signal) => this.editor.call(method, params,
         { session: caller.id, root: caller.root, place: null }, signal, true),
@@ -230,6 +231,11 @@ export class DaemonServer {
       }
       this.usage.initialize({ ...usageConfig, pollers: this.#hostPollers(usageConfig.agents ?? []), pollInterval: this.configuration.value.usage.pollInterval, usageFile: join(this.varDir, 'agent-usage.jsonl'),
         quotaFile: join(this.varDir, 'agent-quota.json') })
+      // A crash after a run append may precede saving the shared outbox watermark.
+      // Usage, quota and run deliveries all acknowledge the same producer prefix.
+      for (const row of this.collab.runLog()) if (row.host != null && row._delivery) {
+        this.usage.advance(row._delivery.source, row._delivery.sequence, false)
+      }
       this.configuration.watch((result) => this.#configChanged(result))
       await this.#restore()
       this.collab.restore()
@@ -665,6 +671,33 @@ export class DaemonServer {
           pollInterval: this.usage.pollInterval, pollers: this.usage.pollers }), { mode: 0o600 })
         renameSync(file + '.tmp', file)
         return result
+      }
+      case 'runs/record': {
+        if (this.outbox) throw new Error('Host run records belong to the local daemon')
+        const id = string(params.id, 'id'), host = string(params.host, 'host')
+        const source = string(params.source, 'source')
+        const sequence = integer(params.sequence, 'sequence', 1) ?? invalid('Expected sequence')
+        const row = object(params.row)
+        if (row.type !== 'run' && row.type !== 'rating') invalid('Expected a run or rating row')
+        if (integer(row.run, 'row.run', 1) === undefined) invalid('Expected row.run')
+        if (row.type === 'run') {
+          string(object(row.parent).session, 'row.parent.session')
+          string(row.profile, 'row.profile'); string(row.agent, 'row.agent')
+          const tokens = object(row.tokens)
+          for (const key of ['input', 'cache_read', 'cache_write', 'output']) {
+            if (typeof tokens[key] !== 'number' || !Number.isFinite(tokens[key]) || tokens[key] < 0) invalid(`Expected row.tokens.${key}`)
+          }
+        } else {
+          string(row.session, 'row.session')
+          const score = integer(row.score, 'row.score', 0)
+          if (score === undefined || score > 10) invalid('Expected score from 0 to 10')
+        }
+        this.usage.checkSequence(source, sequence)
+        if (sequence > (this.usage.watermarks[source] ?? 0)) {
+          this.collab.recordRun(row, host, source, sequence)
+          this.usage.advance(source, sequence)
+        }
+        return this.usage.receipt(id, source)
       }
       case 'usage/record': {
         const id = string(params.id, 'id')

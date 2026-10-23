@@ -1,4 +1,4 @@
-// outbox.ts --- durable, ordered usage with stable producer sequence numbers.
+// outbox.ts --- durable, ordered host records with producer sequence numbers.
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -7,7 +7,7 @@ export interface Delivery {
   id: string // Correlates in-flight transport requests.
   source: string
   sequence: number
-  method: 'record' | 'quota'
+  method: 'record' | 'quota' | 'runs/record'
   params: Record<string, any>
 }
 export class Outbox {

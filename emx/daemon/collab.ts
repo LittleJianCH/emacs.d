@@ -133,6 +133,8 @@ export interface CollabHost {
   usage?: Pick<UsageService, 'quotas'> & Partial<Pick<UsageService, 'candidateAvailability'>>
   /** Token sums by model over a session's original backend events. */
   runUsage?(id: string): Map<string, Usage> | undefined
+  /** Capture locally produced run and rating rows in the host outbox. */
+  captureRun?(row: object): void
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
   close(session: Session, completed?: boolean): Promise<void>
@@ -347,7 +349,7 @@ export class Collaboration {
     if (!Number.isSafeInteger(p.run) || (p.run as number) < 1) throw new Error('run must be a positive integer')
     if (!Number.isInteger(p.score) || (p.score as number) < 0 || (p.score as number) > 10) throw new Error('score must be an integer from 0 to 10')
     const own = [...this.active.values()].some((row) => row.run === p.run && row.parent.session === caller.id)
-      || this.runLog().some((row) => row.type === 'run' && row.run === p.run && row.parent?.session === caller.id)
+      || this.runLog().some((row) => row.host == null && row.type === 'run' && row.run === p.run && row.parent?.session === caller.id)
     if (!own) throw new Error(`Run ${p.run} isn't one you started`)
     this.#append({ type: 'rating', run: p.run, time: Date.now() / 1000, session: caller.id, score: p.score })
     return `Rated run ${p.run}.`
@@ -760,29 +762,30 @@ export class Collaboration {
     const now = Date.now() / 1000
     const rows = this.runLog()
     const runs = rows.filter((row) => row.type === 'run' && (!range || row.start >= now - range))
-    const owners = new Map(runs.map((row) => [row.run, row.parent.session]))
-    const ratings = new Map<number, Record<string, any>>()
-    for (const row of rows) if (row.type === 'rating' && owners.has(row.run) && owners.get(row.run) === row.session
+    const key = (row: Record<string, any>) => JSON.stringify([row.host ?? null, row.run])
+    const owners = new Map(runs.map((row) => [key(row), row.parent.session]))
+    const ratings = new Map<string, Record<string, any>>()
+    for (const row of rows) if (row.type === 'rating' && owners.has(key(row)) && owners.get(key(row)) === row.session
       && Number.isInteger(row.score) && row.score >= 0 && row.score <= 10) {
-      ratings.set(row.run, row)
+      ratings.set(key(row), row)
     }
     const groups = new Map<string, RunGroup>()
     const durations = new Map<RunGroup, number[]>()
     for (const row of runs) {
       const model = row.model ?? null
-      const key = JSON.stringify([row.profile, row.agent, model])
-      let group = groups.get(key)
+      const groupKey = JSON.stringify([row.profile, row.agent, model])
+      let group = groups.get(groupKey)
       if (!group) {
         group = { profile: row.profile, agent: row.agent, model,
           runs: 0, failed: 0, closed: 0, rated: 0, score: null,
           duration: null, tokens: { input: 0, cache_read: 0, cache_write: 0, output: 0 } }
-        groups.set(key, group)
+        groups.set(groupKey, group)
         durations.set(group, [])
       }
       group.runs++
       if (row.outcome === 'failed') group.failed++
       if (row.outcome === 'closed') group.closed++
-      const rating = ratings.get(row.run)
+      const rating = ratings.get(key(row))
       if (rating) {
         group.rated++
         group.score = (group.score ?? 0) + rating.score
@@ -801,6 +804,11 @@ export class Collaboration {
   #append(row: object): void {
     mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
     appendFileSync(this.#runFile, JSON.stringify(row) + '\n', { mode: 0o600 })
+    this.host.captureRun?.(row)
+  }
+  /** Persist host identity and delivery identity in the same append as the row. */
+  recordRun(row: Record<string, unknown>, host: string, source: string, sequence: number): void {
+    this.#append({ ...row, host, _delivery: { source, sequence } })
   }
   /** Append the run record of a child once, when its result is settled or lost. */
   #logRun(target: Session | undefined, result: RunOutcome, id = target!.id): void {
@@ -865,6 +873,7 @@ export class Collaboration {
     // Never reuse a logged run number, even if collab.json was lost.
     const logged = new Set<number>()
     for (const row of this.runLog()) {
+      if (row.host != null) continue
       if (Number.isSafeInteger(row.run) && row.run > this.runs) this.runs = row.run
       if (row.type === 'run') logged.add(row.run)
     }

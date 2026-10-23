@@ -337,6 +337,9 @@ export interface Requests {
   /** Private editor hub methods; MCP peers cannot call these directly. */
   'collab/list': [{}, { sessions: object[] }]
   'collab/runs': [{ range?: number }, RunReport]
+  /** Local ingestion of host run/rating rows through the durable outbox. */
+  'runs/record': [{ id: string, source: string, sequence: number, host: string, row: Record<string, unknown> },
+    { id: string, source: string, sequence: number }]
   'collab/profiles': [{ root?: string }, CollabProfiles]
   'collab/disable': [{ profile: string, candidate?: number, disabled: boolean }, { config: import('../config.ts').Config }]
   'collab/read': [{ id: string, last?: number, before?: number, tools?: string }, string]
