@@ -24,17 +24,10 @@ export interface CreationRecord {
 }
 
 export interface RunTokens { input: number, cache_read: number, cache_write: number, output: number }
-export interface RunRating { verdict: 'usable' | 'rework' | 'wrong', verified: boolean, note?: string, time: number }
-export interface RunItem {
-  run: number, start: number, end: number, duration: number, handle: string, title: string, context: string
-  outcome: 'ok' | 'failed' | 'closed', errors?: string[], tools: number, reply: number, tokens: RunTokens
-  effort: string | null, mode: string | null, parent: { handle: string, agent: string, model: string | null }
-  rating?: RunRating
-}
 export interface RunGroup {
   profile: string, agent: string, model: string | null
-  runs: number, failed: number, closed: number, rated: number, usable: number, rework: number, wrong: number, verified: number
-  duration: number | null, tokens: RunTokens, items: RunItem[]
+  runs: number, failed: number, closed: number, rated: number, score: number | null
+  duration: number | null, tokens: RunTokens
 }
 export interface RunReport { now: number, range: number | null, groups: RunGroup[] }
 

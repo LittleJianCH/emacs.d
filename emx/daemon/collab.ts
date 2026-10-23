@@ -345,15 +345,11 @@ export class Collaboration {
   }
   #rate(caller: Session, p: Record<string, unknown>): string {
     if (!Number.isSafeInteger(p.run) || (p.run as number) < 1) throw new Error('run must be a positive integer')
-    if (!['usable', 'rework', 'wrong'].includes(p.verdict as string)) throw new Error('verdict must be usable, rework or wrong')
-    if (typeof p.verified !== 'boolean') throw new Error('verified must be a boolean')
-    if (p.note !== undefined && typeof p.note !== 'string') throw new Error('note must be a string')
+    if (!Number.isInteger(p.score) || (p.score as number) < 0 || (p.score as number) > 10) throw new Error('score must be an integer from 0 to 10')
     const own = [...this.active.values()].some((row) => row.run === p.run && row.parent.session === caller.id)
       || this.runLog().some((row) => row.type === 'run' && row.run === p.run && row.parent?.session === caller.id)
     if (!own) throw new Error(`Run ${p.run} isn't one you started`)
-    const note = typeof p.note === 'string' ? [...p.note.replace(/[\r\n\u2028\u2029]+/g, ' ').trim()].slice(0, 200).join('') : ''
-    this.#append({ type: 'rating', run: p.run, time: Date.now() / 1000, session: caller.id,
-      verdict: p.verdict, verified: p.verified, ...(note ? { note } : {}) })
+    this.#append({ type: 'rating', run: p.run, time: Date.now() / 1000, session: caller.id, score: p.score })
     return `Rated run ${p.run}.`
   }
   find(name: unknown): Session | undefined {
@@ -766,19 +762,22 @@ export class Collaboration {
     const runs = rows.filter((row) => row.type === 'run' && (!range || row.start >= now - range))
     const owners = new Map(runs.map((row) => [row.run, row.parent.session]))
     const ratings = new Map<number, Record<string, any>>()
-    for (const row of rows) if (row.type === 'rating' && owners.has(row.run) && owners.get(row.run) === row.session) {
+    for (const row of rows) if (row.type === 'rating' && owners.has(row.run) && owners.get(row.run) === row.session
+      && Number.isInteger(row.score) && row.score >= 0 && row.score <= 10) {
       ratings.set(row.run, row)
     }
     const groups = new Map<string, RunGroup>()
+    const durations = new Map<RunGroup, number[]>()
     for (const row of runs) {
       const model = row.model ?? null
       const key = JSON.stringify([row.profile, row.agent, model])
       let group = groups.get(key)
       if (!group) {
         group = { profile: row.profile, agent: row.agent, model,
-          runs: 0, failed: 0, closed: 0, rated: 0, usable: 0, rework: 0, wrong: 0, verified: 0,
-          duration: null, tokens: { input: 0, cache_read: 0, cache_write: 0, output: 0 }, items: [] }
+          runs: 0, failed: 0, closed: 0, rated: 0, score: null,
+          duration: null, tokens: { input: 0, cache_read: 0, cache_write: 0, output: 0 } }
         groups.set(key, group)
+        durations.set(group, [])
       }
       group.runs++
       if (row.outcome === 'failed') group.failed++
@@ -786,25 +785,16 @@ export class Collaboration {
       const rating = ratings.get(row.run)
       if (rating) {
         group.rated++
-        if (rating.verdict === 'usable') group.usable++
-        if (rating.verdict === 'rework') group.rework++
-        if (rating.verdict === 'wrong') group.wrong++
-        if (rating.verified) group.verified++
+        group.score = (group.score ?? 0) + rating.score
       }
       for (const token of ['input', 'cache_read', 'cache_write', 'output'] as const) group.tokens[token] += row.tokens[token]
-      group.items.push({ run: row.run, start: row.start, end: row.end, duration: row.duration,
-        handle: row.handle, title: row.title, context: row.context, outcome: row.outcome,
-        ...(row.errors ? { errors: row.errors } : {}), tools: row.tools, reply: row.reply, tokens: row.tokens,
-        effort: row.effort, mode: row.mode,
-        parent: { handle: row.parent.handle, agent: row.parent.agent, model: row.parent.model },
-        ...(rating ? { rating: { verdict: rating.verdict, verified: rating.verified,
-          ...(rating.note !== undefined ? { note: rating.note } : {}), time: rating.time } } : {}) })
+      if (Number.isFinite(row.duration)) durations.get(group)!.push(row.duration)
     }
     for (const group of groups.values()) {
-      group.items.sort((a, b) => b.start - a.start || b.run - a.run)
-      const durations = group.items.map((item) => item.duration).filter(Number.isFinite).sort((a, b) => a - b)
-      const middle = Math.floor(durations.length / 2)
-      if (durations.length) group.duration = durations.length % 2 ? durations[middle] : (durations[middle - 1] + durations[middle]) / 2
+      if (group.rated) group.score = Math.round(group.score! / group.rated * 10) / 10
+      const times = durations.get(group)!.sort((a, b) => a - b)
+      const middle = Math.floor(times.length / 2)
+      if (times.length) group.duration = times.length % 2 ? times[middle] : (times[middle - 1] + times[middle]) / 2
     }
     return { now, range: range || null, groups: [...groups.values()].sort((a, b) => b.runs - a.runs || a.profile.localeCompare(b.profile)) }
   }

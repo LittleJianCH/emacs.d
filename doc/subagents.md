@@ -109,7 +109,7 @@ between, newest first, noting what was left out.
 | `session_ask` | asks an idle session; the reply goes to the mailbox | between sessions the user opened |
 | `session_start` | starts a child: `profile`, `context`, `prompt`, `handle`, `title` | profiles with delegation capability |
 | `session_stop` | stops and closes a child | its parent |
-| `session_rate` | rates a finished run: `run`, `verdict`, `verified`, `note` | where `session_start` is visible; only the run's parent |
+| `session_rate` | scores a run: `run`, `score` (integer 0-10) | where `session_start` is visible; only the run's parent |
 
 ### Profiles
 
@@ -492,11 +492,12 @@ which keeps its own format. The reply wrapper carries ` [run N]` so the
 parent can refer to the run; the started receipt no longer names the model,
 since the caller chooses by profile.
 
-Layer B is a best-effort verdict from the session that started the run:
-`session_rate {run, verdict: usable | rework | wrong, verified, note?}`,
-appended as a `rating` row; the latest rating of a run wins. Only the run's
-parent may rate it. The tool is visible exactly where `session_start` is, so
-a coder that starts a coder-flash can rate it, and children that cannot
+Layer B is a best-effort score from the session that started the run:
+`session_rate {run, score}`, with an integer from 0 (useless) to 10 (used as
+is), appended as a `rating` row. The latest valid score of a run wins; old
+ratings without a valid score are ignored. Only the run's parent may rate it.
+The tool is visible exactly where `session_start` is, so a coder that starts
+a coder-flash can rate it, and children that cannot
 delegate never see it. It is in the no-approval set with `sessions` and
 `session_read`, so it never asks the user in any backend or mode. Nothing sent
 to a child mentions ratings.
@@ -505,13 +506,14 @@ The cost rule, stated in the tool description: rate after verifying or using
 the result, not on receipt, and only in parallel with a tool call made anyway
 (such as the alert before the final reply), never as a standalone call;
 without such a call, skip it. Estimated costs: the description adds roughly
-100 tokens to each delegating session's cached tool list, a rating roughly 50
+100 tokens to each delegating session's cached tool list, a score call roughly 20
 output tokens and no extra round trip, the run label a few tokens per reply.
 
-`collab/runs {range}` groups the log by profile x agent x model (runs, failure
-share, closed, rated, usable / rework / wrong, verified share, median
-duration, tokens) with each group's runs and notes. `C-c a U`
-(`agent-runs`) shows it on a Chinese page. Records from remote host daemons
+`collab/runs {range}` groups the log by profile x agent x model (runs, failed,
+closed, rated, mean score rounded to one decimal or null when unrated, median
+duration, tokens). Each rated run contributes its latest valid score once.
+`C-c a U` (`agent-runs`) shows the grouped summary on a Chinese page with a
+mean-score column and no per-run expansion. Records from remote host daemons
 are not relayed yet.
 
 ### Approvals and progress

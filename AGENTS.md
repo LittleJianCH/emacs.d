@@ -190,7 +190,8 @@ var/                     runtime state (history, backups, pasted images...); git
   following moved candidates and clamping indices when a row disappears.
 - `agent-runs.el` — `C-c a U` opens local subagent runs and optional parent
   ratings from asynchronous `collab/runs`. Pixel-aligned groups summarize each
-  profile and concrete model; `TAB` / `RET` expands run details and notes.
+  profile and concrete model, with rated counts and mean scores; there is no
+  per-run expansion.
   `r` cycles 7 days, 30 days (default) and all time; `g` refreshes while
   preserving logical rows. Native and Evil keys share the same commands.
 - `agent-canvas.el` — `render` / `patch` methods: native pages built from JSON blocks

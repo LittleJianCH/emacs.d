@@ -15,28 +15,11 @@
   '(:now 1800000000 :range 2592000
     :groups
     [(:profile "coder" :agent "codex" :model "gpt-6"
-      :runs 4 :failed 1 :closed 1 :rated 3 :usable 1 :rework 1 :wrong 1
-      :verified 2 :duration 133
-      :tokens (:input 600000 :cache_read 500000 :cache_write 100000 :output 34000)
-      :items
-      [(:run 12 :start 1799999800 :end 1799999933 :duration 133
-        :handle "helper" :title "修复对齐" :context "fresh" :outcome "ok"
-        :tools 8 :reply 400 :tokens (:input 1000 :output 200)
-        :effort "medium" :mode "auto"
-        :parent (:handle "parent" :agent "claude" :model "sonnet")
-        :rating (:verdict "usable" :verified t :note "已运行回归测试" :time 1800000000))
-       (:run 11 :start 1799999700 :end 1799999750 :duration 50
-        :handle "retry" :title "补充检查" :outcome "failed"
-        :errors ["quota" "transport"] :tools 2
-        :rating (:verdict "rework" :verified :false :note "遗漏边界"))
-       (:run 10 :start 1799999600 :end 1799999640 :duration 40
-        :handle "closed" :title "取消任务" :outcome "closed" :tools 0)
-       (:run 9 :start 1799999500 :end 1799999520 :duration 20
-        :handle "wrong" :title "旧任务" :outcome "ok" :tools 1
-        :rating (:verdict "wrong" :verified t :note "结论错误"))])
+      :runs 4 :failed 1 :closed 1 :rated 3 :score 7.0 :duration 133
+      :tokens (:input 600000 :cache_read 500000 :cache_write 100000 :output 34000))
      (:profile "探索" :agent "claude" :model nil
-      :runs 1 :failed 0 :closed 0 :rated 0 :usable 0 :rework 0 :wrong 0
-      :verified 0 :duration nil :tokens (:input 50 :output 0) :items [])]))
+      :runs 2 :failed 0 :closed 0 :rated 1 :score 9.0 :duration nil
+      :tokens (:input 50 :output 0))]))
 
 (defvar agent-runs-test--response nil)
 (defvar agent-runs-test--sent nil)
@@ -71,9 +54,10 @@
     (should hl-line-mode)
     (should (eq (keymap-lookup agent-session-command-map "U") #'agent-runs))
     (should (equal agent-runs-test--sent '((:range 2592000))))
-    (dolist (text '("子代理评估  30 天" "2 组 · 5 次 · 失败 1 次 · 提前关闭 1 次 · 已评 3 次"
-                    "▸ coder" "▸ 探索" "未知模型" "25%" "1 / 1 / 1" "67%"
-                    "2 分 13 秒" "1.2M / 34k" "50 / 0"))
+    (dolist (text '("子代理评估  30 天"
+                    "2 组 · 6 次 · 失败 1 次 · 提前关闭 1 次 · 已评 4 次 · 均分 7.5"
+                    "coder" "探索" "未知模型" "g 刷新 · r 范围 · n/p 移动"
+                    "25%" "7.0" "9.0" "0%" "2 分 13 秒" "1.2M / 34k" "50 / 0"))
       (should (string-match-p (regexp-quote text) (buffer-string))))
     (let* ((group (aref (plist-get agent-runs--snapshot :groups) 0))
            (cells (agent-runs--cells group)))
@@ -81,7 +65,7 @@
                      (concat (agent-session--get 'codex :title) " "
                              (agent-session-model-short-name "gpt-6" "Codex"))))
       (should (equal (seq-drop cells 2)
-                     '("4" "25%" "3" "1 / 1 / 1" "67%" "2 分 13 秒" "1.2M / 34k")))
+                     '("4" "25%" "3" "7.0" "2 分 13 秒" "1.2M / 34k")))
       (should (equal (get-text-property 0 'help-echo (nth 3 cells))
                      "失败 1 次；提前关闭 1 次")))
     (let (alignments)
@@ -93,29 +77,28 @@
               (push display offsets))
             (setq pos (next-single-property-change pos 'display nil (line-end-position))))
           (push (nreverse offsets) alignments)))
-      (should (= (length (car alignments)) 8))
+      (should (= (length (car alignments)) 7))
       (should (equal (car alignments) (cadr alignments)))
       (should (cl-every (lambda (display) (numberp (car (plist-get (cdr display) :align-to))))
                         (car alignments))))))
 
-(ert-deftest agent-runs-test-expand-native-navigation-and-notes ()
+(ert-deftest agent-runs-test-navigation-without-expansion ()
   (agent-runs-test--with-page
-    (execute-kbd-macro (kbd "TAB"))
-    (should (= (length agent-runs--rows) 6))
-    (dolist (part '("▾ coder" "#12" "@helper  修复对齐  完成" "工具 8 次"
-                    "可用 · 已核实  已运行回归测试" "失败（quota、transport）"
-                    "返工 · 未核实  遗漏边界" "提前关闭" "未评" "错误 · 已核实  结论错误"))
-      (should (string-match-p (regexp-quote part) (buffer-string))))
-    (execute-kbd-macro (kbd "n"))
-    (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6" 12)))
-    (execute-kbd-macro (kbd "C-n C-p p"))
-    (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6")))
-    (execute-kbd-macro (kbd "RET"))
+    (should-not (fboundp 'agent-runs-toggle))
+    (should-not (boundp 'agent-runs--expanded))
+    (dolist (key '("TAB" "<tab>" "RET"))
+      (should-not (lookup-key agent-runs-mode-map (kbd key))))
     (should (= (length agent-runs--rows) 2))
-    (should-not (string-match-p "已运行回归测试" (buffer-string)))
+    (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6")))
     (execute-kbd-macro (kbd "n"))
     (should (equal (agent-runs--selection) '("探索" "claude" nil)))
-    (execute-kbd-macro (kbd "n p p"))
+    (execute-kbd-macro (kbd "n"))
+    (should (equal (agent-runs--selection) '("探索" "claude" nil)))
+    (execute-kbd-macro (kbd "p"))
+    (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6")))
+    (execute-kbd-macro (kbd "C-n C-p"))
+    (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6")))
+    (execute-kbd-macro (kbd "p"))
     (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6")))))
 
 (ert-deftest agent-runs-test-cycle-ranges-and-empty-state ()
@@ -127,25 +110,27 @@
       (should (= agent-runs--range range))
       (should (string-match-p (agent-runs--range-label) (buffer-string))))
     (should (string-match-p "此范围内暂无子代理运行记录。" (buffer-string)))
-    (should (string-match-p "0 组 · 0 次" (buffer-string)))
-    (should-not agent-runs--rows)
-    (should-error (agent-runs-toggle) :type 'user-error)))
+    (should (string-match-p
+             "0 组 · 0 次 · 失败 0 次 · 提前关闭 0 次 · 已评 0 次 · 均分 —"
+             (buffer-string)))
+    (should-not agent-runs--rows)))
 
-(ert-deftest agent-runs-test-refresh-keeps-group-run-and-expansion ()
+(ert-deftest agent-runs-test-refresh-keeps-group-selection ()
   (agent-runs-test--with-page
-    (execute-kbd-macro (kbd "TAB n"))
+    (execute-kbd-macro (kbd "n"))
+    (should (equal (agent-runs--selection) '("探索" "claude" nil)))
     (setf (plist-get agent-runs-test--response :groups)
           (vconcat (reverse (append (plist-get agent-runs-test--response :groups) nil))))
     (execute-kbd-macro (kbd "g"))
-    (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6" 12)))
-    (should (= (length agent-runs--rows) 6))
-    (setf (plist-get (aref (plist-get agent-runs-test--response :groups) 1) :items) [])
+    (should (equal (agent-runs--selection) '("探索" "claude" nil)))
+    (should (= (length agent-runs--rows) 2))
+    (setf (plist-get agent-runs-test--response :groups)
+          (vector (aref (plist-get agent-runs-test--response :groups) 1)))
     (execute-kbd-macro (kbd "g"))
     (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6")))
-    (setf (plist-get agent-runs-test--response :groups)
-          (vector (aref (plist-get agent-runs-test--response :groups) 0)))
+    (setf (plist-get agent-runs-test--response :groups) [])
     (execute-kbd-macro (kbd "g"))
-    (should (equal (agent-runs--selection) '("探索" "claude" nil)))))
+    (should-not agent-runs--rows)))
 
 (ert-deftest agent-runs-test-stale-response-and-live-selection ()
   (agent-runs-test--with-page
@@ -208,22 +193,27 @@
 (ert-deftest agent-runs-test-formatting-and-palette ()
   (should (equal (mapcar #'agent-runs--duration '(nil :null 0 59 60 133 3601))
                  '("—" "—" "0 秒" "59 秒" "1 分" "2 分 13 秒" "1 时 1 秒")))
+  (should (equal (mapcar #'agent-runs--score '(nil :null 0 6.74 10))
+                 '("—" "—" "0.0" "6.7" "10.0")))
+  (should (equal (agent-runs--score
+                  (agent-runs--mean '((:score 8 :rated 2) (:score 5 :rated 1))))
+                 "7.0"))
+  (should-not (agent-runs--mean '((:score nil :rated 3) (:score 9 :rated 0))))
   (should (equal (agent-runs--percent 0 0) "—"))
   (should (equal (agent-runs--tokens nil) "0 / 0"))
   (let* ((specs (my/nano-face-specs '(:strong "strong" :popout "popout")))
-         (heading (cdr (assq t (cadr (assq 'agent-runs-heading specs)))))
-         (rework (cdr (assq t (cadr (assq 'agent-runs-rework specs))))))
+         (heading (cdr (assq t (cadr (assq 'agent-runs-heading specs))))))
     (should (equal (plist-get heading :foreground) "strong"))
-    (should (equal (plist-get rework :foreground) "popout"))))
+    (should-not (assq 'agent-runs-rework specs))))
 
 (ert-deftest agent-runs-test-entry-reuses-page-state ()
   (agent-runs-test--with-page
     (let ((agent-runs--buffer (buffer-name)))
-      (execute-kbd-macro (kbd "TAB n"))
+      (execute-kbd-macro (kbd "n"))
       (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
         (agent-runs))
-      (should (equal (agent-runs--selection) '("coder" "codex" "gpt-6" 12)))
-      (should (= (length agent-runs--rows) 6)))))
+      (should (equal (agent-runs--selection) '("探索" "claude" nil)))
+      (should (= (length agent-runs--rows) 2)))))
 
 (ert-deftest agent-runs-test-help-quit-and-evil-keys ()
   (agent-runs-test--with-page
@@ -238,7 +228,6 @@
       (evil-normal-state)
       (unwind-protect
           (dolist (entry '(("g r" . agent-runs-refresh) ("r" . agent-runs-cycle-range)
-                           ("TAB" . agent-runs-toggle) ("RET" . agent-runs-toggle)
                            ("j" . agent-runs-next-row) ("k" . agent-runs-previous-row)
                            ("n" . agent-runs-next-row) ("p" . agent-runs-previous-row)
                            ("C-n" . agent-runs-next-row) ("C-p" . agent-runs-previous-row)

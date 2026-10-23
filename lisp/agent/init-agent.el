@@ -244,9 +244,6 @@ In visual state a is the text object prefix, so this rebinds it there."
 
   (evil-set-initial-state 'agent-runs-mode 'normal)
   (evil-define-key* '(normal motion) agent-runs-mode-map
-    (kbd "RET") #'agent-runs-toggle
-    (kbd "TAB") #'agent-runs-toggle
-    (kbd "<tab>") #'agent-runs-toggle
     (kbd "C-n") #'agent-runs-next-row
     (kbd "C-p") #'agent-runs-previous-row
     "j" #'agent-runs-next-row

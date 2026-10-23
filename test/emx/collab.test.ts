@@ -47,6 +47,16 @@ test('daemon config owns six caller-independent collaboration definitions', () =
   assert.deepEqual(tools.map((tool) => tool.name).sort(),
     ['session_ask', 'session_rate', 'session_read', 'session_start', 'session_stop', 'sessions'])
   assert.ok(tools.every((tool) => tool.inputSchema.type === 'object'))
+  const rate = tools.find((tool) => tool.name === 'session_rate')!
+  assert.deepEqual(rate.inputSchema, {
+    type: 'object', properties: { run: { type: 'integer' }, score: { type: 'integer', minimum: 0, maximum: 10 } },
+    required: ['run', 'score'],
+  })
+  assert.match(rate.description, /from 0 \(useless\) to 10 \(used as is\)/)
+  assert.match(rate.description, /after you verified or used its result, not on receipt/)
+  assert.match(rate.description, /only in parallel/)
+  assert.match(rate.description, /never as a standalone/)
+  assert.match(rate.description, /if there is no such call,\s+skip it/)
   const start = tools.find((tool) => tool.name === 'session_start')!.description
   assert.ok(start.indexOf('Delegate independent work early') < start.indexOf('Choose how it gets context:'))
   assert.match(start, /Only profiles whose tools permit helpers/)
@@ -692,37 +702,37 @@ test('session_rate follows session_start visibility even when profile allow list
     check(limited, false)
     t.config.profiles.echo.tools.allow = ['session_rate']
     check(limited, false)
-    await assert.rejects(t.collab.call(limited, 'session_rate', { run: 1, verdict: 'usable', verified: true }, signal()), /not allowed/)
+    await assert.rejects(t.collab.call(limited, 'session_rate', { run: 1, score: 10 }, signal()), /not allowed/)
     for (const key of ['taskNote', 'forkNote']) assert.doesNotMatch(t.config.collab.prompts[key], /rating|session_rate/)
   } finally { await t.cleanup() }
 })
 
-test('session_rate validates ownership and parameters and appends bounded one-line ratings', async () => {
+test('session_rate validates ownership and integer scores and appends score-only ratings', async () => {
   const t = setup()
   try {
     const parent = t.create(); await parent.start(); parent.setStatus('running')
     const other = t.create('echo', t.dir, {}, { handle: 'other' }); await other.start()
     t.collab.host.view = async (s) => { s.backend.send = () => { s.setStatus('running') } }
     await t.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task' }, signal())
-    const valid = { run: 1, verdict: 'usable', verified: true }
-    for (const params of [{ run: 0 }, { run: 1.5 }, { run: '1' }, { verdict: 'bad' }, { verified: 'yes' }, { note: 5 }]) {
+    const valid = { run: 1, score: 10 }
+    for (const params of [{ run: 0 }, { run: 1.5 }, { run: '1' }, { run: undefined },
+      ...[undefined, null, '10', true, -1, 11, 1.5, NaN, Infinity].map((score) => ({ score }))]) {
       await assert.rejects(t.collab.call(parent, 'session_rate', { ...valid, ...params }, signal()), /must be/)
     }
     for (const [caller, run] of [[other, 1], [parent, 999]] as const) {
       await assert.rejects(t.collab.call(caller, 'session_rate', { ...valid, run }, signal()), new RegExp(`Run ${run} isn't one you started`))
     }
-    assert.equal(await t.collab.call(parent, 'session_rate', { ...valid, note: '  checked\r\nclaims\n' + '😀'.repeat(250) }, signal()), 'Rated run 1.')
+    assert.equal(await t.collab.call(parent, 'session_rate', valid, signal()), 'Rated run 1.')
     let rating = t.collab.runLog()[0]
-    assert.equal(rating.type, 'rating'); assert.equal(rating.session, parent.id)
-    assert.equal(rating.verdict, 'usable'); assert.equal(rating.verified, true)
-    assert.ok(rating.time > 0); assert.equal([...rating.note].length, 200)
-    assert.ok(rating.note.startsWith('checked claims ')); assert.doesNotMatch(rating.note, /[\r\n]/)
+    assert.ok(rating.time > 0)
+    assert.deepEqual(rating, { type: 'rating', run: 1, time: rating.time, session: parent.id, score: 10 })
     await t.collab.call(parent, 'session_stop', { session: '@echo' }, signal())
-    await t.collab.call(parent, 'session_rate', { ...valid, verdict: 'rework', verified: false }, signal())
-    assert.equal(t.collab.runLog().length, 3)
-    rating = t.collab.runLog().at(-1)!
-    assert.equal(rating.verdict, 'rework'); assert.equal(rating.verified, false)
-    assert.equal('note' in rating, false)
+    for (let score = 0; score <= 10; score++) {
+      await t.collab.call(parent, 'session_rate', { ...valid, score }, signal())
+      rating = t.collab.runLog().at(-1)!
+      assert.deepEqual(rating, { type: 'rating', run: 1, time: rating.time, session: parent.id, score })
+    }
+    assert.equal(t.collab.runLog().length, 13)
     await assert.rejects(t.collab.call(other, 'session_rate', valid, signal()), /isn't one you started/)
   } finally { await t.cleanup() }
 })
@@ -738,17 +748,19 @@ test('run reports group by profile, agent and actual model and join only the lat
       parent: { session: 'private-id', handle: 'parent', agent: 'claude', model: 'opus' },
       outcome: 'ok', tools: 2, reply: 30, tokens: { input: 1, cache_read: 2, cache_write: 3, output: 4 }, ...extra,
     })
-    const rate = (run: number, time: number, verdict: string, extra = {}) => ({ type: 'rating', run, time,
-      session: 'private-id', verdict, verified: true, ...extra })
+    const rate = (run: number, time: number, score: unknown, extra = {}) => ({ type: 'rating', run, time,
+      session: 'private-id', score, ...extra })
     const rows = [row(1, 1000, 2), row(2, 1800, 8, { outcome: 'failed', errors: ['backend-error'] }),
       row(3, 1900, 12, { outcome: 'closed' }), row(4, 1950, 20),
       row(5, 1950, 5, { profile: 'alpha' }), row(6, 1950, 9, { profile: 'alpha' }),
       row(7, 1960, 7, { model: null }), row(8, 1970, 10, { agent: 'codex' }),
       row(9, 1980, 3, { profile: 'beta' }), row(10, 1990, 11, { profile: 'beta' }),
-      rate(1, 1500, 'wrong'), rate(1, 1600, 'usable', { note: 'checked' }),
-      rate(2, 1900, 'rework', { verified: false }), rate(3, 1950, 'wrong'),
-      rate(4, 1970, 'usable', { session: 'someone-else' }),
-      rate(1, 1980, 'wrong', { session: 'someone-else' }), rate(999, 1990, 'wrong')]
+      rate(1, 1500, 0), rate(1, 1600, 10), rate(2, 1900, 7), rate(3, 1950, 0),
+      rate(4, 1970, 10, { session: 'someone-else' }),
+      rate(1, 1980, 0, { session: 'someone-else' }), rate(999, 1990, 0),
+      ...[undefined, null, '8', true, -1, 11, 1.5].flatMap((score) => [rate(1, 1995, score), rate(4, 1995, score)]),
+      ...[1, 4].map((run) => ({ type: 'rating', run, time: 1999, session: 'private-id',
+        verdict: 'usable', verified: true, note: 'legacy row' }))]
     mkdirSync(join(t.dir, 'emx'))
     writeFileSync(join(t.dir, 'emx/subagent-runs.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n{damaged\n')
     const report = t.collab.runReport()
@@ -758,25 +770,21 @@ test('run reports group by profile, agent and actual model and join only the lat
       ['coder', 'echo', null, 1], ['coder', 'codex', 'actual', 1],
     ])
     const group = report.groups[0]
-    assert.deepEqual({ ...group, items: undefined }, {
+    assert.deepEqual(group, {
       profile: 'coder', agent: 'echo', model: 'actual', runs: 4, failed: 1, closed: 1,
-      rated: 3, usable: 1, rework: 1, wrong: 1, verified: 2, duration: 10,
-      tokens: { input: 4, cache_read: 8, cache_write: 12, output: 16 }, items: undefined,
+      rated: 3, score: 5.7, duration: 10,
+      tokens: { input: 4, cache_read: 8, cache_write: 12, output: 16 },
     })
-    assert.deepEqual(group.items.map((i) => i.run), [4, 3, 2, 1])
-    assert.equal(group.items[0].rating, undefined)
-    assert.deepEqual(group.items[2].errors, ['backend-error'])
-    assert.deepEqual(group.items[3], {
-      run: 1, start: 1000, end: 1002, duration: 2, handle: 'worker-1', title: 'Task 1', context: 'fresh',
-      outcome: 'ok', tools: 2, reply: 30, tokens: { input: 1, cache_read: 2, cache_write: 3, output: 4 },
-      effort: 'high', mode: 'auto', parent: { handle: 'parent', agent: 'claude', model: 'opus' },
-      rating: { verdict: 'usable', verified: true, note: 'checked', time: 1600 },
-    })
+    for (const unrated of report.groups.slice(1)) {
+      assert.equal(unrated.rated, 0); assert.equal(unrated.score, null)
+      assert.equal('items' in unrated, false)
+    }
     const ranged = t.collab.runReport(200)
     assert.equal(ranged.range, 200)
     assert.equal(ranged.groups[0].runs, 3, 'range includes the start boundary')
     assert.equal(ranged.groups[0].duration, 12, 'odd medians use the middle run')
     assert.equal(ranged.groups[0].rated, 2)
+    assert.equal(ranged.groups[0].score, 3.5)
     assert.deepEqual(t.collab.runReport(0), report)
     assert.deepEqual(t.collab.runReport(1).groups, [])
     writeFileSync(join(t.dir, 'emx/subagent-runs.jsonl'), '')
@@ -802,17 +810,15 @@ test('collab/runs socket RPC reports original usage after automatic child closur
     await t.mcp.request('mcp/call', { name: 'session_start', arguments: { profile: 'echo', prompt: 'task' } })
     await until(() => t.daemon.collab.runLog().length === 1 && t.daemon.sessions.size === 1)
     assert.equal(t.daemon.accounting.totals.size, 0)
-    await t.mcp.request('mcp/call', { name: 'session_rate', arguments: { run: 1, verdict: 'usable', verified: true, note: 'Used it' } })
+    await t.mcp.request('mcp/call', { name: 'session_rate', arguments: { run: 1, score: 10 } })
     const report = await t.client.request('collab/runs', { range: 60 })
     assert.equal(report.range, 60); assert.ok(report.now > 0)
     assert.equal(report.groups.length, 1)
     const group = report.groups[0]
     assert.equal(group.profile, 'echo'); assert.equal(group.model, 'actual')
-    assert.equal(group.runs, 1); assert.equal(group.usable, 1); assert.equal(group.verified, 1)
+    assert.equal(group.runs, 1); assert.equal(group.rated, 1); assert.equal(group.score, 10)
     assert.deepEqual(group.tokens, { input: 10, cache_read: 20, cache_write: 30, output: 40 })
-    assert.equal(group.items[0].parent.handle, t.parent.info.handle)
-    assert.equal('session' in group.items[0].parent, false)
-    assert.equal('session' in group.items[0].rating!, false)
+    assert.equal('items' in group, false)
     assert.equal((await t.client.request('collab/runs', { range: 0 })).range, null)
     for (const range of [-1, 1.5, '60', null, true, Number.MAX_SAFE_INTEGER + 1]) {
       await assert.rejects(t.client.request('collab/runs', { range } as any), { code: -32602 })

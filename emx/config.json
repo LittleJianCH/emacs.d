@@ -379,34 +379,22 @@
       },
       {
         "name": "session_rate",
-        "description": "Rate a run (the number in its reply) after you verified or used its result,\nnot on receipt. Send only in parallel with another tool call you are making\nanyway (for example the alert before your final reply), never as a standalone\ncall; if there is no such call, skip it.",
+        "description": "Score a run (the number in its reply) from 0 (useless) to 10 (used as is)\nafter you verified or used its result, not on receipt. Send only in parallel\nwith another tool call you are making anyway (for example the alert before\nyour final reply), never as a standalone call; if there is no such call,\nskip it.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "run": {
               "type": "integer"
             },
-            "verdict": {
-              "type": "string",
-              "enum": [
-                "usable",
-                "rework",
-                "wrong"
-              ]
-            },
-            "verified": {
-              "type": "boolean",
-              "description": "Did you check its key claims or use the result?"
-            },
-            "note": {
-              "type": "string",
-              "description": "Optional one-line note, up to 200 characters"
+            "score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
             }
           },
           "required": [
             "run",
-            "verdict",
-            "verified"
+            "score"
           ]
         }
       }

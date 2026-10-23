@@ -1,7 +1,7 @@
 ;;; agent-runs.el --- Subagent run summaries -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Display local daemon run statistics and expandable, rated run details.
+;; Display local daemon run statistics and mean scores per profile and model.
 
 ;;; Code:
 
@@ -13,19 +13,14 @@
   "Heading of the subagent run summary."
   :group 'agent-session)
 
-(defface agent-runs-rework '((t :inherit warning))
-  "Run ratings that required rework."
-  :group 'agent-session)
-
 (defconst agent-runs--buffer "*子代理评估*")
 (defconst agent-runs--ranges '(604800 2592000 0))
 (defconst agent-runs--columns
-  '("角色" "模型" "次数" "失败率" "已评" "可用 / 返工 / 错误"
-    "已核实" "中位耗时" "token 输入含缓存 / 输出"))
+  '("角色" "模型" "次数" "失败率" "已评" "均分" "中位耗时"
+    "token 输入含缓存 / 输出"))
 (defvar-local agent-runs--range 2592000 "Requested range in seconds.")
 (defvar-local agent-runs--snapshot nil "Last successful daemon response.")
 (defvar-local agent-runs--generation 0 "Newest refresh request number.")
-(defvar-local agent-runs--expanded nil "Expanded profile, agent and model keys.")
 (defvar-local agent-runs--rows nil "Logical row identifiers and positions.")
 (defvar-local agent-runs--error nil "Current request error message.")
 (defvar-local agent-runs--loading nil "Non-nil while a refresh is pending.")
@@ -43,9 +38,8 @@
   (get-text-property (line-beginning-position) 'agent-runs-row))
 
 (defun agent-runs--goto (selection)
-  "Restore SELECTION, falling back to its group or the first row."
+  "Restore SELECTION, falling back to the first row."
   (when-let* ((row (or (assoc selection agent-runs--rows)
-                      (assoc (seq-take selection 3) agent-runs--rows)
                       (car agent-runs--rows))))
     (goto-char (cdr row))))
 
@@ -124,37 +118,36 @@
   "Format COUNT's share of TOTAL, or an unavailable share."
   (if (zerop total) "—" (format "%.0f%%" (* 100.0 (/ count (float total))))))
 
-(defun agent-runs--verdict (verdict)
-  "Return localized, colored VERDICT."
-  (pcase verdict
-    ("usable" (propertize "可用" 'face 'agent-session-ok))
-    ("rework" (propertize "返工" 'face 'agent-runs-rework))
-    ("wrong" (propertize "错误" 'face 'agent-session-error))
-    (_ (propertize "未评" 'face 'agent-session-dim))))
+(defun agent-runs--score (score)
+  "Format mean SCORE to one decimal, or a missing score."
+  (if (numberp score) (format "%.1f" score) "—"))
+
+(defun agent-runs--mean (groups)
+  "Return the rated-weighted mean score of GROUPS, or nil when unrated."
+  (let ((sum 0.0) (count 0))
+    (dolist (group groups)
+      (when (numberp (plist-get group :score))
+        (let ((rated (or (plist-get group :rated) 0)))
+          (setq sum (+ sum (* (plist-get group :score) rated))
+                count (+ count rated)))))
+    (when (> count 0) (/ sum count))))
 
 (defun agent-runs--cells (group)
   "Return summary cells for GROUP."
-  (let* ((key (agent-runs--group-key group))
-         (agent (plist-get group :agent))
+  (let* ((agent (plist-get group :agent))
          (title (or (agent-session--get (intern agent) :title) agent))
          (model (plist-get group :model))
-         (runs (plist-get group :runs))
-         (rated (plist-get group :rated)))
+         (runs (plist-get group :runs)))
     (list
-     (concat (if (member key agent-runs--expanded) "▾ " "▸ ") (car key))
+     (plist-get group :profile)
      (concat title " " (if (stringp model)
                             (agent-session-model-short-name model title) "未知模型"))
      (number-to-string runs)
      (propertize (agent-runs--percent (plist-get group :failed) runs)
                  'help-echo (format "失败 %d 次；提前关闭 %d 次"
                                     (plist-get group :failed) (plist-get group :closed)))
-     (number-to-string rated)
-     (mapconcat (lambda (pair)
-                  (propertize (number-to-string (plist-get group (car pair)))
-                              'face (cdr pair)))
-                '((:usable . agent-session-ok) (:rework . agent-runs-rework)
-                  (:wrong . agent-session-error)) " / ")
-     (agent-runs--percent (plist-get group :verified) rated)
+     (number-to-string (plist-get group :rated))
+     (agent-runs--score (plist-get group :score))
      (agent-runs--duration (plist-get group :duration))
      (agent-runs--tokens (plist-get group :tokens)))))
 
@@ -175,33 +168,6 @@
              (insert cell)
              (setq offset (+ offset width)))))
 
-(defun agent-runs--insert-run (key item)
-  "Insert ITEM underneath the group identified by KEY."
-  (agent-runs--insert-row
-   (append key (list (plist-get item :run)))
-   (lambda ()
-     (let* ((rating (plist-get item :rating))
-            (errors (append (plist-get item :errors) nil))
-            (outcome (pcase (plist-get item :outcome)
-                       ("ok" (propertize "完成" 'face 'agent-session-ok))
-                       ("failed" (propertize "失败" 'face 'agent-session-error))
-                       (_ (propertize "提前关闭" 'face 'agent-session-dim)))))
-       (insert (format "  #%d  %s  @%s  %s  "
-                       (plist-get item :run)
-                       (format-time-string "%Y-%m-%d %H:%M" (plist-get item :start))
-                       (plist-get item :handle)
-                       (replace-regexp-in-string "[\n\r]+" " "
-                                                 (or (plist-get item :title) "无标题")))
-               outcome (if errors (format "（%s）" (string-join errors "、")) "")
-               (format "  %s  工具 %d 次  "
-                       (agent-runs--duration (plist-get item :duration))
-                       (plist-get item :tools))
-               (agent-runs--verdict (plist-get rating :verdict)))
-       (when rating
-         (insert (if (eq (plist-get rating :verified) t) " · 已核实" " · 未核实"))
-         (when-let* ((note (plist-get rating :note)))
-           (insert "  " (replace-regexp-in-string "[\n\r]+" " " note))))))))
-
 (defun agent-runs--render ()
   "Render the snapshot and restore the logical row at point."
   (let ((selection (agent-runs--selection))
@@ -215,10 +181,12 @@
     (when agent-runs--snapshot
       (let ((total (lambda (key)
                      (apply #'+ (mapcar (lambda (g) (plist-get g key)) groups)))))
-        (insert (format "%d 组 · %d 次 · 失败 %d 次 · 提前关闭 %d 次 · 已评 %d 次\n"
+        (insert (format (concat "%d 组 · %d 次 · 失败 %d 次 · 提前关闭 %d 次"
+                                " · 已评 %d 次 · 均分 %s\n")
                         (length groups) (funcall total :runs) (funcall total :failed)
-                        (funcall total :closed) (funcall total :rated)))))
-    (insert (propertize "g 刷新 · r 范围 · TAB/RET 展开 · n/p 移动\n\n"
+                        (funcall total :closed) (funcall total :rated)
+                        (agent-runs--score (agent-runs--mean groups))))))
+    (insert (propertize "g 刷新 · r 范围 · n/p 移动\n\n"
                         'face 'agent-session-dim))
     (cond (agent-runs--error
            (insert (propertize agent-runs--error 'face 'agent-session-error) "\n"))
@@ -237,25 +205,11 @@
         (agent-runs--insert-cells agent-runs--columns widths)
         (insert "\n")
         (cl-loop for group in groups for cells in rows do
-                 (let ((key (agent-runs--group-key group)))
-                   (agent-runs--insert-row
-                    key (lambda () (agent-runs--insert-cells cells widths)))
-                   (when (member key agent-runs--expanded)
-                     (seq-doseq (item (plist-get group :items))
-                       (agent-runs--insert-run key item)))))))
+                 (agent-runs--insert-row
+                  (agent-runs--group-key group)
+                  (lambda () (agent-runs--insert-cells cells widths))))))
     (setq agent-runs--rows (nreverse agent-runs--rows))
     (agent-runs--goto selection)))
-
-(defun agent-runs-toggle ()
-  "Expand or collapse the group at point."
-  (interactive)
-  (let* ((selection (agent-runs--selection))
-         (key (seq-take selection 3)))
-    (unless key (user-error "请先选择运行组"))
-    (if (member key agent-runs--expanded)
-        (setq agent-runs--expanded (remove key agent-runs--expanded))
-      (push key agent-runs--expanded))
-    (agent-runs--render)))
 
 (defun agent-runs-next-row (&optional count)
   "Move COUNT logical rows forward."
@@ -280,20 +234,17 @@
   (with-help-window "*子代理评估帮助*"
     (princ "子代理评估 · 键盘操作\n\n")
     (princ "g：刷新    r：切换 7 天 / 30 天 / 全部（默认 30 天）\n")
-    (princ "TAB / RET：展开或收起    n / p、C-n / C-p：逐行移动\n")
+    (princ "n / p、C-n / C-p：逐行移动\n")
     (princ "q：返回    ?：帮助\n")
     (princ "Evil 普通状态：j / k 移动，g r 刷新。\n\n")
     (princ "失败率为失败次数 / 总次数；提前关闭次数见汇总及失败率提示。\n")
-    (princ "可用 / 返工 / 错误按每次运行的最新评分计；已核实为已核实次数 / 已评次数。\n")
+    (princ "均分为每次运行最新评分的平均值，保留一位小数；已评为已评分的运行次数。\n")
     (princ "token 为后端上报的用量：输入含缓存读取及写入 / 输出。仅统计本机记录。\n")))
 
 (defvar-keymap agent-runs-mode-map
   :doc "Keys for the subagent run page."
   "g" #'agent-runs-refresh
   "r" #'agent-runs-cycle-range
-  "TAB" #'agent-runs-toggle
-  "<tab>" #'agent-runs-toggle
-  "RET" #'agent-runs-toggle
   "n" #'agent-runs-next-row
   "p" #'agent-runs-previous-row
   "C-n" #'agent-runs-next-row
@@ -308,7 +259,7 @@
 
 ;;;###autoload
 (defun agent-runs ()
-  "Show local subagent runs and ratings."
+  "Show local subagent run summaries and mean scores."
   (interactive)
   (let ((buffer (get-buffer-create agent-runs--buffer)))
     (with-current-buffer buffer
