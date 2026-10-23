@@ -143,6 +143,46 @@ A string in FORMS is inserted as is."
     ;; Its load was noted: nothing to reload any more.
     (should-not (my/reload-config))))
 
+(ert-deftest init-reload-test-compiles-newly-loaded-dependencies ()
+  "Files pulled in during reload, including transitive dependencies, compile."
+  (init-reload-test--with-module file
+    (let* ((dir (file-name-directory file))
+           (child (expand-file-name "init-reload-test-child.el" dir))
+           (grandchild (expand-file-name "init-reload-test-grandchild.el" dir))
+           (load-path (cons dir load-path)))
+      (init-reload-test--write
+       file '(provide 'init-reload-test-mod))
+      (load file nil t t)
+      (init-reload-test--write
+       grandchild
+       '(defun init-reload-test-grandchild-fn () 'grandchild)
+       '(provide 'init-reload-test-grandchild))
+      (init-reload-test--write
+       child
+       '(require 'init-reload-test-grandchild)
+       '(defun init-reload-test-child-fn () 'child)
+       '(provide 'init-reload-test-child))
+      ;; The changed parent introduces a require.  Compiling it source-loads
+      ;; CHILD, whose own require source-loads GRANDCHILD.
+      (init-reload-test--write
+       file
+       '(require 'init-reload-test-child)
+       '(provide 'init-reload-test-mod))
+      (let* ((report (my/reload-config (list file)))
+             (reported (mapcar (lambda (entry) (plist-get entry :file)) report)))
+        (should (equal (length reported) 3))
+        (should (member file reported))
+        (should (member child reported))
+        (should (member grandchild reported))
+        (dolist (entry report)
+          (should (eq (plist-get entry :status) 'reloaded)))
+        (should (compiled-function-p
+                 (symbol-function 'init-reload-test-child-fn)))
+        (should (compiled-function-p
+                 (symbol-function 'init-reload-test-grandchild-fn)))
+        (should (eq (init-reload-test-child-fn) 'child))
+        (should (eq (init-reload-test-grandchild-fn) 'grandchild))))))
+
 (ert-deftest init-reload-test-compile-problems ()
   "Compiler warnings are reported; a file that does not compile loads nothing."
   (init-reload-test--with-module file

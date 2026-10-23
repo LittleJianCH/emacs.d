@@ -348,6 +348,19 @@ made before this reload lack them" (car struct)))
                                  structs)
                          (cdr compiled)))))))
 
+(defun my/reload--files (files)
+  "Reload FILES and return a report entry for each file."
+  (mapcar (lambda (file)
+            (cons :file
+                  (cons file
+                        (condition-case err
+                            (if (file-exists-p file)
+                                (my/reload--file file)
+                              (error "No such file"))
+                          (error (list :status 'failed
+                                       :error (error-message-string err)))))))
+          files))
+
 (defvar my/reload-emx-function nil
   "Function returning daemon reload reports, installed by agent-emx.")
 
@@ -359,22 +372,28 @@ list of plists (:file :status ...), where :status is `reloaded', `failed' or
 Interactively, report the outcome in the echo area."
   (interactive)
   (let* ((loaded (my/reload--loaded))
+         (loaded-before (mapcar #'car loaded))
          (files (if files
                     (mapcar (lambda (file)
                               (file-truename (expand-file-name file user-emacs-directory)))
                             files)
                   (seq-filter #'my/reload--changed-p (mapcar #'car loaded))))
-         (report
-          (mapcar (lambda (file)
-                    (cons :file
-                          (cons file
-                                (condition-case err
-                                    (if (file-exists-p file)
-                                        (my/reload--file file)
-                                      (error "No such file"))
-                                  (error (list :status 'failed
-                                               :error (error-message-string err)))))))
-                  (my/reload--order files loaded))))
+         (reported-files files)
+         (report (my/reload--files (my/reload--order files loaded))))
+    ;; Compiling or loading a file can `require' another configuration file.
+    ;; Such a dependency was just source-loaded, so reload it through the same
+    ;; compiled path.  Repeat because compiling that dependency may load more.
+    (let (new-files)
+      (while (setq new-files
+                   (seq-remove
+                    (lambda (file) (member file reported-files))
+                    (seq-difference (mapcar #'car (my/reload--loaded))
+                                    loaded-before)))
+        (setq report
+              (append report
+                      (my/reload--files
+                       (my/reload--order new-files (my/reload--loaded))))
+              reported-files (append reported-files new-files))))
     ;; init.el and early-init.el run once at startup; reloading them would redo it.
     (unless files
       (dolist (file (list user-init-file early-init-file))
