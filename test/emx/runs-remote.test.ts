@@ -1,7 +1,7 @@
 // Host run rows share the durable usage stream and retain their daemon identity.
 import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, unlinkSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -80,16 +80,43 @@ test('mixed usage, run, quota and rating deliveries deduplicate and recover a mi
     // Simulate a crash after durable append and before advancing the watermark.
     t.daemon.usage.watermarks.producer = 3
     writeFileSync(t.daemon.usage.watermarkFile, JSON.stringify({ producer: 3 }))
+    appendFileSync(join(t.dir, 'emx/subagent-runs.jsonl'), '{"type":"run"')
     await t.restart()
     assert.deepEqual(await t.client.request('runs/record', score), { id: 'rating', source: 'producer', sequence: 4 })
     assert.equal(t.daemon.collab.runLog().length, 2)
     await t.client.request('usage/record', { id: 'next', source: 'producer', sequence: 5, record: { agent: 'echo', input: 7 } })
+    await t.client.request('runs/record', { ...score, id: 'after-truncated-line', sequence: 6, row: rating(8) })
+    assert.equal(t.daemon.collab.runLog().length, 3)
+    await t.restart()
+    await t.client.request('runs/record', { ...score, id: 'after-truncated-line', sequence: 6, row: rating(8) })
+    assert.equal(t.daemon.collab.runLog().length, 3)
     const groups = (await t.client.request('collab/runs', {})).groups
     assert.equal(groups[0].score, 8)
     assert.equal((await t.client.request('usage/report', { range: 'all' })).total.input, 12)
     for (const row of [{ ...rating(11) }, { ...run(), run: 0 }, { ...run(), tokens: {} }, { type: 'other', run: 1 }]) {
-      await assert.rejects(t.client.request('runs/record', { ...entry, sequence: 6, row }), { code: -32602 })
+      await assert.rejects(t.client.request('runs/record', { ...entry, sequence: 7, row }), { code: -32602 })
     }
+  } finally { await t.cleanup() }
+})
+
+test('host capture survives a run log write failure', async () => {
+  const t = await setup(true)
+  try {
+    const { id } = await t.client.request('session/open', { agent: 'echo', root: t.dir })
+    const parent = t.daemon.sessions.get(id)!
+    parent.setStatus('running')
+    t.daemon.collab.host.view = async (child) => { child.backend.send = () => { child.setStatus('running') } }
+    const signal = new AbortController().signal
+    await t.daemon.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task', handle: 'worker' }, signal)
+    // A directory where the log should be makes its append fail independently.
+    mkdirSync(join(t.dir, 'emx/subagent-runs.jsonl'))
+    await t.daemon.collab.call(parent, 'session_stop', { session: '@worker' }, signal)
+    const entries = t.daemon.outbox!.entries.filter((entry) => entry.method === 'runs/record')
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].params.row.type, 'run')
+    assert.equal(entries[0].params.row.run, 1)
+    assert.equal(JSON.parse(readFileSync(t.daemon.outbox!.file, 'utf8')).entries.filter((e: any) => e.method === 'runs/record').length, 1)
+    rmSync(join(t.dir, 'emx/subagent-runs.jsonl'), { recursive: true })
   } finally { await t.cleanup() }
 })
 

@@ -2,7 +2,7 @@ import { sessionSkills } from '../backends/backend.ts'
 import { delegationProfiles, delegationTools, profileTools, sessionProfile } from './profiles.ts'
 // collab.ts --- daemon-owned tools, children, mailbox and task context.
 import { spawn } from 'node:child_process'
-import { accessSync, appendFileSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { accessSync, appendFileSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
@@ -802,9 +802,16 @@ export class Collaboration {
     return { now, range: range || null, groups: [...groups.values()].sort((a, b) => b.runs - a.runs || a.profile.localeCompare(b.profile)) }
   }
   #append(row: object): void {
-    mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
-    appendFileSync(this.#runFile, JSON.stringify(row) + '\n', { mode: 0o600 })
+    // Capture first, as usage does: host log failures must not lose the relay.
     this.host.captureRun?.(row)
+    mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
+    const fd = openSync(this.#runFile, 'a+', 0o600)
+    try {
+      const size = fstatSync(fd).size, last = Buffer.alloc(1)
+      if (size) readSync(fd, last, 0, 1, size - 1)
+      // A crash may have cut the previous append short. Keep this row readable.
+      appendFileSync(fd, (size && last[0] !== 0x0a ? '\n' : '') + JSON.stringify(row) + '\n')
+    } finally { closeSync(fd) }
   }
   /** Persist host identity and delivery identity in the same append as the row. */
   recordRun(row: Record<string, unknown>, host: string, source: string, sequence: number): void {
