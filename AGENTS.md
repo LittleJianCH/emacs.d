@@ -37,9 +37,9 @@ lisp/core/               base layer
 lisp/lang/lang-NAME.el   one file per language; enabled via `my/languages' in init.el
 lisp/agent/              shared agent support (see below)
   agent-emx.el          required daemon client, session views and editor tools
-  agent-emx-remote.el   host runtime install, -L transport, config and usage relay
+  agent-emx-remote.el   host runtime install, -L transport, config and record relay
   agent-profiles.el     standalone subagent profile and quota threshold controls
-  agent-runs.el         local subagent runs and ratings grouped by profile and model
+  agent-runs.el         combined subagent runs and ratings grouped by profile and model
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       enabled-agent registration (all use :backend emx)
     pi/                 thin Pi RPC approval and direct MCP extension
@@ -135,9 +135,11 @@ var/                     runtime state (history, backups, pasted images...); git
   Timers only restore local
   forwards for connected hosts; install, ensure, root expansion, skills and
   uploads run on user action. Host config overrides executables only. Durable
-  usage outboxes use sequence acknowledgments. Children remain in the parent's
-  daemon; cross-daemon list/read/ask and replies use Emacs as the hub. Tests
-  simulate a host locally.
+  usage outboxes relay usage, quotas and run/rating rows with shared sequence
+  acknowledgments. Local `runs/record` stores host and delivery identity, so
+  replay is idempotent and ratings join by `(host, run)`. Children remain in
+  the parent's daemon; cross-daemon list/read/ask and replies use Emacs as the
+  hub. Tests simulate a host locally.
 - `agent-remote.el` — shared ControlMaster lookup and input upload helpers.
   No reverse bridge, keeper, relay, per-session emx or byte-offset reattach.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
@@ -162,10 +164,13 @@ var/                     runtime state (history, backups, pasted images...); git
   Pi polls OpenCode Go's undocumented usage endpoint using a key obtained
   from Pi, never persisted: 5h / weekly forecasts, monthly allowance only.
   The editor retains durable pending upgrade entries and the transport used to
-  forward acknowledged host usage, plus one-time old-ledger conversion.
+  forward acknowledged host usage and run/rating rows, plus one-time old-ledger
+  conversion.
   `C-c a u` opens the report; `agent-usage-clear` stays unbound and confirmed.
   Subagent runs are logged separately by `collab.ts` in
   `var/emx/subagent-runs.jsonl` (one row per child, plus parent ratings).
+  Host rows are relayed into the local log with a `host` label; local counter
+  recovery and rating authorization only consider local rows.
   `agent-usage-restart-service` reconnects without stopping agents.
 - `agent-profiles.el` — `C-c a p` opens a standalone local daemon profile page.
   It reads `collab/profiles {root}` using the invoking buffer's project root
@@ -188,8 +193,8 @@ var/                     runtime state (history, backups, pasted images...); git
   Profile descriptions appear in the echo area; `*` marks overrides and
   disabled groups are dimmed. Writes and refresh restore the logical row,
   following moved candidates and clamping indices when a row disappears.
-- `agent-runs.el` — `C-c a U` opens local subagent runs and optional parent
-  ratings from asynchronous `collab/runs`. Pixel-aligned groups summarize each
+- `agent-runs.el` — `C-c a U` opens local and relayed subagent runs and optional
+  parent ratings from asynchronous `collab/runs`. Pixel-aligned groups summarize each
   profile and concrete model, with rated counts and mean scores; there is no
   per-run expansion.
   `r` cycles 7 days, 30 days (default) and all time; `g` refreshes while

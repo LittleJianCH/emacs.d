@@ -480,8 +480,8 @@ approvals or changes in child behavior, and only a few extra tokens.
 
 Layer A is objective and costs no tokens. `session_start` gives each child a
 run number from a daemon-wide counter persisted in `collab.json` (and never
-below the log's largest). When the child's result is delivered, or the child
-is closed first (stopped, closed with its parent, startup failure, lost in a
+below the local rows' largest). When the child's result is delivered, or the
+child is closed first (stopped, closed with its parent, startup failure, lost in a
 daemon restart), one `run` row is appended: start, end and duration, root,
 the parent (handle, agent, model), handle, title, profile, context, the
 candidate's agent, effort and mode, the requested and the actually used model
@@ -513,8 +513,18 @@ output tokens and no extra round trip, the run label a few tokens per reply.
 closed, rated, mean score rounded to one decimal or null when unrated, median
 duration, tokens). Each rated run contributes its latest valid score once.
 `C-c a U` (`agent-runs`) shows the grouped summary on a Chinese page with a
-mean-score column and no per-run expansion. Records from remote host daemons
-are not relayed yet.
+mean-score column and no per-run expansion.
+
+Host daemons keep their own run log and also put each run and rating row in
+the durable usage outbox as `runs/record`. Emacs forwards these entries to the
+local daemon with the host label, acknowledging only after local receipt.
+Usage, quota and run entries share the producer's contiguous sequence and
+watermark. The local append stores the delivery identity with the row, so
+replays after a disconnect or restart cannot duplicate it. Run numbers are
+scoped by host: ratings join on `(host, run)`, and only local rows affect the
+local counter, active-run recovery and `session_rate` authorization. The
+summary still merges hosts by profile, agent and model. Existing host logs
+are not backfilled; the relay captures new rows after the host is updated.
 
 ### Approvals and progress
 
@@ -573,8 +583,7 @@ inherited conversation.
 - A session-level "direct only" mode, in which the parent's agent only splits
   work, starts children and summarizes.
 - A git worktree per child, for children editing the same files at once.
-- Relaying run records from host daemons (through the usage outbox), and
-  rotating models inside a profile on purpose to compare them.
+- Rotating models inside a profile on purpose to compare them.
 
 ## References
 
