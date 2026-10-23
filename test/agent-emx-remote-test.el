@@ -258,6 +258,102 @@
         (should (equal (cadar sent) "usage/ack"))
         (should (equal (nth 2 (car sent)) '(:source "host-producer" :sequence 7)))))))
 
+(ert-deftest agent-emx-remote-outbox-relays-run-rows-with-usage ()
+  (should (equal (agent-emx-remote--outbox-rpc "record") "usage/record"))
+  (should (equal (agent-emx-remote--outbox-rpc "quota") "usage/quota"))
+  (should (equal (agent-emx-remote--outbox-rpc "runs/record") "runs/record"))
+  (let ((agent-emx-remote--inflight (make-hash-table :test #'eq))
+        (remote (agent-emx--make-connection :place "/rpc:phase7:/project/" :ready t))
+        (local (agent-emx--make-connection)) sent)
+    (cl-letf (((symbol-function 'agent-emx--local-connection)
+               (lambda (callback _error &rest _) (funcall callback local)))
+              ((symbol-function 'agent-emx--request)
+               (lambda (connection method params &optional callback error)
+                 (push (list connection method params callback error) sent))))
+      (let ((row '(:type "run" :run 4 :profile "review" :agent "codex" :model "m"
+                   :root "~/project" :tokens (:input 3)))
+            (entries [(:id "run-1" :source "host" :sequence 3 :method "runs/record"
+                       :params (:row (:type "run" :run 4 :profile "review" :agent "codex"
+                                           :model "m" :root "~/project"
+                                           :tokens (:input 3))))
+                      (:id "quota-1" :source "host" :sequence 1 :method "quota"
+                       :params (:reading (:agent "codex" :balance 5)))
+                      (:id "usage-1" :source "host" :sequence 2 :method "record"
+                       :params (:record (:agent "codex" :root "/project/" :input 2)))]))
+        (agent-emx-remote-usage remote entries)
+        ;; One durable order holds across every entry kind.
+        (should (equal (mapcar #'cadr (reverse sent))
+                       '("usage/quota" "usage/record" "runs/record")))
+        (let ((requests (reverse sent)))
+          (should (equal (mapcar (lambda (r) (eq (car r) local)) requests)
+                         '(t t t)))
+          ;; Quotas name the host they were read on; run rows only tag origin.
+          (should (equal (plist-get (plist-get (nth 2 (nth 0 requests)) :reading) :host)
+                         "phase7"))
+          (should-not (plist-member (nth 2 (nth 0 requests)) :host))
+          (should (equal (plist-get (plist-get (nth 2 (nth 1 requests)) :record) :root)
+                         "/rpc:phase7:/project/"))
+          (let ((params (nth 2 (nth 2 requests))))
+            (should (equal (plist-get params :host) "phase7"))
+            (should (equal (plist-get params :id) "run-1"))
+            (should (equal (plist-get params :source) "host"))
+            (should (equal (plist-get params :sequence) 3))
+            (should (equal (plist-get params :row) row)))
+          ;; Entries stay untouched, so a retry sends the original row.
+          (should (equal (plist-get (plist-get (aref entries 0) :params) :row) row))
+          (should-not (plist-member (plist-get (aref entries 0) :params) :host))
+          (should (equal (plist-get (plist-get (plist-get (aref entries 2) :params)
+                                              :record)
+                                    :root)
+                         "/project/"))
+          ;; Receipts are acknowledged in order with the local daemon's triple.
+          (funcall (nth 3 (nth 0 requests)) '(:id "quota-1" :source "host" :sequence 1))
+          (should (equal (cadr (car sent)) "usage/ack"))
+          (should (eq (car (car sent)) remote))
+          (should (equal (nth 2 (car sent)) '(:source "host" :sequence 1)))
+          (funcall (nth 3 (nth 2 requests)) '(:id "run-1" :source "host" :sequence 3))
+          (should (equal (cadr (car sent)) "usage/ack"))
+          (should (equal (nth 2 (car sent)) '(:source "host" :sequence 3)))
+          (should (= (length sent) 5))
+          (should (= (hash-table-count (gethash remote agent-emx-remote--inflight)) 1)))))))
+
+(ert-deftest agent-emx-remote-outbox-replays-run-rows-until-acknowledged ()
+  (let ((agent-emx-remote--inflight (make-hash-table :test #'eq))
+        (remote (agent-emx--make-connection :place "/rpc:phase7:/project/" :ready t))
+        (local (agent-emx--make-connection)) sent)
+    (cl-letf (((symbol-function 'agent-emx--local-connection)
+               (lambda (callback _error &rest _) (funcall callback local)))
+              ((symbol-function 'agent-emx--request)
+               (lambda (connection method params &optional callback error)
+                 (push (list connection method params callback error) sent))))
+      (let ((row '(:type "run" :run 9 :profile "p" :agent "codex" :model nil
+                   :root "~/w" :tokens (:input 1)))
+            (entry [(:id "run-1" :source "host" :sequence 5 :method "runs/record"
+                      :params (:row (:type "run" :run 9 :profile "p" :agent "codex"
+                                          :model nil :root "~/w"
+                                          :tokens (:input 1))))]))
+        (agent-emx-remote-usage remote entry)
+        (should (= (length sent) 1))
+        (should (equal (cadr (car sent)) "runs/record"))
+        ;; A failed local request forgets the receipt: no ack, replay later.
+        (funcall (nth 4 (car sent)) '(:message "local daemon busy"))
+        (should (= (length sent) 1))
+        (agent-emx-remote-usage remote entry)
+        (should (= (length sent) 2))
+        ;; A reply belonging to another request must not acknowledge this row.
+        (funcall (nth 3 (car sent)) '(:id "someone-else" :source "host" :sequence 5))
+        (should (= (length sent) 2))
+        (agent-emx-remote-usage remote entry)
+        (should (= (length sent) 3))
+        (should (equal (plist-get (nth 2 (car sent)) :row) row))
+        (should (equal (plist-get (nth 2 (car sent)) :host) "phase7"))
+        (funcall (nth 3 (car sent)) '(:id "run-1" :source "host" :sequence 5))
+        (should (= (length sent) 4))
+        (should (equal (cadr (car sent)) "usage/ack"))
+        (should (eq (car (car sent)) remote))
+        (should (equal (nth 2 (car sent)) '(:source "host" :sequence 5)))
+        (should (= (hash-table-count (gethash remote agent-emx-remote--inflight)) 0))))))
+
 (ert-deftest agent-emx-remote-simulated-host-round-trip ()
   "Run the real ensure command locally, replacing only tramp and ssh."
   (let* ((agent-emx-remote-test--home (make-temp-file "/tmp/emx-host-" t))

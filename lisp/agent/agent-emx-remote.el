@@ -11,7 +11,7 @@
 (defvar agent-emx-remote--timer nil "Timer checking already connected hosts.")
 (defvar agent-emx-remote--automatic nil "Non-nil in automatic reconnect work.")
 (defvar agent-emx-remote--inflight (make-hash-table :test #'eq)
-  "Remote usage receipts currently being handed to the local daemon.")
+  "Remote outbox receipts currently being handed to the local daemon.")
 
 (defun agent-emx-remote--manifest ()
   "Get the local code version and its exact runtime manifest."
@@ -324,8 +324,17 @@ all its project views, since one host daemon has one editor attachment."
    (list :agents (vconcat (mapcar (lambda (a) (symbol-name (car a))) agent-session-agents)))
    nil (lambda (error) (message "emx 远程用量配置失败：%s" (plist-get error :message)))))
 
+(defun agent-emx-remote--outbox-rpc (method)
+  "Return the local daemon request name for outbox METHOD.
+Usage entries keep their `usage/' namespace; relayed run rows use their own."
+  (if (member method '("record" "quota"))
+      (concat "usage/" method)
+    method))
+
 (defun agent-emx-remote-usage (connection entries)
-  "Relay durable usage ENTRIES from CONNECTION; acknowledge after local receipt."
+  "Relay durable outbox ENTRIES from CONNECTION; acknowledge after local receipt.
+ENTRIES hold usage records, quota readings and subagent run rows, which reach
+the local daemon tagged with this host's place label."
   (seq-doseq (entry (sort (append entries nil)
                          (lambda (a b) (< (or (plist-get a :sequence) 0)
                                           (or (plist-get b :sequence) 0)))))
@@ -338,18 +347,27 @@ all its project views, since one host daemon has one editor attachment."
            (root (agent-emx--connection-place connection)))
       (unless (gethash id inflight)
         (puthash id t inflight)
-        (if (equal method "quota")
-            (setq params (plist-put params :reading
-                                    (plist-put (plist-get params :reading) :host
-                                               (file-remote-p root 'host))))
-          (when-let* ((record (plist-get params :record))
-                      (path (plist-get record :root)))
-            (setq params (plist-put params :record
-                                    (plist-put record :root (concat (file-remote-p root) path))))))
+        (pcase method
+          ;; Accounts are per host, so a quota reading names the host it saw.
+          ("quota"
+           (setq params (plist-put params :reading
+                                   (plist-put (plist-get params :reading) :host
+                                              (file-remote-p root 'host)))))
+          ;; Runs stay grouped by profile and model across hosts; only their
+          ;; origin is tagged, and their file roots remain host paths.
+          ("runs/record"
+           (setq params (plist-put params :host (file-remote-p root 'host))))
+          ;; Usage records are local turns, so their root becomes a tramp name.
+          ("record"
+           (when-let* ((record (plist-get params :record))
+                       (path (plist-get record :root)))
+             (setq params (plist-put params :record
+                                     (plist-put record :root
+                                                (concat (file-remote-p root) path)))))))
         (agent-emx--local-connection
          (lambda (local)
            (agent-emx--request
-            local (concat "usage/" method) (append (list :id id)
+            local (agent-emx-remote--outbox-rpc method) (append (list :id id)
                                    (list :source (plist-get entry :source)
                                          :sequence (plist-get entry :sequence)) params)
             (lambda (ack)
