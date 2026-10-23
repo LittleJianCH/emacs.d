@@ -25,6 +25,7 @@ init.el                  package setup, then loads modules in order
 lisp/core/               base layer
   init-base.el           defaults, var/ paths, `my/use-evil' + `my/toggle-evil'
   init-reload.el         `my/reload-config': apply edited files to the running Emacs
+  init-update.el         `my/update-config': fetch and apply revision-owned steps
   init-ui.el             fonts, layout (nano margins), status line, side panels
   init-theme.el          nano-style light / dark themes following the macOS appearance
   init-evil.el           Vim bindings (on by default, `my/use-evil')
@@ -59,6 +60,7 @@ test/agent-session-profile-test.el  ERT suite for profile creation and model cho
 test/agent-session-table-test.el  ERT suite for Markdown tables in transcripts
 test/agent-session-link-test.el   ERT suite for clickable links in transcripts
 test/init-reload-test.el    ERT suite for reloading
+test/init-update-test.el    ERT suite for configuration updates (temporary Git remotes)
 test/init-base-test.el      ERT suite for base defaults
 test/init-evil-pinyin-test.el ERT suite for Microsoft double-pinyin Evil motions
 test/init-remote-test.el    ERT suite for remote editing
@@ -238,7 +240,8 @@ evil off first (it is on by default and its normal state would eat typed keys):
 ```sh
 emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-session-test.el -l test/agent-session-profile-test.el \
-      -l test/init-reload-test.el -l test/init-base-test.el -l test/init-evil-pinyin-test.el \
+      -l test/init-reload-test.el -l test/init-update-test.el \
+      -l test/init-base-test.el -l test/init-evil-pinyin-test.el \
       -l test/init-remote-test.el \
       -l test/init-ui-test.el -l test/init-term-test.el \
       -l test/init-lazy-test.el -l test/lang-test.el \
@@ -353,6 +356,41 @@ hibernate with their transcripts and resume ids; Emacs reconnects and restores
 their views, and the next send resumes them with new code. Host runtime install
 happens during reload, never from a reconnect timer. The manual fallback remains
 `M-x agent-emx-restart-daemon`.
+
+### Updating
+
+`M-x my/update-config` asynchronously fetches the current branch's upstream,
+fast-forwards it and applies changes since the last fully applied revision,
+including local commits. Output goes to `*配置更新*`; the `update` agent method
+returns a deferred report without offering a restart. Interactive updates offer
+`restart-emacs` when startup files or incompatible layouts need it. Detached
+HEAD, missing upstream, divergence and conflicting dirty files stop the update;
+there is no stash, reset or branch switch.
+
+Two-stage update contract:
+
+- `my/update-config` is a bootstrap that may run from OLD code. In
+  `(file-truename user-emacs-directory)` it asynchronously fetches the current
+  upstream and merges `--ff-only @{u}`, reloads `init-update.el` through
+  `my/reload-config` if it changed, then calls the NEW definition of
+  `(my/update--apply FROM TO)`.
+- The name and two-argument arity of `my/update--apply` are frozen forever;
+  everything else, including build tools and apply steps, may change.
+  Failed compilation/reload stops the update without advancing the marker.
+- FROM is the last fully applied revision under `var/update/applied`, or HEAD
+  before merging on first use. Only complete success advances it to TO;
+  `restart_required` counts as applied and is reported to the user.
+
+Any change needing more than `reload` to take effect (a new build tool or
+language, dependency install, data/config migration or artifact rebuild) must
+add or edit its step in `lisp/core/init-update.el` in the same commit. Steps
+must be idempotent, derive from repository state and work when bootstrapped
+from the previous revision's `my/update-config`. `my/update-steps` is ordered:
+`emx-deps` installs changed/missing npm dependencies, `lisp` reloads changed
+already loaded files, and `emx` builds and updates local/host daemons. A future
+Rust runtime can replace the relevant step with `cargo build`. The Lisp step
+suppresses the daemon reload hook so that emx runs only once. Newly required
+configuration modules are also compiled and included in reload reports.
 
 Other caveats:
 

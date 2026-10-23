@@ -23,6 +23,7 @@
 (require 'agent-session)
 (require 'agent-session-list)
 (require 'init-reload)
+(require 'init-update)
 
 
 (defgroup agent-ui nil
@@ -510,6 +511,23 @@ to compile was not loaded; one that failed while loading may be partly loaded.")
 Emacs.")
                  ((seq-some (lambda (e) (equal (plist-get e :status) "restart_scheduled")) emx)
                   "The daemon will restart automatically when its waiting sessions and deliveries finish. Sessions resume on their next send."))))))
+
+(agent-ui-defmethod "update" ()
+  "Fetch the configuration upstream, fast-forward and apply revision-owned steps.
+Returns immediately with a deferred result, polled until the update finishes.
+The final report includes git, steps, reload and restart_required.  Never
+prompts for a restart; tell the user when restarting Emacs is required."
+  (let (result)
+    (my/update-config (lambda (report) (setq result report)))
+    (agent-ui-defer
+     (lambda ()
+       (when result
+         (list (plist-put
+                (copy-sequence result) :reload
+                (vconcat (mapcar (lambda (entry)
+                                   (if (plist-member entry :file)
+                                       (agent-ui--reload-entry entry) entry))
+                                 (plist-get result :reload))))))))))
 
 (defvar agent-ui-description-functions nil
   "Functions extending method descriptions: ((NAME . FUNCTION) ...).

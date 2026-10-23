@@ -48,6 +48,7 @@ Most load on first visiting one of their files; see `my/lazy-modules'.")
 
 (require 'init-base)        ; defaults, paths, macOS environment
 (require 'init-reload)      ; M-x my/reload-config: apply edited files, no restart
+(require 'init-update)      ; M-x my/update-config: fetch and apply repository steps
 (require 'init-ui)          ; theme, fonts, windows
 (when my/use-evil
   (require 'init-evil))     ; Vim keys (evil), off by default; M-x my/toggle-evil
