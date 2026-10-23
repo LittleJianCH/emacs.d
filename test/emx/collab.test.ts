@@ -36,7 +36,7 @@ function setup() {
     return s
   }
   collab = new Collaboration({ sessions, varDir: dir, config: () => config, create,
-    close: async (s) => { await s.stop(); sessions.delete(s.id); closed.push(s.id) },
+    close: async (s, completed) => { await collab.beginClose(s, completed); await s.stop(); sessions.delete(s.id); closed.push(s.id) },
     view: async () => { opened++ }, visible: async () => visible, changed: () => {} })
   const cleanup = async () => { collab.stop(); for (const s of sessions.values()) await s.stop(); rmSync(dir, { recursive: true, force: true }) }
   return { dir, config, sessions, create, collab, cleanup, closed, setVisible: (value: boolean) => { visible = value }, opened: () => opened }
@@ -210,7 +210,7 @@ for (const method of ['session_start', 'session_ask']) for (const c of failureCa
       const reply = t.collab.mailbox.get(parent.id)![0].text
       const followup = method === 'session_start' ? 'It takes no follow-ups; for more work, start another session.'
         : 'Follow up with session_ask session=@worker; see what it did with session_read.'
-      assert.equal(reply, `Reply from "@worker" (Echo)${c.exited ? ', which then exited' : ''}:\n\n${c.body}\n\n${followup}`)
+      assert.equal(reply, `Reply from "@worker" (Echo)${method === 'session_start' ? ' [run 1]' : ''}${c.exited ? ', which then exited' : ''}:\n\n${c.body}\n\n${followup}`)
       if (c.notices.some((n) => n.level === 'error')) {
         assert.doesNotMatch(reply, /\(no reply\)/)
         assert.ok(t.sessions.has(target!.id), 'failed sessions remain open')
@@ -543,4 +543,123 @@ for (const stage of ['view', 'backend']) test(`parent close waits for a child st
     assert.equal(child!.backend.alive(), false)
     assert.ok(!child!.blocks.some((b) => b.type === 'user'))
   } finally { release.resolve(); await starting?.catch(() => {}); await closing; await t.cleanup() }
+})
+
+test('run records capture actual model totals, reply labels and one outcome per child', async () => {
+  const t = setup()
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    t.config.profiles.echo.model = 'requested'
+    t.collab.host.runUsage = () => new Map([
+      ['small', { input: 1, cacheRead: 2, cacheWrite: 3, output: 4 }],
+      ['actual', { input: 20, cacheRead: 30, cacheWrite: 40, output: 50 }],
+    ])
+    t.collab.host.view = async (s) => {
+      s.backend.send = (text, _images, block) => {
+        s.addBlock({ id: block!, type: 'user', text })
+        s.addBlock({ id: 'tool', type: 'tool', view: { kind: 'read', name: 'read', title: 'Read file' }, status: 'done' })
+        s.addBlock({ id: 'reply', type: 'text', kind: 'assistant', text: ' 😀ok ', done: true })
+        s.setStatus('idle')
+      }
+    }
+    await t.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task', title: 'A task' }, signal())
+    await until(() => t.collab.runLog().length === 1)
+    const row = t.collab.runLog()[0]
+    assert.equal(row.type, 'run'); assert.equal(row.run, 1)
+    assert.equal(row.outcome, 'ok'); assert.equal(row.title, 'A task')
+    assert.equal(row.profile, 'echo'); assert.equal(row.context, 'fresh')
+    assert.equal(row.agent, 'echo'); assert.equal(row.mode, 'auto'); assert.equal(row.effort, null)
+    assert.equal(row.parent.session, parent.id); assert.equal(row.parent.handle, 'parent')
+    assert.equal(row.model, 'actual'); assert.equal(row.requested_model, 'requested')
+    assert.deepEqual(row.models, ['small', 'actual'])
+    assert.deepEqual(row.tokens, { input: 21, cache_read: 32, cache_write: 43, output: 54 })
+    assert.equal(row.tools, 1); assert.equal(row.reply, 3)
+    assert.ok(row.end >= row.start && row.duration >= 0)
+    assert.match(t.collab.mailbox.get(parent.id)![0].text, /\[run 1\]/)
+    assert.equal(t.sessions.size, 1)
+    await t.collab.settle(); assert.equal(t.collab.runLog().length, 1)
+  } finally { await t.cleanup() }
+})
+
+test('failed runs remain open and closing later does not duplicate their record', async () => {
+  const t = setup()
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    t.collab.host.view = async (s) => {
+      s.backend.send = (text, _images, block) => {
+        s.addBlock({ id: block!, type: 'user', text })
+        for (const id of ['one', 'two']) s.addBlock({ id, type: 'notice', notice: { kind: 'backend-error', level: 'error' } })
+        s.setStatus('idle')
+      }
+    }
+    await t.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task' }, signal())
+    await until(() => t.collab.runLog().length === 1)
+    const child = [...t.sessions.values()].find((s) => s.info.parent)!
+    assert.ok(child)
+    assert.equal(t.collab.runLog()[0].outcome, 'failed')
+    assert.deepEqual(t.collab.runLog()[0].errors, ['backend-error'])
+    await t.collab.host.close(child)
+    assert.equal(t.collab.runLog().length, 1)
+  } finally { await t.cleanup() }
+})
+
+for (const close of ['child', 'parent', 'startup']) test(`unfinished run records ${close} closure once`, async () => {
+  const t = setup()
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    t.collab.host.view = async (s) => {
+      if (close === 'startup') throw new Error('startup test')
+      s.backend.send = () => { s.setStatus('running') }
+    }
+    const started = t.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task' }, signal())
+    if (close === 'startup') await assert.rejects(started, /startup test/)
+    else {
+      await started
+      if (close === 'parent') await t.collab.host.close(parent)
+      else await t.collab.call(parent, 'session_stop', { session: '@echo' }, signal())
+    }
+    await t.collab.settle()
+    const rows = t.collab.runLog()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].outcome, close === 'startup' ? 'failed' : 'closed')
+    if (close === 'startup') assert.deepEqual(rows[0].errors, ['startup'])
+  } finally { await t.cleanup() }
+})
+
+test('run counters persist, honor the log maximum and restore lost active runs', async () => {
+  const t = setup()
+  let replacement: Collaboration | undefined
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    t.collab.host.view = async (s) => { s.backend.send = () => { s.setStatus('running') } }
+    await t.collab.call(parent, 'session_start', { profile: 'echo', prompt: 'task' }, signal())
+    t.collab.stop()
+    const child = [...t.sessions.values()].find((s) => s.info.parent)!
+    t.sessions.delete(child.id); await child.stop()
+    replacement = new Collaboration(t.collab.host); replacement.restore()
+    assert.equal(replacement.runs, 1)
+    assert.equal(replacement.runLog()[0].outcome, 'closed')
+    assert.equal(replacement.active.size, 0)
+    replacement.stop()
+    const file = join(t.dir, 'emx/collab.json')
+    const state = JSON.parse(readFileSync(file, 'utf8')); state.runs = 0
+    writeFileSync(file, JSON.stringify(state))
+    replacement = new Collaboration(t.collab.host); replacement.restore()
+    assert.equal(replacement.runs, 1)
+    assert.equal(replacement.runLog().length, 1)
+    await replacement.call(parent, 'session_start', { profile: 'echo', prompt: 'next' }, signal())
+    assert.equal(replacement.runs, 2)
+  } finally { replacement?.stop(); await t.cleanup() }
+})
+
+test('session_ask replies have neither a run row nor a run label', async () => {
+  const t = setup()
+  try {
+    const parent = t.create(); await parent.start(); parent.setStatus('running')
+    const peer = t.create('echo', t.dir, {}, { handle: 'peer' }); await peer.start()
+    await t.collab.call(parent, 'session_ask', { session: '@peer', prompt: 'question' }, signal())
+    await until(() => !!t.collab.mailbox.get(parent.id)?.length)
+    assert.doesNotMatch(t.collab.mailbox.get(parent.id)![0].text, /\[run/)
+    assert.deepEqual(t.collab.runLog(), [])
+  } finally { await t.cleanup() }
 })

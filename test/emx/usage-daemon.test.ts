@@ -202,3 +202,24 @@ test('an idle-only restart rechecks turns and ephemeral children before stopping
   delete session.info.parent
   await client.request('daemon/stop', {idleOnly: true})
 })
+
+test('session totals survive turn flushes and disappear only after close logs the run', async (t) => {
+  const { daemon, client, id, session, ledger } = await setup(t)
+  session.emit({ type: 'usage/call', model: 'actual', usage: call(1) })
+  session.emit({ type: 'usage/end' })
+  session.emit({ type: 'usage/call', model: 'actual', usage: call(5) })
+  session.emit({ type: 'usage/end' })
+  assert.equal(daemon.accounting.pending.size, 0)
+  assert.deepEqual(daemon.accounting.totals.get(id)?.get('actual'), { input: 6, cacheRead: 4, cacheWrite: 6, output: 8 })
+  assert.equal(ledger().length, 2)
+  let closingTotal: unknown
+  const begin = daemon.collab.beginClose.bind(daemon.collab)
+  daemon.collab.beginClose = (...args) => {
+    closingTotal = daemon.collab.host.runUsage?.(id)?.get('actual')
+    return begin(...args)
+  }
+  await client.request('session/stop', { id })
+  assert.deepEqual(closingTotal, { input: 6, cacheRead: 4, cacheWrite: 6, output: 8 })
+  assert.equal(daemon.accounting.totals.has(id), false)
+  assert.equal(daemon.accounting.pending.has(id), false)
+})

@@ -2,14 +2,14 @@ import { sessionSkills } from '../backends/backend.ts'
 import { delegationProfiles, profileTools, sessionProfile } from './profiles.ts'
 // collab.ts --- daemon-owned tools, children, mailbox and task context.
 import { spawn } from 'node:child_process'
-import { accessSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { accessSync, appendFileSync, constants, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
 import type { UsageService } from '../usage/service.ts'
 import type { Config, Profile, ProfileCandidate } from '../config.ts'
 import { candidateDisabledBy, profileCandidates } from '../config.ts'
-import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings } from './protocol.ts'
+import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings, Usage } from './protocol.ts'
 import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop']
@@ -118,7 +118,11 @@ export function formatTurn(n: number, turn: Block[], tools: string, running: boo
   return parts.join('\n\n')
 }
 export interface RemoteRoute { daemon: string, session: string }
-interface Pending { target: string, asker: string, block: string, handle?: string, route?: RemoteRoute }
+interface Pending { target: string, asker: string, block: string, handle?: string, route?: RemoteRoute, run?: number }
+/** What a run record needs that is gone once its child closes. */
+interface RunStart { run: number, start: number, root: string, parent: { session: string, handle: string, agent: string, model: string | null },
+  handle: string, title: string, profile: string, context: string, agent: string, model: string | null, effort: string | null, mode: string | null }
+type RunOutcome = { outcome: 'ok' | 'failed' | 'closed', errors?: string[], turn?: Block[], reply?: number }
 interface Outgoing { id: string, route: RemoteRoute, mail: Mail }
 interface Mail { handle: string, text: string, source?: string }
 export interface CollabHost {
@@ -127,6 +131,8 @@ export interface CollabHost {
   hub?(caller: { id: string, root: string }, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
   environment?(root: string): NodeJS.ProcessEnv
   usage?: Pick<UsageService, 'quotas'> & Partial<Pick<UsageService, 'candidateAvailability'>>
+  /** Token sums by model over a session's original backend events. */
+  runUsage?(id: string): Map<string, Usage> | undefined
   varDir: string
   create(agent: string, root: string, settings: Settings, info: Record<string, unknown>): Session
   close(session: Session, completed?: boolean): Promise<void>
@@ -141,6 +147,10 @@ export class Collaboration {
   mailbox = new Map<string, Mail[]>()
   outgoing: Outgoing[] = []
   receipts = new Set<string>()
+  /** Run numbers handed out so far, daemon-wide and persisted. */
+  runs = 0
+  /** Children not yet in the run log, by session id. */
+  active = new Map<string, RunStart>()
   #handoffs = new Map<string, { turn: string, text: string }>()
   #reservations = new Map<string, number>()
   #closing = new WeakSet<Session>()
@@ -264,6 +274,8 @@ export class Collaboration {
       for (const child of this.host.sessions.values()) if (child.info.parent === node.id) subtree.add(child)
     }
     const ids = new Set([...subtree].map((node) => node.id))
+    // A child closed before its result was delivered: stopped, or torn down with its parent.
+    for (const node of subtree) if (this.active.has(node.id)) this.#logRun(node, { outcome: 'closed' })
     this.pending = this.pending.filter((entry) => !ids.has(entry.target) && (!!entry.route || !ids.has(entry.asker)))
     const cancelledSource = (source?: string) => !!source && ids.has(source) && !(completed && source === session.id)
     for (const [id, mail] of this.mailbox) {
@@ -591,12 +603,19 @@ export class Collaboration {
       const cap = Math.max(0, modes.indexOf(caller.settings.mode ?? 'plan'))
       const requested = modes.indexOf(profile.mode ?? '')
       const settings = { model: profile.model, effort: profile.effort, mode: modes[Math.min(cap, requested < 0 ? cap : requested)] }
-      child = this.host.create(profile.agent, caller.root, settings, { parent: caller.id,
+      const run = ++this.runs
+      child = this.host.create(profile.agent, caller.root, settings, { parent: caller.id, run,
         parentSession: caller.resumeId(), profile: context === 'fork' ? sessionProfile(caller) : name, named: true, title: p.title ?? prompt.slice(0, 80),
         handle: this.unique(cleanHandle(String(p.handle ?? '')) ?? name), ...(fork ? { forkFrom: fork } : {}),
         skills: sessionSkills(caller) })
       // The registered starting session now owns the concurrency slot.
       release()
+      this.active.set(child.id, { run, start: Date.now() / 1000, root: child.root,
+        parent: { session: caller.id, handle: this.#handle(caller), agent: caller.agent, model: this.#model(caller) },
+        handle: this.#handle(child), title: String(child.info.title ?? ''), profile: String(child.info.profile),
+        context: String(context), agent: profile.agent, model: settings.model ?? null,
+        effort: settings.effort ?? null, mode: settings.mode ?? null })
+      this.save()
       await this.host.view(child)
       signal.throwIfAborted(); this.assertOpen(caller); this.assertOpen(child)
       await child.start()
@@ -610,6 +629,8 @@ export class Collaboration {
         : taskNote)
       return this.#prompt('started', this.#handle(child), this.#title(child), context) + note
     } catch (error) {
+      if (child && this.active.has(child.id)) this.#logRun(child, this.#closing.has(caller) || this.#closing.has(child)
+        ? { outcome: 'closed' } : { outcome: 'failed', errors: ['startup'] })
       if (child) await this.host.close(child)
       throw error
     } finally { release() }
@@ -617,7 +638,8 @@ export class Collaboration {
   #send(target: Session, asker: Session, text: string, hidden: string): void {
     this.assertOpen(target); this.assertOpen(asker)
     const block = target.newId('user')
-    this.pending.push({ target: target.id, asker: asker.id, block, handle: this.#handle(target) })
+    const run = this.active.get(target.id)?.parent.session === asker.id ? this.active.get(target.id)!.run : undefined
+    this.pending.push({ target: target.id, asker: asker.id, block, handle: this.#handle(target), ...(run ? { run } : {}) })
     this.save()
     target.sendMessage(text, '@' + this.#handle(asker), hidden, block)
   }
@@ -667,14 +689,18 @@ export class Collaboration {
         let reply = target ? this.#replyText(handle, body) : ''
         const tools = (turn ?? []).filter((b): b is Extract<Block, {type: 'tool'}> => b.type === 'tool').map(toolLine)
         const summary = tools.length ? 'What it did:\n' + tools.slice(0, 12).join('\n') + (tools.length > 12 ? `\n- … ${tools.length - 12} more` : '') + '\n\n' : ''
-        reply = target ? this.#prompt('reply', handle, this.#title(target), target.status === 'exited' ? ', which then exited' : '', reply,
-          target.info.parent ? summary + this.#prompt('childFollowup') : this.#prompt('followup', handle)) : `"@${handle}" ended without replying: it was closed before it replied`
+        const run = entry.run !== undefined && !entry.route ? this.active.get(entry.target) : undefined
+        const label = entry.run !== undefined ? this.#prompt('runLabel', entry.run) : ''
+        reply = target ? this.#prompt('reply', handle, this.#title(target), label + (target.status === 'exited' ? ', which then exited' : ''), reply,
+          target.info.parent ? summary + this.#prompt('childFollowup') : this.#prompt('followup', handle)) : `"@${handle}"${label} ended without replying: it was closed before it replied`
         // Keep the pending entry revocable while visibility is in flight.
         const close = asker && target?.info.parent === asker.id && target.status === 'idle'
           && this.config.collab.closeFinished && !errors.length && !await this.host.visible(target)
         if (!this.pending.includes(entry) || target && this.#closing.has(target)
           || asker && this.#closing.has(asker) && !entry.route) continue
         this.pending = this.pending.filter((e) => e !== entry)
+        if (target && run?.run === entry.run) this.#logRun(target, { outcome: errors.length ? 'failed' : 'ok',
+          errors: [...new Set(errors.map(({ notice }) => notice.kind))], turn, reply: [...(text?.text ?? '').trim()].length })
         const mail = { handle, text: reply, source: entry.target }
         if (entry.route) this.outgoing.push({ id: entry.block, route: entry.route, mail })
         else this.mailbox.set(asker!.id, [...this.mailbox.get(asker!.id) ?? [], mail])
@@ -707,6 +733,52 @@ export class Collaboration {
       if (this.#settleAgain) { this.#settleAgain = false; this.schedule() }
     }
   }
+  #model(s: Session): string | null {
+    return typeof s.info.model === 'string' ? s.info.model : s.settings.model ?? null
+  }
+  get #runFile(): string { return join(this.host.varDir, 'emx', 'subagent-runs.jsonl') }
+  /** Rows of var/emx/subagent-runs.jsonl, skipping damaged lines. */
+  runLog(): Record<string, any>[] {
+    let text = ''
+    try { text = readFileSync(this.#runFile, 'utf8') } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
+    return text.split('\n').flatMap((line) => {
+      try { const row = JSON.parse(line); return row && typeof row === 'object' ? [row] : [] } catch { return [] }
+    })
+  }
+  #append(row: object): void {
+    mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
+    appendFileSync(this.#runFile, JSON.stringify(row) + '\n', { mode: 0o600 })
+  }
+  /** Append the run record of a child once, when its result is settled or lost. */
+  #logRun(target: Session | undefined, result: RunOutcome, id = target!.id): void {
+    const start = this.active.get(id)
+    if (!start) return
+    this.active.delete(id)
+    const end = Date.now() / 1000
+    const usage = this.host.runUsage?.(id) ?? new Map<string, Usage>()
+    const tokens = { input: 0, cache_read: 0, cache_write: 0, output: 0 }
+    let model: string | null = null, most = -1
+    for (const [name, u] of usage) {
+      tokens.input += u.input; tokens.cache_read += u.cacheRead; tokens.cache_write += u.cacheWrite; tokens.output += u.output
+      const total = u.input + u.cacheRead + u.cacheWrite + u.output
+      if (total > most) { most = total; model = name }
+    }
+    const blocks = result.turn ?? target?.blocks ?? []
+    const texts = blocks.filter((b): b is Extract<Block, {type: 'text'}> => b.type === 'text' && b.kind !== 'thinking')
+    const home = homedir()
+    try {
+      this.#append({ type: 'run', run: start.run, start: start.start, end, duration: Math.round((end - start.start) * 10) / 10,
+        root: start.root.startsWith(home + '/') ? '~' + start.root.slice(home.length) : start.root,
+        parent: start.parent, handle: start.handle, title: start.title, profile: start.profile, context: start.context,
+        agent: start.agent, effort: start.effort, mode: start.mode, requested_model: start.model,
+        model: model ?? (target ? this.#model(target) : null) ?? start.model,
+        ...(usage.size > 1 ? { models: [...usage.keys()] } : {}),
+        outcome: result.outcome, ...(result.errors?.length ? { errors: result.errors } : {}),
+        tools: blocks.filter((b) => b.type === 'tool').length,
+        reply: result.reply ?? [...(texts.at(-1)?.text ?? '').trim()].length, tokens })
+    } catch { /* The run log is best-effort; delivery must not depend on it. */ }
+    this.save()
+  }
   #replyText(handle: string, text: string): string {
     text = text.trim()
     if ([...text].length <= this.config.collab.replyLimit) return text
@@ -719,7 +791,8 @@ export class Collaboration {
   save(): void {
     const file = join(this.host.varDir, 'emx', 'collab.json')
     mkdirSync(join(this.host.varDir, 'emx'), { recursive: true, mode: 0o700 })
-    writeFileSync(file + '.tmp', JSON.stringify({ enabled: this.enabled, pending: this.pending, mailbox: [...this.mailbox], outgoing: this.outgoing, receipts: [...this.receipts] }), { mode: 0o600 })
+    writeFileSync(file + '.tmp', JSON.stringify({ enabled: this.enabled, pending: this.pending, mailbox: [...this.mailbox], outgoing: this.outgoing, receipts: [...this.receipts],
+      runs: this.runs, active: [...this.active] }), { mode: 0o600 })
     renameSync(file + '.tmp', file)
     this.host.changed()
   }
@@ -733,7 +806,13 @@ export class Collaboration {
       this.mailbox = new Map(data.mailbox)
       this.outgoing = data.outgoing ?? []
       this.receipts = new Set(data.receipts ?? [])
+      if (Number.isSafeInteger(data.runs)) this.runs = data.runs
+      if (Array.isArray(data.active)) this.active = new Map(data.active)
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
+    // Never reuse a logged run number, even if collab.json was lost.
+    for (const row of this.runLog()) if (Number.isSafeInteger(row.run) && row.run > this.runs) this.runs = row.run
+    // Children are not restored: their runs ended with the previous daemon.
+    for (const id of this.active.keys()) if (!this.host.sessions.has(id)) this.#logRun(undefined, { outcome: 'closed' }, id)
     this.schedule()
   }
   stop(): void {

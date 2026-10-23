@@ -9,6 +9,7 @@ const labels: Record<string, string> = { five_hour: '5h', seven_day: '周',
 
 export class Accounting {
   readonly service: UsageService
+  readonly totals = new Map<string, Map<string, Usage>>()
   readonly pending = new Map<string, Map<string, Usage>>()
 
   constructor(service: UsageService) { this.service = service }
@@ -17,11 +18,13 @@ export class Accounting {
   accept(session: Session, event: SessionEvent): void {
     switch (event.type) {
       case 'usage/call': {
-        let turn = this.pending.get(session.id)
-        if (!turn) this.pending.set(session.id, turn = new Map())
-        const sum = turn.get(event.model) ?? { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
-        for (const key of ['input', 'cacheRead', 'cacheWrite', 'output'] as const) sum[key] += event.usage[key] ?? 0
-        turn.set(event.model, sum)
+        for (const sums of [this.pending, this.totals]) {
+          let models = sums.get(session.id)
+          if (!models) sums.set(session.id, models = new Map())
+          const sum = models.get(event.model) ?? { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+          for (const key of ['input', 'cacheRead', 'cacheWrite', 'output'] as const) sum[key] += event.usage[key] ?? 0
+          models.set(event.model, sum)
+        }
         break
       }
       case 'usage/end': this.flush(session); break
@@ -35,6 +38,8 @@ export class Accounting {
       }
     }
   }
+
+  forget(id: string): void { this.totals.delete(id); this.pending.delete(id) }
 
   flush(session: Session): void {
     const turn = this.pending.get(session.id)

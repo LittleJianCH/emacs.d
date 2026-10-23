@@ -158,6 +158,7 @@ export class DaemonServer {
       } })
     this.accounting = new Accounting(this.usage)
     this.collab = new Collaboration({ sessions: this.sessions, varDir: this.varDir, usage: this.usage,
+      runUsage: (id) => this.accounting.totals.get(id),
       config: () => this.configuration.value,
       hub: (caller, method, params, signal) => this.editor.call(method, params,
         { session: caller.id, root: caller.root, place: null }, signal, true),
@@ -956,6 +957,7 @@ export class DaemonServer {
     }
     await session.stop()
     this.sessions.delete(session.id)
+    this.accounting.forget(session.id)
     this.client?.notify('collab/closed', { id: session.id })
     this.collab.schedule()
     this.#changed()
