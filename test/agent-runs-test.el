@@ -237,7 +237,7 @@
       (evil-local-mode 1)
       (evil-normal-state)
       (unwind-protect
-          (dolist (entry '(("g" . agent-runs-refresh) ("r" . agent-runs-cycle-range)
+          (dolist (entry '(("g r" . agent-runs-refresh) ("r" . agent-runs-cycle-range)
                            ("TAB" . agent-runs-toggle) ("RET" . agent-runs-toggle)
                            ("j" . agent-runs-next-row) ("k" . agent-runs-previous-row)
                            ("n" . agent-runs-next-row) ("p" . agent-runs-previous-row)

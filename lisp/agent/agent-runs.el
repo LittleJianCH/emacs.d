@@ -282,10 +282,10 @@
     (princ "g：刷新    r：切换 7 天 / 30 天 / 全部（默认 30 天）\n")
     (princ "TAB / RET：展开或收起    n / p、C-n / C-p：逐行移动\n")
     (princ "q：返回    ?：帮助\n")
-    (princ "Evil 普通状态：j / k 移动，g 刷新。\n\n")
+    (princ "Evil 普通状态：j / k 移动，g r 刷新。\n\n")
     (princ "失败率为失败次数 / 总次数；提前关闭次数见汇总及失败率提示。\n")
-    (princ "已核实为已核实次数 / 已评次数；未评分不计入可用率。\n")
-    (princ "token 为估算值：输入含缓存读取及写入 / 输出。仅统计本机记录。\n")))
+    (princ "可用 / 返工 / 错误按每次运行的最新评分计；已核实为已核实次数 / 已评次数。\n")
+    (princ "token 为后端上报的用量：输入含缓存读取及写入 / 输出。仅统计本机记录。\n")))
 
 (defvar-keymap agent-runs-mode-map
   :doc "Keys for the subagent run page."

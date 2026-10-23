@@ -253,7 +253,7 @@ In visual state a is the text object prefix, so this rebinds it there."
     "k" #'agent-runs-previous-row
     "n" #'agent-runs-next-row
     "p" #'agent-runs-previous-row
-    "g" #'agent-runs-refresh
+    "gr" #'agent-runs-refresh
     "r" #'agent-runs-cycle-range
     "?" #'agent-runs-help
     "q" #'quit-window)
