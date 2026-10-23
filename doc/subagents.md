@@ -109,6 +109,7 @@ between, newest first, noting what was left out.
 | `session_ask` | asks an idle session; the reply goes to the mailbox | between sessions the user opened |
 | `session_start` | starts a child: `profile`, `context`, `prompt`, `handle`, `title` | profiles with delegation capability |
 | `session_stop` | stops and closes a child | its parent |
+| `session_rate` | rates a finished run: `run`, `verdict`, `verified`, `note` | where `session_start` is visible; only the run's parent |
 
 ### Profiles
 
@@ -469,6 +470,50 @@ idle, entries arrive as one message, with a hidden origin note. A child
 can finish while Emacs is disconnected and its result still reaches its
 parent; the editor reattaches views by event sequence.
 
+### Run log and ratings
+
+The user talks to the orchestrator and never sees the helpers' work directly,
+so cannot tell which model behind a profile is worth its subscription. The
+daemon therefore keeps a run log, `var/emx/subagent-runs.jsonl`, of every child
+by profile and concrete model. It must not disturb daily work: no new prompts,
+approvals or changes in child behavior, and only a few extra tokens.
+
+Layer A is objective and costs no tokens. `session_start` gives each child a
+run number from a daemon-wide counter persisted in `collab.json` (and never
+below the log's largest). When the child's result is delivered, or the child
+is closed first (stopped, closed with its parent, startup failure, lost in a
+daemon restart), one `run` row is appended: start, end and duration, root,
+the parent (handle, agent, model), handle, title, profile, context, the
+candidate's agent, effort and mode, the requested and the actually used model
+(the one with most tokens in the child's usage events), outcome (`ok`,
+`failed` with error kinds, or `closed`), tool count, reply length and token
+sums. Token sums come from the same backend usage events as the usage ledger,
+which keeps its own format. The reply wrapper carries ` [run N]` so the
+parent can refer to the run; the started receipt no longer names the model,
+since the caller chooses by profile.
+
+Layer B is a best-effort verdict from the session that started the run:
+`session_rate {run, verdict: usable | rework | wrong, verified, note?}`,
+appended as a `rating` row; the latest rating of a run wins. Only the run's
+parent may rate it. The tool is visible exactly where `session_start` is, so
+a coder that starts a coder-flash can rate it, and children that cannot
+delegate never see it. It is in the no-approval set with `sessions` and
+`session_read`, so it never asks the user in any backend or mode. Nothing sent
+to a child mentions ratings.
+
+The cost rule, stated in the tool description: rate after verifying or using
+the result, not on receipt, and only in parallel with a tool call made anyway
+(such as the alert before the final reply), never as a standalone call;
+without such a call, skip it. Estimated costs: the description adds roughly
+100 tokens to each delegating session's cached tool list, a rating roughly 50
+output tokens and no extra round trip, the run label a few tokens per reply.
+
+`collab/runs {range}` groups the log by profile x agent x model (runs, failure
+share, closed, rated, usable / rework / wrong, verified share, median
+duration, tokens) with each group's runs and notes. `C-c a U`
+(`agent-runs`) shows it on a Chinese page. Records from remote host daemons
+are not relayed yet.
+
 ### Approvals and progress
 
 A child's confirmations and questions show in its footer and, labelled
@@ -519,12 +564,15 @@ inherited conversation.
 | 5 | approvals and questions mirrored to the parent; child status in the parent's tool block; folded agent messages | done |
 | 6 | fork on all three backends | done |
 | 7 | children close once their reply is delivered; agent notes hidden from the transcript | done |
+| 8 | run log, `session_rate`, `collab/runs` and the run summary page | done |
 
 ## Open questions
 
 - A session-level "direct only" mode, in which the parent's agent only splits
   work, starts children and summarizes.
 - A git worktree per child, for children editing the same files at once.
+- Relaying run records from host daemons (through the usage outbox), and
+  rotating models inside a profile on purpose to compare them.
 
 ## References
 

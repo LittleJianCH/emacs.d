@@ -150,7 +150,7 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-collab.el` — editor-only collaboration: enrich user mentions from
   cached daemon wording and link child progress in the parent's tool block.
   `agent-emx` recovers daemon views, routes cross-daemon calls and answers; `agent-session` mirrors
-  child asks in the parent's footer. `emx/daemon/collab.ts` owns all five
+  child asks in the parent's footer. `emx/daemon/collab.ts` owns all six
   `session_*` tools, handles, profiles, forks, children and persisted mailboxes.
   Policy is in `emx/config.json` plus `var/emx/config.json`, with no Lisp
   defcustom fallbacks. `agent-emx-config.el` caches display titles, executable
@@ -164,6 +164,8 @@ var/                     runtime state (history, backups, pasted images...); git
   The editor retains durable pending upgrade entries and the transport used to
   forward acknowledged host usage, plus one-time old-ledger conversion.
   `C-c a u` opens the report; `agent-usage-clear` stays unbound and confirmed.
+  Subagent runs are logged separately by `collab.ts` in
+  `var/emx/subagent-runs.jsonl` (one row per child, plus parent ratings).
   `agent-usage-restart-service` reconnects without stopping agents.
 - `agent-profiles.el` — `C-c a p` opens a standalone local daemon profile page.
   It reads `collab/profiles {root}` using the invoking buffer's project root
@@ -215,7 +217,8 @@ var/                     runtime state (history, backups, pasted images...); git
 
 The daemon injects MCP only into its own agent processes, never globally.
 Its audited read-only set combines editor `:read-only` methods with
-`sessions`, `session_read`, and host `config_read`. These need no approval:
+`sessions`, `session_read`, `session_rate` (it only appends to the run log)
+and host `config_read`. These need no approval:
 Claude gets exact `--allowedTools` entries, Codex per-tool
 `mcp_servers.emacs.tools.<name>.approval_mode="approve"`, and dsh its bridge
 gate. Never publish `readOnlyHint` in MCP definitions. Persistent Claude and
