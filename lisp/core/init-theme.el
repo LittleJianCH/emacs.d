@@ -382,6 +382,8 @@
          (agent-session-dim :foreground ,faded)
          (agent-session-ok :foreground ,green)
          (agent-session-error :foreground ,critical)
+         (agent-runs-heading :foreground ,strong :weight bold)
+         (agent-runs-rework :foreground ,popout)
          (agent-session-ask :foreground ,popout :weight bold)
          (agent-session-button :background ,subtle :foreground ,strong :weight bold
                                :box (:line-width (6 . 2) :style flat-button))

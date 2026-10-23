@@ -12,6 +12,7 @@
 ;;   C-c a f  input with current file ref    C-c a r  input with region code block
 ;;   C-c a k  end session                    C-c a v  back to agent's last page
 ;;   C-c a u  usage and quota of the agents  C-c a p  subagent profiles
+;;   C-c a U  subagent runs and ratings
 ;;   C-x p a  new session in the project; also `a' after C-x p p
 ;; In a session buffer: C-c C-c sends the input area, RET inserts a newline,
 ;; M-p / M-n history, TAB completes (/ commands, @ files);
@@ -87,6 +88,14 @@
   :after agent-session
   :config
   (keymap-set agent-session-command-map "p" #'agent-profiles))
+
+;; Local daemon run summaries and optional parent ratings.
+(declare-function agent-runs "agent-runs")
+(use-package agent-runs
+  :demand t
+  :after agent-session
+  :config
+  (keymap-set agent-session-command-map "U" #'agent-runs))
 
 (defmacro agent-session--evil-enter (name command)
   "Define NAME to run evil's COMMAND in the input area.
@@ -231,6 +240,22 @@ In visual state a is the text object prefix, so this rebinds it there."
     "z" #'agent-profiles-exhaust
     "?" #'agent-profiles-help
     "gr" #'agent-profiles-refresh
+    "q" #'quit-window)
+
+  (evil-set-initial-state 'agent-runs-mode 'normal)
+  (evil-define-key* '(normal motion) agent-runs-mode-map
+    (kbd "RET") #'agent-runs-toggle
+    (kbd "TAB") #'agent-runs-toggle
+    (kbd "<tab>") #'agent-runs-toggle
+    (kbd "C-n") #'agent-runs-next-row
+    (kbd "C-p") #'agent-runs-previous-row
+    "j" #'agent-runs-next-row
+    "k" #'agent-runs-previous-row
+    "n" #'agent-runs-next-row
+    "p" #'agent-runs-previous-row
+    "g" #'agent-runs-refresh
+    "r" #'agent-runs-cycle-range
+    "?" #'agent-runs-help
     "q" #'quit-window)
 
   (evil-set-initial-state 'agent-review-mode 'normal)
