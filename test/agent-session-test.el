@@ -1146,6 +1146,30 @@ question unanswered, and quitting halfway keeps the answers so far."
            (should-error (agent-session-test--call "alert" nil)))
        (kill-buffer list-buffer)))))
 
+(ert-deftest agent-session-test-alert-waits-for-turn-end ()
+  "An alert made during a turn is raised when the turn ends, not before."
+  (agent-session-test--with-session
+   (let ((session agent-session--current)
+         (alerts nil))
+     (cl-letf (((symbol-function 'agent-session-list-alert)
+                (lambda (buffer &optional reason) (push (list buffer reason) alerts))))
+       (agent-session-set-status session 'running)
+       (should (eq (agent-session-test--call "alert" buffer :reason "写完了") t))
+       (should-not alerts)
+       ;; A dropped connection doesn't end the turn in the daemon.
+       (agent-session-set-status session 'disconnected)
+       (agent-session-set-status session 'running)
+       (should-not alerts)
+       (agent-session-set-status session 'idle)
+       (should (equal alerts (list (list buffer "写完了"))))
+       ;; Once raised it isn't raised again by the next turn.
+       (agent-session-set-status session 'running)
+       (agent-session-set-status session 'idle)
+       (should (= (length alerts) 1))
+       ;; Outside a turn it is raised at once.
+       (agent-session-test--call "alert" buffer :reason "要你决定")
+       (should (equal (car alerts) (list buffer "要你决定")))))))
+
 ;;; Sessions working with each other (agent-collab)
 
 (defun agent-session-test--call (method caller &rest params)

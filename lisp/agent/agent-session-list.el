@@ -82,7 +82,8 @@ The value is ((AGENT . ITEM) ...)."
 ;;
 ;; An agent can ask for the user's attention: its entry rises to the top of
 ;; the live sessions, flashes red and pink twice and stays pink until the
-;; user opens the session.
+;; user opens the session.  An alert made during a turn waits for the turn
+;; to end, so the user finds the final reply written.
 
 (defface agent-session-list-alert '((t :background "#ffc0cb" :extend t))
   "Entry of a session whose agent asks for your attention.")
@@ -133,6 +134,34 @@ session, it only flashes."
        (when (and last (buffer-live-p buffer) (agent-session-list--seen-p buffer))
          (agent-session-list--clear buffer))
        (agent-session-list--refresh)))))
+
+(defvar-local agent-session-list--pending-alert nil
+  "In a session buffer: the reason of an alert waiting for its turn to end.")
+
+(defun agent-session-list-alert-after-turn (session &optional reason)
+  "Ask for attention from SESSION once its current turn ends.
+Agents ask before their final reply, which is still being written then;
+raising the entry when the turn is over shows the user a finished reply.
+A session that isn't running asks now.  REASON is as in
+`agent-session-list-alert'."
+  (let ((buffer (agent-session-buffer session)))
+    (if (eq (agent-session-status session) 'running)
+        (with-current-buffer buffer
+          (setq agent-session-list--pending-alert (or reason "")))
+      (agent-session-list-alert buffer reason))))
+
+(defun agent-session-list--alert-at-turn-end (session _previous)
+  "Raise the alert SESSION kept for the end of its turn, if it ended.
+A disconnected session may still be running in the daemon, so it waits."
+  (let ((buffer (agent-session-buffer session)))
+    (when (and (memq (agent-session-status session) '(idle exited))
+               (buffer-live-p buffer))
+      (when-let* ((reason (buffer-local-value 'agent-session-list--pending-alert buffer)))
+        (with-current-buffer buffer
+          (setq agent-session-list--pending-alert nil))
+        (agent-session-list-alert buffer reason)))))
+
+(add-hook 'agent-session-status-functions #'agent-session-list--alert-at-turn-end)
 
 (defun agent-session-list--clear (buffer)
   "Stop showing that session BUFFER asks for attention."

@@ -449,11 +449,12 @@ in the foreground."
 (agent-ui-defmethod "alert"
     ((reason string "Why you need the user, shown when the mouse is on your entry"))
   "Ask for the user's attention: your session's entry in the session list flashes red
-and stays pink until the user opens your session.  Use it when you finish a long task
-the user is waiting for, or when you are blocked on a decision only the user can make;
-not for ordinary replies."
+and stays pink until the user opens your session.  It takes effect when your turn
+ends, so call it before your final reply: the user sees the reply complete.  Use it
+when you finish a long task the user is waiting for, or when you are blocked on a
+decision only the user can make; not for ordinary replies."
   (let ((session (or (agent-ui-caller-session) (error "Only an agent session can ask for attention"))))
-    (agent-session-list-alert (agent-session-buffer session) reason)
+    (agent-session-list-alert-after-turn session reason)
     t))
 
 (agent-ui-defmethod "eval"
