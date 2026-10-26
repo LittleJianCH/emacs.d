@@ -17,7 +17,7 @@
 
 | 用途                       | 软件                                      |
 |----------------------------+-------------------------------------------|
-| 编辑器                     | Emacs 30.1+ (日常用 emacs-plus 31)        |
+| 编辑器                     | Emacs 31.1+ (日常用 emacs-plus 31)        |
 | agent → Emacs 的桥 =bin/emx= | ~node~                                      |
 | 基础工具                   | ~git~ 、 ~python3~ 、 ~ripgrep~ (~C-c r~)         |
 | agent CLI                  | ~claude~ 、 ~codex~ ，可选 ~dsh~ ；各自完成登录 |

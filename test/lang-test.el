@@ -391,6 +391,7 @@
 
 (defvar rust-ts-mode-map)
 (defvar go-ts-mode-map)
+(defvar go-ts-indent-offset)
 (declare-function my/rust-evil-keys "lang-rust")
 (declare-function my/go-evil-keys "lang-go")
 
@@ -429,16 +430,13 @@
             (should (eq (key-binding (kbd native)) command))))))))
 
 (ert-deftest lang-go-indent-follows-tab-width ()
-  "Go buffers indent one tab per level under the current option name."
+  "Go buffers indent one tab per level."
   (require 'go-ts-mode)
   (require 'lang-go)
   (with-temp-buffer
     (setq-local tab-width 4)
     (my/go-setup)
-    (should (= (symbol-value (if (boundp 'go-ts-indent-offset)
-                                 'go-ts-indent-offset
-                               'go-ts-mode-indent-offset))
-               4))))
+    (should (= go-ts-indent-offset 4))))
 
 (ert-deftest lang-elisp-evil-leader ()
   "Emacs Lisp commands are under SPC l, and *scratch* evaluates there."

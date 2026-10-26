@@ -17,8 +17,8 @@
 
 ;;; Code:
 
-(when (version< emacs-version "30.1")
-  (error "这份配置需要 Emacs 30.1 或更新版本"))
+(when (version< emacs-version "31.1")
+  (error "这份配置需要 Emacs 31.1 或更新版本"))
 
 (dolist (dir '("core" "lang" "agent" "agent/backend" "app"))
   (add-to-list 'load-path (expand-file-name (concat "lisp/" dir) user-emacs-directory)))

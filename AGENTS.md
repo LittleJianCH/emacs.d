@@ -15,7 +15,9 @@ A modular Emacs config built for developing *with* agents:
   inside Emacs — no external browser.
 - Day-to-day languages are Rust and Emacs Lisp.
 
-Requires Emacs 30.1+ (the user runs Emacs 31, emacs-plus on macOS).
+Requires Emacs 31.1+ (the user runs emacs-plus 31 on macOS and upgrades rather
+than keeping old versions working). Use current APIs and option names; do not add
+compatibility code for older Emacs releases.
 
 ## Layout
 
