@@ -299,7 +299,7 @@
       (my/lean-environment-ready))))
 
 (ert-deftest lang-functional-evil-leaders ()
-  "Major-mode leaders work in command states and preserve native keys."
+  "Language leaders work in command states and preserve native keys."
   (skip-unless (featurep 'init-evil))
   (dolist (entry '((haskell-mode-map my/haskell-evil-keys
                     "l" haskell-process-load-file "C-c C-l")
@@ -315,12 +315,31 @@
           (evil-local-mode 1)
           (dolist (state '(normal motion visual))
             (evil-change-state state)
-            (should (eq (key-binding (kbd (concat "SPC m " key))) command))
+            (should (eq (key-binding (kbd (concat "SPC l " key))) command))
             (should (eq (key-binding (kbd native)) command)))
           (evil-insert-state)
           (should (eq (key-binding (kbd "SPC")) 'self-insert-command))
           (evil-local-mode -1)
           (should (eq (key-binding (kbd native)) command)))))))
+
+(ert-deftest lang-functional-haskell-leader-with-eglot ()
+  "Haskell's SPC l commands sit beside Eglot's without shadowing them."
+  (skip-unless (featurep 'init-evil))
+  (require 'eglot)
+  (let ((haskell-mode-map (make-sparse-keymap)))
+    (my/haskell-evil-keys)
+    (with-temp-buffer
+      (use-local-map haskell-mode-map)
+      (setq-local eglot--managed-mode t)
+      (evil-local-mode 1)
+      (evil-normal-state)
+      (dolist (binding '(("l" . haskell-process-load-file)
+                         ("R" . haskell-process-reload)
+                         ("a" . eglot-code-actions)
+                         ("r" . eglot-rename)
+                         ("f" . eglot-format-buffer)))
+        (should (eq (key-binding (kbd (concat "SPC l " (car binding))))
+                    (cdr binding)))))))
 
 (provide 'lang-functional-test)
 ;;; lang-functional-test.el ends here

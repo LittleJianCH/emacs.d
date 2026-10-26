@@ -68,18 +68,18 @@
 (add-hook 'after-change-major-mode-hook #'my/lean-environment-ready 90)
 
 (defvar-keymap my/lean-command-map
-  :doc "Lean commands under the major-mode leader."
+  :doc "Lean commands under the language leader."
   "i" 'lean4-toggle-info
   "d" 'lean4-refresh-file-dependencies
   "b" 'lean4-lake-build
   "l" 'lean4-std-exe
-  "r" 'lsp-workspace-restart)
+  "R" 'lsp-workspace-restart)
 
 (with-eval-after-load 'evil
   (defun my/lean-evil-keys ()
-    "Install Lean's major-mode leader in Evil command states."
+    "Install Lean's language leader in Evil command states."
     (evil-define-key* '(normal motion visual) lean4-mode-map
-      (kbd "<leader>m") my/lean-command-map))
+      (kbd "<leader>l") my/lean-command-map))
   (with-eval-after-load 'lean4-mode
     (my/lean-evil-keys)))
 

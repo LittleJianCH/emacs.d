@@ -73,9 +73,9 @@
 (add-hook 'after-change-major-mode-hook #'my/haskell-environment-ready 90)
 
 (defvar-keymap my/haskell-command-map
-  :doc "Haskell commands under the major-mode leader."
+  :doc "Haskell commands under the language leader, next to Eglot's."
   "l" 'haskell-process-load-file
-  "r" 'haskell-process-reload
+  "R" 'haskell-process-reload
   "z" 'haskell-interactive-switch
   "t" 'haskell-process-do-type
   "i" 'haskell-process-do-info
@@ -83,9 +83,9 @@
 
 (with-eval-after-load 'evil
   (defun my/haskell-evil-keys ()
-    "Install Haskell's major-mode leader in Evil command states."
+    "Install Haskell's language leader in Evil command states."
     (evil-define-key* '(normal motion visual) haskell-mode-map
-      (kbd "<leader>m") my/haskell-command-map))
+      (kbd "<leader>l") my/haskell-command-map))
   (with-eval-after-load 'haskell-mode
     (my/haskell-evil-keys)))
 

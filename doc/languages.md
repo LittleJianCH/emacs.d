@@ -26,8 +26,9 @@ HLS 提供补全、诊断、定义跳转、代码操作和保存时格式化。�
 `("haskell-language-server-wrapper" "--lsp")`。项目设置沿用
 `eglot-workspace-configuration`，Cabal 文件使用专门的编辑模式。
 
-Evil 的 `SPC m` 下，`l` 加载、`r` 重载、`z` 打开 GHCi、`t` 查询类型、
-`i` 查询信息、`b` 构建。
+Evil 的 `SPC l` 下，`l` 加载、`R` 重载、`z` 打开 GHCi、`t` 查询类型、
+`i` 查询信息、`b` 构建；同一前缀下还有 Eglot 的 `a` 代码操作、`r` 重命名、
+`f` 格式化。
 
 ## Coq
 
@@ -35,7 +36,7 @@ Evil 的 `SPC m` 下，`l` 加载、`r` 重载、`z` 打开 GHCi、`t` 查询类
 证明目标。编辑文件不会立即启动证明进程；首次执行证明命令时才启动。
 Coq 使用 Proof General 的协议，不启动 Eglot。
 
-Evil 的 `SPC m` 下，`n` 推进、`u` 撤回一步、`p` 处理到光标、`b` 处理
+Evil 的 `SPC l` 下，`n` 推进、`u` 撤回一步、`p` 处理到光标、`b` 处理
 整个文件、`r` 撤回整个文件、`R` 重启证明器、`q` 退出证明器。原生的
 `C-c C-n`、`C-c C-u`、`C-c C-RET` 等 Proof General 键位保持可用。
 
@@ -51,8 +52,8 @@ Flymake。其他语言仍使用各自的客户端。
 `C-c C-i` 切换目标窗口，`C-c C-d` 刷新导入，`C-c C-p C-l` 用 Lake
 构建，`C-c C-l` 运行当前文件。Unicode 输入沿用模式的反斜线缩写。
 
-Evil 的 `SPC m` 下，`i` 切换目标、`d` 刷新导入、`b` 构建、`l` 运行、
-`r` 重启语言服务器。
+Evil 的 `SPC l` 下，`i` 切换目标、`d` 刷新导入、`b` 构建、`l` 运行、
+`R` 重启语言服务器。
 
 若工具链不在 PATH 中，可用 `lean4-rootdir` 指向包含 `bin/lean` 的安装目录。
 自动探测的工具链路径不会缓存到其他项目。

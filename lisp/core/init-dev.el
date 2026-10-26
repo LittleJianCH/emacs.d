@@ -60,7 +60,8 @@
 (declare-function evil-define-key* "evil-core")
 (defvar eglot-mode-map)
 
-;; SPC l mirrors C-c l in every eglot buffer.
+;; SPC l mirrors C-c l in every eglot buffer; language modules add their
+;; own commands under the same prefix.
 (with-eval-after-load 'evil
   (with-eval-after-load 'eglot
     (evil-define-key* '(normal motion visual) eglot-mode-map

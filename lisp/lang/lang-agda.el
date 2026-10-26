@@ -159,7 +159,7 @@ BUFFER is the optional target buffer passed to Polymode's mode setup."
 (declare-function my/agda-evil-keys "lang-agda")
 
 (defvar-keymap my/agda-command-map
-  :doc "Agda commands under the Evil major-mode leader."
+  :doc "Agda commands under the Evil language leader."
   "l" 'agda2-load
   "c" 'agda2-goal-and-context
   "t" 'agda2-goal-and-context-and-inferred
@@ -173,9 +173,9 @@ BUFFER is the optional target buffer passed to Polymode's mode setup."
 
 (with-eval-after-load 'evil
   (defun my/agda-evil-keys ()
-    "Install Agda's major-mode leader in Evil command states."
+    "Install Agda's language leader in Evil command states."
     (evil-define-key* '(normal motion visual) agda2-mode-map
-      (kbd "<leader>m") my/agda-command-map))
+      (kbd "<leader>l") my/agda-command-map))
   (with-eval-after-load 'agda2-mode
     (my/agda-evil-keys)))
 

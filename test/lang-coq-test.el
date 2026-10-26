@@ -165,7 +165,7 @@
         (should (eq (key-binding (kbd (car binding))) (cdr binding)))))))
 
 (ert-deftest lang-coq-evil-both-load-orders ()
-  "Install the major-mode leader only after Evil and Coq are available."
+  "Install the language leader only after Evil and Coq are available."
   (dolist (order '((evil coq) (coq evil)))
     (lang-coq-test--with-module
       (let (calls)
@@ -178,7 +178,7 @@
           (should (= (length calls) 1))
           (should (equal (caar calls) '(normal motion visual)))
           (should (eq (nth 1 (car calls)) coq-mode-map))
-          (should (equal (nth 2 (car calls)) (kbd "<leader>m")))
+          (should (equal (nth 2 (car calls)) (kbd "<leader>l")))
           (should (eq (nth 3 (car calls)) my/coq-command-map)))))))
 
 (ert-deftest lang-coq-leader-proof-workflow ()

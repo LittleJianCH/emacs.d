@@ -192,26 +192,28 @@ insert state 使用 Emacs 的编辑键，上面的 Emacs 键位在 evil 下照�
 leader 为 ~SPC~ ： ~SPC f~ 找文件， ~SPC b~ 切换 buffer， ~SPC r~ 最近文件， ~SPC s~ 搜索当前文件，
 ~SPC /~ 项目内搜索， ~SPC p~ 项目命令， ~SPC g g~ magit， ~SPC g b~ 开关逐行 blame， ~SPC a~ agent 命令 (同 ~C-c a~)，
 ~SPC w~ 窗口， ~SPC u~ 前缀参数 (~C-u~ 用于向上翻页)， ~SPC i~ 打开 init.el。
+~SPC l~ 是语言命令：用 Eglot 的语言下 ~SPC l a~ 代码操作、 ~SPC l r~ 重命名、 ~SPC l f~ 格式化
+(同 ~C-c l~)，各语言自己的命令也在 ~SPC l~ 下。
 
 会话起始为 normal： ~i~ / ~a~ / ~o~ 在对话中跳到输入区末尾进入 insert，insert 下 ~C-c C-c~ 发送，
 ~ESC~ 回到 normal 浏览； ~]]~ / ~[[~ 在消息间跳转。本地 leader ~,~ ： ~,o~ 菜单， ~,m~ 模型，
 ~,e~ 推理强度， ~,M~ 权限模式， ~,p~ 计划模式， ~,A~ 切换 agent， ~,y~ / ~,n~ 允许 / 拒绝，
 ~,k~ 中断， ~,s~ 会话列表， ~,N~ 新会话， ~,r~ 恢复会话。
 
-Agda 的模式命令前缀是 ~SPC m~（normal / motion / visual 状态）：
+Agda 的命令在 ~SPC l~ 下（normal / motion / visual 状态）：
 
 | 按键      | 功能                         |
 |-----------+------------------------------|
-| ~SPC m l~ | 加载 / 类型检查              |
-| ~SPC m c~ | 查看目标和上下文             |
-| ~SPC m t~ | 查看目标、上下文和推断类型   |
-| ~SPC m s~ | 分情况                       |
-| ~SPC m g~ | 填入目标                     |
-| ~SPC m r~ | 精化目标                     |
-| ~SPC m n~ | 下一个目标                   |
-| ~SPC m p~ | 上一个目标                   |
-| ~SPC m R~ | 重启 Agda                    |
-| ~SPC m q~ | 中断计算                     |
+| ~SPC l l~ | 加载 / 类型检查              |
+| ~SPC l c~ | 查看目标和上下文             |
+| ~SPC l t~ | 查看目标、上下文和推断类型   |
+| ~SPC l s~ | 分情况                       |
+| ~SPC l g~ | 填入目标                     |
+| ~SPC l r~ | 精化目标                     |
+| ~SPC l n~ | 下一个目标                   |
+| ~SPC l p~ | 上一个目标                   |
+| ~SPC l R~ | 重启 Agda                    |
+| ~SPC l q~ | 中断计算                     |
 
 项目环境操作：~SPC E r~ 重新加载，~SPC E a~ 授权，~SPC E d~ 撤销授权，
 ~SPC E l~ 查看日志。原有 ~C-c~ 按键在 Evil 中照常使用。

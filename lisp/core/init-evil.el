@@ -9,7 +9,8 @@
 ;;   SPC a  agent commands (same as C-c a)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
 ;;   SPC t  terminal (same as C-c t, init-term.el)
-;;   SPC l  language server actions, rename, format (same as C-c l, init-dev.el)
+;;   SPC l  language commands: Eglot actions a / r / f (same as C-c l,
+;;          init-dev.el) plus each language's own (lisp/lang/)
 ;;   SPC g g  magit status  SPC g b  toggle per-line blame (magit-blame)
 ;; C-j / C-k move point and the text together, a line at a time, so point
 ;; stays where it is on the screen.

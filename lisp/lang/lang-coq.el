@@ -10,7 +10,7 @@
 ;;   C-c C-RET    process or retract to point
 ;;   C-c C-b      process the buffer
 ;;   C-c C-r      retract the buffer
-;; Evil users also have these operations under SPC m.
+;; Evil users also have these operations under SPC l.
 
 ;;; Code:
 
@@ -50,7 +50,7 @@ calling buffer's environment rather than the global shell environment."
   (advice-add 'proof-shell-start :around #'my/coq-start-with-environment))
 
 (defvar-keymap my/coq-command-map
-  :doc "Coq commands under the Evil major-mode leader."
+  :doc "Coq commands under the Evil language leader."
   "n" 'proof-assert-next-command-interactive
   "u" 'proof-undo-last-successful-command
   "p" 'proof-goto-point
@@ -62,7 +62,7 @@ calling buffer's environment rather than the global shell environment."
 (with-eval-after-load 'evil
   (with-eval-after-load 'coq
     (evil-define-key* '(normal motion visual) coq-mode-map
-      (kbd "<leader>m") my/coq-command-map)))
+      (kbd "<leader>l") my/coq-command-map)))
 
 (provide 'lang-coq)
 ;;; lang-coq.el ends here

@@ -56,8 +56,8 @@ CompileFlags:
 | `M-.`、`M-,` | 跳转定义 / 返回 |
 | `M-g n`、`M-g p` | 下一处 / 上一处诊断 |
 
-开启 Evil 时，`SPC m` 另有语言操作入口；原生 Emacs 按键仍可使用。
-具体绑定见 `my/c-command-map`。CC Mode 原有的 `C-c C-c` 注释、
+开启 Evil 时，`SPC l` 下有 `c` 构建、`k` 重复构建、`o` 切换头文件，以及
+Eglot 的 `a`、`r`、`f`；原生 Emacs 按键仍可使用。具体绑定见 `my/c-command-map`。CC Mode 原有的 `C-c C-c` 注释、
 `C-c C-k` 注释风格和 `C-c C-o` 缩进调整等按键保持不变。
 
 测试位于 `test/lang-c-test.el`，模拟服务器和工具链，不启动真实 clangd。

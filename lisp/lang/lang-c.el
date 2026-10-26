@@ -161,19 +161,16 @@ Eglot calls this at connection time, after its deferred startup hook."
                '((c-mode c++-mode c-ts-mode c++-ts-mode) . my/clangd-contact)))
 
 (defvar-keymap my/c-command-map
-  :doc "C/C++ commands under the major-mode leader."
+  :doc "C/C++ commands under the language leader, next to Eglot's."
   "c" #'project-compile
   "k" #'recompile
-  "o" #'ff-find-other-file
-  "f" #'eglot-format-buffer
-  "a" #'eglot-code-actions
-  "r" #'eglot-rename)
+  "o" #'ff-find-other-file)
 
 (with-eval-after-load 'evil
   (defun my/c-evil-keys ()
     "Bind the C/C++ leader in this buffer without affecting native keys."
     (evil-define-key* '(normal motion visual) (current-local-map)
-      (kbd "<leader>m") my/c-command-map))
+      (kbd "<leader>l") my/c-command-map))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (my/c--buffer-p) my/c--keys-configured)
