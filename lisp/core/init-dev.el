@@ -57,6 +57,17 @@
   (eglot-autoshutdown t)
   (eglot-events-buffer-config '(:size 0)))
 
+(declare-function evil-define-key* "evil-core")
+(defvar eglot-mode-map)
+
+;; SPC l mirrors C-c l in every eglot buffer.
+(with-eval-after-load 'evil
+  (with-eval-after-load 'eglot
+    (evil-define-key* '(normal motion visual) eglot-mode-map
+      (kbd "<leader>la") #'eglot-code-actions
+      (kbd "<leader>lr") #'eglot-rename
+      (kbd "<leader>lf") #'eglot-format-buffer)))
+
 ;; Show eldoc (hover, signature) in a child frame next to point.  Its look, a
 ;; padded card in the status-line band color, comes from the theme
 ;; (init-theme.el) and init-ui.el.

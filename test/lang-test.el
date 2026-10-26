@@ -371,5 +371,23 @@
     (should (eq (key-binding (kbd "SPC E l")) 'envrc-show-log))
     (should (eq (key-binding (kbd "C-c E r")) 'envrc-reload))))
 
+(ert-deftest lang-eglot-evil-leader ()
+  "SPC l mirrors the native C-c l language server keys."
+  (skip-unless (featurep 'init-evil))
+  (require 'evil)
+  (with-temp-buffer
+    (setq-local eglot--managed-mode t)
+    (evil-local-mode 1)
+    (dolist (state '(normal motion visual))
+      (evil-change-state state)
+      (dolist (binding '(("a" . eglot-code-actions) ("r" . eglot-rename)
+                         ("f" . eglot-format-buffer)))
+        (should (eq (key-binding (kbd (concat "SPC l " (car binding))))
+                    (cdr binding)))
+        (should (eq (key-binding (kbd (concat "C-c l " (car binding))))
+                    (cdr binding)))))
+    (evil-insert-state)
+    (should (eq (key-binding (kbd "SPC")) 'self-insert-command))))
+
 (provide 'lang-test)
 ;;; lang-test.el ends here
