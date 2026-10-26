@@ -24,7 +24,6 @@
 (declare-function eglot-managed-p "eglot")
 (declare-function evil-define-key* "evil-core")
 (declare-function my/go-evil-keys "lang-go")
-(defvar go-ts-mode-indent-offset)
 (defvar go-ts-mode-map)
 
 (defcustom my/gopls-command '("gopls")
@@ -77,7 +76,11 @@ Per-project settings belong in `eglot-workspace-configuration'."
   "Set up a Go buffer: indentation and import organizing on save."
   ;; gofmt indents with one tab per level; go-ts-mode's 8-column offset
   ;; would insert two tabs per level with a 4-column `tab-width'.
-  (setq-local go-ts-mode-indent-offset tab-width)
+  ;; Emacs 31 renamed the option and made the old name an obsolete alias.
+  (set (make-local-variable (if (boundp 'go-ts-indent-offset)
+                                'go-ts-indent-offset
+                              'go-ts-mode-indent-offset))
+       tab-width)
   ;; Depth -10: organize imports before `my/eglot-format-on-save' formats.
   (add-hook 'before-save-hook #'my/go-organize-imports -10 t))
 

@@ -428,6 +428,18 @@
                           (cdr binding))))
             (should (eq (key-binding (kbd native)) command))))))))
 
+(ert-deftest lang-go-indent-follows-tab-width ()
+  "Go buffers indent one tab per level under the current option name."
+  (require 'go-ts-mode)
+  (require 'lang-go)
+  (with-temp-buffer
+    (setq-local tab-width 4)
+    (my/go-setup)
+    (should (= (symbol-value (if (boundp 'go-ts-indent-offset)
+                                 'go-ts-indent-offset
+                               'go-ts-mode-indent-offset))
+               4))))
+
 (ert-deftest lang-elisp-evil-leader ()
   "Emacs Lisp commands are under SPC l, and *scratch* evaluates there."
   (skip-unless (featurep 'init-evil))
