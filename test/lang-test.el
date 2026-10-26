@@ -389,5 +389,65 @@
     (evil-insert-state)
     (should (eq (key-binding (kbd "SPC")) 'self-insert-command))))
 
+(defvar rust-ts-mode-map)
+(defvar go-ts-mode-map)
+(declare-function my/rust-evil-keys "lang-rust")
+(declare-function my/go-evil-keys "lang-go")
+
+(ert-deftest lang-rust-go-evil-leader ()
+  "Rust and Go commands sit beside Eglot's under SPC l."
+  (skip-unless (featurep 'init-evil))
+  (require 'evil)
+  (require 'lang-rust)
+  (require 'lang-go)
+  (dolist (entry '((rust-ts-mode-map my/rust-evil-keys "C-c C-c" my/cargo
+                    ("c" . my/cargo) ("t" . my/cargo-test-at-point)
+                    ("x" . my/cargo-run) ("k" . recompile))
+                   (go-ts-mode-map my/go-evil-keys "C-c C-c" my/go
+                    ("c" . my/go) ("x" . my/go-run) ("k" . recompile)
+                    ("t" . go-ts-mode-test-function-at-point)
+                    ("T" . go-ts-mode-test-this-file)
+                    ("p" . go-ts-mode-test-this-package)
+                    ("d" . go-ts-mode-docstring))))
+    (pcase-let* ((`(,map-symbol ,setup ,native ,command . ,bindings) entry)
+                 (map (make-sparse-keymap)))
+      (cl-progv (list map-symbol) (list map)
+        (define-key map (kbd native) command)
+        (funcall setup)
+        (with-temp-buffer
+          (use-local-map map)
+          (setq-local eglot--managed-mode t)
+          (evil-local-mode 1)
+          (dolist (state '(normal motion visual))
+            (evil-change-state state)
+            (dolist (binding (append bindings
+                                     '(("a" . eglot-code-actions)
+                                       ("r" . eglot-rename)
+                                       ("f" . eglot-format-buffer))))
+              (should (eq (key-binding (kbd (concat "SPC l " (car binding))))
+                          (cdr binding))))
+            (should (eq (key-binding (kbd native)) command))))))))
+
+(ert-deftest lang-elisp-evil-leader ()
+  "Emacs Lisp commands are under SPC l, and *scratch* evaluates there."
+  (skip-unless (featurep 'init-evil))
+  (require 'evil)
+  (require 'lang-elisp)
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (dolist (binding '(("b" . eval-buffer) ("e" . pp-eval-last-sexp)
+                       ("m" . macrostep-expand) ("z" . ielm)
+                       ("d" . helpful-at-point)))
+      (should (eq (key-binding (kbd (concat "SPC l " (car binding))))
+                  (cdr binding))))
+    (should (eq (key-binding (kbd "C-c C-b")) 'eval-buffer)))
+  (with-temp-buffer
+    (lisp-interaction-mode)
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "SPC l e")) 'pp-eval-last-sexp))))
+
 (provide 'lang-test)
 ;;; lang-test.el ends here

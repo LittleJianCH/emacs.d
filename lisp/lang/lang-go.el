@@ -11,6 +11,8 @@
 ;;   C-c C-k    rerun the last go command
 ;;   C-c C-t t  run the test at point (built in; C-c C-t f file, C-c C-t p package)
 ;;   C-c C-d    insert a doc comment for the declaration at point (built in)
+;; Evil has them under SPC l: c go, x run, k rerun, t test at point,
+;; T test file, p test package, d doc comment.
 
 ;;; Code:
 
@@ -20,7 +22,10 @@
 (declare-function eglot-current-server "eglot")
 (declare-function eglot-execute "eglot")
 (declare-function eglot-managed-p "eglot")
+(declare-function evil-define-key* "evil-core")
+(declare-function my/go-evil-keys "lang-go")
 (defvar go-ts-mode-indent-offset)
+(defvar go-ts-mode-map)
 
 (defcustom my/gopls-command '("gopls")
   "Command used to start gopls."
@@ -87,6 +92,24 @@ Per-project settings belong in `eglot-workspace-configuration'."
          ("C-c C-c" . my/go)
          ("C-c C-r" . my/go-run)
          ("C-c C-k" . recompile)))
+
+(defvar-keymap my/go-command-map
+  :doc "Go commands under the language leader, next to Eglot's."
+  "c" #'my/go
+  "x" #'my/go-run
+  "k" #'recompile
+  "t" 'go-ts-mode-test-function-at-point
+  "T" 'go-ts-mode-test-this-file
+  "p" 'go-ts-mode-test-this-package
+  "d" 'go-ts-mode-docstring)
+
+(with-eval-after-load 'evil
+  (defun my/go-evil-keys ()
+    "Install Go's language leader in Evil command states."
+    (evil-define-key* '(normal motion visual) go-ts-mode-map
+      (kbd "<leader>l") my/go-command-map))
+  (with-eval-after-load 'go-ts-mode
+    (my/go-evil-keys)))
 
 (defun my/gopls-contact (&rest _)
   "Return the latest gopls command and options.

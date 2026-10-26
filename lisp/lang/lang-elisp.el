@@ -7,9 +7,12 @@
 ;;   C-c C-e  evaluate the previous sexp and pretty-print the result
 ;;   C-c C-m  expand the macro at point (macrostep, q to quit)
 ;;   C-c C-z  open IELM
+;; Evil has them under SPC l: b, e, m, z and d (helpful at point).
 ;; C-h f / v / k / x use helpful instead, which shows source and references.
 
 ;;; Code:
+
+(declare-function evil-define-key* "evil-core")
 
 (defun my/elisp-setup ()
   "Common setup for Emacs Lisp buffers."
@@ -40,6 +43,24 @@
          ("C-h x" . helpful-command)
          :map emacs-lisp-mode-map
          ("C-c C-d" . helpful-at-point)))
+
+(defvar-keymap my/elisp-command-map
+  :doc "Emacs Lisp commands under the Evil language leader."
+  "b" #'eval-buffer
+  "e" #'pp-eval-last-sexp
+  "m" 'macrostep-expand
+  "z" #'ielm
+  "d" 'helpful-at-point)
+
+(defvar-keymap my/lisp-interaction-command-map
+  :doc "*scratch* commands under the Evil language leader."
+  "e" #'pp-eval-last-sexp)
+
+(with-eval-after-load 'evil
+  (evil-define-key* '(normal motion visual) emacs-lisp-mode-map
+    (kbd "<leader>l") my/elisp-command-map)
+  (evil-define-key* '(normal motion visual) lisp-interaction-mode-map
+    (kbd "<leader>l") my/lisp-interaction-command-map))
 
 (provide 'lang-elisp)
 ;;; lang-elisp.el ends here

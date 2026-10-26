@@ -126,12 +126,15 @@ var/                 运行时状态（不进 git）
 
 Rust (~rust-ts-mode~)： ~C-c C-c~ 运行 cargo 子命令， ~C-c C-t~ 运行光标所在的测试，
 ~C-c C-r~ cargo run， ~C-c C-k~ 重新运行上一次命令；保存时用 rustfmt 格式化。
+Evil 下在 ~SPC l~ ： ~c~ cargo 子命令， ~t~ 光标处测试， ~x~ cargo run， ~k~ 重新运行。
 
 Go (~go-ts-mode~)： ~C-c C-c~ 运行 go 子命令， ~C-c C-r~ go run， ~C-c C-k~ 重新运行；
-保存时通过 gopls 整理 import 并格式化。
+保存时通过 gopls 整理 import 并格式化。Evil 下在 ~SPC l~ ： ~c~ go 子命令， ~x~ go run，
+~k~ 重新运行， ~t~ 光标处测试， ~T~ 测当前文件， ~p~ 测当前包， ~d~ 插入文档注释。
 
 Elisp： ~C-c C-b~ eval-buffer， ~C-c C-e~ 求值并美化输出， ~C-c C-m~ 展开宏，
-~C-c C-z~ IELM； ~C-h f/v/k/x~ 使用 helpful。
+~C-c C-z~ IELM； ~C-h f/v/k/x~ 使用 helpful。Evil 下在 ~SPC l~ ： ~b~ 、 ~e~ 、 ~m~ 、 ~z~ 同上，
+~d~ 用 helpful 查看光标处符号；~*scratch*~ 中有 ~SPC l e~ 。
 
 Nix (~nix-mode~)：安装 ~nil~ 后自动连接 Eglot，提供补全和诊断；另装 ~nixfmt~ 后保存时自动格式化。
 项目设置可放在 ~eglot-workspace-configuration~ 的 ~:nil~ 中，服务器命令由 ~my/nil-command~ 配置。

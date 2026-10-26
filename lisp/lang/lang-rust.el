@@ -9,11 +9,16 @@
 ;;   C-c C-t  run the test function at point
 ;;   C-c C-r  cargo run
 ;;   C-c C-k  rerun the last cargo command
+;; Evil has them under SPC l: c cargo, t test at point, x run, k rerun.
 
 ;;; Code:
 
 (require 'project)
 (require 'treesit)
+
+(declare-function evil-define-key* "evil-core")
+(declare-function my/rust-evil-keys "lang-rust")
+(defvar rust-ts-mode-map)
 
 (defcustom my/rust-analyzer-command '("rust-analyzer")
   "Command used to start rust-analyzer.
@@ -87,6 +92,21 @@ reports real syntax errors through eglot anyway."
          ("C-c C-t" . my/cargo-test-at-point)
          ("C-c C-r" . my/cargo-run)
          ("C-c C-k" . recompile)))
+
+(defvar-keymap my/rust-command-map
+  :doc "Rust commands under the language leader, next to Eglot's."
+  "c" #'my/cargo
+  "t" #'my/cargo-test-at-point
+  "x" #'my/cargo-run
+  "k" #'recompile)
+
+(with-eval-after-load 'evil
+  (defun my/rust-evil-keys ()
+    "Install Rust's language leader in Evil command states."
+    (evil-define-key* '(normal motion visual) rust-ts-mode-map
+      (kbd "<leader>l") my/rust-command-map))
+  (with-eval-after-load 'rust-ts-mode
+    (my/rust-evil-keys)))
 
 (defun my/rust-analyzer-contact (&rest _)
   "Return the latest rust-analyzer command and options.
