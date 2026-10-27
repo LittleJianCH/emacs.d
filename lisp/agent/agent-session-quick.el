@@ -13,13 +13,13 @@
 
 (require 'agent-session)
 
-(defcustom agent-session-quick-agent 'codex
+(defcustom agent-session-quick-agent 'pi
   "Agent that runs quick requests."
   :type 'symbol
   :group 'agent-session)
 
 (defcustom agent-session-quick-settings
-  '(:model "gpt-6.1-terra" :effort "low" :mode auto)
+  '(:model "opencode-go/deepseek-v4.1-flash" :effort "low" :mode auto)
   "Settings of quick request sessions (:model :effort :mode)."
   :type 'plist
   :group 'agent-session)
