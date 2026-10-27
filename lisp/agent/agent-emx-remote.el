@@ -205,7 +205,8 @@ Reuse OLD only if the ControlMaster is unchanged.  Return transport data."
         (let ((forward (agent-emx-remote--forward
                         root (plist-get result :socket) old agent-emx-remote--automatic)))
           (setf (agent-emx--connection-remote connection)
-                (plist-put forward :version (plist-get result :version)))
+                (plist-put (plist-put forward :version (plist-get result :version))
+                           :stale (eq (plist-get result :stale) t)))
           (setq result (plist-put result :socket (plist-get forward :socket)))
           ;; The callback below does local socket work only.  No sentinel or
           ;; timer is allowed to enter the synchronous tramp file handler.
@@ -307,11 +308,14 @@ all its project views, since one host daemon has one editor attachment."
      fail)))
 
 (defun agent-emx-remote-push-config ()
-  "Send the effective local config to every attached host daemon."
+  "Send the effective local config to every attached host daemon.
+A stale host, running older code, may reject newer keys: it waits for
+reload to restart it."
   (maphash
    (lambda (_ connection)
      (when (and (agent-emx--connection-place connection)
-                (agent-emx--connection-ready connection))
+                (agent-emx--connection-ready connection)
+                (not (plist-get (agent-emx--connection-remote connection) :stale)))
        (agent-emx--request connection "config/push" (list :config (or agent-emx-config--wire agent-emx-config--value))
                            nil (lambda (error) (message "emx 远程配置更新失败：%s"
                                                         (plist-get error :message))))))

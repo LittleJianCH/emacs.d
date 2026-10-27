@@ -218,6 +218,16 @@ export function validate(value: unknown): Config {
   }
   return c as Config
 }
+/** Delete the key at PATH from VALUE; false when VALUE doesn't have it. */
+function dropKey(value: unknown, path: string[]): boolean {
+  let parent = value
+  for (const key of path.slice(0, -1)) parent = object(parent) ? parent[key] : undefined
+  const last = path.at(-1)!
+  if (!object(parent) || !Object.hasOwn(parent, last)) return false
+  delete parent[last]
+  return true
+}
+
 export class Configuration {
   value: Config
   errors: string[] = []
@@ -349,9 +359,18 @@ export class Configuration {
     return this.reload()
   }
   /** A client daemon older than this host lacks newer keys; take them from
-   * this host's defaults, as a reload after the client's own upgrade would. */
+   * this host's defaults, as a reload after the client's own upgrade would.
+   * A newer client may send keys this host doesn't know yet: drop them, so
+   * the host stays reachable until it is upgraded itself. */
   #complete(value: unknown): Config {
-    return validate(mergeConfiguration(JSON.parse(readFileSync(this.defaults, 'utf8')), value))
+    const defaults = JSON.parse(readFileSync(this.defaults, 'utf8'))
+    for (;;) {
+      try { return validate(mergeConfiguration(defaults, value)) }
+      catch (error) {
+        const path = /^config\.(.+): unknown key$/.exec((error as Error).message)?.[1].split('.')
+        if (!path || !dropKey(value, path)) throw error
+      }
+    }
   }
   push(value: unknown): ReturnType<Configuration['reload']> {
     if (!this.baseFile) throw new Error('Only host daemons accept config/push')

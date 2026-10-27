@@ -176,6 +176,31 @@
                                        :null-object :null :false-object :false)
                        "{\"profiles\":{},\"collab\":{\"agentHandleCommands\":{},\"confirm\":false}}"))))))
 
+(ert-deftest agent-emx-remote-stale-host-gets-no-config ()
+  "A host still running older code may reject newer config keys.
+Its hello and pushes leave the config out, so it connects and reload can
+restart it."
+  (let ((agent-emx--connections (make-hash-table :test #'equal))
+        (agent-emx-config--value '(:collab (:maxActive 4))) (agent-emx-config--wire nil)
+        sent)
+    (cl-letf (((symbol-function 'make-network-process) (lambda (&rest _) nil))
+              ((symbol-function 'agent-emx--tools) (lambda (_) nil))
+              ((symbol-function 'agent-emx--request)
+               (lambda (_ method params &rest _) (push (cons method params) sent))))
+      (dolist (stale '(t nil))
+        (setq sent nil)
+        (let ((connection (agent-emx--make-connection :place "/rpc:phase7:/project/" :ready t
+                                                      :remote (list :stale stale))))
+          (clrhash agent-emx--connections)
+          (puthash "host" connection agent-emx--connections)
+          (agent-emx--connect connection (list :socket "/tmp/s" :version "v" :stale (if stale t :false)))
+          (agent-emx-remote-push-config)
+          (should (equal (mapcar #'car sent) (if stale '("hello") '("config/push" "hello"))))
+          (let ((hello (cdr (assoc "hello" sent))))
+            (if stale
+                (should-not (plist-member hello :config))
+              (should (equal (plist-get hello :config) agent-emx-config--value)))))))))
+
 (ert-deftest agent-emx-remote-ensure-rejects-version-before-forwarding ()
   (let ((connection (agent-emx--make-connection :place "/rpc:phase7:/project/")) failure)
     (cl-letf (((symbol-function 'agent-emx-remote--manifest)

@@ -267,6 +267,23 @@ test('host fills keys an older client config lacks from its own defaults', () =>
   } finally { c.close(); fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('host drops keys a newer client config adds, so it stays reachable until upgraded', () => {
+  const dir = fs.mkdtempSync('/tmp/emx-host-newer-')
+  const c = new Configuration(dir, undefined, join(dir, 'host.json'))
+  try {
+    const newer: any = config(); newer.collab.maxActive = 7
+    newer.agents.pi.futureOption = ['x']; newer.collab.futureOption = true; newer.futureSection = {}
+    assert.deepEqual(c.push(newer).errors, [])
+    assert.equal(c.value.collab.maxActive, 7)
+    assert.equal((c.value.agents.pi as any).futureOption, undefined)
+    assert.equal((c.value.collab as any).futureOption, undefined)
+    assert.equal((c.value as any).futureSection, undefined)
+    // Invalid values of known keys still fail.
+    assert.throws(() => c.push({ ...config(), collab: { ...config().collab, maxActive: 'many' } }))
+    assert.equal(c.value.collab.maxActive, 7)
+  } finally { c.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('delayed remote quota delivery preserves the sampling time and forecast history', () => {
   const dir = fs.mkdtempSync('/tmp/emx-quota-outbox-')
   const outbox = new Outbox(join(dir, 'outbox.json'))

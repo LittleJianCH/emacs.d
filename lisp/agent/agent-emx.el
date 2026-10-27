@@ -679,7 +679,10 @@ Daemon events keep their distinct false value; only tool arguments use nil."
        (append (list :client "emacs" :version (plist-get result :version) :tools tools
 		     :agents (vconcat (mapcar (lambda (a) (symbol-name (car a)))
 					      agent-session-agents)))
-               (when (agent-emx--connection-place connection)
+               ;; A stale host may reject keys newer than its code; it keeps
+               ;; its last config until reload restarts it on this version.
+               (when (and (agent-emx--connection-place connection)
+                          (not (eq (plist-get result :stale) t)))
                  (list :config (or agent-emx-config--wire agent-emx-config--value)))))
      (lambda (hello)
        (let* ((cancelled (copy-sequence
