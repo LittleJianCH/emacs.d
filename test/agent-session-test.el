@@ -1394,5 +1394,82 @@ expanded; the user's own messages stay whole."
             (should (eq (plist-get (rpc "_poll" (list :id id)) :ok) :false))))
       (delete-directory dir t))))
 
+;;; Quick requests
+
+(defmacro agent-session-test--with-quick (&rest body)
+  "Run BODY with quick requests going to the echo backend.
+Bind `opened' to the session buffers opened and `messages' to the echo
+area messages, latest first; kill the sessions BODY leaves."
+  `(let ((default-directory temporary-file-directory)
+         (agent-session-last-settings nil)
+         (agent-session-quick-agent 'test-echo)
+         (agent-session-quick-settings '(:model "small" :effort "low" :mode auto))
+         (before (agent-session-buffers))
+         (opened nil)
+         (messages nil))
+     (unwind-protect
+         (cl-letf* ((open (symbol-function 'agent-session-open))
+                    ((symbol-function 'agent-session-open)
+                     (lambda (&rest args) (car (push (apply open args) opened))))
+                    ((symbol-function 'message)
+                     (lambda (format &rest args)
+                       (push (apply #'format-message format args) messages))))
+           ,@body)
+       (dolist (b (agent-session-buffers))
+         (unless (memq b before) (agent-session-kill-quietly b))))))
+
+(ert-deftest agent-session-test-quick-short-reply ()
+  "A quick request goes to its own session; a short reply ends it."
+  (require 'agent-session-quick)
+  (agent-session-test--with-quick
+   (let ((agent-session-quick-echo-lines 100))
+     (with-temp-buffer
+       (setq buffer-file-name (expand-file-name "quick.el" temporary-file-directory))
+       (insert "a\nb\n")
+       (agent-session-quick "打开 init.el"))
+     (let* ((buffer (car opened))
+            (session (buffer-local-value 'agent-session--current buffer)))
+       (should (equal (agent-session-settings session)
+                      '(:model "small" :effort "low" :mode auto)))
+       (should (eq (agent-session-status session) 'idle))
+       ;; The user's text is shown; the note and context only reach the agent.
+       (let ((reply (car messages)))
+         (should (string-prefix-p "收到：打开 init.el\n\nThis is a one-shot request" reply))
+         (should (string-match-p "quick\\.el at line 3" reply)))
+       (should (= 1 (length messages)))
+       (accept-process-output nil 0.05)
+       (should-not (buffer-live-p buffer))))))
+
+(ert-deftest agent-session-test-quick-long-reply ()
+  "A reply too long for the echo area shows its session, which stays."
+  (require 'agent-session-quick)
+  (agent-session-test--with-quick
+   (let ((agent-session-quick-echo-lines 1))
+     (agent-session-quick "解释一下")
+     (accept-process-output nil 0.05)
+     (let ((buffer (car opened)))
+       (should (buffer-live-p buffer))
+       (should (get-buffer-window buffer))
+       (should (equal (car messages) "回复较长，已打开会话"))
+       (should-not (plist-get (agent-session-info
+                               (buffer-local-value 'agent-session--current buffer))
+                              :quick))))))
+
+(ert-deftest agent-session-test-quick-ask ()
+  "A quick session that asks the user is shown and outlives its turn."
+  (require 'agent-session-quick)
+  (agent-session-test--with-quick
+   (agent-session-quick "hold 运行 make")
+   (let* ((buffer (car opened))
+          (session (buffer-local-value 'agent-session--current buffer)))
+     (should (equal (car messages) "已交给 small：hold 运行 make"))
+     (should-not (get-buffer-window buffer))
+     (agent-session-ask session :title "运行 make" :choices '((allow "允许") (deny "拒绝")))
+     (should (get-buffer-window buffer))
+     (agent-session-text session "r" "好了")
+     (agent-session-set-status session 'idle)
+     (accept-process-output nil 0.05)
+     (should (buffer-live-p buffer)))))
+
 (provide 'agent-session-test)
 ;;; agent-session-test.el ends here

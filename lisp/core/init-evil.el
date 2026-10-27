@@ -7,6 +7,7 @@
 ;;   SPC f  find file       SPC b  switch buffer    SPC r  recent files
 ;;   SPC s  search buffer   SPC /  search project   SPC p  project commands
 ;;   SPC a  agent commands (same as C-c a)
+;;   SPC SPC  one-shot request to an agent (same as C-c a q, init-agent.el)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
 ;;   SPC t  terminal (same as C-c t, init-term.el)
 ;;   SPC l  language commands: Eglot actions a / r / f (same as C-c l,

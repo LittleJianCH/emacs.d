@@ -144,6 +144,13 @@ var/                     runtime state (history, backups, pasted images...); git
   hub. Tests simulate a host locally.
 - `agent-remote.el` — shared ControlMaster lookup and input upload helpers.
   No reverse bridge, keeper, relay, per-session emx or byte-offset reattach.
+- `agent-session-quick.el` — `C-c a q` (evil `SPC SPC`): a one-shot request
+  typed in the minibuffer runs in its own unshown session (codex
+  gpt-6.1-terra by default, `agent-session-quick-settings`) with a hidden
+  note asking for a short direct answer. When the turn ends the reply goes
+  to the echo area and the session is killed; it is shown instead on a
+  confirmation or questions, a reply longer than
+  `agent-session-quick-echo-lines`, or an exit.
 - `agent-session-list.el` — the session sidebar (live sessions + history per project),
   keyboard and mouse.
 - `agent-ui.el` — editor methods defined by `agent-ui-defmethod`, exposed over

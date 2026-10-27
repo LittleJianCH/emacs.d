@@ -1344,6 +1344,10 @@ PROPS: :kind :title :status :output :diff :note."
   (when-let* ((block (agent-session--block session id)))
     (agent-session--update session id :output (concat (plist-get block :output) delta))))
 
+(defvar agent-session-ask-functions nil
+  "Functions called with a session and the id of a request it just made.
+That is a confirmation or questions waiting for the user's answer.")
+
 (cl-defun agent-session-ask (session &key title detail diff choices callback tool)
   "Ask the user to confirm.
 CHOICES is ((KEY LABEL) ...); after the user picks one, CALLBACK is called
@@ -1365,6 +1369,7 @@ the request.  DIFF is already shown by the tool block, so it isn't repeated."
     (agent-session--refresh session)
     (message "%s 需要确认：%s（C-c C-y 允许，C-c C-n 拒绝）"
              (agent-session-title session) title)
+    (run-hook-with-args 'agent-session-ask-functions session id)
     id))
 
 (defun agent-session--mirror-ask (session id)
@@ -1457,6 +1462,7 @@ When the user declines to answer, CALLBACK is called with `cancel'."
     (agent-session--refresh session)
     (message "%s 有问题等你回答：%s（C-c C-y 回答，C-c C-n 不回答）"
              (agent-session-title session) (plist-get (car questions) :question))
+    (run-hook-with-args 'agent-session-ask-functions session id)
     id))
 
 (defun agent-session--question-position (ask)

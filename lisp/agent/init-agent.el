@@ -12,7 +12,7 @@
 ;;   C-c a f  input with current file ref    C-c a r  input with region code block
 ;;   C-c a k  end session                    C-c a v  back to agent's last page
 ;;   C-c a u  usage and quota of the agents  C-c a p  subagent profiles
-;;   C-c a U  subagent runs and ratings
+;;   C-c a U  subagent runs and ratings      C-c a q  one-shot request (SPC SPC)
 ;;   C-x p a  new session in the project; also `a' after C-x p p
 ;; In a session buffer: C-c C-c sends the input area, RET inserts a newline,
 ;; M-p / M-n history, TAB completes (/ commands, @ files);
@@ -48,6 +48,13 @@
 (use-package agent-session-list
   :after agent-session
   :demand t)
+
+;; One-shot requests typed in the minibuffer; the reply goes to the echo area.
+(use-package agent-session-quick
+  :demand t
+  :after agent-session
+  :config
+  (keymap-set agent-session-command-map "q" #'agent-session-quick))
 
 ;; agent → Emacs: the methods called by the emx command and MCP server are
 ;; all defined in agent-ui.
@@ -146,7 +153,8 @@ In visual state a is the text object prefix, so this rebinds it there."
 ;; under the local leader "," (only active in agent buffers).
 (with-eval-after-load 'evil
   (evil-define-key* '(normal motion visual) 'global
-    (kbd "<leader>a") agent-session-command-map)
+    (kbd "<leader>a") agent-session-command-map
+    (kbd "<leader>SPC") #'agent-session-quick)
 
   (defvar-keymap agent-session-local-leader-map
     :doc "Keys after , in session buffers."
