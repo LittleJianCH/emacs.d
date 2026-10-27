@@ -138,6 +138,18 @@ or the U.S. layout, and sis can only switch to an enabled one."
   (setq-local sis-prefix-override-buffer-disable-predicates nil)
   (sis-prefix-override-buffer-enable))
 
+(defvar sis-respect-minibuffer-triggers)
+
+(defvar my/sis-chinese-minibuffer-commands '(agent-session-quick)
+  "Commands whose minibuffer starts in the Chinese input source.
+sis switches every other minibuffer to English.")
+
+(defun my/sis--add-minibuffer-triggers ()
+  "Start the minibuffers of `my/sis-chinese-minibuffer-commands' in Chinese."
+  (dolist (command my/sis-chinese-minibuffer-commands)
+    (setf (alist-get command sis-respect-minibuffer-triggers)
+          (lambda () 'other))))
+
 (defvar sis-prefix-override-keys)
 (defvar sis-prefix-override-buffer-disable-predicates)
 (declare-function sis-ism-lazyman-config "sis")
@@ -156,6 +168,7 @@ or the U.S. layout, and sis can only switch to an enabled one."
   (advice-add 'sis--respect-evil :after #'my/sis--setup-evil)
   (advice-add 'sis--minibuffer-setup-handler :before
               #'my/sis--before-minibuffer)
+  (my/sis--add-minibuffer-triggers)
   (add-hook 'sis-change-hook #'my/sis--remember-source)
   (add-hook 'window-selection-change-functions #'my/sis--window-change)
   (add-hook 'agent-session-mode-hook #'my/sis-enable-agent-prefixes)

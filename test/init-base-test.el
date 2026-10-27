@@ -287,6 +287,24 @@ Scrolling needs a real display: run it in the running Emacs."
     (my/sis--restore-buffer #'ignore)
     (should (equal input-source sis-other-source))))
 
+(ert-deftest init-base-sis-quick-request-minibuffer-chinese ()
+  "A quick agent request is read in Chinese; other minibuffers in English."
+  (init-base-test--with-input-window
+    (let ((sis-respect-minibuffer-triggers nil))
+      (my/sis--add-minibuffer-triggers)
+      ;; Configuring again on reload keeps one trigger per command.
+      (my/sis--add-minibuffer-triggers)
+      (should (= 1 (length sis-respect-minibuffer-triggers)))
+      (with-current-buffer (window-buffer (minibuffer-window))
+        (let ((sis--for-buffer-locked nil)
+              (sis--for-buffer nil))
+          (let ((this-command 'agent-session-quick))
+            (sis--minibuffer-setup-handler))
+          (should (equal input-source sis-other-source))
+          (let ((this-command 'execute-extended-command))
+            (sis--minibuffer-setup-handler))
+          (should (equal input-source sis-english-source)))))))
+
 (ert-deftest init-base-sis-evil-transitions ()
   "Real Evil state hooks preserve Chinese through normal and replace states."
   (skip-unless (require 'evil nil t))
