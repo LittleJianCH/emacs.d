@@ -58,4 +58,17 @@ init-term, so binding C-c t too would silently take the key back."
   (should (eq (keymap-lookup project-prefix-map "t") #'ghostel-project))
   (should (assq 'ghostel-project project-switch-commands)))
 
+(ert-deftest init-term-project-menu-survives-reload ()
+  "Reloading init-dev.el keeps the Terminal and Agent entries other modules
+added to `project-switch-commands', without duplicating the base entries."
+  (let ((before project-switch-commands))
+    (unwind-protect
+        (progn
+          (load (locate-library "init-dev.el") nil t)
+          (should (equal project-switch-commands before))
+          (should (assq 'ghostel-project project-switch-commands))
+          (should (assq 'agent-session-create project-switch-commands))
+          (should-not (assq 'project-find-regexp project-switch-commands)))
+      (setopt project-switch-commands before))))
+
 ;;; init-term-test.el ends here

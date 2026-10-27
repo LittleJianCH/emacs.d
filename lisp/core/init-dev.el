@@ -1,11 +1,23 @@
 ;;; init-dev.el --- Projects, git, language servers -*- lexical-binding: t; -*-
 
+(defconst my/project-switch-commands
+  '((project-find-file "Find file" ?f)
+    (consult-ripgrep "Ripgrep" ?r)
+    (project-dired "Dired" ?d)
+    (magit-project-status "Magit" ?m))
+  "Base of the `project-switch-project' menu, replacing Emacs's default.")
+
 (use-package project
-  :custom
-  (project-switch-commands '((project-find-file "Find file" ?f)
-                             (consult-ripgrep "Ripgrep" ?r)
-                             (project-dired "Dired" ?d)
-                             (magit-project-status "Magit" ?m))))
+  :config
+  ;; Other modules append their own entries (Terminal, Agent).  Keep them, so
+  ;; that reloading this file does not drop them from the menu.
+  (let ((default (eval (car (get 'project-switch-commands 'standard-value)) t)))
+    (setopt project-switch-commands
+            (append my/project-switch-commands
+                    (seq-remove (lambda (entry)
+                                  (or (member entry default)
+                                      (assq (car entry) my/project-switch-commands)))
+                                project-switch-commands)))))
 
 ;;; Git: the main tools for reviewing agent changes
 
