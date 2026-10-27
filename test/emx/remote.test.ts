@@ -49,7 +49,12 @@ test('runtime install hashes match without node_modules, and include the dsh run
     let out = read(); assert.equal(out.status, 0, out.stderr)
     assert.equal(JSON.parse(out.stdout).version, codeVersion())
     assert.ok(runtimeFiles().includes('lisp/agent/backend/dsh/emacs-bridge.mjs'))
-    assert.ok(runtimeFiles().every((f) => !f.includes('node_modules') && !f.startsWith('test/') && !f.endsWith('.ts')))
+    assert.ok(runtimeFiles().every((f) => !f.includes('node_modules') && !f.startsWith('test/')
+      && (!f.endsWith('.ts') || f.startsWith('lisp/agent/backend/pi/auto-permissions/'))))
+    for (const file of ['auto-permissions.json', 'auto-permissions/index.ts', 'auto-permissions/LICENSE']) {
+      assert.ok(runtimeFiles().includes('lisp/agent/backend/pi/' + file))
+    }
+    assert.ok(!runtimeFiles().includes('lisp/agent/backend/pi/auto-permissions/README.md'))
     assert.ok(runtimeFiles().includes('emx/dist/config.json'))
     assert.ok(!runtimeFiles().includes('emx/package.json'))
     assert.ok(!fs.existsSync(join(target, 'emx/daemon')))

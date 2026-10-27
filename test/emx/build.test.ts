@@ -95,7 +95,9 @@ test('manifest versions describe runtime bytes and source-free hosts never need 
   const first = JSON.parse((await command(dir)).stdout)
   assert.ok(first.files.includes('emx/dist/package.json'))
   for (const name of ['main', 'args', 'emacsclient']) assert.ok(first.files.includes(`emx/dist/cli/${name}.js`))
-  assert.ok(first.files.every((file: string) => !/\.ts$|node_modules|tsconfig|package-lock|build-stamp/.test(file)))
+  // Pi compiles the vendored guardian itself; hosts need no compiler for it.
+  assert.ok(first.files.every((file: string) => file.startsWith('lisp/agent/backend/pi/auto-permissions/')
+    || !/\.ts$|node_modules|tsconfig|package-lock|build-stamp/.test(file)))
   const host = install(dir, first)
   assert.equal(fs.existsSync(join(host, 'emx/node_modules')), false)
   assert.equal(fs.existsSync(join(host, 'emx/daemon')), false)

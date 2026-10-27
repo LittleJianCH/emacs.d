@@ -57,7 +57,8 @@ export function runtimeFiles(): string[] {
   const dsh = 'lisp/agent/backend/dsh'
   walk(join(checkoutRoot, dsh), dsh, /\.(mjs|yml)$/)
   const pi = 'lisp/agent/backend/pi'
-  walk(join(checkoutRoot, pi), pi, /\.js$/)
+  // Includes the vendored guardian's TypeScript, which Pi loads itself.
+  walk(join(checkoutRoot, pi), pi, /\.(js|ts|json)$|^LICENSE$/)
   files.push('bin/emx')
   return files.sort()
 }
