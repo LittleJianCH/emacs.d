@@ -8,6 +8,7 @@ const log = (direction, value) => {
   if (process.env.EMX_PI_LOG) appendFileSync(process.env.EMX_PI_LOG, JSON.stringify({
     direction, ...value, argv, cwd: process.cwd(), socket: process.env.EMX_DAEMON_SOCKET,
     session: process.env.EMX_SESSION, emx: process.env.EMX_PI_EMX,
+    guardianConfig: process.env.PI_AUTO_PERMISSIONS_CONFIG,
   }) + '\n')
 }
 const write = (value) => { log('out', value); process.stdout.write(JSON.stringify(value) + '\n') }
@@ -48,6 +49,14 @@ function receive(m) {
     const call = waiting
     waiting = undefined
     if (!call) return
+    // The extension's guardian asks the user through emx with its reason.
+    if (m.value === 'review' && call.reason !== undefined && !call.reviewed) {
+      waiting = { ...call, reviewed: true }
+      write({ type: 'extension_ui_request', id: `review-${turn}`, method: 'select',
+        title: 'emx-review ' + JSON.stringify({ tool: call.tool, id: call.id, input: call.input ?? {}, reason: call.reason }),
+        options: ['allow', 'deny'] })
+      return
+    }
     write({ type: 'tool_execution_update', toolCallId: call.id, toolName: call.tool,
       partialResult: { content: [{ type: 'text', text: 'partial output' }] } })
     write({ type: 'tool_execution_end', toolCallId: call.id, toolName: call.tool,

@@ -15,6 +15,8 @@ export interface AgentConfig {
   defaultModel?: string
   quotaSkip?: number
   models?: { include: string[], exclude: string[] }
+  /** Tools auto mode runs without asking, by the name the agent calls them. */
+  autoAllowTools?: string[]
 }
 export interface ProfileCandidate {
   agent: string
@@ -128,11 +130,12 @@ export function validate(value: unknown): Config {
   for (const [name, a] of Object.entries(obj(c.agents, 'agents'))) {
     const p = `agents.${name}`
     if (!name || name.includes('/')) fail(p, 'nonempty agent name without /')
-    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'quotaSkip', 'models'], p)
+    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'quotaSkip', 'models', 'autoAllowTools'], p)
     str(a.title, p + '.title'); str(a.executable, p + '.executable')
     if (!a.executable) fail(p + '.executable', 'nonempty string')
     if (a.extraArgs !== undefined) array(a.extraArgs, p + '.extraArgs')
     if (a.disallowedTools !== undefined) array(a.disallowedTools, p + '.disallowedTools')
+    if (a.autoAllowTools !== undefined) array(a.autoAllowTools, p + '.autoAllowTools')
     if (a.nativeSubagents !== undefined) bool(a.nativeSubagents, p + '.nativeSubagents')
     if (a.historyTurns !== undefined) num(a.historyTurns, p + '.historyTurns', 1)
     if (a.quotaSkip !== undefined) threshold(a.quotaSkip, p + '.quotaSkip')

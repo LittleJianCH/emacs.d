@@ -161,7 +161,8 @@ export class PiBackend implements Backend {
     args.push(...config?.extraArgs ?? [])
     const env = { ...process.env, ...await this.host.environment?.(),
       EMX_DAEMON_SOCKET: this.host.daemonSocket, EMX_SESSION: this.host.id,
-      EMX_PI_EMX: join(checkoutRoot, 'bin/emx') }
+      EMX_PI_EMX: join(checkoutRoot, 'bin/emx'),
+      PI_AUTO_PERMISSIONS_CONFIG: join(checkoutRoot, 'lisp/agent/backend/pi/auto-permissions.json') }
     const child = spawn(process.env.EMX_PI_EXECUTABLE ?? config?.executable ?? 'pi', args,
       { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
@@ -287,7 +288,8 @@ export class PiBackend implements Backend {
   }
   #cancelDialogs(): void { for (const cancel of this.#dialogs.values()) cancel(); this.#dialogs.clear() }
 
-  async #approval(request: any): Promise<void> {
+  /** Answer extension dialog REQUEST with DECIDE's value; aborts cancel it. */
+  async #dialog(request: any, decide: (stale: () => boolean) => Promise<string | undefined>): Promise<void> {
     const child = this.#process
     let replied = false
     const reply = (value?: string): void => {
@@ -297,9 +299,14 @@ export class PiBackend implements Backend {
         ...(value ? { value } : { cancelled: true }) })
     }
     this.#dialogs.set(request.id, () => reply())
-    try {
-      const { tool, id, input = {} } = JSON.parse(request.title.slice('emx-approval '.length))
-      if (typeof tool !== 'string' || typeof id !== 'string' || this.#cancelled) { reply(); return }
+    try { reply(await decide(() => replied || this.#cancelled)) }
+    catch (error) { this.#notice(String(error)); reply() }
+  }
+
+  #approval(request: any): Promise<void> {
+    return this.#dialog(request, async (stale) => {
+      const { tool, id, input = {}, review } = JSON.parse(request.title.slice('emx-approval '.length))
+      if (typeof tool !== 'string' || typeof id !== 'string' || stale()) return undefined
       const mode = this.host.settings.mode ?? this.#confirmed.mode ?? 'edits'
       const readOnly = ['read', 'grep', 'find', 'ls'].includes(tool)
         || this.#tools.readOnly.some((name) => tool === `mcp__emacs__${name}`)
@@ -307,17 +314,32 @@ export class PiBackend implements Backend {
       if (readOnly) choice = 'allow'
       else if (mode === 'plan') choice = 'deny-plan'
       else if (mode === 'full' || this.#always.has(tool)) choice = 'allow'
-      else if (mode === 'auto' && tool === 'bash') choice = 'allow'
+      // Auto mode hands Bash to the extension's guardian, like Codex auto_review.
+      else if (mode === 'auto' && tool === 'bash') choice = review === true ? 'review' : 'allow'
+      else if (mode === 'auto' && this.host.agentConfig?.()?.autoAllowTools?.includes(tool)) choice = 'allow'
       else if (['edits', 'auto'].includes(mode) && ['write', 'edit'].includes(tool)
         && await contained(this.host.root, input.path)) choice = 'allow'
       else choice = (await this.host.ask({ type: 'approval', tool: id,
         view: toolView(this.host.root, tool, input), choices: ['allow', 'always', 'deny'] })).choice
-      if (replied || this.#cancelled) { reply(); return }
+      if (stale()) return undefined
       // A live switch to plan also constrains a previously pending approval.
       if (!readOnly && (this.host.settings.mode ?? this.#confirmed.mode) === 'plan') choice = 'deny-plan'
       if (choice === 'always') this.#always.add(tool)
-      reply(choice)
-    } catch (error) { this.#notice(String(error)); reply() }
+      return choice
+    })
+  }
+
+  /** The guardian wants the user to decide a Bash call, giving its reason. */
+  #review(request: any): Promise<void> {
+    return this.#dialog(request, async (stale) => {
+      const { tool, id, input = {}, reason } = JSON.parse(request.title.slice('emx-review '.length))
+      if (typeof tool !== 'string' || typeof id !== 'string' || stale()) return undefined
+      const { choice } = await this.host.ask({ type: 'approval', tool: id,
+        view: toolView(this.host.root, tool, input),
+        ...(typeof reason === 'string' ? { description: reason } : {}), choices: ['allow', 'deny'] })
+      if (stale() || choice === undefined) return undefined
+      return choice === 'allow' && (this.host.settings.mode ?? this.#confirmed.mode) !== 'plan' ? 'allow' : 'deny'
+    })
   }
 
   #finishTexts(): void {
@@ -356,6 +378,7 @@ export class PiBackend implements Backend {
     switch (event.type) {
       case 'extension_ui_request':
         if (event.method === 'select' && event.title?.startsWith('emx-approval ')) void this.#approval(event)
+        else if (event.method === 'select' && event.title?.startsWith('emx-review ')) void this.#review(event)
         else if (['select', 'confirm', 'input', 'editor'].includes(event.method)) {
           this.#write({ type: 'extension_ui_response', id: event.id, cancelled: true })
           this.#notice(`Unsupported Pi extension dialog: ${event.title ?? event.method}`, 'warning')

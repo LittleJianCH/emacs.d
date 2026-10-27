@@ -31,6 +31,12 @@
         "+grep,+find,+ls"
       ],
       "defaultModel": "opencode-go/kimi-k3",
+      "autoAllowTools": [
+        "mcp__emacs__open",
+        "mcp__emacs__show",
+        "mcp__emacs__notify",
+        "mcp__emacs__alert"
+      ],
       "models": {
         "include": [
           "^opencode-go/",

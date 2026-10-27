@@ -44,7 +44,8 @@ lisp/agent/              shared agent support (see below)
   agent-runs.el         combined subagent runs and ratings grouped by profile and model
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       enabled-agent registration (all use :backend emx)
-    pi/                 thin Pi RPC approval and direct MCP extension
+    pi/                 thin Pi RPC approval and direct MCP extension,
+                        vendored Bash guardian (auto-permissions/)
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications; enabled via `my/apps' in init.el
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
@@ -119,7 +120,16 @@ var/                     runtime state (history, backups, pasted images...); git
 - `emx/backends/pi.ts` — Pi 1.3.0 RPC, filtered OpenCode Go models, live
   thinking/mode settings, native resume/fork and `agent_settled` completion.
   `backend/pi/emacs-extension.js` forwards every tool for daemon arbitration
-  and registers direct Emacs MCP. Tests use a fake Pi CLI only.
+  and registers direct Emacs MCP. Pi has no reviewer of its own, so auto mode
+  answers `review` for Bash: the extension then runs the vendored
+  pi-auto-permissions guardian (`backend/pi/auto-permissions/`, unmodified
+  upstream 0.1.4; review new source before upgrading). Its rules and reviewer
+  model are `backend/pi/auto-permissions.json`, passed through
+  `PI_AUTO_PERMISSIONS_CONFIG`; matching commands go to the reviewer model,
+  whose user questions return as `emx-review` approvals with its reason.
+  Auto also runs `agents.pi.autoAllowTools` (display-only editor tools)
+  without asking. Guardian model calls bypass the usage ledger. Tests use a
+  fake Pi CLI and a fake guardian only.
 - `emx/backends/history.ts` — `sessions/history {agent, root}`: discover past
   Claude JSONL, Codex `thread/list`, and dsh `sessions/list` asynchronously on
   their owning host. Groups git worktrees and preserves each resume root.
@@ -302,7 +312,8 @@ emacs --batch --init-directory=. -l init.el --eval '
 No output means a clean compile. It must stay warning-free, including with evil disabled (declare evil functions
 with `declare-function`; call `evil-define-key*`, not the `evil-define-key` macro).
 `node --check bin/emx` for the bridge and `node --check
-lisp/agent/backend/dsh/emacs-bridge.mjs` for the dsh plugin. The usage tests moved
+lisp/agent/backend/dsh/emacs-bridge.mjs` for the dsh plugin; `node --check
+lisp/agent/backend/pi/emacs-extension.js` for the Pi extension. The usage tests moved
 to `test/emx/usage*.test.ts`, retaining `test/fixtures/usage/`.
 
 Install the pinned local build tools with `npm install --prefix emx`. Build and

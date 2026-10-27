@@ -39,8 +39,8 @@ A longer reply is shown in its session."
 (defconst agent-session-quick--note
   "This is a one-shot request typed in the Emacs minibuffer; the user \
 won't reply.  Do it directly without follow-up questions, and don't start \
-other sessions.  Use the Emacs tools for editor actions such as opening a \
-file.  Answer in one or two short sentences, in the user's language; the \
+other sessions.  Use the Emacs tools for editor actions: open a file with \
+open, never eval.  Answer in one or two short sentences, in the user's language; the \
 answer is shown in the echo area.  Don't call alert or notify."
   "Note for the agent sent after a quick request, not shown.")
 
