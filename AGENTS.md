@@ -123,7 +123,10 @@ var/                     runtime state (history, backups, pasted images...); git
   and registers direct Emacs MCP. Pi has no reviewer of its own, so auto mode
   answers `review` for Bash: the extension then runs the vendored
   pi-auto-permissions guardian (`backend/pi/auto-permissions/`, unmodified
-  upstream 0.1.4; review new source before upgrading). Its rules and reviewer
+  upstream 0.1.4; review new source before upgrading). `backend/pi/guardian.ts`,
+  a second extension so Pi resolves the guardian's imports, loads it and
+  keeps its `tool_call` handlers for the bridge; a load failure leaves Pi
+  running with emx's own auto policy. Its rules and reviewer
   model are `backend/pi/auto-permissions.json`, passed through
   `PI_AUTO_PERMISSIONS_CONFIG`; matching commands go to the reviewer model,
   whose user questions return as `emx-review` approvals with its reason.

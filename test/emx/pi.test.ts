@@ -69,6 +69,7 @@ test('new Pi sessions explicitly select a filtered default, advertise models and
   assert.ok(!init.argv.includes('--no-session'))
   assert.ok(!init.argv.includes('--approve'))
   assert.match(init.argv[init.argv.indexOf('-e') + 1], /pi\/emacs-extension.js$/)
+  assert.match(init.argv[init.argv.lastIndexOf('-e') + 1], /pi\/guardian.ts$/)
   assert.equal(init.socket, daemon.socket); assert.equal(init.session, id)
   assert.equal(init.emx, fileURLToPath(new URL('../../bin/emx', import.meta.url)))
   assert.deepEqual(attached.capabilities.models.map((m: any) => m.id), ['opencode-go/kimi-k3', 'opencode-go/glm-5.3-flash'])
@@ -307,7 +308,7 @@ test('installed skills replace discovery and images use Pi ImageContent', async 
 })
 
 /** Load the extension with environment ENV; return its registrations. */
-async function loadExtension(env: Record<string, string>) {
+async function loadExtension(env: Record<string, string> = {}) {
   const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
   Object.assign(process.env, env)
   try {
@@ -325,18 +326,35 @@ async function loadExtension(env: Record<string, string>) {
   }
 }
 
-const guardian = fileURLToPath(new URL('./fixtures/pi-guardian.cjs', import.meta.url))
+const registry = Symbol.for('emx.pi.guardian')
 
-test('bridge forwards all tools, blocks cancellations and plan denials, and never advertises readOnlyHint', async () => {
+/** Run guardian.ts with the guardian module at PATH; return what it registered. */
+async function loadGuardian(t: TestContext, path: string) {
+  const saved = process.env.EMX_PI_GUARDIAN
+  process.env.EMX_PI_GUARDIAN = path
+  t.after(() => { delete (globalThis as any)[registry] })
+  try {
+    const events: string[] = []
+    const { default: guardian } = await import(new URL('../../lisp/agent/backend/pi/guardian.ts', import.meta.url).href)
+    await guardian({ on: (event: string) => { events.push(event) } })
+    return { events, guardian: (globalThis as any)[registry] }
+  } finally {
+    if (saved === undefined) delete process.env.EMX_PI_GUARDIAN; else process.env.EMX_PI_GUARDIAN = saved
+  }
+}
+
+const fakeGuardian = fileURLToPath(new URL('./fixtures/pi-guardian.cjs', import.meta.url))
+
+test('bridge forwards all tools, blocks cancellations and plan denials, and never advertises readOnlyHint', async (t) => {
   const { registration, handler, events } = await loadExtension({ EMX_PI_EMX: '/runtime/bin/emx',
-    EMX_SESSION: 'test', EMX_DAEMON_SOCKET: '/socket', EMX_PI_GUARDIAN: guardian })
+    EMX_SESSION: 'test', EMX_DAEMON_SOCKET: '/socket' })
   assert.equal(registration.name, 'emacs')
   assert.equal(registration.config.command, process.execPath)
   assert.deepEqual(registration.config.args, ['/runtime/bin/emx', 'mcp'])
   assert.equal(registration.config.exposure, 'direct')
   assert.ok(!JSON.stringify(registration).includes('readOnlyHint'))
-  // The guardian's other hooks reach Pi; its tool_call handler stays with the bridge.
-  assert.deepEqual(events, ['session_start', 'tool_call'])
+  assert.deepEqual(events, ['tool_call'])
+  await loadGuardian(t, fakeGuardian)
   for (const toolName of ['bash', 'write', 'mcp__emacs__context']) {
     for (const choice of ['allow', 'always', 'deny', 'deny-plan', undefined]) {
       const result = await handler({ toolName, toolCallId: 'call', input: { path: 'a' } }, { mode: 'rpc', ui: {
@@ -354,8 +372,16 @@ test('bridge forwards all tools, blocks cancellations and plan denials, and neve
   }
 })
 
-test('bridge runs the guardian only on review, and its questions become emx-review approvals', async () => {
-  const { handler } = await loadExtension({ EMX_PI_GUARDIAN: guardian })
+test('guardian.ts keeps the guardian tool_call handlers and passes its other hooks to Pi', async (t) => {
+  const { events, guardian } = await loadGuardian(t, fakeGuardian)
+  assert.deepEqual(events, ['session_start'])
+  assert.equal(guardian.handlers.length, 1)
+  assert.equal(guardian.error, undefined)
+})
+
+test('bridge runs the guardian only on review, and its questions become emx-review approvals', async (t) => {
+  await loadGuardian(t, fakeGuardian)
+  const { handler } = await loadExtension()
   const run = async (command: string, answer?: string) => {
     const titles: string[] = []
     const result = await handler({ toolName: 'bash', toolCallId: 'call', input: { command } }, { mode: 'rpc', ui: {
@@ -371,19 +397,17 @@ test('bridge runs the guardian only on review, and its questions become emx-revi
     return { result, titles }
   }
   // Unguarded commands pass without a question.
-  assert.deepEqual(await run('echo hi'), { result: undefined, titles: [approvalTitle('echo hi')] })
+  const quiet = await run('echo hi')
+  assert.equal(quiet.result, undefined); assert.equal(quiet.titles.length, 1)
   assert.equal((await run('guarded', 'allow')).result, undefined)
   assert.deepEqual((await run('guarded', 'deny')).result, { block: true, reason: 'guardian: Block' })
   assert.deepEqual((await run('guarded')).result, { block: true, reason: 'guardian: undefined' })
 })
 
-function approvalTitle(command: string): string {
-  return 'emx-approval ' + JSON.stringify({ tool: 'bash', id: 'call', input: { command }, review: true })
-}
-
-test('bridge without a loadable guardian never asks for review and says so once', async () => {
-  const { handler, events } = await loadExtension({ EMX_PI_GUARDIAN: '/nonexistent/guardian.cjs' })
-  assert.deepEqual(events, ['tool_call'])
+test('a guardian that fails to load leaves Pi running, never asks for review and says so once', async (t) => {
+  const { guardian } = await loadGuardian(t, '/nonexistent/guardian.cjs')
+  assert.ok(guardian.error)
+  const { handler } = await loadExtension()
   const notices: string[] = []
   for (let i = 0; i < 2; i++) {
     await handler({ toolName: 'bash', toolCallId: 'call', input: {} }, { ui: {

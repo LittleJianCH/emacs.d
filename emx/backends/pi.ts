@@ -149,6 +149,7 @@ export class PiBackend implements Backend {
     const config = this.host.agentConfig?.()
     const fork = this.host.info.forkFrom as string | undefined
     const args = ['--mode', 'rpc', '-e', join(checkoutRoot, 'lisp/agent/backend/pi/emacs-extension.js'),
+      '-e', join(checkoutRoot, 'lisp/agent/backend/pi/guardian.ts'),
       ...(resume ? ['--session', resume] : fork ? ['--fork', fork] : []),
       '--model', this.#model(desired), ...(desired.effort ? ['--thinking', desired.effort] : [])]
     // Pi's --no-session takes precedence over --fork/--session, discarding
