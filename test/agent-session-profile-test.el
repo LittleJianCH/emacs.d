@@ -34,18 +34,32 @@
     (:agent "codex" :model "blocked" :selectable :false)))
 
 (ert-deftest agent-session-profile-test-create-entry ()
-  "The normal entry always chooses a profile, independent of the last agent."
+  "The normal entry passes its prefix through, independent of the last agent."
   (let ((agent-session-default-agent 'codex) called)
     (cl-letf (((symbol-function 'agent-session-profile-create)
-               (lambda (&optional root) (setq called (list 'profile root)))))
+               (lambda (&optional root choose)
+                 (setq called (list 'profile root choose)))))
       (agent-session-create)
-      (should (equal called '(profile nil)))
+      (should (equal called '(profile nil nil)))
       (setq called nil)
       (agent-session-create t)
-      (should (equal called '(profile nil))))))
+      (should (equal called '(profile nil t))))))
+
+(ert-deftest agent-session-profile-test-create-opens-orchestrator ()
+  "Without a prefix, a new session opens orchestrator without asking."
+  (let (opened)
+    (cl-letf (((symbol-function 'agent-emx--request)
+               (lambda (&rest _) (ert-fail "profiles should not be requested")))
+              ((symbol-function 'agent-session--completing-read)
+               (lambda (&rest _) (ert-fail "no profile should be asked for")))
+              ((symbol-function 'agent-session-profile--open)
+               (lambda (root profile) (setq opened (list root profile)))))
+      (agent-session-profile-create temporary-file-directory)
+      (should (equal opened (list temporary-file-directory "orchestrator"))))))
 
 (ert-deftest agent-session-profile-test-project-default-and-completion ()
-  "Effective daemon profiles populate the chooser with orchestrator default."
+  "With a prefix, effective daemon profiles populate the chooser with
+orchestrator as default."
   (let (request opened)
     (cl-letf (((symbol-function 'agent-emx--local-connection)
                (lambda (success _) (funcall success 'connection)))
@@ -63,7 +77,7 @@
                  default))
               ((symbol-function 'agent-session-profile--open)
                (lambda (root profile) (setq opened (list root profile)))))
-      (agent-session-profile-create temporary-file-directory)
+      (agent-session-profile-create temporary-file-directory t)
       (should (equal (car request) "collab/profiles"))
       (should (equal (plist-get (cadr request) :root) temporary-file-directory))
       (should (equal opened (list temporary-file-directory "orchestrator"))))))
@@ -72,7 +86,7 @@
   (agent-session-profile-test--with-session
    (let (root)
      (cl-letf (((symbol-function 'agent-session-profile-create)
-                (lambda (value) (setq root value))))
+                (lambda (value &optional _choose) (setq root value))))
        (agent-session-new)
        (should (equal root (agent-session-root session)))))))
 

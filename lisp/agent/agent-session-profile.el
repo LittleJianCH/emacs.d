@@ -28,10 +28,19 @@
     (agent-session-focus-input (buffer-local-value 'agent-session--current buffer))
     buffer))
 
-(defun agent-session-profile-create (&optional root)
-  "Choose an effective daemon profile and create a conversation in ROOT."
-  (interactive)
+(defun agent-session-profile-create (&optional root choose)
+  "Create an orchestrator conversation in ROOT.
+With CHOOSE (interactively, a prefix argument), choose an effective daemon
+profile first."
+  (interactive (list nil current-prefix-arg))
   (setq root (or root (agent-session--root)))
+  (if (not choose)
+      (agent-session-profile--open root "orchestrator")
+    (agent-session-profile--choose root))
+  nil)
+
+(defun agent-session-profile--choose (root)
+  "Choose an effective daemon profile and create a conversation in ROOT."
   (let ((receive
          (lambda (connection)
            (agent-emx--request
@@ -58,8 +67,7 @@
             #'agent-session-profile--error))))
     (if (file-remote-p root)
         (agent-emx-remote-connection root receive #'agent-session-profile--error)
-      (agent-emx--local-connection receive #'agent-session-profile--error)))
-  nil)
+      (agent-emx--local-connection receive #'agent-session-profile--error))))
 
 (defun agent-session-profile--key (candidate)
   "Return an unambiguous slash-completion key for CANDIDATE."

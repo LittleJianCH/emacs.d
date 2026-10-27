@@ -2553,10 +2553,11 @@ session carrying over the input draft."
                          t))
         (agent-session-backend-start (agent-session-backend session) session)))))
 
-(defun agent-session-new ()
-  "Choose a profile for a new session in the same project."
-  (interactive)
-  (agent-session-profile-create (agent-session-root (agent-session--this))))
+(defun agent-session-new (&optional choose)
+  "Start an orchestrator session in the same project.
+With CHOOSE (a prefix argument), choose its profile first."
+  (interactive "P")
+  (agent-session-profile-create (agent-session-root (agent-session--this)) choose))
 
 (defun agent-session-resume (&optional agent)
   "Resume a past session of AGENT (default the current one) in this project."
@@ -3022,16 +3023,17 @@ agent's latest settings; INFO is the initial info plist."
     buffer)))
 
 ;;;###autoload
-(defun agent-session-create (&optional _choose)
-  "Choose a daemon profile for a new session in the current project.
-The default profile is orchestrator.  Agent-specific start commands remain
-available for native history and legacy provider entry points."
+(defun agent-session-create (&optional choose)
+  "Start an orchestrator session in the current project.
+With CHOOSE (a prefix argument), choose its daemon profile first.
+Agent-specific start commands remain available for native history and
+legacy provider entry points."
   (interactive "P")
-  (agent-session-profile-create))
+  (agent-session-profile-create nil choose))
 
 ;;;###autoload
 (defun agent-session-toggle ()
-  "Show or hide the agent column; without sessions, choose a profile."
+  "Show or hide the agent column; without sessions, start one."
   (interactive)
   (if-let* ((window (agent-session--visible-window)))
       (if (one-window-p) (switch-to-buffer (other-buffer)) (delete-window window))

@@ -414,7 +414,7 @@ Status changes often while output streams, so coalesce them into one redraw."
 
 (defun agent-session-list-create (&optional choose)
   "Create a session in the list's project.
-CHOOSE is retained for compatibility; creation always chooses a profile."
+With CHOOSE (a prefix argument), choose its profile first."
   (interactive "P")
   (let ((default-directory agent-session-list--root))
     (agent-session-create choose)))
