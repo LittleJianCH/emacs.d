@@ -704,7 +704,7 @@ export class Collaboration {
         const run = entry.run !== undefined && !entry.route ? this.active.get(entry.target) : undefined
         const label = entry.run !== undefined ? this.#prompt('runLabel', entry.run) : ''
         reply = target ? this.#prompt('reply', handle, this.#title(target), label + (target.status === 'exited' ? ', which then exited' : ''), reply,
-          target.info.parent ? summary + this.#prompt('childFollowup') : this.#prompt('followup', handle)) : `"@${handle}"${label} ended without replying: it was closed before it replied`
+          target.info.parent ? summary + this.#prompt('childFollowup') + (entry.run !== undefined && !entry.route ? this.#prompt('rateHint', entry.run) : '') : this.#prompt('followup', handle)) : `"@${handle}"${label} ended without replying: it was closed before it replied`
         // Keep the pending entry revocable while visibility is in flight.
         const close = asker && target?.info.parent === asker.id && target.status === 'idle'
           && this.config.collab.closeFinished && !errors.length && !await this.host.visible(target)

@@ -206,7 +206,7 @@ export function validate(value: unknown): Config {
   array(collab.handleCommand, 'collab.handleCommand')
   for (const [k, v] of Object.entries(obj(collab.agentHandleCommands, 'collab.agentHandleCommands'))) array(v, 'collab.agentHandleCommands.' + k)
   for (const [k, v] of Object.entries(obj(collab.prompts, 'collab.prompts'))) str(v, 'collab.prompts.' + k)
-  for (const k of ['handoff', 'forkNote', 'taskNote', 'messageNote', 'mailbox', 'reply', 'failedReply', 'replyError', 'partialReply', 'childFollowup', 'followup', 'started', 'candidateSkipped', 'candidatesSkipped', 'candidateUnavailable', 'candidateModelExcluded', 'candidateQuotaUsed', 'candidateQuotaLimited', 'candidateBalanceExhausted', 'candidateSameAgent', 'noCandidate', 'sent', 'mention', 'profileHeader', 'forkAgents', 'delegation', 'startSummary', 'handlePrompt', 'task']) str(collab.prompts[k], 'collab.prompts.' + k)
+  for (const k of ['handoff', 'forkNote', 'taskNote', 'messageNote', 'mailbox', 'reply', 'failedReply', 'replyError', 'partialReply', 'childFollowup', 'rateHint', 'followup', 'started', 'candidateSkipped', 'candidatesSkipped', 'candidateUnavailable', 'candidateModelExcluded', 'candidateQuotaUsed', 'candidateQuotaLimited', 'candidateBalanceExhausted', 'candidateSameAgent', 'noCandidate', 'sent', 'mention', 'profileHeader', 'forkAgents', 'delegation', 'startSummary', 'handlePrompt', 'task']) str(collab.prompts[k], 'collab.prompts.' + k)
   if (!Array.isArray(collab.tools) || collab.tools.length !== 6) fail('collab.tools', 'six tool definitions')
   for (const name of ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop', 'session_rate']) {
     const t = collab.tools.find((t: any) => t.name === name)

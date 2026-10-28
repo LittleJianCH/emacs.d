@@ -53,10 +53,10 @@ test('daemon config owns six caller-independent collaboration definitions', () =
     required: ['run', 'score'],
   })
   assert.match(rate.description, /from 0 \(useless\) to 10 \(used as is\)/)
-  assert.match(rate.description, /after you verified or used its result, not on receipt/)
-  assert.match(rate.description, /only in parallel/)
+  assert.match(rate.description, /after you used or checked its result, not on receipt/)
+  assert.match(rate.description, /in parallel\s+with your first tool call after that/)
   assert.match(rate.description, /never as a standalone/)
-  assert.match(rate.description, /if there is no such call,\s+skip it/)
+  assert.match(rate.description, /if that\s+call passes without it, skip it/)
   const start = tools.find((tool) => tool.name === 'session_start')!.description
   assert.ok(start.indexOf('Delegate independent work early') < start.indexOf('Choose how it gets context:'))
   assert.match(start, /Only profiles whose tools permit helpers/)
@@ -219,6 +219,7 @@ for (const method of ['session_start', 'session_ask']) for (const c of failureCa
       await until(() => !!t.collab.mailbox.get(parent.id)?.length)
       const reply = t.collab.mailbox.get(parent.id)![0].text
       const followup = method === 'session_start' ? 'It takes no follow-ups; for more work, start another session.'
+        + '  Rate run 1 with session_rate in parallel with your first tool call after using or checking this result (load it in that same step if it is deferred); skip it after that.'
         : 'Follow up with session_ask session=@worker; see what it did with session_read.'
       assert.equal(reply, `Reply from "@worker" (Echo)${method === 'session_start' ? ' [run 1]' : ''}${c.exited ? ', which then exited' : ''}:\n\n${c.body}\n\n${followup}`)
       if (c.notices.some((n) => n.level === 'error')) {
@@ -586,6 +587,7 @@ test('run records capture actual model totals, reply labels and one outcome per 
     assert.equal(row.tools, 1); assert.equal(row.reply, 3)
     assert.ok(row.end >= row.start && row.duration >= 0)
     assert.match(t.collab.mailbox.get(parent.id)![0].text, /\[run 1\]/)
+    assert.match(t.collab.mailbox.get(parent.id)![0].text, /Rate run 1 with session_rate/)
     assert.equal(t.sessions.size, 1)
     await t.collab.settle(); assert.equal(t.collab.runLog().length, 1)
   } finally { await t.cleanup() }

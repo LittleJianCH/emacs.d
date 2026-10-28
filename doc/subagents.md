@@ -502,12 +502,18 @@ delegate never see it. It is in the no-approval set with `sessions` and
 `session_read`, so it never asks the user in any backend or mode. Nothing sent
 to a child mentions ratings.
 
-The cost rule, stated in the tool description: rate after verifying or using
-the result, not on receipt, and only in parallel with a tool call made anyway
-(such as the alert before the final reply), never as a standalone call;
-without such a call, skip it. Estimated costs: the description adds roughly
-100 tokens to each delegating session's cached tool list, a score call roughly 20
-output tokens and no extra round trip, the run label a few tokens per reply.
+The cost rule: rate after using or checking the result, not on receipt, in
+parallel with the first tool call made after that, never as a standalone
+call; if that call passes without it, skip it. An earlier rule tied the score
+to the alert before the final reply, and no parent rated anything: Claude
+Code defers MCP tools, so the rule in the `session_rate` description was
+never seen, and the next alert could come many user messages after the
+reply, or never. The rule now also travels as `rateHint` at the end of each
+child run's reply, next to the result it scores, and asks deferred clients to
+load the tool in the same step. Estimated costs: the description adds roughly
+100 tokens to each delegating session's cached tool list, the hint about 40
+tokens per child reply, a score call roughly 20 output tokens and no extra
+round trip.
 
 `collab/runs {range}` groups the log by profile x agent x model (runs, failed,
 closed, rated, mean score rounded to one decimal or null when unrated, median
