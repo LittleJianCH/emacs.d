@@ -1,6 +1,6 @@
 // Thin Pi RPC bridge: emx owns policy and the editor owns all interaction.
-// When emx answers review (Bash in auto mode), the guardian guardian.ts
-// loaded decides instead, asking through emx too.
+// When emx answers review (auto mode), the guardian guardian.ts loaded
+// decides instead, asking through emx too.
 
 /** CTX whose ui.select becomes an emx-review approval of EVENT. */
 function reviewContext(ctx, event) {
@@ -30,14 +30,16 @@ module.exports = function (pi) {
     const guardian = globalThis[Symbol.for('emx.pi.guardian')]
     if (guardian?.error && !reported) {
       reported = true
-      ctx.ui.notify?.(`Bash review is unavailable: ${guardian.error.message ?? guardian.error}`, 'error')
+      ctx.ui.notify?.(`Auto review is unavailable: ${guardian.error.message ?? guardian.error}`, 'error')
     }
     const choice = await ctx.ui.select('emx-approval ' + JSON.stringify({
-      tool: event.toolName, id: event.toolCallId, input: event.input, review: guardian?.handlers.length > 0,
+      tool: event.toolName, id: event.toolCallId, input: event.input,
+      review: event.toolName === 'bash' ? guardian?.handlers.length > 0 : Boolean(guardian?.review),
     }), ['allow', 'always', 'deny', 'deny-plan', 'review'])
     if (choice === 'review') {
       const review = reviewContext(ctx, event)
-      for (const handler of guardian?.handlers ?? []) {
+      // Bash goes through the guardian's gates; other tools to its reviewer.
+      for (const handler of event.toolName === 'bash' ? guardian?.handlers ?? [] : [guardian?.review].filter(Boolean)) {
         const result = await handler(event, review)
         if (result?.block) return result
       }

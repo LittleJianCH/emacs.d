@@ -320,6 +320,8 @@ export class PiBackend implements Backend {
       else if (mode === 'auto' && this.host.agentConfig?.()?.autoAllowTools?.includes(tool)) choice = 'allow'
       else if (['edits', 'auto'].includes(mode) && ['write', 'edit'].includes(tool)
         && await contained(this.host.root, input.path)) choice = 'allow'
+      // Whatever auto mode would ask about goes to the reviewer first.
+      else if (mode === 'auto' && review === true) choice = 'review'
       else choice = (await this.host.ask({ type: 'approval', tool: id,
         view: toolView(this.host.root, tool, input), choices: ['allow', 'always', 'deny'] })).choice
       if (stale()) return undefined

@@ -152,6 +152,23 @@ test('auto hands Bash to an available guardian, whose user questions carry its r
   assert.deepEqual(ask.choices, ['allow', 'always', 'deny'])
 })
 
+test('auto sends every call it would ask about to an available reviewer', async (t) => {
+  const { call, dir } = await setup(t, { settings: { mode: 'auto' } })
+  const outside = { path: join(dir, '../outside-file'), content: 'x' }
+  // Without a reviewer, emx asks as before.
+  await call('write', outside, 'deny')
+  for (const [tool, input] of [['write', outside], ['mcp__emacs__eval', { code: '(+ 1 2)' }], ['custom', {}]] as const) {
+    assert.equal((await call(tool, input, undefined, { review: true })).reply.value, 'review')
+  }
+  // Calls auto runs anyway never reach the reviewer.
+  assert.equal((await call('write', { path: 'a' }, undefined, { review: true })).reply.value, 'allow')
+  assert.equal((await call('mcp__emacs__open', {}, undefined, { review: true })).reply.value, 'allow')
+  assert.equal((await call('mcp__emacs__context', {}, undefined, { review: true })).reply.value, 'allow')
+  // The reviewer's question shows the call's own view.
+  const { ask, reply } = await call('write', outside, 'allow', { review: true, reason: 'Writes outside the project' })
+  assert.equal(reply.value, 'allow'); assert.equal(ask.view.kind, 'edit'); assert.equal(ask.description, 'Writes outside the project')
+})
+
 test('a live switch to plan denies a pending guardian question', async (t) => {
   const { client, id, idle, requests } = await setup(t, { settings: { mode: 'auto' } })
   const from = client.notifications.length
@@ -359,7 +376,8 @@ test('bridge forwards all tools, blocks cancellations and plan denials, and neve
     for (const choice of ['allow', 'always', 'deny', 'deny-plan', undefined]) {
       const result = await handler({ toolName, toolCallId: 'call', input: { path: 'a' } }, { mode: 'rpc', ui: {
         select: async (title: string, options: string[]) => {
-          assert.deepEqual(JSON.parse(title.slice(13)), { tool: toolName, id: 'call', input: { path: 'a' }, review: true })
+          // The fake guardian has gates but no reviewer for other tools.
+          assert.deepEqual(JSON.parse(title.slice(13)), { tool: toolName, id: 'call', input: { path: 'a' }, review: toolName === 'bash' })
           assert.deepEqual(options, ['allow', 'always', 'deny', 'deny-plan', 'review']); return choice
         },
       } })
@@ -404,6 +422,72 @@ test('bridge runs the guardian only on review, and its questions become emx-revi
   assert.deepEqual((await run('guarded')).result, { block: true, reason: 'guardian: undefined' })
 })
 
+test('bridge sends other tools to the reviewer, and only offers review when it exists', async (t) => {
+  await loadGuardian(t, fakeGuardian)
+  const { handler } = await loadExtension()
+  const call = (answer: string) => handler({ toolName: 'write', toolCallId: 'call', input: { path: '/x' } }, { ui: {
+    select: async (title: string) => {
+      if (title.startsWith('emx-approval ')) { offered.push(JSON.parse(title.slice(13)).review); return 'review' }
+      return answer
+    },
+  } })
+  const offered: boolean[] = []
+  // The fake guardian module has no reviewer: emx gets review: false.
+  assert.equal(await call('allow'), undefined)
+  const reviewed: any[] = []
+  ;(globalThis as any)[registry].review = async (event: any, ctx: any) => {
+    reviewed.push(event.toolName)
+    return (await ctx.ui.select('Writes outside — Auto Permissions needs approval', ['Allow', 'Block'])) === 'Allow'
+      ? undefined : { block: true, reason: 'Blocked by user' }
+  }
+  assert.equal(await call('allow'), undefined)
+  assert.deepEqual(await call('deny'), { block: true, reason: 'Blocked by user' })
+  assert.deepEqual(offered, [false, true, true])
+  assert.deepEqual(reviewed, ['write', 'write'])
+})
+
+test('the reviewer approves, revises or asks with its reason, and asks when it fails', async () => {
+  const review = await import(new URL('../../lisp/agent/backend/pi/auto-permissions/review.ts', import.meta.url).href)
+  const { reviewer } = await import(new URL('../../lisp/agent/backend/pi/guardian.ts', import.meta.url).href)
+  let answer: any, requests: any[] = [], questions: string[] = []
+  const model = { provider: 'opencode-go', id: 'deepseek-v4.1-flash', contextWindow: 3000 }
+  const ctx = { cwd: '/root', model: { id: 'session-model' }, ui: {
+      select: async (title: string, options: string[]) => { questions.push(title); assert.deepEqual(options, ['Allow', 'Block']); return 'Allow' } },
+    modelRegistry: { find: (provider: string, id: string) => ({ ...model, provider, id }),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: 'key' }) },
+    sessionManager: { buildContextEntries: () => [
+      { type: 'message', id: 'old', message: { role: 'user', content: 'x'.repeat(5000) } },
+      { type: 'message', id: 'u', message: { role: 'user', content: 'write the notes to ../notes.md' } }] } }
+  const handler = reviewer({ review, loadConfig: () => ({ systemPrompt: 'POLICY',
+    reviewer: { provider: 'opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'low' } }),
+  complete: async (m: any, context: any, options: any) => {
+    requests.push({ m, context, options })
+    if (answer instanceof Error) throw answer
+    return { stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(answer) }] }
+  } })
+  const event = { toolName: 'write', toolCallId: 'c', input: { path: '../notes.md', content: 'y'.repeat(3000) } }
+  answer = { decision: 'approve', reason: 'requested' }
+  assert.equal(await handler(event, ctx), undefined)
+  const { m, context, options } = requests[0]
+  assert.equal(m.id, 'deepseek-v4.1-flash'); assert.equal(options.reasoning, 'low'); assert.equal(options.apiKey, 'key')
+  // OpenCode Go rejects requests without a session.
+  assert.match(options.sessionId, /^emx-review-/)
+  assert.match(context.systemPrompt, /^POLICY\n\nThe latest request may also be a file write/)
+  const envelope = context.messages[0].content[0].text
+  assert.match(envelope, /write the notes to/)
+  // Old evidence gives way to the budget; long payloads are cut.
+  assert.ok(!envelope.includes('x'.repeat(100)))
+  assert.match(envelope, /1000 more characters/)
+  answer = { decision: 'revise', reason: 'write inside the project' }
+  assert.match((await handler(event, ctx)).reason, /requested revision: write inside the project/)
+  answer = { decision: 'ask_user', reason: 'overwrites a file outside the project' }
+  assert.equal(await handler(event, ctx), undefined)
+  assert.match(questions.at(-1)!, /write call — Auto Permissions needs approval\n\noverwrites a file outside the project/)
+  answer = new Error('network down')
+  assert.equal(await handler(event, ctx), undefined)
+  assert.match(questions.at(-1)!, /Automatic review failed: network down/)
+})
+
 test('a guardian that fails to load leaves Pi running, never asks for review and says so once', async (t) => {
   const { guardian } = await loadGuardian(t, '/nonexistent/guardian.cjs')
   assert.ok(guardian.error)
@@ -416,7 +500,7 @@ test('a guardian that fails to load leaves Pi running, never asks for review and
     } })
   }
   assert.equal(notices.length, 1)
-  assert.match(notices[0], /Bash review is unavailable/)
+  assert.match(notices[0], /Auto review is unavailable/)
 })
 
 test('model filter configuration validates regexes and tool views include all Pi edit replacements', async () => {

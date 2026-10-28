@@ -121,18 +121,22 @@ var/                     runtime state (history, backups, pasted images...); git
   thinking/mode settings, native resume/fork and `agent_settled` completion.
   `backend/pi/emacs-extension.js` forwards every tool for daemon arbitration
   and registers direct Emacs MCP. Pi has no reviewer of its own, so auto mode
-  answers `review` for Bash: the extension then runs the vendored
-  pi-auto-permissions guardian (`backend/pi/auto-permissions/`, unmodified
-  upstream 0.1.4; review new source before upgrading). `backend/pi/guardian.ts`,
-  a second extension so Pi resolves the guardian's imports, loads it and
-  keeps its `tool_call` handlers for the bridge; a load failure leaves Pi
-  running with emx's own auto policy. Its rules and reviewer
-  model are `backend/pi/auto-permissions.json`, passed through
-  `PI_AUTO_PERMISSIONS_CONFIG`; matching commands go to the reviewer model,
-  whose user questions return as `emx-review` approvals with its reason.
-  Auto also runs `agents.pi.autoAllowTools` (display-only editor tools)
-  without asking. Guardian model calls bypass the usage ledger. Tests use a
-  fake Pi CLI and a fake guardian only.
+  answers `review` wherever Claude Code's and Codex's reviewers would judge:
+  Bash, and every call it would otherwise ask about (writes outside the
+  root, non-read-only editor tools, unknown tools). Bash goes through the
+  vendored pi-auto-permissions guardian (`backend/pi/auto-permissions/`,
+  unmodified upstream 0.1.4; review new source before upgrading), whose
+  regex gates pick the commands its reviewer model judges. Other calls go
+  to the reviewer in `backend/pi/guardian.ts`, which reuses the guardian's
+  evidence, prompt, verdicts and model. guardian.ts is a second extension so
+  Pi resolves the guardian's imports; a load failure leaves Pi running with
+  emx's own auto policy. Rules and reviewer model are
+  `backend/pi/auto-permissions.json`, passed through
+  `PI_AUTO_PERMISSIONS_CONFIG`; reviewer questions return as `emx-review`
+  approvals with its reason, and failures ask. Auto also runs
+  `agents.pi.autoAllowTools` (display-only editor tools) without asking.
+  Reviewer model calls bypass the usage ledger. Tests use a fake Pi CLI and
+  a fake guardian; the reviewer is tested with a fake model.
 - `emx/backends/history.ts` — `sessions/history {agent, root}`: discover past
   Claude JSONL, Codex `thread/list`, and dsh `sessions/list` asynchronously on
   their owning host. Groups git worktrees and preserves each resume root.
