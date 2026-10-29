@@ -41,7 +41,9 @@ is involved: understand the code yourself.
    changes that are hard to place.
 6. **Hand it over.** Tell the user the base and head, the number of items and
    anything notable, in a few lines. They read it in Emacs: selecting lines
-   and pressing `a` writes an annotation that is sent to this session.
+   and pressing `a` writes an annotation. Building the review creates a fork
+   of this session that inherits this conversation and answers annotations
+   there. The creator does not receive them; hand over the review.
 
 The split is a static reading of the diff: never describe it as compiled or
 tested.
@@ -83,7 +85,9 @@ reopens the existing review.
 
 ## Answer annotations
 
-Each annotation arrives as a user message starting with `[原子审查·标注]`.
+Annotations go to the fork created when the review was built, which inherits
+its creator's conversation. The creator does not receive them. In the fork,
+each annotation arrives as a user message starting with `[原子审查·标注]`.
 It carries the item, file, line range (新: lines at head, 旧: lines at the
 merge base), the selected code, the user's text, and the review id,
 annotation id and revision.

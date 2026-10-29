@@ -2964,10 +2964,15 @@ the next message.  ROOT defaults to the current project root."
   "Non-nil while restoring a view of an already-running daemon session.
 Restoring a view must not run project program probes from a process filter.")
 
-(defun agent-session-open (agent root &optional resume settings info)
+(defvar agent-session-fork-failed-functions nil
+  "Functions called with a fork session and its opening error.
+The failed fork's client plist retains the error under `:fork-error'.")
+
+(defun agent-session-open (agent root &optional resume settings info client)
   "Start an AGENT session in ROOT without showing it; return its buffer.
 RESUME is the id of a past session to resume.  SETTINGS defaults to the
-agent's latest settings; INFO is the initial info plist."
+agent's latest settings; INFO is the initial info plist.  CLIENT supplies
+initial backend client state, for example a fork source."
   ;; Keep local paths independent of later process-environment bindings.
   ;; Remote home expansion is asynchronous and belongs to the host runtime.
   (unless (file-remote-p root)
@@ -2988,13 +2993,14 @@ agent's latest settings; INFO is the initial info plist."
                                 (user-error "未注册 agent：%s" agent))
                    :root root :buffer buffer
                    :info info
-                   :client (and resume (list :resume resume))
-                   :settings (or settings
-                                 (unless (plist-get info :profile)
-                                   (copy-sequence
-                                    (alist-get agent agent-session-last-settings)))))))
+                   :client (append (and resume (list :resume resume)) client)
+                   :settings (if (or settings (plist-get client :fork))
+                                 settings
+                               (unless (plist-get info :profile)
+                                 (copy-sequence
+                                  (alist-get agent agent-session-last-settings)))))))
     ;; A placeholder name until one is made from the topic (see agent-collab.el).
-    (agent-session-set-handle session (symbol-name agent))
+    (agent-session-set-handle session (or (plist-get info :handle) (symbol-name agent)))
     (agent-session--setup-buffer session)
     (with-current-buffer buffer
       (setq default-directory root)
@@ -3025,8 +3031,31 @@ agent's latest settings; INFO is the initial info plist."
     ;; Its agent may start sessions of the agents installed where it runs.
     (unless agent-session-opening-view
       (agent-session-refresh-programs root))
-    (agent-session-backend-start (agent-session-backend session) session)
+    (condition-case err
+        (agent-session-backend-start (agent-session-backend session) session)
+      (error
+       (when (plist-get client :fork) (agent-session-kill-quietly buffer))
+       (signal (car err) (cdr err))))
     buffer)))
+
+(defun agent-session-fork (source &optional handle info)
+  "Fork live SOURCE into an unshown top-level session; return its buffer.
+SOURCE is a session object.  HANDLE names the fork; INFO supplies its
+initial info, including a title.  The daemon inherits the conversation,
+profile, settings and skills from SOURCE."
+  (unless (and (buffer-live-p (agent-session-buffer source))
+               (eq (agent-session-backend source) 'emx)
+               (plist-get (agent-session-client source) :emx-id))
+    (user-error "源会话尚未连接，无法创建分支"))
+  (setq info (copy-sequence info))
+  (when-let* ((profile (plist-get (agent-session-info source) :profile)))
+    (setq info (plist-put info :profile profile)))
+  (when handle (setq info (plist-put info :handle handle)))
+  (agent-session-open
+   (agent-session-agent source) (agent-session-root source) nil
+   (copy-tree (agent-session-settings source)) info
+   (list :fork (plist-get (agent-session-client source) :emx-id)
+         :fork-source (agent-session-buffer source))))
 
 ;;;###autoload
 (defun agent-session-create (&optional choose)

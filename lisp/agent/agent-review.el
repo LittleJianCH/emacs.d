@@ -6,8 +6,9 @@
 ;; one intent each.  Emacs pins the diff, checks that the items cover every
 ;; changed line exactly once, and shows them in a review buffer with a
 ;; sidebar of its items.  The user selects lines there and writes an
-;; annotation, which goes straight to the session that made the review with
-;; the selected code; the agent's answers appear under the annotations.
+;; annotation, which goes to a fork created when the review is built, with
+;; the selected code.  The fork inherits the creator's conversation; its
+;; answers appear under the annotations.
 ;;
 ;; The idea and workflow of atomic reviews are inspired by HerrCai0907's cui
 ;; (https://github.com/HerrCai0907/cui).
@@ -595,7 +596,7 @@ files not covered: %s, metadata-only files not selected exactly once: %s"
       (error "No review %s" id)))
 
 (defun agent-review--index ()
-  "Summaries of all reviews, newest first: (:id :title :agent :root :created)."
+  "Review summaries, newest first: (:id :title :agent :fork :root :created)."
   (agent-review--read (agent-review--path "index.eld")))
 
 (defun agent-review--comments (id)
@@ -663,8 +664,8 @@ The diff runs from the merge base of the two.  Return the snapshot."
 
 (defun agent-review-build (snapshot summary items &optional title agent)
   "Build the review of SNAPSHOT from SUMMARY and the planned ITEMS.
-TITLE defaults to the compared refs; AGENT is the session buffer name to
-answer annotations.  Building the same plan again returns the existing
+TITLE defaults to the compared refs; AGENT is the creator's buffer name.
+Building the same plan again returns the existing
 review, so its annotations are kept."
   (unless (and (stringp summary) (not (string-blank-p summary)))
     (error "summary is required: what the whole compared change achieves"))
@@ -720,6 +721,7 @@ review, so its annotations are kept."
   (agent-review--write (agent-review--path "index.eld")
                        (cons (list :id (plist-get review :id) :title (plist-get review :title)
                                    :agent (plist-get review :agent)
+                                   :fork (plist-get review :fork)
                                    :root (plist-get review :root)
                                    :created (plist-get review :created))
                              (agent-review--index))))
@@ -736,7 +738,8 @@ review, so its annotations are kept."
 ;;
 ;; An annotation covers the lines the user selected in one file of one item,
 ;; and is shown below the last of them.  Writing one sends it straight to
-;; the session that made the review, with the selected code.
+;; the review's fork, with the selected code.  The fork is made at build
+;; time and inherits the creator's conversation.
 
 (defun agent-review--line-key (target)
   "Key of the line TARGET, for finding the annotations shown below it."
@@ -2196,40 +2199,119 @@ session that made the review, with the selected code, when sent."
       (agent-review--delete-comment id comment)
       (agent-review--refresh id (plist-get comment :item)))))
 
-(defun agent-review--set-agent (review agent)
-  "Make the session buffer named AGENT the one answering REVIEW; return REVIEW."
+(defun agent-review--set-session (review key name)
+  "Store session buffer NAME under KEY in REVIEW and its index entry."
   (let ((id (plist-get review :id)))
-    (setq review (plist-put (copy-sequence review) :agent agent))
+    (setq review (plist-put (copy-sequence review) key name))
     (agent-review--write (agent-review--path id "review.eld") review)
     (agent-review--write (agent-review--path "index.eld")
                          (mapcar (lambda (entry)
                                    (if (equal (plist-get entry :id) id)
-                                       (plist-put (copy-sequence entry) :agent agent)
+                                       (plist-put (copy-sequence entry) key name)
                                      entry))
                                  (agent-review--index)))
     (dolist (buffer (agent-review--buffers id))
       (with-current-buffer buffer (setq agent-review--review review)))
     review))
 
+(defun agent-review--set-agent (review agent)
+  "Store creator buffer name AGENT in REVIEW; return the updated review."
+  (agent-review--set-session review :agent agent))
+
+(defun agent-review--live-session (name)
+  "Return the live session buffer named NAME, if any."
+  (when-let* ((buffer (and name (get-buffer name)))
+              ((agent-session-buffer-p buffer))
+              ((not (eq (agent-session-status
+                         (buffer-local-value 'agent-session--current buffer))
+                        'exited))))
+    buffer))
+
+(defun agent-review--fork-failed (session error)
+  "Fall back to the source of review fork SESSION after opening ERROR."
+  (when (seq-some (lambda (entry)
+                   (equal (plist-get entry :fork)
+                          (buffer-name (agent-session-buffer session))))
+                 (agent-review--index))
+    (message "无法创建审查回应分支，将由原会话回应：%s"
+             (plist-get error :message))
+    (when-let* ((source (plist-get (agent-session-client session) :fork-source))
+                ((buffer-live-p source))
+                (agent (buffer-local-value 'agent-session--current source)))
+      (agent-session-ensure-attached agent)
+      ;; A first annotation may already be queued before open is rejected.
+      (let ((queue (agent-session-queue session)))
+        (setf (agent-session-queue session) nil)
+        (dolist (entry queue)
+          (agent-session--remove-block session (car entry))
+          (agent-session-submit agent (cdr entry)))))))
+
+(add-hook 'agent-session-fork-failed-functions #'agent-review--fork-failed)
+
+(defun agent-review--ensure-fork (review source)
+  "Ensure REVIEW has a fork of SOURCE; return the updated review.
+Reuse a live stored fork, including when SOURCE is that fork itself.
+Opening errors leave the creator available as a fallback."
+  (if (agent-review--live-session (plist-get review :fork))
+      review
+    (condition-case err
+        (let* ((session (buffer-local-value 'agent-session--current source))
+               (fork (agent-session-fork
+                      session (concat (agent-session-handle session) "-review")
+                      (list :title (concat "审查回应：" (plist-get review :title)))))
+               (fork-session (buffer-local-value 'agent-session--current fork)))
+          (setq review (agent-review--set-session review :fork (buffer-name fork)))
+          (when-let* ((error (plist-get (agent-session-client fork-session) :fork-error)))
+            (agent-review--fork-failed fork-session error))
+          review)
+      (error
+       (message "无法创建审查回应分支，将由原会话回应：%s"
+                (error-message-string err))
+       review))))
+
 (defun agent-review--session-buffer (review)
   "The session buffer that answers REVIEW's annotations.
-That is the session that made it; once that one is gone (session buffer
-names change when Emacs restarts), the user picks a live session, those of
-the review's project first, and the choice is stored with the review."
-  (let ((buffer (and (plist-get review :agent) (get-buffer (plist-get review :agent)))))
-    (if (and buffer (agent-session-buffer-p buffer))
-        buffer
-      (let* ((live (seq-filter #'agent-session-buffer-p (buffer-list)))
-             (same (seq-filter (lambda (b)
-                                 (equal (agent-session-root (buffer-local-value
-                                                             'agent-session--current b))
-                                        (plist-get review :root)))
-                               live))
-             (names (mapcar #'buffer-name (append same (seq-difference live same)))))
-        (unless names (user-error "没有可用的 agent 会话"))
-        (let ((name (completing-read "生成这份审查的会话已关闭，交给哪个会话回应：" names nil t)))
-          (agent-review--set-agent review name)
-          (get-buffer name))))))
+Prefer its live fork.  Recreate a missing fork from the creator, or let
+the user pick a source when the creator is gone.  Opening errors fall
+back to that source without changing the stored creator."
+  (let* ((fork (agent-review--live-session (plist-get review :fork)))
+         (client (and fork (agent-session-client
+                            (buffer-local-value 'agent-session--current fork))))
+         (failed (plist-get client :fork-error))
+         (fallback (plist-get client :fork-source))
+         (source (or (and failed (buffer-live-p fallback)
+                          (agent-review--live-session (buffer-name fallback)))
+                     (agent-review--live-session (plist-get review :agent)))))
+    (if (and fork (not failed))
+        fork
+      (unless source
+        (let* ((live (seq-filter (lambda (buffer)
+                                   (and (agent-review--live-session (buffer-name buffer))
+                                        (not (eq buffer fork))))
+                                 (agent-session-buffers)))
+               (same (seq-filter (lambda (b)
+                                   (equal (agent-session-root (buffer-local-value
+                                                               'agent-session--current b))
+                                          (plist-get review :root)))
+                                 live))
+               (names (mapcar #'buffer-name (append same (seq-difference live same)))))
+          (unless names (user-error "没有可用的 agent 会话"))
+          (setq source
+                (get-buffer (completing-read
+                             "生成这份审查的会话已关闭，从哪个会话创建回应分支："
+                             names nil t)))))
+      (if (and failed (eq source fallback))
+          source
+        (setq review (agent-review--ensure-fork
+                      (if failed (agent-review--set-session review :fork nil) review)
+                      source))
+        (let ((buffer (agent-review--live-session (plist-get review :fork))))
+          (if (and buffer
+                   (not (plist-get (agent-session-client
+                                    (buffer-local-value 'agent-session--current buffer))
+                                   :fork-error)))
+              buffer
+            source))))))
 
 (defun agent-review-visit ()
   "Show the code of the line at point in another window.
@@ -2612,24 +2694,30 @@ The plan you then give review_build: a summary of the whole compared change, and
      (summary string "Overview of the whole compared change, in Chinese" required)
      (items array "The atomic items, see review_snapshot for the format" required)
      (title string "Review title. Default: <head> → <base>"))
-  "Assemble your plan for a snapshot (item format: see review_snapshot), check that every changed line is covered exactly once, and show the review in Emacs. Building the same plan again reopens the existing review with its annotations; a changed plan makes a new review and leaves the old one. Afterwards give the user the base/head and a short result, and tell them to select lines in the review buffer and press a to write an annotation. Each annotation arrives in this session as a user message carrying the selected code, its file and line range, and the review and annotation ids. Answer it only by calling review_reply: the answer shows under the annotation in the review, so do not also write it in the conversation (at most a one-line note that you replied). Do not wait or poll for annotations."
+  "Assemble your plan for a snapshot (item format: see review_snapshot), check that every changed line is covered exactly once, and show the review in Emacs. Building the same plan again reopens the existing review with its annotations; a changed plan makes a new review and leaves the old one. Afterwards give the user the base/head and a short result, and tell them to select lines in the review buffer and press a to write an annotation. Building creates a fork of this session that inherits this conversation and receives each annotation as a user message carrying the selected code, its file and line range, and the review and annotation ids. The fork answers there only by calling review_reply; answers appear under the annotations. The creator should hand over the review; it does not receive annotations. Do not wait or poll for annotations."
   (let* ((snap (agent-review--load-snapshot snapshot))
          (review (agent-review-build snap summary items title
                                      (plist-get agent-ui-caller :agent_buffer)))
+         (review (if-let* ((source (agent-review--live-session
+                                     (plist-get agent-ui-caller :agent_buffer))))
+                     (agent-review--ensure-fork review source)
+                   review))
          (buffer (agent-review-show review)))
     (append (list :review (plist-get review :id) :buffer (buffer-name buffer)
                   :base (plist-get review :base-sha) :head (plist-get review :head-sha))
             (plist-get review :stats))))
 
 (agent-ui-defmethod "review_comments"
-    ((review string "Review id. Default: every review made by this session")
+    ((review string "Review id. Default: reviews created by or assigned to this session")
      (all boolean "Include annotations already answered"))
-  "Read the user's annotations of atomic reviews: item, file, the line range they cover (新: lines at head, 旧: lines at the merge base), the selected code as diff lines, revision and the user's text. Each annotation was also sent to the session as a message when written; use this to re-read them. Treat them as the user's review comments: check each against the pinned commits and answer it with review_reply only, not in the conversation. Answering is not permission to change the code; change it only when the user asks."
+  "Read the user's annotations of atomic reviews: item, file, the line range they cover (新: lines at head, 旧: lines at the merge base), the selected code as diff lines, revision and the user's text. Each annotation was also sent to the review's fork as a message when written; use this to re-read them. Treat them as the user's review comments: check each against the pinned commits and answer it with review_reply only, not in the conversation. Answering is not permission to change the code; change it only when the user asks."
   :read-only t
   (let* ((agent (plist-get agent-ui-caller :agent_buffer))
          (root (agent-ui--caller-root))
          (ids (cond (review (list review))
-                    ((let ((mine (seq-filter (lambda (e) (equal (plist-get e :agent) agent))
+                    ((let ((mine (seq-filter (lambda (e)
+                                               (or (equal (plist-get e :agent) agent)
+                                                   (equal (plist-get e :fork) agent)))
                                              (agent-review--index))))
                        (mapcar (lambda (e) (plist-get e :id)) mine)))
                     (t (when-let* ((latest (seq-find (lambda (e) (equal (plist-get e :root) root))

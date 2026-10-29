@@ -208,6 +208,177 @@ review_snapshot lists without comparing refs again."
         (list :item "atomic-1" :file "a.txt" :side 'new :line 2 :kind ?+ :code "line two"))
   "The two diff lines of item 1, as selected in the review buffer.")
 
+(agent-session-define-agent review-test-echo :title "Review Echo" :backend emx)
+
+(defmacro agent-review-test--with-forks (&rest body)
+  "Run BODY with SOURCE and FORKS using an immediate fake echo backend."
+  (declare (indent 0))
+  `(let ((before (buffer-list))
+         (agent-session-submit-functions nil)
+         (agent-session-status-functions nil)
+         (agent-session--list-refresh-function nil)
+         (agent-session--clock nil)
+         forks source)
+     (cl-letf (((symbol-function 'agent-session-refresh-programs) #'ignore)
+               ((symbol-function 'agent-session-backend-start)
+                (lambda (_ session)
+                  (when (plist-get (agent-session-client session) :fork)
+                    (push (agent-session-buffer session) forks))
+                  (setf (agent-session-client session)
+                        (plist-put (agent-session-client session) :emx-id
+                                   (format "echo-%d" (length forks))))
+                  (agent-session-set-status session 'idle)))
+               ((symbol-function 'agent-session-backend-stop) #'ignore)
+               ((symbol-function 'agent-session-backend-send)
+                (lambda (_ session text)
+                  (agent-session-text session "echo" text)
+                  (agent-session-set-status session 'idle))))
+       (unwind-protect
+           (progn
+             (setq source (agent-session-open 'review-test-echo repo nil
+                                              '(:model "echo" :mode auto)
+                                              '(:title "Creator" :profile "reviewer")))
+             ,@body)
+         (when (timerp agent-session--clock) (cancel-timer agent-session--clock))
+         (dolist (buffer (seq-difference (buffer-list) before))
+           (when (buffer-live-p buffer) (agent-session-kill-quietly buffer)))))))
+
+(defun agent-review-test--build-method (snapshot source)
+  "Build SNAPSHOT through MCP with caller SOURCE and return its review."
+  (let* ((agent-ui-caller (list :agent_buffer (buffer-name source)))
+         (method (plist-get (alist-get "review_build" agent-ui--methods nil nil #'equal)
+                            :function))
+         (result (funcall method (list :snapshot (plist-get snapshot :id)
+                                      :summary "概览" :items (agent-review-test--plan)
+                                      :title "测试审查"))))
+    (agent-review--load (plist-get result :review))))
+
+(ert-deftest agent-review-test-build-creates-and-reuses-fork ()
+  "MCP build persists a fork and keeps both the creator and inherited info."
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (let* ((snapshot (agent-review-snapshot repo "main" "feature"))
+             (review (agent-review-test--build-method snapshot source))
+             (fork (get-buffer (plist-get review :fork)))
+             (session (buffer-local-value 'agent-session--current fork))
+             (creator (buffer-local-value 'agent-session--current source)))
+        (should (equal (plist-get review :agent) (buffer-name source)))
+        (should (eq fork (car forks)))
+        (should (equal (plist-get (car (agent-review--index)) :fork) (buffer-name fork)))
+        (should (equal (plist-get (agent-session-client session) :fork) "echo-0"))
+        (should (eq (agent-session-agent session) (agent-session-agent creator)))
+        (should (equal (agent-session-root session) (agent-session-root creator)))
+        (should (equal (agent-session-settings session) (agent-session-settings creator)))
+        (should-not (eq (agent-session-settings session) (agent-session-settings creator)))
+        (should (equal (plist-get (agent-session-info session) :title) "审查回应：测试审查"))
+        (should (equal (plist-get (agent-session-info session) :profile) "reviewer"))
+        (should (string-prefix-p (concat (agent-session-handle creator) "-review")
+                                (agent-session-handle session)))
+        (should-not (agent-session-child-p session))
+        (agent-review-test--build-method snapshot source)
+        (agent-review-test--build-method snapshot fork)
+        (should (= 1 (length forks)))
+        (should (equal (plist-get (agent-review--load (plist-get review :id)) :agent)
+                       (buffer-name source)))))))
+
+(ert-deftest agent-review-test-note-send-routes-to-fork ()
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (let* ((review (agent-review-test--build-method
+                      (agent-review-snapshot repo "main" "feature") source))
+             (view (car (agent-review--buffers (plist-get review :id))))
+             (fork (get-buffer (plist-get review :fork)))
+             (session (buffer-local-value 'agent-session--current fork)))
+        (with-temp-buffer
+          (agent-review-note-mode)
+          (setq agent-review--note (list :buffer view :lines agent-review-test--change))
+          (insert "为什么改")
+          (cl-letf (((symbol-function 'agent-review--note-close) #'ignore))
+            (agent-review-note-send)))
+        (should (= 1 (length (agent-review--comments (plist-get review :id)))))
+        (with-current-buffer fork
+          (should (string-search "[原子审查·标注]" (buffer-string))))
+        (with-current-buffer source
+          (should-not (string-search "[原子审查·标注]" (buffer-string))))
+        (should (eq (agent-session-status session) 'idle))))))
+
+(ert-deftest agent-review-test-dead-fork-recreated-from-creator ()
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (let* ((review (agent-review-test--build-method
+                      (agent-review-snapshot repo "main" "feature") source))
+             (old (get-buffer (plist-get review :fork))))
+        (agent-session-kill-quietly old)
+        (let ((fork (agent-review--session-buffer review)))
+          (should-not (eq fork old))
+          (should (= 2 (length forks)))
+          (should (equal (plist-get (agent-session-client
+                                    (buffer-local-value 'agent-session--current fork)) :fork)
+                         "echo-0"))
+          (should (equal (plist-get (agent-review--load (plist-get review :id)) :fork)
+                         (buffer-name fork))))))))
+
+(ert-deftest agent-review-test-missing-creator-picks-fork-source ()
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")
+                                        "概览" (agent-review-test--plan) nil "*gone*"))
+             (creator (plist-get review :agent)))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (buffer-name source))))
+          (should (eq (agent-review--session-buffer review) (car forks))))
+        (should (= 1 (length forks)))
+        (should (equal (plist-get (agent-review--load (plist-get review :id)) :agent)
+                       creator))))))
+
+(ert-deftest agent-review-test-fork-failure-falls-back ()
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (cl-letf (((symbol-function 'agent-session-fork)
+                 (lambda (&rest _) (error "Agent cannot fork"))))
+        (let ((review (agent-review-test--build-method
+                       (agent-review-snapshot repo "main" "feature") source)))
+          (should-not (plist-get review :fork))
+          (should (eq (agent-review--session-buffer review) source))
+          (should-not forks))))))
+
+(ert-deftest agent-review-test-async-fork-failure-forwards-queued-note ()
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (let* ((review (agent-review-test--build-method
+                      (agent-review-snapshot repo "main" "feature") source))
+             (fork (car forks))
+             (session (buffer-local-value 'agent-session--current fork))
+             (error '(:message "No conversation yet")))
+        (agent-session-set-status session 'starting)
+        (agent-session-submit session "queued annotation")
+        (setf (agent-session-client session)
+              (plist-put (agent-session-client session) :fork-error error))
+        (agent-session-set-status session 'disconnected)
+        (run-hook-with-args 'agent-session-fork-failed-functions session error)
+        (should-not (agent-session-queue session))
+        (should (eq (agent-review--session-buffer review) source))
+        (with-current-buffer source
+          (should (string-search "queued annotation" (buffer-string))))
+        (should (= 1 (length forks)))))))
+
+(ert-deftest agent-review-test-comments-default-includes-fork ()
+  "The assigned fork sees its review even when another is newer."
+  (agent-review-test--with-repo repo
+    (agent-review-test--with-forks
+      (let* ((snapshot (agent-review-snapshot repo "main" "feature"))
+             (review (agent-review-test--build-method snapshot source))
+             (agent-ui-caller (list :agent_buffer (plist-get review :fork)))
+             (method (plist-get (alist-get "review_comments" agent-ui--methods nil nil #'equal)
+                                :function)))
+        (agent-review-annotate-lines review agent-review-test--change "为什么改")
+        (agent-review-build snapshot "另一个审查" (agent-review-test--plan) nil "*other*")
+        (cl-letf (((symbol-function 'agent-ui--caller-root) (lambda () repo)))
+          (let ((result (funcall method nil)))
+            (should (= 1 (length result)))
+            (should (equal (plist-get (aref result 0) :review) (plist-get review :id)))
+            (should (= 1 (length (plist-get (aref result 0) :comments))))))))))
+
 (ert-deftest agent-review-test-annotate-and-reply ()
   (agent-review-test--with-repo repo
     (let* ((review (agent-review-build (agent-review-snapshot repo "main" "feature")

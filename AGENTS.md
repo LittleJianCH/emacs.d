@@ -238,8 +238,9 @@ var/                     runtime state (history, backups, pasted images...); git
 - `agent-review.el` — atomic reviews of a branch: `review_snapshot` pins base/head and
   lists hunks, the agent plans items, `review_build` checks every changed line is covered
   exactly once and shows a review buffer with a sidebar of items. The user selects lines
-  and writes an annotation, which is sent straight to the originating session with the
-  selected code; the agent answers with `review_reply`. Git runs in the
+  and writes an annotation, which is sent with the selected code to a fork created
+  when the review is built. The fork inherits the creator's conversation and answers
+  with `review_reply`; the creator does not receive annotations. Git runs in the
   caller's root through its file handler, so remote projects need nothing on the host.
   The session command `/atomic-review [BRANCH|COMMIT|A..B]` resolves the refs and
   pins the snapshot in Emacs, then sends the agent its id (`review_snapshot {snapshot}`).
