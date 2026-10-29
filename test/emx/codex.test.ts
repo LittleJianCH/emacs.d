@@ -59,6 +59,43 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfi
   return { dir, daemon, client, id, attached, session, send, requests }
 }
 
+test('top-level Codex forks persist and resume their own thread after restart and restore', async (t) => {
+  const { daemon, client, session: source, dir, requests } = await setup(t, { handle: 'review' })
+  const opened = await client.request('session/open', { creationId: 'codex-fork', root: dir, fork: source.id,
+    handle: 'review', agent: 'unknown', profile: 'unknown', settings: { model: 'ignored' } })
+  const fork = daemon.sessions.get(opened.id)!
+  assert.equal(fork.info.parent, undefined)
+  assert.equal(fork.info.handle, 'review-2')
+  assert.equal(fork.info.profile, 'orchestrator')
+  assert.deepEqual(fork.settings, source.settings)
+  const ownId = fork.resumeId()!
+  assert.notEqual(ownId, source.resumeId())
+  assert.deepEqual((await requests()).find((r) => r.method === 'thread/fork').params,
+    { threadId: source.resumeId(), ephemeral: false, excludeTurns: true })
+  const checkResume = async () => {
+    const log = await requests()
+    assert.equal(log.filter((r) => r.method === 'thread/fork').length, 1)
+    assert.equal(log.findLast((r) => r.method === 'thread/resume').params.threadId, ownId)
+  }
+  await fork.restart()
+  await checkResume()
+  await fork.hibernate()
+  assert.equal(fork.backend.alive(), false)
+  await fork.start()
+  await checkResume()
+  await daemon.stop()
+  await client.close()
+  const restored = new DaemonServer({ varDir: dir })
+  try {
+    await restored.start()
+    const saved = restored.sessions.get(fork.id)!
+    assert.equal(saved.info.forkFrom, source.resumeId())
+    assert.equal(saved.resumeId(), ownId)
+    await saved.start()
+    await checkResume()
+  } finally { await restored.stop() }
+})
+
 test('Codex launches private daemon MCP, skill replacements, modes and instructions', async (t) => {
   const { id, daemon, dir, requests, attached } = await setup(t, {
     settings: { model: 'fake-cheap', effort: 'high', mode: 'auto' },
@@ -286,7 +323,6 @@ test('Codex config failures preserve configured instructions and turn errors fin
   assert.ok(session.blocks.some((b) => b.type === 'notice' && b.notice.args?.message === 'turn failed'))
   assert.ok(!session.blocks.some((b) => b.type === 'notice' && b.notice.args?.message === 'retrying'))
   await assert.rejects(client.request('session/open', { agent: 'codex', root: '/rpc:host:/tmp/' }), /local absolute root/)
-  await assert.rejects(client.request('session/open', { agent: 'codex', root: dir, fork: session.id }), /forks are not supported/)
 })
 
 test('Codex item views and effective instructions match Lisp behavior', () => {

@@ -41,7 +41,8 @@ lines.on('line', (line) => {
       config = { model: p.resume ? 'fake/chat' : p.model ?? 'fake/chat',
         effort: p.resume ? 'high' : p.effort ?? 'high',
         preset: p.preset, plan: p.plan }
-      result(msg.id, { sessionId: p.resume ?? 'fake-session', title: p.resume ? 'Resumed' : null,
+      result(msg.id, { sessionId: p.resume ?? (p.forkFrom ? `fork-${p.forkFrom}` : 'fake-session'),
+        title: p.resume ? 'Resumed' : null,
         config, version: 'test-version', warnings: ['fixture warning'], presets: ['read-only',
           'workspace-write', 'auto', 'danger-full-access'], plan: true,
         models: [{ id: 'fake/chat', name: 'Chat', efforts: [{ id: 'high' }], defaultEffort: 'high' }],

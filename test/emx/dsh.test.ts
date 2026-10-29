@@ -1,9 +1,10 @@
 // dsh.test.ts --- local bridge adapter, exercised through a real daemon socket.
 import './fixtures/environment.ts'
 import * as assert from 'node:assert/strict'
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import type { TestContext } from 'node:test'
@@ -12,12 +13,22 @@ import { diff, toolView } from '../../emx/backends/dsh.ts'
 import { SocketClient } from './client.ts'
 import type { OpenParams } from '../../emx/daemon/protocol.ts'
 
+async function until(predicate: () => boolean, description = 'condition'): Promise<void> {
+  for (let i = 0; i < 500; i++) { if (predicate()) return; await delay(10) }
+  throw new Error('Timed out: ' + description)
+}
+
 async function setup(t: TestContext, options: Partial<OpenParams> = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'emx-dsh-'))
   const executable = process.env.EMX_DSH_EXECUTABLE
   const log = process.env.EMX_DSH_LOG
   process.env.EMX_DSH_EXECUTABLE = fileURLToPath(new URL('./fixtures/dsh.mjs', import.meta.url))
   process.env.EMX_DSH_LOG = join(dir, 'bridge.jsonl')
+  await mkdir(join(dir, 'emx'), { recursive: true })
+  await writeFile(join(dir, 'emx/config.json'), JSON.stringify({
+    collab: { handleCommand: [], agentHandleCommands: {}, closeFinished: false },
+    usage: { pollInterval: 0 },
+  }))
   const daemon = new DaemonServer({ varDir: dir })
   let client: Awaited<ReturnType<typeof SocketClient.connect>>
   t.after(async () => {
@@ -176,6 +187,30 @@ test('resume replays transcript once and excludes its usage; daemon MCP is rebui
     await restored.stop()
     await peer?.close()
   }
+})
+
+test('a restarted fork resumes its own session instead of forking the source again', async (t) => {
+  const { daemon, client, id, session, requests } = await setup(t)
+  const source = session.resumeId()!
+  assert.ok(source)
+  await client.close()
+  await daemon.collab.call(session, 'session_start',
+    { context: 'fork', handle: 'long-fork', prompt: 'fork task' }, new AbortController().signal)
+  const fork = [...daemon.sessions.values()].find((s) => s.info.parent === id)!
+  assert.equal(fork.info.forkFrom, source)
+  const own = fork.resumeId()!
+  assert.notEqual(own, source, 'the fork has its own native session')
+  await until(() => fork.status === 'idle', 'fork turn')
+  await fork.restart()
+  const calls = (await requests()).filter((r) => r.method === 'initialize')
+  const initial = calls.find((r) => r.params.forkFrom)!
+  assert.equal(initial.params.forkFrom, source)
+  assert.equal(initial.params.resume, undefined)
+  const restarted = calls.at(-1)!
+  assert.equal(restarted.params.resume, own)
+  assert.equal(restarted.params.forkFrom, undefined, 'a restart must not fork the source again')
+  assert.equal(fork.resumeId(), own)
+  assert.equal(calls.filter((r) => r.params.forkFrom).length, 1, 'only the first start forks')
 })
 
 test('steering, interruption, queued turns and unexpected process exit settle correctly', async (t) => {

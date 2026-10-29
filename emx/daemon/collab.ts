@@ -14,6 +14,15 @@ import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop', 'session_rate']
 export const forkAgents = ['claude', 'codex', 'dsh', 'pi']
+
+/** Native context shared by collaboration children and editor-owned forks. */
+export function sessionForkInfo(source: Session) {
+  if (!forkAgents.includes(source.agent)) throw new Error(`${source.agent} sessions can't fork; use handoff`)
+  const forkFrom = source.resumeId()
+  if (!forkFrom) throw new Error('Source session has no conversation to fork yet')
+  return { forkFrom, profile: sessionProfile(source), skills: sessionSkills(source) }
+}
+
 const costRanks: Record<string, number> = { minimal: 0, low: 1, medium: 2, high: 3, premium: 4, unknown: 5 }
 const modes = ['plan', 'ask', 'edits', 'auto', 'full']
 const icons: Record<string, string> = { command: '$', edit: '✎', read: '≡', search: '⌕', web: '◎', mcp: '⚙', task: '◆', plan: '☰', question: '?', other: '•' }
@@ -585,9 +594,7 @@ export class Collaboration {
     let name: string, profile: ProfileCandidate, fork: string | undefined, confirm = false, note = ''
     if (context === 'fork') {
       if (p.profile !== undefined) throw new Error('A fork uses your own agent and model; omit profile')
-      if (!forkAgents.includes(caller.agent)) throw new Error(`${this.#title(caller)} sessions can't fork; use handoff`)
-      fork = caller.resumeId()
-      if (!fork) throw new Error('Your session has no conversation to fork yet')
+      fork = sessionForkInfo(caller).forkFrom
       name = this.#handle(caller) + '-fork'; profile = { agent: caller.agent, ...caller.settings }
     } else {
       const role = typeof p.profile === 'string' && Object.hasOwn(this.config.profiles, p.profile) ? this.config.profiles[p.profile] : undefined

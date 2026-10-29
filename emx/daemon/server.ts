@@ -8,7 +8,7 @@ import { Outbox } from '../remote/outbox.ts'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { Configuration } from '../config.ts'
-import { Collaboration, toolNames } from './collab.ts'
+import { Collaboration, sessionForkInfo, toolNames } from './collab.ts'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
@@ -757,17 +757,23 @@ export class DaemonServer {
             `Session creation ${creationId} is ${existing.state}: ${existing.error ?? existing.id}`)
         }
         const root = string(params.root, 'root')
-        const resume = optionalString(params.resume, 'resume')
-        let agent = optionalString(params.agent, 'agent')
-        let profile = optionalString(params.profile, 'profile')
-        let selected = settings(params.settings ?? {})
+        const source = params.fork === undefined ? undefined : this.sessions.get(string(params.fork, 'fork'))
+        if (params.fork !== undefined && !source) invalid(`Unknown fork source session: ${params.fork}`)
+        let forkInfo: ReturnType<typeof sessionForkInfo> | undefined
+        if (source) {
+          try { forkInfo = sessionForkInfo(source) } catch (error) { invalid((error as Error).message) }
+        }
+        const resume = source ? undefined : optionalString(params.resume, 'resume')
+        let agent = source ? source.agent : optionalString(params.agent, 'agent')
+        let profile = source ? forkInfo!.profile : optionalString(params.profile, 'profile')
+        let selected = source ? { ...source.settings } : settings(params.settings ?? {})
         if (resume && !agent) invalid('Native resume requires its original agent')
-        const useProfile = !agent || profile !== undefined
+        const useProfile = !source && (!agent || profile !== undefined)
         if (useProfile) profile ??= 'orchestrator'
         if (agent !== undefined && !Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
-        if (profile && !Object.hasOwn(this.configuration.value.profiles, profile)) invalid(`Unknown profile: ${profile}`)
+        if (!source && profile && !Object.hasOwn(this.configuration.value.profiles, profile)) invalid(`Unknown profile: ${profile}`)
         const handle = optionalString(params.handle, 'handle')
-        const parent = optionalString(params.parent, 'parent')
+        const parent = source ? undefined : optionalString(params.parent, 'parent')
         if (resume && !parent) {
           const live = [...this.sessions.values()].find((s) => !s.info.parent && s.agent === agent
             && s.root === root && s.status !== 'exited' && s.resumeId() === resume)
@@ -776,12 +782,11 @@ export class DaemonServer {
             return this.#openCreation(creationId, live.id, async () => { await initializing })
           }
         }
-        // Forks are created by collaboration rather than editor open requests.
-        if (params.fork !== undefined) invalid('Session forks are not supported yet')
         const id = `session-${randomUUID()}`
-        const skills = params.skills === undefined ? undefined : skillContext(params.skills)
+        const skills = source || params.skills === undefined ? undefined : skillContext(params.skills)
         let session: Session | undefined
         return this.#openCreation(creationId, id, async () => {
+          if (source) await source.backend.flush?.()
           if (useProfile) {
             if (this.environments) await this.environments.get(root)
             const candidate = this.collab.profileCandidate(profile!, root, agent, selected.model)
@@ -790,7 +795,8 @@ export class DaemonServer {
           }
           if (this.#creations.get(creationId)?.state === 'closed') throw new Error('Session creation was cancelled')
           session = this.#make({ id, creationId, agent: agent!, root, resume, settings: selected,
-            info: { ...(profile ? { profile } : {}), handle: this.collab.unique(handle ?? agent!),
+            info: { ...(profile ? { profile } : {}), ...forkInfo,
+              handle: this.collab.unique(handle ?? (source ? String(source.info.handle ?? source.agent) + '-fork' : agent!)),
               ...(parent ? { parent, parentSession: this.sessions.get(parent)?.resumeId() ?? parent } : {}),
               ...(skills ? { skills } : {}) } })
           this.sessions.set(id, session)

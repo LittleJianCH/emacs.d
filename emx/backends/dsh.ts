@@ -128,13 +128,16 @@ export class DshBackend implements Backend {
     }
     child.once('error', ended)
     child.once('close', () => ended())
+    // A fork copies its source only on the first start. Once this session has
+    // its own native id, a restart must resume that id instead.
+    const forkFrom = resume ? undefined : this.host.info.forkFrom
     const result = await this.#request('initialize', {
       cwd: this.host.root.replace(/\/$/, '') || '/', preset: presets[mode === 'plan' ? this.#beforePlan : mode] ?? presets.edits,
       plan: mode === 'plan', mcpServers: [{ name: 'emacs', command: process.execPath,
         args: [join(checkoutRoot, 'bin/emx'), 'mcp'],
         env: { EMX_DAEMON_SOCKET: this.host.daemonSocket, EMX_SESSION: this.host.id },
         timeoutMs: 1800000, readOnly: this.host.editorTools().readOnly }], resume,
-      parent: this.host.info.parentSession ?? this.host.info.parent, forkFrom: this.host.info.forkFrom, model: desired.model ?? undefined,
+      parent: this.host.info.parentSession ?? this.host.info.parent, forkFrom, model: desired.model ?? undefined,
       effort: desired.effort ?? undefined,
     })
     this.#resume = result.sessionId

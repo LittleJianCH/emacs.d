@@ -68,6 +68,96 @@ async function until(predicate: () => boolean | Promise<boolean>) {
   }
 }
 
+test('editor forks inherit context, flush once and resume their own persistent conversation', async (t) => {
+  const skills = { skillsDir: '/tmp/fork-skills', supersededSkills: ['atomic-review'] }
+  const { daemon, client, session: source, dir, calls } = await setup(t, {
+    handle: 'review', settings: { model: 'haiku', effort: 'low', mode: 'auto' }, skills,
+  })
+  source.setInfo({ profile: 'orchestrator' })
+  let flushing!: () => void, release!: () => void, flushes = 0
+  const started = new Promise<void>((resolve) => { flushing = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  source.backend.flush = async () => { flushes++; flushing(); await gate }
+  // Even invalid overrides are ignored when the source supplies the context.
+  const params = { creationId: 'review-fork', root: dir, fork: source.id,
+    agent: 42, profile: false, settings: 'ignored', resume: {}, skills: false, parent: source.id } as any
+  const opening = client.request('session/open', params)
+  await started
+  assert.equal(daemon.sessions.size, 1, 'flush finishes before the fork is created')
+  const retry = client.request('session/open', params)
+  release()
+  const opened = await opening
+  assert.deepEqual(await retry, opened)
+  assert.equal(flushes, 1)
+  const fork = daemon.sessions.get(opened.id)!
+  assert.notEqual(fork.id, source.id)
+  assert.equal(fork.agent, source.agent)
+  assert.deepEqual(fork.settings, source.settings)
+  assert.notEqual(fork.settings, source.settings)
+  assert.equal(fork.info.profile, 'orchestrator')
+  assert.deepEqual(fork.info.skills, skills)
+  assert.equal(fork.info.forkFrom, source.resumeId())
+  assert.equal(fork.info.handle, 'review-fork')
+  assert.equal(fork.info.parent, undefined)
+  assert.equal(fork.info.run, undefined)
+  assert.equal(daemon.collab.active.size, 0)
+  await until(() => !!fork.resumeId())
+  const ownId = fork.resumeId()!
+  assert.notEqual(ownId, source.resumeId())
+  let argv = (await calls()).findLast((m) => m.type === 'spawn').argv
+  assert.equal(argv[argv.indexOf('--resume') + 1], source.resumeId())
+  assert.ok(argv.includes('--fork-session'))
+  assert.ok(!argv.includes('--no-session-persistence'))
+  await client.request('session/configure', { id: fork.id, effort: 'high' })
+  const checkResume = async () => {
+    const spawns = (await calls()).filter((m) => m.type === 'spawn')
+    argv = spawns.at(-1).argv
+    assert.equal(argv[argv.indexOf('--resume') + 1], ownId)
+    assert.ok(!argv.includes('--fork-session'))
+    assert.equal(spawns.filter((m) => m.argv.includes('--fork-session')).length, 1)
+  }
+  await checkResume()
+  await fork.hibernate()
+  assert.equal(fork.backend.alive(), false)
+  await fork.start()
+  await checkResume()
+  await client.request('session/stop', { id: source.id })
+  assert.ok(daemon.sessions.has(fork.id), 'closing the source leaves its top-level fork open')
+  await daemon.stop()
+  await client.close()
+  const restored = new DaemonServer({ varDir: dir })
+  try {
+    await restored.start()
+    const saved = restored.sessions.get(fork.id)!
+    assert.equal(saved.info.forkFrom, source.resumeId())
+    assert.equal(saved.resumeId(), ownId)
+    await saved.start()
+    await checkResume()
+    const peer = await SocketClient.connect(restored.socket)
+    try {
+      await peer.request('hello', { client: 'restored-fork-test', version: restored.version })
+      assert.deepEqual(await peer.request('session/open', params), opened)
+    } finally { await peer.close() }
+  } finally { await restored.stop() }
+})
+
+test('editor forks reject unknown, unsupported and conversation-less sources as invalid params', async (t) => {
+  const { client, daemon, session, dir } = await setup(t)
+  const invalid = async (fork: string, message: RegExp) => {
+    await assert.rejects(client.request('session/open', { root: dir, fork }), (error: any) => {
+      assert.equal(error.code, -32602)
+      assert.match(error.message, message)
+      return true
+    })
+  }
+  await invalid('unknown-source', /Unknown fork source session/)
+  const echo = await client.request('session/open', { agent: 'echo', root: dir })
+  await invalid(echo.id, /can't fork/)
+  t.mock.method(session, 'resumeId', () => undefined)
+  await invalid(session.id, /no conversation to fork yet/)
+  assert.equal(daemon.sessions.size, 2)
+})
+
 for (const trigger of ['background', 'background-assistant']) test(`background completion starts an accounted autonomous turn (${trigger})`, async (t) => {
   const { client, session, daemon, send } = await setup(t)
   assert.equal(session.status, 'idle', 'initialize/init does not start a turn')
@@ -397,7 +487,6 @@ test('rate limit readings, crash, restart and resume', async (t) => {
   const argv = (await calls()).findLast((m) => m.type === 'spawn').argv
   assert.equal(argv[argv.indexOf('--resume') + 1], 'fixture-native')
   await assert.rejects(client.request('session/open', { agent: 'claude', root: '/rpc:host:/tmp' }), /local absolute root/)
-  await assert.rejects(client.request('session/open', { agent: 'claude', root: '/tmp', fork: id }), /forks are not supported/)
 })
 
 test('tool views preserve diffs, plan items and result text', () => {

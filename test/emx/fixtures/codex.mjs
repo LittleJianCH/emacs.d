@@ -4,7 +4,8 @@ import { createInterface } from 'node:readline'
 import { appendFileSync, existsSync } from 'node:fs'
 if (process.argv[2] === 'exec') { console.log('fixture-handle'); process.exit(0) }
 const write = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n')
-const notify = (method, params) => write({ method, params: { threadId: 'fake-thread', ...params } })
+let threadId = 'fake-thread'
+const notify = (method, params) => write({ method, params: { threadId, ...params } })
 const result = (id, value = {}) => write({ id, result: value })
 const log = (value) => process.env.EMX_CODEX_LOG && appendFileSync(process.env.EMX_CODEX_LOG, JSON.stringify({ ...value, pid: process.pid, argv: process.argv.slice(2) }) + '\n')
 if (process.env.EMX_CODEX_RESTART_GATE) process.on('SIGTERM', () => {
@@ -63,7 +64,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       else result(msg.id, { config: { developer_instructions: '  User rules.\n' } }); break
     case 'skills/extraRoots/set': result(msg.id); break
     case 'thread/start': case 'thread/resume': case 'thread/fork':
-      result(msg.id, { thread: { id: 'fake-thread' }, model: p.model ?? 'fake-cheap' })
+      threadId = msg.method === 'thread/fork' ? 'fork-thread-' + process.pid : p.threadId ?? 'fake-thread'
+      result(msg.id, { thread: { id: threadId }, model: p.model ?? 'fake-cheap' })
       notify('thread/tokenUsage/updated', { tokenUsage: usage() }); break
     case 'thread/list': result(msg.id, { data: [{ id: 'past-codex', name: 'Past Codex', updatedAt: 12, cwd: process.cwd() }] }); break
     case 'thread/turns/list':

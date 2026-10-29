@@ -318,8 +318,8 @@ export class ClaudeBackend implements Backend {
     if (desired.model && desired.model !== 'default') args.push('--model', desired.model)
     if (desired.effort) args.push('--effort', desired.effort)
     const fork = this.host.info.forkFrom as string | undefined
-    if (fork) args.push('--resume', fork, '--fork-session')
-    else if (resume) args.push('--resume', resume)
+    if (resume) args.push('--resume', resume)
+    else if (fork) args.push('--resume', fork, '--fork-session')
     if (skills?.skillsDir) args.push('--add-dir', skills.skillsDir)
     if (skills?.supersededSkills?.length) args.push('--settings', JSON.stringify({ skillOverrides: Object.fromEntries(skills.supersededSkills.map((s) => [s, 'off'])) }))
     args.push(...config.extraArgs ?? [])

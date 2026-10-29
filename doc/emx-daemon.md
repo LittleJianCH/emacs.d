@@ -310,7 +310,7 @@ Requests may flow both ways; the contract is `emx/daemon/protocol.ts`.
 | `hello` | `{client, version, agents?, config?, tools?}` | `{daemon, version, capabilities, config, sessions}` |
 | `sessions/list` | `{root?}` | `{sessions}` |
 | `sessions/history` | `{agent, root}` | `{items}` |
-| `session/open` | `{agent?, profile?, root, settings?, resume?, parent?, handle?, skills?, claude?, codex?}` | `{id}` |
+| `session/open` | `{creationId?, agent?, profile?, root, settings?, resume?, fork?, parent?, handle?, skills?, claude?, codex?}` | `{id}` |
 | `session/attach` | `{id, after?, turns?}` | snapshot (below) |
 | `session/detach` | `{id}` | `{}` |
 | `session/send` | `{id, text, images?, block?, handle?}` | `{queued}` |
@@ -353,9 +353,17 @@ usage role restricted to `usage/*` and `ping`. `mcp/hello` binds a
 connection to one existing session. Neither can become the editor.
 
 `session/open` reuses a live top-level session whose native resume id, agent
-and root match instead of starting a second process. The `fork` field in
-`OpenParams` is reserved but rejected; native forks go through
-`session_start context=fork` (Collaboration).
+and root match instead of starting a second process. With `fork` set to a
+source daemon session id, it instead flushes the source's native history and
+creates an independent top-level conversation. It inherits the source's agent,
+settings, profile and skills, ignoring those parameters and `resume` in the
+request. `root` is required; `handle` defaults to the source handle plus `-fork`,
+made unique. The source must use a fork-capable backend and have a native
+conversation. Creation-id retries remain idempotent. These forks have no
+parent, run accounting, automatic closure or reply delivery to the source.
+Only the initial start forks: later restarts, hibernation and daemon restores
+resume the fork's own persistent native conversation. Collaboration forks
+(`session_start context=fork`) remain ephemeral task children.
 
 ### Events and cursors
 
@@ -1209,9 +1217,6 @@ test/agent-emx-*.el      ERT suites: daemon client, host simulation, smoke
   replay after expiry may create a new session. Atomic file replacement
   covers process crashes, not power-loss durability (no fsync).
 
-- **`session/open.fork` is rejected.** Native forks exist only through
-  `session_start context=fork`, and only for a caller with a live native
-  conversation.
 - **Real-host transport is simulated in tests.** The remote path is covered
   by a temporary home, stubbed tramp/SSH and a local host simulation. Actual
   tramp-rpc/sshd behavior, stream-local forwarding policy, socket-path limits

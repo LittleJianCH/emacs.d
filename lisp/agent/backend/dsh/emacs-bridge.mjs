@@ -32,6 +32,8 @@
 // synthetic result) and the model it last used, so its first request reuses
 // that session's prompt cache. Its history is not returned. flush makes a
 // session's log complete on disk first, for a fork from another process.
+// resume takes precedence over forkFrom: a restarted fork continues its own
+// session instead of copying the source again.
 //
 // images are absolute file paths. A prompt naming a dsh slash command runs
 // the command instead of starting a turn. mcpServers are stdio servers
@@ -435,7 +437,7 @@ export function apply(ctx) {
       }
       const fallback = ctx.get('agentDefaultModel')?.currentSelection()
       const fallbackModel = fallback && `${fallback.provider}/${fallback.model}`
-      if (params.forkFrom) {
+      if (params.forkFrom && !params.resume) {
         // Read the source's stored log without taking it over: its own
         // process keeps writing it.
         const reader = await ctx.sessionPersistence.open(params.forkFrom, 'read')

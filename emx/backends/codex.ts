@@ -184,8 +184,8 @@ export class CodexBackend implements Backend {
     try { instructions = developerInstructions(await this.#request('config/read', { cwd: this.host.root }), this.host.editorTools().tools.map((tool) => tool.name)) }
     catch (error) { this.#notice('codex-config-read-failed', (error as Error).message) }
     const mode = modes[this.host.settings.mode ?? 'edits'] ?? modes.edits
-    const fork = this.host.info.forkFrom as string | undefined
-    const result = fork ? await this.#request('thread/fork', { threadId: fork, ephemeral: true, excludeTurns: true })
+    const fork = resume ? undefined : this.host.info.forkFrom as string | undefined
+    const result = fork ? await this.#request('thread/fork', { threadId: fork, ephemeral: !!this.host.info.parent, excludeTurns: true })
       : await this.#request(resume ? 'thread/resume' : 'thread/start', {
       cwd: this.host.root, approvalPolicy: mode[0], sandbox: mode[2],
       ...(instructions === undefined ? {} : { developerInstructions: instructions }),
