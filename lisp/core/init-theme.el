@@ -203,6 +203,54 @@
          (font-lock-property-name-face :foreground ,fg)
          (font-lock-property-use-face :foreground ,fg)
 
+         ;; Agda uses semantic faces instead of Font Lock.
+         (agda2-highlight-keyword-face :inherit font-lock-keyword-face)
+         (agda2-highlight-string-face :inherit font-lock-string-face)
+         (agda2-highlight-number-face :inherit font-lock-number-face)
+         (agda2-highlight-symbol-face :foreground ,fg)
+         (agda2-highlight-primitive-type-face :inherit font-lock-type-face)
+         (agda2-highlight-bound-variable-face :inherit font-lock-variable-use-face)
+         (agda2-highlight-generalizable-variable-face
+          :inherit font-lock-variable-use-face)
+         (agda2-highlight-inductive-constructor-face :foreground ,green)
+         (agda2-highlight-coinductive-constructor-face :foreground ,green)
+         (agda2-highlight-datatype-face :inherit font-lock-type-face)
+         (agda2-highlight-record-face :inherit font-lock-type-face)
+         (agda2-highlight-field-face :inherit font-lock-property-use-face)
+         (agda2-highlight-function-face :inherit font-lock-function-call-face)
+         (agda2-highlight-module-face :inherit font-lock-type-face)
+         (agda2-highlight-postulate-face :inherit font-lock-type-face)
+         (agda2-highlight-pragma-face :inherit font-lock-preprocessor-face)
+         (agda2-highlight-primitive-face :inherit font-lock-builtin-face)
+         (agda2-highlight-macro-face :inherit font-lock-preprocessor-face)
+         (agda2-highlight-dotted-face :foreground ,faded)
+         (agda2-highlight-error-face :inherit error)
+         (agda2-highlight-error-warning-face :foreground ,critical
+                                            :background ,removed)
+         (agda2-highlight-unsolved-meta-face :foreground ,popout
+                                            :background ,changed)
+         (agda2-highlight-unsolved-constraint-face :foreground ,popout
+                                                  :background ,changed)
+         (agda2-highlight-termination-problem-face :foreground ,critical
+                                                  :background ,removed)
+         (agda2-highlight-deadcode-face :foreground ,faded :background ,subtle)
+         (agda2-highlight-shadowing-in-telescope-face :foreground ,faded
+                                                     :background ,subtle)
+         (agda2-highlight-coverage-problem-face :foreground ,popout
+                                               :background ,changed)
+         (agda2-highlight-positivity-problem-face :foreground ,popout
+                                                 :background ,changed)
+         (agda2-highlight-incomplete-pattern-face :foreground ,popout
+                                                  :background ,changed)
+         (agda2-highlight-catchall-clause-face :foreground ,popout
+                                              :background ,changed)
+         (agda2-highlight-confluence-problem-face :foreground ,critical
+                                                 :background ,removed)
+         (agda2-highlight-missing-definition-face :foreground ,critical
+                                                  :background ,removed)
+         (agda2-highlight-typechecks-face :foreground ,salient
+                                          :background ,salient-bg)
+
          ;; Outlines: headings in org, outline and agent pages.
          (outline-1 :foreground ,strong :weight bold)
          (outline-2 :foreground ,strong :weight bold)
