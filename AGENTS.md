@@ -56,6 +56,9 @@ emx/                     the emx daemon (TypeScript compiled on demand to genera
   usage/                 ledger, quotas (including Pi OpenCode Go), forecasts and live accounting
   mcp.ts                 stdio MCP client (requires daemon socket/session binding)
 skills/NAME/SKILL.md     skills given to the agents Emacs starts (`agent-session-add-skill')
+site/                   optional private repository; git-ignored
+  site-init.el          extends module selections after custom.el, before module loading
+  lisp/                 private modules, including agent-NAME.el registrations
 doc/subagents.md         design of subagents and agent collaboration, with measurements
 doc/emx-daemon.md        design of the emx daemon, sessions and remote projects
 test/agent-backend-test.el  ERT suite for enabled daemon registrations
@@ -88,6 +91,22 @@ test/emx/usage*.test.ts     usage arithmetic, daemon accounting and fake quota p
 test/emx/                   node --test suites for the emx daemon
 var/                     runtime state (history, backups, pasted images...); git-ignored
 ```
+
+The optional private Lisp layer lives in `my/site-directory`, defaulting to
+`site/` under `user-emacs-directory`; custom.el can select another directory or
+set it to nil. Startup adds its `lisp/` to load-path and loads `site-init.el`
+before the language, app and agent loops, so it can extend `my/agents` with
+`acme` and supply `lisp/agent-acme.el`. Initialization errors warn without
+aborting startup. Reload compiles changed loaded private Lisp and site-init.el
+like public modules. If reloading site-init.el adds agents, languages or apps,
+its report requires a restart to activate them. The update command first fetches
+and fast-forwards the private repository when it has an upstream, then reloads
+its changed loaded Lisp; changes under its `emx/` also trigger the daemon update
+step. Absent repositories and missing upstreams are skipped. Skills are
+explicitly registered with `agent-session-add-skill`, rather than discovered by
+directory; private initialization can register skills the same way.
+Batch tests should preload `test/test-helper.el` before init.el, or use an
+isolated checkout without site/ or custom.el, to exclude private startup code.
 
 ### Agent layer (`lisp/agent/`)
 
@@ -248,6 +267,13 @@ var/                     runtime state (history, backups, pasted images...); git
   `emacs-atomic-review` skill (`skills/`), which replaces the CLIs' web page
   `atomic-review` skill in the sessions Emacs starts.
 - `init-agent.el` — wires it all up; evil bindings live in `with-eval-after-load 'evil`.
+
+Agent identities select a protocol with `agents.<name>.backend` (default: name),
+validated against the adapter registry. For example, `acme` can select `codex`
+while keeping its own executable, history discovery, models and quota labels.
+Configuration merges tracked `emx/config.json`, optional private
+`site/emx/config.json`, then `var/emx/config.json`. The site layer ships in the
+runtime manifest when present; host-local policy still overrides executables only.
 
 The daemon injects MCP only into its own agent processes, never globally.
 Its audited read-only set combines editor `:read-only` methods with

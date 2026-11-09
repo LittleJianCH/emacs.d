@@ -49,6 +49,13 @@ Preserved across the bootstrap's reload of this module.")
 
 (defun my/update--finish (&optional error-text)
   "Finish the current update, optionally with ERROR-TEXT."
+  (when-let* ((step (and error-text (plist-get my/update--state :active-step)))
+              (name (plist-get step :name)))
+    (unless (seq-some (lambda (entry) (equal (plist-get entry :name) name))
+                      (plist-get my/update--state :reports))
+      (my/update--put :reports
+                      (append (plist-get my/update--state :reports)
+                              (list (list :name name :status "failed"))))))
   (let* ((state my/update--state)
          (report (list :status (if error-text "failed" "applied")
                        :from (plist-get state :from) :to (plist-get state :to)
@@ -118,11 +125,84 @@ With ALLOW-FAILURE, CALLBACK also receives a nonzero exit status."
 
 (defun my/update--lisp-p (paths)
   "Whether PATHS contain configuration Lisp or startup files."
-  (my/update--paths-p paths "\\`\\(?:lisp/.*\\.el\\|init\\.el\\|early-init\\.el\\)\\'"))
+  (or (my/update--paths-p
+       paths "\\`\\(?:lisp/.*\\.el\\|init\\.el\\|early-init\\.el\\)\\'")
+      (my/update--site-files)))
+
+(defun my/update--site-files ()
+  "Return loaded site Lisp files changed since their last load."
+  (seq-filter (lambda (file)
+                (and (my/reload--site-file-p file)
+                     (file-exists-p file) (my/reload--changed-p file)))
+              (mapcar #'car (my/reload--loaded))))
+
+(defun my/update--site-git (args callback &optional allow-failure)
+  "Run Git ARGS in the private repository and invoke CALLBACK.
+With ALLOW-FAILURE, pass nonzero exit statuses to CALLBACK too."
+  (my/update--git (append (list "-C" (plist-get my/update--state :site-root)) args)
+                  callback allow-failure))
+
+(defun my/update--site-skip (reason)
+  "Finish the asynchronous site step with a short skip REASON."
+  (my/update--log (concat "跳过私有配置：" reason "\n"))
+  (funcall (plist-get my/update--state :site-done) '(:status "skipped")))
+
+(defun my/update--site (done)
+  "Asynchronously fast-forward the optional site repository, then call DONE."
+  (my/update--put :site-done done)
+  (if (not (and my/site-directory
+                (file-directory-p my/site-directory)
+                (file-exists-p (expand-file-name ".git" my/site-directory))))
+      (my/update--site-skip "未配置独立仓库")
+    (my/update--put :site-root (file-truename my/site-directory))
+    (my/update--site-git
+     '("symbolic-ref" "--quiet" "--short" "HEAD")
+     (lambda (branch status)
+       (unless (zerop status) (error "私有配置处于分离 HEAD 状态，无法更新"))
+       (my/update--put :site-branch (string-trim branch))
+       (my/update--site-git
+        (list "for-each-ref" "--format=%(upstream)" "--"
+              (concat "refs/heads/" (string-trim branch)))
+        #'my/update--site-upstream)) t)))
+
+(defun my/update--site-upstream (upstream _status)
+  "Fetch UPSTREAM for the site, or skip when none is configured."
+  (if (string-empty-p (string-trim upstream))
+      (my/update--site-skip "当前分支没有上游")
+    (my/update--site-git
+     (list "config" "--get"
+           (concat "branch." (plist-get my/update--state :site-branch) ".remote"))
+     (lambda (remote _status)
+       (my/update--site-git
+        (list "fetch" "--" (string-trim remote))
+        (lambda (_output _status)
+          (my/update--site-git
+           '("rev-list" "--left-right" "--count" "HEAD...@{u}")
+           #'my/update--site-counts)))))))
+
+(defun my/update--site-counts (counts _status)
+  "Refuse divergent site COUNTS, then attempt a safe fast-forward."
+  (let ((numbers (mapcar #'string-to-number (split-string counts))))
+    (when (and (> (car numbers) 0) (> (cadr numbers) 0))
+      (error "私有配置与上游分支已分叉，请手动处理")))
+  (my/update--site-git
+   '("rev-parse" "HEAD")
+   (lambda (head _status)
+     (my/update--site-git
+      '("merge" "--ff-only" "--no-autostash" "@{u}")
+      (lambda (output status)
+        (unless (zerop status)
+          (error "私有配置无法快进合并，请检查工作区冲突：%s" (string-trim output)))
+        (my/update--site-git
+         (list "diff" "--name-only" "-z" (string-trim head) "HEAD")
+         (lambda (paths _status)
+           (my/update--put :site-paths (split-string paths "\0" t))
+           (funcall (plist-get my/update--state :site-done) nil)))) t))))
 
 (defun my/update--emx-p (paths)
-  "Whether PATHS require rebuilding or updating emx."
-  (my/update--paths-p paths "\\`\\(?:emx/\\|bin/emx\\'\\|lisp/agent/backend/\\(?:pi\\|dsh\\)/\\)"))
+  "Whether public PATHS or changed site paths require updating emx."
+  (or (my/update--paths-p paths "\\`\\(?:emx/\\|bin/emx\\'\\|lisp/agent/backend/\\(?:pi\\|dsh\\)/\\)")
+      (my/update--paths-p (plist-get my/update--state :site-paths) "\\`emx/")))
 
 (defun my/update--languages-p (paths)
   "Whether PATHS can change enabled languages or their lazy triggers."
@@ -134,8 +214,11 @@ With ALLOW-FAILURE, CALLBACK also receives a nonzero exit status."
   (let* ((root (plist-get my/update--state :root))
          (paths (plist-get my/update--state :paths))
          (loaded (mapcar #'car (my/reload--loaded)))
-         (files (seq-filter
-                 (lambda (file) (member (file-relative-name file root) paths)) loaded))
+         (files (delete-dups
+                 (append (seq-filter
+                          (lambda (file) (member (file-relative-name file root) paths))
+                          loaded)
+                         (my/update--site-files))))
          (my/reload-emx-function nil)
          ;; nil means all changed files to reload-config, so skip an empty set.
          (report (and files (my/reload-config files))))
@@ -209,7 +292,8 @@ Preserve customized language selections.  Never require a language module."
   (list :reload (list (list :emx (vconcat (funcall my/reload-emx-function))))))
 
 (defconst my/update-steps
-  '((:name "emx-deps" :when my/update--deps-p
+  '((:name "site" :when always :run my/update--site :async t)
+    (:name "emx-deps" :when my/update--deps-p
      :run ("npm" "install" "--prefix" "emx"))
     (:name "lisp" :when my/update--lisp-p :run my/update--lisp)
     (:name "languages" :when my/update--languages-p :run my/update--languages)
@@ -217,8 +301,9 @@ Preserve customized language selections.  Never require a language module."
   "Ordered update steps owned by this revision.
 Each plist has :name, :when (a predicate of changed paths), and :run.
 A run is an argv list for `make-process', or a zero-argument Lisp function
-returning a plist with optional :reload entries.  Steps must be idempotent
-and derive from repository state, including checks for missing artifacts.")
+returning a plist with optional :reload entries and :status.
+With :async t, the function instead receives a callback for that plist.
+Steps must be idempotent and derive from repository state.")
 
 (defun my/update--record-step (step result)
   "Record STEP's RESULT and continue, unless a reload failed."
@@ -240,7 +325,9 @@ and derive from repository state, including checks for missing artifacts.")
     (my/update--put :reports
                     (append (plist-get my/update--state :reports)
                             (list (list :name (plist-get step :name)
-                                        :status (if failed "failed" "applied")))))
+                                        :status (if failed "failed"
+                                                  (or (plist-get result :status)
+                                                      "applied"))))))
     (if failed (my/update--finish "重载失败，请查看更新报告")
       (my/update--next-step))))
 
@@ -272,7 +359,10 @@ and derive from repository state, including checks for missing artifacts.")
                               (format "步骤 %s 失败（退出码 %d）：%s"
                                       (plist-get step :name) status
                                       (string-trim output))))) t)
-                  (my/update--record-step step (funcall run))))
+                  (if (plist-get step :async)
+                      (funcall run (lambda (result)
+                                     (my/update--record-step step result)))
+                    (my/update--record-step step (funcall run)))))
             (error
              (my/update--put :reports
                              (append (plist-get my/update--state :reports)

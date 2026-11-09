@@ -16,3 +16,6 @@
 # Generated emx runtime and immutable build generations
 /emx/dist
 /emx/.dist-*
+
+# Private site layer (separate repository)
+/site/

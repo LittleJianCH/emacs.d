@@ -45,6 +45,87 @@ A string in FORMS is inserted as is."
       (if (stringp form) (insert form) (prin1 form (current-buffer)))
       (insert "\n"))))
 
+(ert-deftest init-reload-test-site-files ()
+  "Private modules and site-init.el use the same compiled reload path."
+  (init-reload-test--with-module unused-file
+    (let* ((my/site-directory (file-truename
+                               (expand-file-name "site" my/reload-directory)))
+           (module (expand-file-name "lisp/acme.el" my/site-directory))
+           (init (expand-file-name "site-init.el" my/site-directory))
+           (outside (expand-file-name "other.el" my/site-directory))
+           (my/reload-directory (expand-file-name "public/" my/reload-directory))
+           (load-history (copy-tree load-history))
+           (my/reload-emx-function nil))
+      (make-directory (file-name-directory module) t)
+      (dolist (file (list module init outside))
+        (init-reload-test--write file '(defun init-reload-test-site-fn () 'old))
+        (load file nil t t))
+      (should-not (my/reload-config))
+      (dolist (file (list module init outside))
+        (init-reload-test--write file '(defun init-reload-test-site-fn () 'new)))
+      (let* ((report (my/reload-config))
+             (files (mapcar (lambda (entry) (plist-get entry :file)) report)))
+        (should (= (length files) 2))
+        (should (member module files))
+        (should (member init files))
+        (dolist (entry report)
+          (should (eq (plist-get entry :status) 'reloaded))
+          (should-not (plist-get entry :warnings))))
+      (should (compiled-function-p (symbol-function 'init-reload-test-site-fn)))
+      (should (eq (init-reload-test-site-fn) 'new))
+      (should-not (my/reload-config))
+      (init-reload-test--write module "(defun broken (")
+      (let ((entry (car (my/reload-config))))
+        (should (eq (plist-get entry :status) 'failed)))
+      (should (eq (init-reload-test-site-fn) 'new)))))
+
+(ert-deftest init-reload-test-site-new-selections-require-restart ()
+  "Each newly enabled module selection needs startup, including in-place edits."
+  (dolist (var '(my/agents my/languages my/apps))
+    (init-reload-test--with-module file
+      (let ((my/site-directory dir)
+            (my/agents (list 'acme))
+            (my/languages (list 'acme))
+            (my/apps (list 'acme))
+            (load-history (copy-tree load-history))
+            (my/reload-emx-function nil))
+        (setq file (file-truename (expand-file-name "site-init.el" dir)))
+        (init-reload-test--write file '(setq init-reload-test-state 'old))
+        (load file nil t t)
+        (init-reload-test--write file `(nconc ,var '(acme-extra)))
+        (let ((entry (car (my/reload-config))))
+          (should (equal (plist-get entry :file) file))
+          (should (eq (plist-get entry :status) 'restart_required))
+          (should (string-match-p (symbol-name var) (plist-get entry :error)))
+          (should-not (plist-get entry :warnings)))
+        (should (equal (symbol-value var) '(acme acme-extra)))
+        (dolist (feature '(agent-acme-extra lang-acme-extra init-acme-extra))
+          (should-not (featurep feature)))
+        ;; An explicit repeat with no new entries is an ordinary reload.
+        (init-reload-test--write file `(add-to-list ',var 'acme-extra))
+        (should (eq (plist-get (car (my/reload-config (list file))) :status)
+                    'reloaded))))))
+
+(ert-deftest init-reload-test-site-selection-removal-and-reordering ()
+  "Removing or reordering existing selections does not require a restart."
+  (init-reload-test--with-module file
+    (let ((my/site-directory dir)
+          (my/agents '(acme acme-extra acme-old))
+          (my/languages '(acme acme-extra acme-old))
+          (my/apps '(acme acme-extra acme-old))
+          (my/reload-emx-function nil))
+      (setq file (expand-file-name "site-init.el" dir))
+      (init-reload-test--write file
+                              "(setq my/agents '(acme-extra acme)\n"
+                              "      my/languages '(acme-extra acme)\n"
+                              "      my/apps '(acme-extra acme))\n")
+      (let ((entry (car (my/reload-config (list file)))))
+        (should (eq (plist-get entry :status) 'reloaded))
+        (should-not (plist-get entry :warnings)))
+      (should (equal my/agents '(acme-extra acme)))
+      (should (equal my/languages '(acme-extra acme)))
+      (should (equal my/apps '(acme-extra acme))))))
+
 (ert-deftest init-reload-test-applies-definitions ()
   "Keymaps merge, untouched options and faces update, state stays."
   (init-reload-test--with-module file

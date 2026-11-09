@@ -7,6 +7,11 @@
 (require 'ert)
 (require 'cl-lib)
 
+;; Preload this helper before init.el when testing the user's checkout.
+;; Suites and subprocess fixtures must never update the real private repository.
+(defvar my/site-directory)
+(setq my/site-directory nil)
+
 ;; Batch UI tests drive their own timers.  Unrelated file and non-file buffers
 ;; must not restart the global polling timer on every major-mode change while
 ;; a test intercepts `run-with-timer'.

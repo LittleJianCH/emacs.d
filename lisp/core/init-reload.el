@@ -20,16 +20,20 @@
 ;;     Emacs needs a restart instead.
 ;; Other `defvar's hold state and keep their values.
 ;;
-;; Without arguments it reloads every file under lisp/ changed on disk since it
-;; was last loaded, in dependency order.  Files that depend on a changed file
-;; are not reloaded with it: functions are looked up at call time, but code
-;; expanding a changed macro needs its own file reloaded.
+;; Without arguments it reloads loaded files under lisp/, site/lisp/ and
+;; site/site-init.el changed on disk since their last load, in dependency
+;; order.  Files that depend on a changed file are not reloaded with it:
+;; functions are looked up at call time, but code expanding a changed macro
+;; needs its own file reloaded.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+
+;; An older updater can bootstrap this file before loading the new init-base.
+(defvar my/site-directory (expand-file-name "site" user-emacs-directory))
 
 ;; bytecomp is loaded when the first file is reloaded.
 (defvar byte-compile-current-buffer)
@@ -51,21 +55,33 @@ Bindings in it that a later version of the source drops are removed.")
 
 ;;; Which files, in which order
 
+(defun my/reload--site-file-p (file)
+  "Whether FILE belongs to the configured private Lisp layer."
+  (when my/site-directory
+    (let ((root (file-name-as-directory (file-truename my/site-directory))))
+      (or (equal file (expand-file-name "site-init.el" root))
+          (string-prefix-p (expand-file-name "lisp/" root) file)))))
+
+(defun my/reload--config-file-p (file)
+  "Whether canonical FILE belongs to the public or private Lisp layer."
+  (or (string-prefix-p
+       (file-name-as-directory (file-truename my/reload-directory)) file)
+      (my/reload--site-file-p file)))
+
 (defun my/reload--loaded ()
-  "Return (FILE . HISTORY) for loaded source files under `my/reload-directory'.
+  "Return (FILE . HISTORY) for loaded public and private Lisp source files.
 HISTORY is the file's `load-history' entry list; oldest file first."
-  (let ((dir (file-truename my/reload-directory))
-        loaded)
+  (let (loaded)
     (pcase-dolist (`(,file . ,history) load-history)
       (when (and (stringp file) (string-suffix-p ".el" file)
-                 (string-prefix-p dir (file-truename file)))
+                 (my/reload--config-file-p (file-truename file)))
         (push (cons (file-truename file) history) loaded)))
     (seq-uniq loaded (lambda (a b) (equal (car a) (car b))))))
 
 (defun my/reload--note-load (file)
   "Remember when FILE was loaded, however it was, if it is a configuration file."
   (let ((file (file-truename file)))
-    (when (string-prefix-p (file-truename my/reload-directory) file)
+    (when (my/reload--config-file-p file)
       (puthash file (current-time) my/reload--times))))
 
 (add-hook 'after-load-functions #'my/reload--note-load)
@@ -312,7 +328,14 @@ compile."
 
 (defun my/reload--file (file)
   "Reload FILE and return a report plist."
-  (let* ((forms (my/reload--forms file))
+  (let* ((selections
+          (when (and my/site-directory
+                     (equal file (file-truename
+                                  (expand-file-name "site-init.el" my/site-directory))))
+            (mapcar (lambda (var)
+                      (cons var (and (boundp var) (copy-sequence (symbol-value var)))))
+                    '(my/agents my/languages my/apps))))
+         (forms (my/reload--forms file))
          (structs (seq-keep (lambda (form)
                               (when-let* ((change (my/reload--struct-change form)))
                                 (cons (cadr form) change)))
@@ -335,18 +358,27 @@ compile."
         (if compiled
             (my/reload--load-compiled file (car compiled))
           (load file nil t t))
-        (list :status 'reloaded
-              :keymaps (seq-keep (pcase-lambda (`(,var . ,form))
-                                   (and (my/reload--keymap var form) var))
-                                 keymaps)
-              :options (my/reload--update-options options)
-              :faces (my/reload--update-faces forms)
-              :warnings (append
-                         (mapcar (lambda (struct)
-                                   (format "%S gained slots at the end; objects \
+        (let ((added (seq-keep
+                      (pcase-lambda (`(,var . ,before))
+                        (when (and (boundp var)
+                                   (seq-difference (symbol-value var) before))
+                          var))
+                      selections)))
+          (list :status (if added 'restart_required 'reloaded)
+                :error (when added
+                         (format "site-init.el enabled new entries in %s; restart to load modules"
+                                 (mapconcat #'symbol-name added ", ")))
+                :keymaps (seq-keep (pcase-lambda (`(,var . ,form))
+                                    (and (my/reload--keymap var form) var))
+                                  keymaps)
+                :options (my/reload--update-options options)
+                :faces (my/reload--update-faces forms)
+                :warnings (append
+                           (mapcar (lambda (struct)
+                                     (format "%S gained slots at the end; objects \
 made before this reload lack them" (car struct)))
-                                 structs)
-                         (cdr compiled)))))))
+                                   structs)
+                           (cdr compiled))))))))
 
 (defun my/reload--files (files)
   "Reload FILES and return a report entry for each file."

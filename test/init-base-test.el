@@ -17,6 +17,94 @@
 (defvar magit-blame-mode)
 (defvar evil-mode)
 
+(ert-deftest init-base-site-before-agent-loop ()
+  "custom.el selects a private layer that extends the normal agent loop."
+  (let* ((directory (make-temp-file "init-site-" t))
+         (site (expand-file-name "private" directory))
+         (lisp (expand-file-name "lisp" site))
+         (default-directory directory))
+    (unwind-protect
+        (progn
+          (make-directory lisp t)
+          (make-symbolic-link (expand-file-name "lisp" emx-test--checkout)
+                              (expand-file-name "lisp" directory))
+          (with-temp-file (expand-file-name "custom.el" directory)
+            (prin1 `(setq my/site-directory ,site my/agents nil
+                          my/languages nil my/apps nil my/use-evil nil)
+                   (current-buffer)))
+          (with-temp-file (expand-file-name "site-init.el" site)
+            (insert "(add-to-list 'my/agents 'acme)\n"))
+          (with-temp-file (expand-file-name "agent-acme.el" lisp)
+            (insert "(agent-session-define-agent acme :title \"Acme\" :backend emx\n"
+                    "  :executable \"acme\" :emx-agent \"acme\")\n"
+                    "(provide 'agent-acme)\n"))
+          (with-temp-buffer
+            (let ((status
+                   (call-process
+                    (expand-file-name invocation-name invocation-directory)
+                    nil t nil "--batch" "-Q" (concat "--init-directory=" directory)
+                    "--eval" (prin1-to-string `(setq package-user-dir ,package-user-dir))
+                    "-l" (expand-file-name "init.el" emx-test--checkout)
+                    "--eval"
+                    (prin1-to-string
+                     `(progn
+                        (cl-assert (equal my/site-directory ,site))
+                        (cl-assert (equal my/agents '(acme)))
+                        (cl-assert (featurep 'agent-acme))
+                        (cl-assert (eq (agent-session--get 'acme :backend) 'emx)))))))
+              (ert-info ((buffer-string)) (should (eql status 0))))))
+      (delete-directory directory t))))
+
+(ert-deftest init-base-site-optional ()
+  "Disabled, absent and empty site directories leave startup usable."
+  (let* ((directory (make-temp-file "init-site-" t))
+         (load-path (copy-sequence load-path)))
+    (unwind-protect
+        (progn
+          (dolist (site (list nil (expand-file-name "missing" directory)))
+            (let ((my/site-directory site)
+                  (before (copy-sequence load-path)))
+              (my/site-initialize)
+              (should (equal load-path before))))
+          (let ((my/site-directory directory))
+            (my/site-initialize)
+            (should (member (expand-file-name "lisp" directory) load-path))))
+      (delete-directory directory t))))
+
+(ert-deftest init-base-site-default-skipped-in-batch ()
+  "Batch runs ignore the default site directory, so tests stay public-only."
+  (let* ((user-emacs-directory (file-name-as-directory
+                                (make-temp-file "init-site-" t)))
+         (my/site-directory (expand-file-name "site" user-emacs-directory))
+         (load-path (copy-sequence load-path))
+         (before (copy-sequence load-path)))
+    (unwind-protect
+        (progn
+          (make-directory my/site-directory)
+          (with-temp-file (expand-file-name "site-init.el" my/site-directory)
+            (insert "(error \"default site loaded in batch\")\n"))
+          (should noninteractive)
+          (my/site-initialize)
+          (should (equal load-path before)))
+      (delete-directory user-emacs-directory t))))
+
+(ert-deftest init-base-site-error-warns ()
+  "An error in site-init.el warns without aborting startup."
+  (let* ((my/site-directory (make-temp-file "init-site-" t))
+         (load-path (copy-sequence load-path))
+         warning)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "site-init.el" my/site-directory)
+            (insert "(error \"acme init failure\")\n"))
+          (cl-letf (((symbol-function 'display-warning)
+                     (lambda (&rest args) (setq warning args))))
+            (my/site-initialize))
+          (should (eq (car warning) 'init-site))
+          (should (string-match-p "acme init failure" (cadr warning)))
+          (should (eq (nth 2 warning) :warning)))
+      (delete-directory my/site-directory t))))
+
 (ert-deftest init-base-evil-keybinding-preset ()
   "evil's integration settings are set before evil can load by any path.
 evil-collection warns when evil loaded with `evil-want-keybinding' on,

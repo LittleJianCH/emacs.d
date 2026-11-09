@@ -186,7 +186,7 @@
             (should (equal (plist-get report :status) "applied"))
             (should (equal (mapcar (lambda (step) (plist-get step :name))
                                   (append (plist-get report :steps) nil))
-                           '("emx-deps" "lisp" "languages" "emx")))
+                           '("site" "emx-deps" "lisp" "languages" "emx")))
             (should (equal (plist-get report :restart_required)
                            (vector (expand-file-name "init.el" (file-truename repo))))))
           (should (eq major-mode 'fundamental-mode))
@@ -306,7 +306,8 @@
     (init-update-test--commit repo "lisp/core/init-lazy.el" "(defun broken (")
     (my/update-config)
     (let* ((report (init-update-test--wait))
-           (step (aref (plist-get report :steps) 2)))
+           (step (seq-find (lambda (entry) (equal (plist-get entry :name) "languages"))
+                           (plist-get report :steps))))
       (should (equal (plist-get report :status) "failed"))
       (should (equal (plist-get step :name) "languages"))
       (should (equal (plist-get step :status) "failed"))
@@ -338,7 +339,10 @@
     (my/update-config)
     (let ((report (init-update-test--wait)))
       (should (equal (plist-get report :status) "failed"))
-      (should (equal (plist-get (aref (plist-get report :steps) 2) :status) "failed"))
+      (should (equal (plist-get
+                      (seq-find (lambda (entry)
+                                  (equal (plist-get entry :name) "languages"))
+                                (plist-get report :steps)) :status) "failed"))
       (should (string-match-p "Nonliteral" (plist-get report :error))))
     (should (equal my/languages '(update-old update-eager update-loaded)))
     (should (equal (init-update-test--marker) before))))
@@ -596,6 +600,190 @@
         (should (equal (plist-get (init-update-test--wait) :status) "failed"))
         (should (= calls 1))
         (should-not (init-update-test--marker))))))
+
+(defmacro init-update-test--with-site (&rest body)
+  "Run BODY with independent public and private repositories."
+  (declare (indent 0))
+  `(let ((changed-p (symbol-function 'my/reload--changed-p)))
+     (init-update-test--fixture
+       (let* ((site-publisher (expand-file-name "site-publisher/" base))
+              (site-remote (expand-file-name "site-remote.git" base))
+              (my/site-directory (file-truename (expand-file-name "site/" repo)))
+              (my/update-steps
+               (seq-filter (lambda (step)
+                             (member (plist-get step :name) '("site" "lisp")))
+                           init-update-test--revision-steps)))
+         (make-directory site-publisher t)
+         (init-update-test--git base "init" "-q" "--bare" "--initial-branch=main"
+                                site-remote)
+         (init-update-test--git site-publisher "init" "-q" "-b" "main")
+         (init-update-test--commit
+          site-publisher "lisp/acme.el"
+          ";;; -*- lexical-binding: t; -*-\n(defun init-update-test-site-fn () 'old)\n")
+         (init-update-test--git site-publisher "remote" "add" "origin" site-remote)
+         (init-update-test--git site-publisher "push" "-qu" "origin" "main")
+         (init-update-test--git base "clone" "-q" site-remote my/site-directory)
+         (cl-letf (((symbol-function 'my/reload--changed-p)
+                    (lambda (file)
+                      (and (my/reload--site-file-p file) (funcall changed-p file)))))
+           ,@body)))))
+
+(ert-deftest init-update-test-site-fast-forward-and-reload ()
+  "A site-only upstream change is fetched and compiled, even on retry."
+  (init-update-test--with-site
+    (let ((file (expand-file-name "lisp/acme.el" my/site-directory))
+          (my/reload-emx-function (lambda () (ert-fail "Site update called daemon"))))
+      (load file nil t t)
+      (let ((to (init-update-test--commit
+                 site-publisher "lisp/acme.el"
+                 (concat ";;; -*- lexical-binding: t; -*-\n"
+                         "(defun init-update-test-site-fn () 'new)\n"))))
+        (init-update-test--git site-publisher "push" "-q")
+        (my/update-config)
+        (let ((report (init-update-test--wait)))
+          (should (equal (plist-get report :status) "applied"))
+          (should (equal (init-update-test--git my/site-directory "rev-parse" "HEAD") to))
+          (should (equal (plist-get (aref (plist-get report :reload) 0) :file) file))
+          (should (compiled-function-p (symbol-function 'init-update-test-site-fn)))
+          (should (eq (init-update-test-site-fn) 'new)))
+        (my/update-config)
+        (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+        (should (equal (plist-get my/update-last-report :reload) []))))))
+
+(ert-deftest init-update-test-site-emx-changes-update-daemons ()
+  "Site-only emx changes run the daemon step once, with the actual changed paths."
+  (init-update-test--with-site
+    (let ((my/update-steps
+           (seq-filter (lambda (step)
+                         (member (plist-get step :name) '("site" "lisp" "emx")))
+                       init-update-test--revision-steps))
+          (calls 0)
+          changed-paths)
+      (let ((my/reload-emx-function
+             (lambda ()
+               (cl-incf calls)
+               (setq changed-paths (plist-get my/update--state :site-paths))
+               '((:status "up_to_date")))))
+        (init-update-test--commit site-publisher "emx/config.json"
+                                  "{\"agents\":{\"acme\":{\"backend\":\"codex\"}}}\n")
+        (init-update-test--git site-publisher "push" "-q")
+        (my/update-config)
+        (let* ((report (init-update-test--wait))
+               (step (seq-find (lambda (entry)
+                                 (equal (plist-get entry :name) "emx"))
+                               (plist-get report :steps))))
+          (should (equal (plist-get report :status) "applied"))
+          (should (equal (plist-get step :status) "applied"))
+          (should (equal (plist-get report :from) (plist-get report :to)))
+          (should (= calls 1))
+          (should (equal changed-paths '("emx/config.json"))))
+        ;; No new site commit must not cause another daemon update.
+        (my/update-config)
+        (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+        (should (= calls 1))
+        ;; A private Lisp-only commit must not cause a daemon update either.
+        (let ((file (expand-file-name "lisp/acme.el" my/site-directory)))
+          (load file nil t t)
+          (init-update-test--commit
+           site-publisher "lisp/acme.el"
+           ";;; -*- lexical-binding: t; -*-\n(defun init-update-test-site-fn () 'new)\n")
+          (init-update-test--git site-publisher "push" "-q")
+          (my/update-config)
+          (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+          (should (eq (init-update-test-site-fn) 'new))
+          (should (= calls 1)))))))
+
+(ert-deftest init-update-test-site-new-selections-require-restart ()
+  "Site selection additions are applied with a restart report, never hot-loaded."
+  (dolist (var '(my/agents my/languages my/apps))
+    (init-update-test--with-site
+      (let ((file (expand-file-name "site-init.el" my/site-directory))
+            (my/agents '(acme))
+            (my/languages '(acme))
+            (my/apps '(acme)))
+        (init-update-test--commit site-publisher "site-init.el"
+                                  ";;; -*- lexical-binding: t; -*-\n")
+        (init-update-test--git site-publisher "push" "-q")
+        (init-update-test--git my/site-directory "pull" "-q" "--ff-only")
+        (load file nil t t)
+        (init-update-test--commit site-publisher "site-init.el"
+                                  (format (concat ";;; -*- lexical-binding: t; -*-\n"
+                                                  "(add-to-list '%s 'acme-extra)\n") var))
+        (init-update-test--git site-publisher "push" "-q")
+        (my/update-config)
+        (let* ((report (init-update-test--wait))
+               (entry (aref (plist-get report :reload) 0)))
+          (should (equal (plist-get report :status) "applied"))
+          (should (equal (plist-get report :restart_required) (vector file)))
+          (should (eq (plist-get entry :status) 'restart_required))
+          (should (string-match-p (symbol-name var) (plist-get entry :error)))
+          (should (equal (init-update-test--marker) (plist-get report :to))))
+        (should (memq 'acme-extra (symbol-value var)))
+        (dolist (feature '(agent-acme-extra lang-acme-extra init-acme-extra))
+          (should-not (featurep feature)))))))
+
+(ert-deftest init-update-test-site-skips-without-repository-or-upstream ()
+  "Absent sites and ordinary directories do not fetch the enclosing repo."
+  (dolist (mode '(disabled absent directory no-upstream))
+    (init-update-test--with-site
+      (pcase mode
+        ('disabled (setq my/site-directory nil))
+        ('absent (setq my/site-directory (expand-file-name "absent" base)))
+        ('directory (setq my/site-directory (make-temp-file
+                                            (expand-file-name "plain-" repo) t)))
+        ('no-upstream (init-update-test--git my/site-directory
+                                            "branch" "--unset-upstream")))
+      (my/update-config)
+      (let* ((report (init-update-test--wait))
+             (step (aref (plist-get report :steps) 0)))
+        (should (equal (plist-get report :status) "applied"))
+        (should (equal (plist-get step :name) "site"))
+        (should (equal (plist-get step :status) "skipped"))))))
+
+(ert-deftest init-update-test-site-retries-failed-reload ()
+  "A failed reload does not advance the public marker or lose pending site work."
+  (init-update-test--with-site
+    (let ((file (expand-file-name "lisp/acme.el" my/site-directory)))
+      (load file nil t t)
+      (init-update-test--commit site-publisher "lisp/acme.el" "(defun broken (")
+      (init-update-test--git site-publisher "push" "-q")
+      (my/update-config)
+      (should (equal (plist-get (init-update-test--wait) :status) "failed"))
+      (should-not (init-update-test--marker))
+      (should (eq (init-update-test-site-fn) 'old))
+      (init-update-test--write
+       my/site-directory "lisp/acme.el"
+       ";;; -*- lexical-binding: t; -*-\n(defun init-update-test-site-fn () 'fixed)\n")
+      (my/update-config)
+      (should (equal (plist-get (init-update-test--wait) :status) "applied"))
+      (should (init-update-test--marker))
+      (should (eq (init-update-test-site-fn) 'fixed)))))
+
+(ert-deftest init-update-test-site-refuses-unsafe-merges ()
+  "Detached, divergent and conflicting dirty sites preserve files and marker."
+  (dolist (mode '(detached diverged dirty))
+    (init-update-test--with-site
+      (let ((before (init-update-test--git my/site-directory "rev-parse" "HEAD")))
+        (init-update-test--commit site-publisher "lisp/acme.el" ";;; upstream\n")
+        (init-update-test--git site-publisher "push" "-q")
+        (pcase mode
+          ('detached (init-update-test--git my/site-directory "checkout" "-q" "--detach"))
+          ('diverged (setq before (init-update-test--commit my/site-directory
+                                                           "local" "local\n")))
+          ('dirty
+           (init-update-test--git my/site-directory "config" "merge.autoStash" "true")
+           (init-update-test--write my/site-directory "lisp/acme.el" ";;; dirty\n")))
+        (my/update-config)
+        (should (equal (plist-get (init-update-test--wait) :status) "failed"))
+        (should (equal (plist-get (aref (plist-get my/update-last-report :steps) 0)
+                                  :status) "failed"))
+        (should-not (init-update-test--marker))
+        (should (equal (init-update-test--git my/site-directory "rev-parse" "HEAD") before))
+        (when (eq mode 'dirty)
+          (should (equal (with-temp-buffer
+                           (insert-file-contents
+                            (expand-file-name "lisp/acme.el" my/site-directory))
+                           (buffer-string)) ";;; dirty\n")))))))
 
 (provide 'init-update-test)
 ;;; init-update-test.el ends here

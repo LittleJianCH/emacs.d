@@ -71,7 +71,34 @@ text can't scroll, only point moves."
       url-configuration-directory (my/var "url/")
       tramp-persistency-file-name (my/var "tramp")
       custom-file (expand-file-name "custom.el" user-emacs-directory))
+(defcustom my/site-directory (expand-file-name "site" user-emacs-directory)
+  "Directory of the optional private site repository, or nil to disable it.
+Set this in custom.el before the site layer is initialized."
+  :type '(choice (const :tag "禁用" nil) directory)
+  :group 'convenience)
+
 (load custom-file 'noerror 'nomessage)
+
+(defun my/site-initialize ()
+  "Add the private Lisp directory and load its optional site-init.el.
+Report site initialization errors without interrupting startup.  Batch
+runs (tests, compile checks) skip the default directory, so they see only
+the public configuration unless `my/site-directory' was set explicitly."
+  (when (and my/site-directory (file-directory-p my/site-directory)
+             (not (and noninteractive
+                       (equal my/site-directory
+                              (eval (car (get 'my/site-directory
+                                              'standard-value))
+                                    t)))))
+    (add-to-list 'load-path (expand-file-name "lisp" my/site-directory))
+    (let ((file (expand-file-name "site-init.el" my/site-directory)))
+      (when (file-exists-p file)
+        (condition-case err
+            (load file nil t t)
+          (error (display-warning 'init-site
+                                  (format "私有配置加载失败：%s"
+                                          (error-message-string err))
+                                  :warning)))))))
 
 ;;; Common built-in modes
 
