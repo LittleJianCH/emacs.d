@@ -83,7 +83,7 @@ test('fake quota poll commands persist and poll without an editor after restart'
     const file = join(dir, source)
     writeFileSync(file, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)} ${source} "$@"\n`)
     chmodSync(file, 0o700)
-    return [source, { executable: file }]
+    return [source, { executable: file, extraArgs: [] }]
   }))
   writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({ agents: executables,
     usage: { pollInterval: 900 }, collab: { handleCommand: [], agentHandleCommands: {} } }))
@@ -120,6 +120,44 @@ test('fake quota poll commands persist and poll without an editor after restart'
     assert.equal(restarted.usage.quotas.length, 4)
     assert.equal(readLedger(join(dir, 'agent-usage.jsonl')).length, 0, 'polling does not charge model usage')
   } finally { await restarted.stop() }
+})
+
+test('a codex-kind alias polls with its own executable and labels its quota', async (t) => {
+  const {daemon, client, dir} = await setup(t)
+  const fixture = new URL('./fixtures/usage-poller.mjs', import.meta.url).pathname
+  const marker = join(dir, 'acme.args')
+  const acme = join(dir, 'acme')
+  const codex = join(dir, 'codex')
+  for (const [source, file] of [['acme', acme], ['codex', codex]]) {
+    writeFileSync(file, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)} ${source} "$@"\n`)
+    chmodSync(file, 0o700)
+  }
+  writeFileSync(join(dir, 'emx/config.json'), JSON.stringify({ agents: {
+    acme: { backend: 'codex', title: 'Acme', executable: acme, extraArgs: ['--listen', 'stdio://', marker] },
+    codex: { title: 'Codex', executable: codex },
+  }, usage: { pollInterval: 900 }, collab: { handleCommand: [], agentHandleCommands: {} } }))
+  await client.request('config/reload', {})
+  await client.request('usage/configure', {agents: ['acme', 'codex']})
+  assert.deepEqual(daemon.usage.pollers.acme, {backend: 'codex', command: [acme, '--listen', 'stdio://', marker]})
+  assert.deepEqual(daemon.usage.pollers.codex, {backend: 'codex', command: [codex]})
+  await daemon.usage.pollAll(true)
+  for (const source of ['acme', 'codex']) {
+    await client.waitFor((n) => n.method === 'usage/quotas' && n.params.quotas.some((q: any) => q.agent === source))
+  }
+  assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8').trim().split('\n')[0]),
+    ['app-server', '--listen', 'stdio://', marker], 'Codex extra arguments follow the subcommand')
+  const quotas = daemon.usage.loadQuotas()
+  const alias = quotas.find((q) => q.agent === 'acme')!
+  const native = quotas.find((q) => q.agent === 'codex')!
+  assert.ok(alias && native, 'both identities keep their own quota')
+  assert.deepEqual(alias.windows.map((w) => w.id), ['300'])
+  assert.deepEqual(native.windows.map((w) => w.id), ['300'])
+  assert.equal(alias.credits, 'unlimited')
+  assert.equal(native.credits, 'unlimited')
+  assert.equal(quotas.filter((q) => !q.host && ['acme', 'codex'].includes(q.agent)).length, 2)
+  const shown = (await client.request('usage/report', {range: 'all'})).quotas
+  assert.deepEqual(shown.filter((q: any) => ['acme', 'codex'].includes(q.agent)).map((q: any) => q.agent),
+    ['acme', 'codex'])
 })
 
 test('a second daemon cannot become a ledger writer for the same var directory', async (t) => {

@@ -159,6 +159,8 @@ async function foreground(opts: Options): Promise<void> {
     await chmod(opts.varDir, 0o700)
   }
   const daemon = new DaemonServer({ varDir: opts.varDir, socket, remote: !!opts.client,
+    // --client uses stable state outside the installed runtime's default var.
+    siteConfigFile: opts.client ? join(checkoutRoot, 'site/emx/config.json') : undefined,
     idleExit: opts.idleExit, log, restart: (runtime) => {
       const child = spawn(process.execPath, [runtime, 'daemon',
         ...(opts.client ? ['--client', opts.client] : ['--var', opts.varDir]),

@@ -3,8 +3,10 @@
 import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 const source = process.argv[2]
-if (source !== 'pi' && process.argv[3] && !process.argv[3].startsWith('-') && process.argv[3] !== 'app-server' && process.argv[3] !== 'auth') {
-  appendFileSync(process.argv[3], source + '\n')
+const args = process.argv.slice(3)
+if (source === 'codex' || source === 'acme') {
+  if (args[0] !== 'app-server') throw new Error('Expected app-server before Codex options')
+  if (source === 'acme') appendFileSync(args.at(-1), JSON.stringify(args) + '\n')
 }
 if (source === 'pi') {
   if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(['auth', 'print-api-key', '--provider', 'opencode-go'])) {

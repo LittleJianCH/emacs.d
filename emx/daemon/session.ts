@@ -19,7 +19,7 @@ export interface SessionOptions {
   resume?: string
   daemonSocket?: string
   environment?: () => Promise<NodeJS.ProcessEnv>
-  agentConfig?: () => import('../config.ts').AgentConfig | undefined
+  agentConfig?: (agent: string) => import('../config.ts').AgentConfig | undefined
   hibernateAfter?: () => number
   editorTools?: () => import('./protocol.ts').EditorTools
   restored?: boolean
@@ -58,7 +58,7 @@ export class Session implements SessionHost {
   settings: Settings
   readonly daemonSocket: string
   readonly environment: NonNullable<SessionOptions['environment']>
-  readonly agentConfig: NonNullable<SessionOptions['agentConfig']>
+  readonly agentConfig: () => import('../config.ts').AgentConfig | undefined
   readonly editorTools: () => import('./protocol.ts').EditorTools
   capabilities: Capabilities = { models: [], modes: [], commands: [] }
   blocks: Block[] = []
@@ -98,7 +98,7 @@ export class Session implements SessionHost {
     this.daemonSocket = options.daemonSocket ?? ''
     this.#resolveEnvironment = options.environment ?? (async () => ({ ...process.env }))
     this.environment = () => this.#environment ??= this.#resolveEnvironment()
-    this.agentConfig = options.agentConfig ?? (() => undefined)
+    this.agentConfig = () => options.agentConfig?.(this.agent)
     this.editorTools = options.editorTools ?? (() => ({ tools: [], readOnly: [] }))
     this.info = structuredClone(options.info ?? {})
     this.settings = { ...options.settings }
@@ -117,7 +117,7 @@ export class Session implements SessionHost {
       this.#shown = new Set(options.transcript.shown)
       this.queue = this.#queued.map((message) => message.text)
     }
-    this.backend = backends[this.agent](this)
+    this.backend = backends[this.agentConfig()?.backend ?? this.agent](this)
   }
 
   summary(): SessionSummary {
@@ -432,7 +432,7 @@ export class Session implements SessionHost {
         if (!sameProvider) {
           this.#resume = undefined
           this.capabilities = { models: [], modes: [], commands: [] }
-          next = backends[agent](this)
+          next = backends[this.agentConfig()?.backend ?? agent](this)
         }
         next.validateSettings?.(nextSettings)
       } finally {

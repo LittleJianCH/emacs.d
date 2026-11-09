@@ -66,7 +66,7 @@ export interface UsageConfig {
   quotaFile: string;
   agents?: string[];
   pollInterval?: number;
-  pollers?: Record<string, {command: string[]}>;
+  pollers?: Record<string, {command: string[], backend?: string}>;
 }
 
 
@@ -675,7 +675,7 @@ const FETCHERS: Record<string, Fetcher> = {
     throw new Error('Claude usage unavailable');
   },
   async codex(command, { spawn }) {
-    const result = await converse(spawn, [...command, 'app-server'], [
+    const result = await converse(spawn, [command[0], 'app-server', ...command.slice(1)], [
       { id: 1, method: 'initialize', params: { clientInfo: { name: 'emx', version: '0' } } },
       { method: 'initialized' },
       { id: 2, method: 'account/rateLimits/read' },
@@ -740,7 +740,7 @@ class UsageService {
   quotaFile!: string;
   agents: string[] = [];
   pollInterval = 0;
-  pollers: Record<string, {command: string[]}> = {};
+  pollers: Record<string, {command: string[], backend?: string}> = {};
   records: UsageRecord[] = [];
   offset = 0;
   watermarks: Record<string, number> = {};
@@ -797,8 +797,11 @@ class UsageService {
     if (params.agents) this.agents = params.agents;
     if (params.pollInterval !== undefined) this.pollInterval = params.pollInterval;
     if (params.pollers) {
-      for (const source of Object.keys(this.pollers)) {
-        if (JSON.stringify(params.pollers[source]?.command) !== JSON.stringify(this.pollers[source].command)) {
+      for (const source of new Set([...Object.keys(this.pollers), ...Object.keys(params.pollers)])) {
+        const before = this.pollers[source], after = params.pollers[source];
+        if (!before || !after
+          || JSON.stringify(after.command) !== JSON.stringify(before.command)
+          || (after.backend ?? source) !== (before.backend ?? source)) {
           this.#availability.delete(source);
           this.failures[source] = 0;
           this.retryAt[source] = 0;
@@ -906,14 +909,16 @@ class UsageService {
 
   /** Cached evidence only: catalog reads and selection never spawn a probe. */
   candidateAvailability(source: string, executable: string, env: NodeJS.ProcessEnv = process.env): QuotaAvailability | undefined {
-    if (source !== 'claude') return;
+    const poller = this.pollers[source];
+    const kind = poller?.backend ?? source;
+    if (kind !== 'claude') return;
     if (externalClaudeEnvironment(env)) return {state: 'external'};
     const cached = this.#availability.get(source);
     // Compare with the probed account, not a possibly changed host environment.
     if (claudeAccountIdentity(env) !== (cached?.account ?? claudeAccountIdentity(process.env))) {
       return {state: 'unknown', reason: 'different-environment'};
     }
-    const command = this.pollers[source]?.command;
+    const command = poller?.command;
     if (cached?.executable && cached.command === JSON.stringify(command)
       && executableIdentity(executable, env) === cached.executable) return cached.status;
     return {state: 'unknown', reason: 'not-checked'};
@@ -930,25 +935,33 @@ class UsageService {
   }
 
   async poll(source: string, force: boolean) {
-    if (!(this.pollInterval > 0) || this.busy.has(source) || !this.fetchers[source]) return;
+    const poller = this.pollers[source];
+    if (!(this.pollInterval > 0) || this.busy.has(source) || !poller) return;
+    const kind = poller.backend ?? source;
+    // A custom fetcher registered for the source still wins; otherwise the
+    // protocol kind selects the built-in fetcher.
+    const direct = this.fetchers[source];
+    const fetcher = direct && direct !== FETCHERS[source] ? direct : this.fetchers[kind];
+    if (!fetcher) return;
     const now = this.now();
     const latest = this.latest(source);
     if (!force) {
       // A historical quota must not suppress the first current auth check.
-      const needsAuth = source === 'claude' && this.fetchers[source] === FETCHERS.claude
+      const needsAuth = kind === 'claude' && fetcher === FETCHERS.claude
         && !this.#availability.has(source);
       if (!needsAuth && latest != null && now - latest < this.pollInterval) return;
       if (this.retryAt[source] && now < this.retryAt[source]) return;
     }
     const generation = this.generation;
-    const command = this.pollers[source]?.command;
-    if (!command) return;
-    const identity = JSON.stringify(command);
+    const command = poller.command;
+    const commandIdentity = JSON.stringify(command);
+    const identity = JSON.stringify([kind, command]);
     const evidence = {
-      command: identity, executable: executableIdentity(command[0], process.env),
+      command: commandIdentity, executable: executableIdentity(command[0], process.env),
       account: claudeAccountIdentity(process.env),
     };
-    const current = () => generation === this.generation && identity === JSON.stringify(this.pollers[source]?.command);
+    const current = () => generation === this.generation
+      && identity === JSON.stringify([this.pollers[source]?.backend ?? source, this.pollers[source]?.command]);
     // A multi-step fetcher must not start another child after stop/reconfigure.
     const spawn = ((...args: Parameters<Spawn>) => {
       if (!current()) throw new Error('quota poll cancelled');
@@ -956,16 +969,17 @@ class UsageService {
     }) as Spawn;
     this.busy.add(source);
     try {
-      const reading = await this.fetchers[source](command,
-                                                  { spawn, now: this.now });
-      if (generation !== this.generation || identity !== JSON.stringify(this.pollers[source]?.command)) return;
+      const reading = await fetcher(command, { spawn, now: this.now });
+      if (!current()) return;
       if (reading.availability) this.#availability.set(source, {...evidence, status: reading.availability});
       this.failures[source] = 0;
       this.retryAt[source] = 0;
-      this.quota(reading);
+      // The protocol's fetcher names the canonical backend; the poller's
+      // configured agent is the identity the quota belongs to.
+      this.quota({...reading, agent: source});
     } catch (err: any) {
-      if (generation !== this.generation || identity !== JSON.stringify(this.pollers[source]?.command)) return;
-      if (source === 'claude') {
+      if (!current()) return;
+      if (kind === 'claude') {
         this.#availability.set(source, {...evidence, status: {
           state: 'unknown', reason: 'probe-failed', checkedAt: this.now(),
         }});

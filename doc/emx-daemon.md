@@ -635,8 +635,10 @@ preserved from `config/read` before the Emacs context is appended; and token
 usage is read from changed thread totals only inside a turn, so replayed or
 duplicate notifications never count. Resume fetches all pages of
 `thread/turns/list` once; the session layer serves the requested page and
-`session/earlier`. Rate limits arrive as sparse account readings. Native
-subagents are disabled unless `agents.codex.nativeSubagents` is true.
+`session/earlier`. Builds without `thread/turns/list` fall back to the turns
+returned by `thread/resume`; the adapter remembers that missing method for
+the process. Rate limits arrive as sparse account readings. Native
+subagents are disabled unless the session agent's `nativeSubagents` is true.
 
 ## Approvals
 
@@ -811,14 +813,16 @@ session and its agent, using the wording cached from the daemon's config.
 
 ## Configuration
 
-There are two files:
+Configuration merges these files in order:
 
 - `<checkout>/emx/config.json` is tracked and shipped with the runtime.
+- `<checkout>/site/emx/config.json` is an optional private site layer, shipped
+  with the runtime when present.
 - `<var>/emx/config.json` is an optional, git-ignored override.
 
 Objects merge deeply; arrays, scalars and null replace. Unknown fields,
 malformed JSON and invalid types report a `config.<path>` error and keep the
-last good effective configuration. Both files are polled every 250 ms,
+last good effective configuration. All three paths are polled every 250 ms,
 including atomic replacement; a reload is debounced by 75 ms. `config/get`
 and `config/reload` return `{config, errors}`; a change pushes a global
 `config` notification and `mcp/tools_changed` to MCP peers.
@@ -827,7 +831,7 @@ The schema:
 
 | Section | Keys |
 |---|---|
-| `agents` | `title`, `executable`, `extraArgs`, `nativeSubagents`; Claude also `disallowedTools`, `historyTurns` |
+| `agents` | `backend` (defaults to the agent name), `title`, `executable`, `extraArgs`, `nativeSubagents`; Claude also `disallowedTools`, `historyTurns` |
 | `profiles` | `cost`, `description`, `use` (a few words shown in every MCP summary), `confirm`, `preferOtherAgent`, ordered `candidates` (`agent`, `model`, `effort`, `mode`); legacy top-level candidate fields remain valid |
 | `usage` | `pollInterval` (seconds) |
 | `daemon` | `idleExit` (seconds) |
@@ -842,6 +846,14 @@ Modes are `plan`, `ask`, `edits`, `auto` and `full`; a profile's cost is
 `minimal`, `low`, `medium`, `high` or `premium`. The default durations are
 900 seconds for `usage.pollInterval` and `daemon.idleExit`, and 7,200 for
 `sessions.hibernateAfter`.
+
+`agents.<name>.backend` selects a registered protocol adapter independently of
+identity. For example, `agents.acme = {"backend":"codex", "title":"Acme",
+"executable":"acme"}` uses the app-server protocol while retaining its own
+executable, arguments, history discovery, models and quota labels. Unknown
+backend kinds fail validation. Protocol checks use the backend kind; session,
+resume and usage identities remain the agent name. `EMX_CODEX_EXECUTABLE` and
+`EMX_CODEX_CONFIG` apply only to the literal `codex` identity.
 
 `my/agents` in `init.el` chooses which agent registration modules Emacs
 loads; on `hello` the daemon receives that enabled list and uses it for
@@ -860,8 +872,8 @@ config in `hello.config` and again with `config/push` on change or local
 reconnection, preserving JSON empty objects, false and null. The host
 persists the pushed base in `<state>/emx/client-config.json`, so it survives
 an editor or daemon restart. `~/.config/emx/config.json` on the host may
-override only `agents.<name>.executable`; any other override is rejected and
-the last good config retained. Host config notifications never overwrite
+override only `agents.<name>.executable`, including agents from the installed
+site layer; any other override is rejected and the last good config retained. Host config notifications never overwrite
 Emacs's local cache.
 
 Environment overrides remain for installations and protocol fixtures:
@@ -1024,8 +1036,8 @@ the `<version>.current` symlink, retaining every published directory an
 existing daemon might still import.
 
 The manifest covers `emx/dist/**/*.js` and `*.json`, `bin/emx`, and the dsh
-`.mjs`/`.yml` files, not sources, tsconfigs, dependency manifests, build
-stamps, `node_modules` or tests. The version hashes exactly those paths and
+`.mjs`/`.yml` files, plus optional `site/emx/config.json`, not sources,
+tsconfigs, dependency manifests, build stamps, `node_modules` or tests. The version hashes exactly those paths and
 bytes, so source mtimes or erased comments can rebuild without changing the
 runtime version. A host never compiles or installs npm dependencies, and
 needs no python3.

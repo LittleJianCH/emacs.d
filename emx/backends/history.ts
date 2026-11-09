@@ -129,8 +129,9 @@ export async function history(agent: string, root: string, config?: AgentConfig,
   environment?: () => Promise<NodeJS.ProcessEnv>): Promise<HistoryItem[]> {
   if (!isAbsolute(root) || /^\/[^/]+:/.test(root)) throw new Error('History requires a host-local absolute root')
   root = resolve(root)
+  const kind = config?.backend ?? agent
   const env = await environment?.(), dirs = await directories(root, env)
-  if (agent === 'claude') {
+  if (kind === 'claude') {
     const projects = process.env.EMX_CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude/projects')
     const names = await readdir(projects).catch((e) => { if (e.code === 'ENOENT') return []; throw e })
     const sources = dirs.map((d) => ({ ...d, name: encodePath(d.root) }))
@@ -149,7 +150,7 @@ export async function history(agent: string, root: string, config?: AgentConfig,
     return Promise.all(files.map(async ({ file, dir, time }) => ({ id: basename(file, '.jsonl'), title: await claudeTitle(file), time,
       ...dir.label ? { root: dir.root, worktree: dir.label } : {} })))
   }
-  if (agent === 'pi') {
+  if (kind === 'pi') {
     const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi/agent')
     const sessions = process.env.EMX_PI_SESSIONS_DIR ?? process.env.PI_CODING_AGENT_SESSION_DIR
       ?? join(agentDir, 'sessions')
@@ -169,14 +170,14 @@ export async function history(agent: string, root: string, config?: AgentConfig,
   }
   if (!config) throw new Error(`Agent is not configured: ${agent}`)
   const cwds = dirs.map((d) => d.root)
-  if (agent === 'codex') return peer([config.executable, 'app-server', ...(config.extraArgs ?? [])], root, env, async (request, notify) => {
+  if (kind === 'codex') return peer([config.executable, 'app-server', ...(config.extraArgs ?? [])], root, env, async (request, notify) => {
     await request('initialize', { clientInfo: { name: 'emx-history', version: '1' } }); notify('initialized')
     const result = await request('thread/list', { cwd: cwds, limit: 50, sortKey: 'updated_at', sortDirection: 'desc' })
     return (result.data ?? []).filter((t: any) => cwds.includes(t.cwd)).map((t: any) => ({
       id: t.id, title: title(t.name ?? t.preview), time: t.updatedAt, ...location(t.cwd, dirs),
     }))
   })
-  if (agent === 'dsh') return peer([config.executable, '--profile', 'sdk', '--patch',
+  if (kind === 'dsh') return peer([config.executable, '--profile', 'sdk', '--patch',
     join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml'), ...(config.extraArgs ?? [])], root, env, async (request) => {
     const result = await request('sessions/list', { cwds })
     return (result.sessions ?? []).filter((s: any) => cwds.includes(s.cwd)).map((s: any) => ({

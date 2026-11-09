@@ -8,16 +8,16 @@ import { homedir, tmpdir } from 'node:os'
 import { allowedModel, defaultModel as piDefaultModel } from '../backends/pi.ts'
 import type { UsageService } from '../usage/service.ts'
 import type { Config, Profile, ProfileCandidate } from '../config.ts'
-import { candidateDisabledBy, profileCandidates } from '../config.ts'
+import { agentBackend, candidateDisabledBy, profileCandidates } from '../config.ts'
 import type { Block, CollabProfiles, EditorTools, SessionEvent, Settings, Usage, RunGroup, RunReport } from './protocol.ts'
 import type { Session } from './session.ts'
 
 export const toolNames = ['sessions', 'session_read', 'session_ask', 'session_start', 'session_stop', 'session_rate']
-export const forkAgents = ['claude', 'codex', 'dsh', 'pi']
+const forkBackends = ['claude', 'codex', 'dsh', 'pi']
 
 /** Native context shared by collaboration children and editor-owned forks. */
 export function sessionForkInfo(source: Session) {
-  if (!forkAgents.includes(source.agent)) throw new Error(`${source.agent} sessions can't fork; use handoff`)
+  if (!forkBackends.includes(source.agentConfig()?.backend ?? source.agent)) throw new Error(`${source.agent} sessions can't fork; use handoff`)
   const forkFrom = source.resumeId()
   if (!forkFrom) throw new Error('Source session has no conversation to fork yet')
   return { forkFrom, profile: sessionProfile(source), skills: sessionSkills(source) }
@@ -53,7 +53,7 @@ export { profileCandidates }
 function candidateUnavailable(c: Config, candidate: ProfileCandidate, enabled: string[] | undefined, env: NodeJS.ProcessEnv): string | undefined {
   const { agent, model } = candidate
   if (!availableAgent(c, agent, enabled, env)) return c.collab.prompts.candidateUnavailable
-  if (agent === 'pi' && !allowedModel(model || c.agents.pi.defaultModel || piDefaultModel, c.agents.pi)) {
+  if (agentBackend(c, agent) === 'pi' && !allowedModel(model || c.agents[agent].defaultModel || piDefaultModel, c.agents[agent])) {
     return c.collab.prompts.candidateModelExcluded
   }
 }
@@ -71,7 +71,7 @@ export function startSummary(c: Config, enabled?: string[], env: NodeJS.ProcessE
   return lines.length ? c.collab.prompts.delegation + '\n' + format(c.collab.prompts.startSummary, lines.join('\n')) : ''
 }
 export function definitions(c: Config, enabled?: string[], env: NodeJS.ProcessEnv = process.env): EditorTools['tools'] {
-  const titles = forkAgents.filter((a) => availableAgent(c, a, enabled, env)).map((a) => c.agents[a].title)
+  const titles = Object.keys(c.agents).filter((a) => forkBackends.includes(agentBackend(c, a)) && availableAgent(c, a, enabled, env)).map((a) => c.agents[a].title)
   const joined = titles.length < 2 ? titles.join('') : titles.slice(0, -1).join(', ') + ' and ' + titles.at(-1)
   return c.collab.tools.map((tool) => {
     if (tool.name !== 'session_start') return { ...tool }

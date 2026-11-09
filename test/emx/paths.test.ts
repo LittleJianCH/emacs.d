@@ -1,9 +1,9 @@
 import './fixtures/environment.ts'
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, lstatSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, lstatSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { clientPaths } from '../../emx/daemon/paths.ts'
+import { clientPaths, runtimeFiles } from '../../emx/daemon/paths.ts'
 
 test('long HOME client sockets use a stable private short directory', () => {
   const dir = mkdtempSync('/tmp/emx-paths-')
@@ -28,4 +28,23 @@ test('long HOME client sockets use a stable private short directory', () => {
     }
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+
+test('runtime manifest includes optional site configuration from the install root', () => {
+  const dir = mkdtempSync('/tmp/emx-manifest-')
+  try {
+    for (const path of ['emx/dist', 'lisp/agent/backend/dsh', 'lisp/agent/backend/pi', 'site/emx']) {
+      mkdirSync(join(dir, path), { recursive: true })
+    }
+    writeFileSync(join(dir, 'emx/dist/config.json'), '{}')
+    const before = runtimeFiles(dir)
+    assert.ok(!before.includes('site/emx/config.json'))
+    writeFileSync(join(dir, 'site/emx/config.json'), '{"agents":{}}')
+    assert.deepEqual(runtimeFiles(dir), [...before, 'site/emx/config.json'].sort())
+    writeFileSync(join(dir, 'site/emx/private.json'), '{}')
+    assert.ok(!runtimeFiles(dir).includes('site/emx/private.json'))
+    rmSync(join(dir, 'site/emx/config.json'))
+    assert.deepEqual(runtimeFiles(dir), before)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

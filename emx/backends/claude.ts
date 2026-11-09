@@ -28,6 +28,7 @@ export interface ClaudeConfiguration {
 
 /** Transitional daemon configuration until the shared config-file phase. */
 export function configuration(host?: SessionHost): ClaudeConfiguration {
+  if (host && host.agent !== 'claude') return host.agentConfig?.() ?? {}
   const config = JSON.parse(process.env.EMX_CLAUDE_CONFIG ?? '{}')
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('EMX_CLAUDE_CONFIG must be a JSON object')
   if (config.executable !== undefined && typeof config.executable !== 'string') throw new Error('Expected string: executable')
@@ -327,7 +328,8 @@ export class ClaudeBackend implements Backend {
     const readOnly = this.host.editorTools().readOnly
     if (readOnly.length) args.push('--allowedTools', readOnly.map((name) => `mcp__emacs__${name}`).join(','))
     const env = await this.host.environment?.()
-    const child = spawn(process.env.EMX_CLAUDE_EXECUTABLE ?? config.executable ?? 'claude', args, { cwd: this.host.root, env, stdio: 'pipe' })
+    const child = spawn(process.env[`EMX_${this.host.agent.toUpperCase()}_EXECUTABLE`]
+      ?? config.executable ?? 'claude', args, { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     this.#readOnly = [...readOnly]
     child.stdin.on('error', () => {})

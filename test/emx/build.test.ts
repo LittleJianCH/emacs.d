@@ -79,6 +79,33 @@ function install(dir: string, manifest: { files: string[] }) {
   return host
 }
 
+test('installed client launcher explicitly loads site policy with stable host state', async (t) => {
+  let host: string | undefined
+  const args = ['--client', '1234567890abcdef']
+  t.after(async () => { if (host) await command(host, [...args, '--stop']) })
+  const dir = fixture(t)
+  const executable = join(root, 'test/emx/fixtures/codex.mjs')
+  fs.mkdirSync(join(dir, 'site/emx'), { recursive: true })
+  fs.writeFileSync(join(dir, 'site/emx/config.json'), JSON.stringify({
+    agents: { acme: { backend: 'codex', title: 'Acme', executable } },
+    collab: { maxActive: 7, handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
+  }))
+  const manifest = JSON.parse((await command(dir)).stdout)
+  assert.ok(manifest.files.includes('site/emx/config.json'))
+  host = install(dir, manifest)
+  const info = JSON.parse((await command(host, [...args, '--ensure'])).stdout)
+  const peer = new Connection(createConnection(info.socket))
+  try {
+    const hello: any = await peer.request('hello', { client: 'test', version: info.version })
+    assert.equal(hello.config.agents.acme.backend, 'codex')
+    assert.equal(hello.config.agents.acme.executable, executable)
+    assert.equal(hello.config.collab.maxActive, 7)
+    assert.equal(hello.config.usage.pollInterval, 0)
+    assert.ok(fs.existsSync(join(host, '.cache/emacs-agent/emx/state/1234567890abcdef/emx/daemon.lock')))
+    assert.ok(!fs.existsSync(join(host, 'var/emx/daemon.lock')))
+  } finally { peer.close() }
+})
+
 test('concurrent builders recover a dead lock owner', async (t) => {
   const dir = fixture(t)
   const exited = spawnSync(process.execPath, ['-e', ''], { timeout: 5000 })
@@ -116,6 +143,27 @@ test('manifest versions describe runtime bytes and source-free hosts never need 
   const before = JSON.parse((await command(dir)).stdout).version
   fs.writeFileSync(config, JSON.stringify(value))
   assert.notEqual(JSON.parse((await command(dir)).stdout).version, before)
+  const withoutSite = JSON.parse((await command(dir)).stdout)
+  const site = join(dir, 'site/emx/config.json')
+  fs.mkdirSync(resolve(site, '..'), { recursive: true })
+  fs.writeFileSync(site, JSON.stringify({ agents: { acme: { backend: 'codex', title: 'Acme', executable: 'acme' } } }))
+  const withSite = JSON.parse((await command(dir)).stdout)
+  assert.ok(withSite.files.includes('site/emx/config.json'))
+  assert.notEqual(withSite.version, withoutSite.version, 'site policy bytes change the runtime version')
+  const installed = install(dir, withSite)
+  assert.equal(JSON.parse((await command(installed)).stdout).version, withSite.version)
+  const override = join(dir, 'host-config.json')
+  fs.writeFileSync(override, JSON.stringify({ agents: { acme: { executable: 'host-acme' } } }))
+  const readConfig = `const {Configuration} = await import(process.argv[1]);
+const c = new Configuration(process.argv[2], undefined, process.argv[3], process.argv[4]);
+console.log(JSON.stringify({agent: c.value.agents.acme, errors: c.errors})); c.close();`
+  const result = await exec(process.execPath, ['--input-type=module', '-e', readConfig,
+    join(installed, 'emx/dist/config.js'), join(dir, 'host-state'), override, join(installed, 'site/emx/config.json')])
+  assert.deepEqual(JSON.parse(result.stdout), {
+    agent: { backend: 'codex', title: 'Acme', executable: 'host-acme' }, errors: [],
+  }, 'source-free hosts load site agents from their own install root')
+  fs.rmSync(site)
+  assert.equal(JSON.parse((await command(dir)).stdout).version, withoutSite.version)
 })
 
 test('build target and runtime APIs stay within Node 18.17', async (t) => {

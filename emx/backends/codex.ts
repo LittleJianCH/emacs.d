@@ -7,6 +7,7 @@ import { once } from 'node:events'
 import { isAbsolute, join, relative } from 'node:path'
 import { createInterface } from 'node:readline'
 import { isDeepStrictEqual } from 'node:util'
+import type { AgentConfig } from '../config.ts'
 import { checkoutRoot } from '../daemon/paths.ts'
 import type { Backend, SessionHost } from './backend.ts'
 import type { SessionEvent, Settings, ToolStatus, ToolView } from '../daemon/protocol.ts'
@@ -17,6 +18,20 @@ export const modes: Record<string, [string, string, string, string]> = {
   auto: ['on-request', 'workspaceWrite', 'workspace-write', 'auto_review'],
   full: ['never', 'dangerFullAccess', 'danger-full-access', 'user'],
   plan: ['never', 'readOnly', 'read-only', 'user'],
+}
+
+/** Include/exclude regexes from the configured identity; absent means all. */
+export function allowedModel(id: string, config?: Pick<AgentConfig, 'models'>): boolean {
+  const filter = config?.models
+  return !filter || (filter.include.some((s) => new RegExp(s, 'i').test(id))
+    && !filter.exclude.some((s) => new RegExp(s, 'i').test(id)))
+}
+
+/** Older app-servers report the missing history pager differently. */
+function unsupported(error: unknown): boolean {
+  const value = error as { code?: unknown, message?: unknown }
+  return value?.code === -32601
+    || typeof value?.message === 'string' && /unknown method/i.test(value.message)
 }
 
 /** Preserve configured instructions verbatim, including whitespace. */
@@ -78,14 +93,16 @@ export function launchArgs(host: SessionHost, readOnly = host.editorTools().read
   // TOML inline tables use '=' rather than JSON's ':'.
   const args = ['app-server', ...Object.entries(overrides).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]),
     '-c', `mcp_servers.emacs.env={EMX_DAEMON_SOCKET=${JSON.stringify(host.daemonSocket)},EMX_SESSION=${JSON.stringify(host.id)}}`]
-  if (!config.nativeSubagents) args.push('-c', 'agents.enabled=false')
+  if (!config?.nativeSubagents) args.push('-c', 'agents.enabled=false')
   if (context?.supersededSkills?.length) args.push('-c', 'skills.config=[' + context.supersededSkills
     .map((name) => `{name=${JSON.stringify(name)},enabled=false}`).join(',') + ']')
-  return [...args, ...(config.extraArgs ?? [])]
+  return [...args, ...(config?.extraArgs ?? [])]
 }
 
-/** Transitional daemon configuration, independent of the Lisp backend options. */
-function codexConfig(host?: SessionHost): { executable?: string, nativeSubagents?: boolean, extraArgs?: string[] } {
+/** Retain legacy overrides for the identity they name, never its aliases. */
+function codexConfig(host: SessionHost): Partial<AgentConfig> {
+  const base = host.agentConfig?.()
+  if (host.agent !== 'codex') return base ?? {}
   const config = JSON.parse(process.env.EMX_CODEX_CONFIG ?? '{}')
   if (!config || typeof config !== 'object' || Array.isArray(config)
     || (config.executable !== undefined && typeof config.executable !== 'string')
@@ -93,7 +110,7 @@ function codexConfig(host?: SessionHost): { executable?: string, nativeSubagents
     || (config.extraArgs !== undefined && (!Array.isArray(config.extraArgs) || !config.extraArgs.every((s: unknown) => typeof s === 'string')))) {
     throw new Error('Invalid EMX_CODEX_CONFIG')
   }
-  return { ...host?.agentConfig?.(), ...config }
+  return { ...base, ...config }
 }
 
 export class CodexBackend implements Backend {
@@ -112,8 +129,18 @@ export class CodexBackend implements Backend {
   #texts = new Set<string>()
   #users = new Map<string, string>()
   #pendingUsers: { id: string, text: string, imageCount: number }[] = []
+  #turnsList = true
 
   constructor(host: SessionHost) { this.host = host }
+
+  #title(): string { return this.host.agentConfig?.()?.title || 'Codex' }
+
+  #executable(): string {
+    const config = codexConfig(this.host)
+    // Each identity has its own override; the canonical name never leaks to aliases.
+    return process.env[`EMX_${this.host.agent.toUpperCase()}_EXECUTABLE`]
+      ?? config?.executable ?? 'codex'
+  }
 
   #write(message: object): void {
     this.#process?.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n')
@@ -122,8 +149,8 @@ export class CodexBackend implements Backend {
   #request(method: string, params: unknown = {}): Promise<any> {
     const id = ++this.#next
     return new Promise((resolve, reject) => {
-      if (!this.alive()) { reject(new Error('Codex is not running')); return }
-      const timer = setTimeout(() => { this.#pending.delete(id); reject(new Error(`Codex request timed out: ${method}`)) }, 120000)
+      if (!this.alive()) { reject(new Error(`${this.#title()} is not running`)); return }
+      const timer = setTimeout(() => { this.#pending.delete(id); reject(new Error(`${this.#title()} request timed out: ${method}`)) }, 120000)
       this.#pending.set(id, { resolve, reject, timer })
       this.#write({ id, method, params })
     })
@@ -136,16 +163,17 @@ export class CodexBackend implements Backend {
 
   async start(resume?: string): Promise<void> {
     if (!isAbsolute(this.host.root) || /^\/[^/]+:/.test(this.host.root)) {
-      throw new Error('Codex daemon sessions require a local absolute root; remote projects are not supported')
+      throw new Error(`${this.#title()} daemon sessions require a local absolute root; remote projects are not supported`)
     }
     this.#stopping = false
     this.#turn = undefined
     this.#completedTurn = undefined
     this.#usageTotal = undefined
+    this.#turnsList = true
     const env = await this.host.environment?.()
     const tools = structuredClone(this.host.editorTools())
     this.#tools = tools
-    const child = spawn(process.env.EMX_CODEX_EXECUTABLE ?? codexConfig(this.host).executable ?? 'codex', launchArgs(this.host, tools.readOnly),
+    const child = spawn(this.#executable(), launchArgs(this.host, tools.readOnly),
       { cwd: this.host.root, env, stdio: 'pipe' })
     this.#process = child
     child.stdin.on('error', () => {})
@@ -161,20 +189,22 @@ export class CodexBackend implements Backend {
       if (this.#turn) this.host.emit({ type: 'usage/end' })
       this.#turn = undefined
       this.#pendingUsers = []
-      for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(error ?? new Error('Codex app-server exited')) }
+      for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(error ?? new Error(`${this.#title()} app-server exited`)) }
       this.#pending.clear()
       if (!this.#stopping) {
-        this.#notice('backend-error', error?.message ?? `Codex exited (${child.exitCode ?? child.signalCode})`)
+        this.#notice('backend-error', error?.message ?? `${this.#title()} exited (${child.exitCode ?? child.signalCode})`)
         this.host.setStatus('exited')
       }
     }
     child.once('error', ended)
     child.once('close', () => ended())
-    await this.#request('initialize', { clientInfo: { name: 'emacs', title: 'Emacs', version: 'emx' } })
+    // Some app-server builds gate thread/resume's excludeTurns behind this capability.
+    await this.#request('initialize', { clientInfo: { name: 'emacs', title: 'Emacs', version: 'emx' },
+      capabilities: { experimentalApi: true } })
     this.#write({ method: 'initialized' })
     const models = await this.#request('model/list', { limit: 50 })
     this.host.emit({ type: 'capabilities', capabilities: { modes: Object.keys(modes), commands: [],
-      models: (models.data ?? []).filter((m: any) => !m.hidden).map((m: any) => ({ id: m.model,
+      models: (models.data ?? []).filter((m: any) => !m.hidden && allowedModel(String(m.model), this.host.agentConfig?.())).map((m: any) => ({ id: m.model,
         name: m.displayName, description: m.description,
         efforts: (m.supportedReasoningEfforts ?? []).map((e: any) => e.reasoningEffort),
         defaultEffort: m.defaultReasoningEffort })) } })
@@ -195,22 +225,42 @@ export class CodexBackend implements Backend {
     })
     this.#resume = result.thread.id
     this.host.setInfo({ sessionId: this.#resume, model: this.host.settings.model ?? result.model })
-    if (resume && !this.host.blocks.length) {
-      // Fetch all pages once; Session owns attach/earlier slicing thereafter.
-      let cursor: string | undefined
-      const seen = new Set<string>()
-      do {
-        const page = await this.#request('thread/turns/list', { threadId: this.#resume, itemsView: 'full', sortDirection: 'asc', limit: 200,
-          ...(cursor ? { cursor } : {}) })
-        for (const turn of page.data ?? []) for (const item of turn.items ?? []) this.#item(item, true, true)
-        cursor = page.nextCursor ?? undefined
-        if (cursor && seen.has(cursor)) throw new Error('Codex history repeated its cursor')
-        if (cursor) seen.add(cursor)
-      } while (cursor)
-      this.#notice('history-end')
-    }
+    if (resume && !this.host.blocks.length) await this.#history()
     await this.#quota()
     this.host.setStatus('idle')
+  }
+
+  async #history(): Promise<void> {
+    let turns: any[] | undefined
+    if (this.#turnsList) {
+      try {
+        // Fetch all pages once; Session owns attach/earlier slicing thereafter.
+        const pages: any[] = []
+        let cursor: string | undefined
+        const seen = new Set<string>()
+        do {
+          const page = await this.#request('thread/turns/list', { threadId: this.#resume, itemsView: 'full', sortDirection: 'asc', limit: 200,
+            ...(cursor ? { cursor } : {}) })
+          pages.push(...(page.data ?? []))
+          cursor = page.nextCursor ?? undefined
+          if (cursor && seen.has(cursor)) throw new Error(`${this.#title()} history repeated its cursor`)
+          if (cursor) seen.add(cursor)
+        } while (cursor)
+        turns = pages
+      } catch (error) {
+        if (!unsupported(error)) throw error
+        // Remember the absence for this process instead of retrying every page.
+        this.#turnsList = false
+      }
+    }
+    if (!turns) {
+      const fallback = (await this.#request('thread/resume', {
+        threadId: this.#resume, excludeTurns: false,
+      })).thread
+      turns = Array.isArray(fallback?.turns) ? fallback.turns : []
+    }
+    for (const turn of turns ?? []) for (const item of turn.items ?? []) this.#item(item, true, true)
+    this.#notice('history-end')
   }
 
   configure(settings: Settings): void {
@@ -299,8 +349,11 @@ export class CodexBackend implements Backend {
       const pending = this.#pending.get(message.id)
       if (!pending) return
       this.#pending.delete(message.id); clearTimeout(pending.timer)
-      if (message.error) pending.reject(new Error(message.error.message))
-      else pending.resolve(message.result)
+      if (message.error) {
+        const error = new Error(message.error.message ?? `${this.#title()} request failed`)
+        if (message.error.code !== undefined) Object.assign(error, { code: message.error.code })
+        pending.reject(error)
+      } else pending.resolve(message.result)
       return
     }
     const p = message.params ?? {}
@@ -348,7 +401,7 @@ export class CodexBackend implements Backend {
       }
       case 'account/rateLimits/updated': this.#rateLimits(p.rateLimits); break
       case 'model/rerouted': this.host.setInfo({ model: p.toModel }); break
-      case 'error': if (!p.willRetry) this.#notice('backend-error', p.error?.message ?? 'Codex error'); break
+      case 'error': if (!p.willRetry) this.#notice('backend-error', p.error?.message ?? `${this.#title()} error`); break
     }
   }
 
@@ -424,7 +477,7 @@ export class CodexBackend implements Backend {
           ? [[q.id, { answers: [...entry.selected, ...(entry.custom ? [entry.custom] : [])] }]] : []
       })) }
     } else {
-      if (this.#process === child) this.#write({ id, error: { code: -32601, message: `Unsupported Codex request: ${method}` } })
+      if (this.#process === child) this.#write({ id, error: { code: -32601, message: `Unsupported ${this.#title()} request: ${method}` } })
       return
     }
     if (this.#process === child) this.#write({ id, result })

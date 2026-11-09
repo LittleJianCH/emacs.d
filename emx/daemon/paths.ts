@@ -1,7 +1,7 @@
 // paths.ts --- where a daemon keeps its socket and state, and its version.
 
 import { createHash } from 'node:crypto'
-import { lstatSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,7 +44,8 @@ export function socketPath(varDir: string): string {
 }
 
 /** Runtime files shared by the installer and code hash; never development trees. */
-export function runtimeFiles(): string[] {
+export function runtimeFiles(root = checkoutRoot,
+  runtime = root === checkoutRoot ? runtimeRoot : join(root, 'emx/dist')): string[] {
   const files: string[] = []
   const walk = (dir: string, prefix: string, pattern: RegExp): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -53,13 +54,14 @@ export function runtimeFiles(): string[] {
       else if (pattern.test(entry.name)) files.push(file)
     }
   }
-  walk(runtimeRoot, 'emx/dist', /\.(js|json)$/)
+  walk(runtime, 'emx/dist', /\.(js|json)$/)
   const dsh = 'lisp/agent/backend/dsh'
-  walk(join(checkoutRoot, dsh), dsh, /\.(mjs|yml)$/)
+  walk(join(root, dsh), dsh, /\.(mjs|yml)$/)
   const pi = 'lisp/agent/backend/pi'
   // Includes the vendored guardian's TypeScript, which Pi loads itself.
-  walk(join(checkoutRoot, pi), pi, /\.(js|ts|json)$|^LICENSE$/)
+  walk(join(root, pi), pi, /\.(js|ts|json)$|^LICENSE$/)
   files.push('bin/emx')
+  if (existsSync(join(root, 'site/emx/config.json'))) files.push('site/emx/config.json')
   return files.sort()
 }
 

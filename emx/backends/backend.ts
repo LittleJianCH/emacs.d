@@ -11,6 +11,7 @@ import type { SessionEvent } from '../daemon/protocol.ts'
 export type NewAsk = Ask extends infer A ? A extends Ask ? Omit<A, 'id'> : never : never
 
 export interface SessionHost {
+  readonly agent: string
   readonly root: string
   readonly settings: Settings
   readonly info: Info

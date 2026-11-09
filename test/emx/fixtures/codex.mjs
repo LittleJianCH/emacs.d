@@ -14,7 +14,7 @@ if (process.env.EMX_CODEX_RESTART_GATE) process.on('SIGTERM', () => {
     if (existsSync(process.env.EMX_CODEX_RESTART_GATE)) { clearInterval(timer); process.exit(0) }
   }, 5)
 })
-let turn = 0, waiting, total = 0, multiUsage = false
+let turn = 0, waiting, total = 0, multiUsage = false, experimental = false
 const usage = () => ({ last: { totalTokens: 20, inputTokens: 15, cachedInputTokens: 3, cacheWriteInputTokens: 2, outputTokens: 5 }, total: { totalTokens: total } })
 const quota = { planType: 'plus', primary: { windowDurationMins: 300, usedPercent: 25, resetsAt: 2000000000 },
   secondary: { windowDurationMins: 10080, usedPercent: 10, resetsAt: 2000000500 }, credits: { balance: '12.5', unlimited: false } }
@@ -54,21 +54,41 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     waiting = undefined; finish(JSON.stringify(msg.result)); return
   }
   switch (msg.method) {
-    case 'initialize': result(msg.id, { userAgent: 'fixture' }); break
+    case 'initialize':
+      experimental = p.capabilities?.experimentalApi === true
+      result(msg.id, { userAgent: 'fixture' }); break
     case 'initialized': break
     case 'model/list': result(msg.id, { data: [{ model: 'fake-cheap', displayName: 'Cheap',
       supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }], defaultReasoningEffort: 'low' },
+      ...(process.env.EMX_CODEX_EXTRA_MODEL ? [{ model: 'fake-extra', displayName: 'Extra',
+        supportedReasoningEfforts: [{ reasoningEffort: 'medium' }], defaultReasoningEffort: 'medium' }] : []),
       { model: 'hidden', hidden: true }] }); break
     case 'config/read':
       if (process.env.EMX_CODEX_BAD_CONFIG) result(msg.id, { config: { developer_instructions: 42 } })
       else result(msg.id, { config: { developer_instructions: '  User rules.\n' } }); break
     case 'skills/extraRoots/set': result(msg.id); break
     case 'thread/start': case 'thread/resume': case 'thread/fork':
+      // Like stricter app-server builds, excludeTurns needs the experimental API.
+      if (p.excludeTurns !== undefined && !experimental) {
+        write({ id: msg.id, error: { code: -32600, message: `${msg.method}.excludeTurns requires experimentalApi capability` } }); break
+      }
       threadId = msg.method === 'thread/fork' ? 'fork-thread-' + process.pid : p.threadId ?? 'fake-thread'
-      result(msg.id, { thread: { id: threadId }, model: p.model ?? 'fake-cheap' })
+      result(msg.id, { thread: { id: threadId,
+        ...(msg.method === 'thread/resume' && p.excludeTurns === true ? { turns: [] } : {}),
+        ...(msg.method === 'thread/resume' && p.excludeTurns !== true && process.env.EMX_CODEX_NO_TURNS_LIST
+          ? { turns: [history(1), history(2), history(3)] } : {}) }, model: p.model ?? 'fake-cheap' })
       notify('thread/tokenUsage/updated', { tokenUsage: usage() }); break
     case 'thread/list': result(msg.id, { data: [{ id: 'past-codex', name: 'Past Codex', updatedAt: 12, cwd: process.cwd() }] }); break
     case 'thread/turns/list':
+      if (process.env.EMX_CODEX_NO_TURNS_LIST === 'unknown') {
+        write({ id: msg.id, error: { code: -32000, message: 'unknown method thread/turns/list' } }); break
+      }
+      if (process.env.EMX_CODEX_NO_TURNS_LIST && process.env.EMX_CODEX_NO_TURNS_LIST !== 'second') {
+        write({ id: msg.id, error: { code: -32601, message: 'method not found' } }); break
+      }
+      if (process.env.EMX_CODEX_NO_TURNS_LIST === 'second' && p.cursor) {
+        write({ id: msg.id, error: { code: -32601, message: 'method not found' } }); break
+      }
       result(msg.id, { data: p.cursor ? [history(3)] : [history(1), history(2)], nextCursor: p.cursor ? null : 'page-2' }); break
     case 'account/rateLimits/read': result(msg.id, { rateLimits: quota }); break
     case 'turn/start': {

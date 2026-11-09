@@ -18,16 +18,19 @@ async function until(predicate: () => boolean, description = 'condition'): Promi
   throw new Error('Timed out: ' + description)
 }
 
-async function setup(t: TestContext, options: Partial<OpenParams> = {}) {
+async function setup(t: TestContext, options: Partial<OpenParams> = {},
+  extra: { config?: Record<string, unknown>, env?: Record<string, string> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'emx-dsh-'))
   const executable = process.env.EMX_DSH_EXECUTABLE
   const log = process.env.EMX_DSH_LOG
+  const saved = Object.fromEntries(Object.keys(extra.env ?? {}).map((key) => [key, process.env[key]]))
   process.env.EMX_DSH_EXECUTABLE = fileURLToPath(new URL('./fixtures/dsh.mjs', import.meta.url))
   process.env.EMX_DSH_LOG = join(dir, 'bridge.jsonl')
+  Object.assign(process.env, extra.env)
   await mkdir(join(dir, 'emx'), { recursive: true })
   await writeFile(join(dir, 'emx/config.json'), JSON.stringify({
     collab: { handleCommand: [], agentHandleCommands: {}, closeFinished: false },
-    usage: { pollInterval: 0 },
+    usage: { pollInterval: 0 }, ...extra.config,
   }))
   const daemon = new DaemonServer({ varDir: dir })
   let client: Awaited<ReturnType<typeof SocketClient.connect>>
@@ -38,6 +41,10 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}) {
     else process.env.EMX_DSH_EXECUTABLE = executable
     if (log === undefined) delete process.env.EMX_DSH_LOG
     else process.env.EMX_DSH_LOG = log
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     await rm(dir, { recursive: true, force: true })
   })
   await daemon.start()
@@ -58,6 +65,23 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}) {
   }
   const requests = async () => (await readFile(join(dir, 'bridge.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
   return { dir, daemon, client, id, attached, session, send, requests }
+}
+
+for (const override of [false, true]) {
+  test(`dsh aliases isolate canonical overrides and use their ${override ? 'identity override' : 'configured executable'}`, async (t) => {
+    const executable = fileURLToPath(new URL('./fixtures/dsh.mjs', import.meta.url))
+    const { requests, send, session } = await setup(t, { agent: 'acme' }, {
+      config: { agents: { acme: { backend: 'dsh', title: 'Acme',
+        executable: override ? '/does-not-exist' : executable, extraArgs: ['--acme-extra'] } } },
+      env: { EMX_DSH_EXECUTABLE: '/does-not-exist',
+        ...(override ? { EMX_ACME_EXECUTABLE: executable } : {}) },
+    })
+    const init = (await requests()).find((request) => request.method === 'initialize')
+    assert.equal(init.argv.at(-1), '--acme-extra')
+    await send('alias message')
+    assert.equal(session.agent, 'acme')
+    assert.equal(session.status, 'idle')
+  })
 }
 
 test('initialize passes local launch, settings, parent and MCP; advertises choices', async (t) => {

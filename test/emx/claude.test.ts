@@ -19,7 +19,8 @@ const editorTools = {
   readOnly: ['context', 'context', 'session_start', 'removed'],
 }
 
-async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?: string, config?: Record<string, unknown>) {
+async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?: string, config?: Record<string, unknown>,
+  extra: { config?: Record<string, unknown>, env?: Record<string, string> } = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'emx-claude-')))
   const saved = { ...process.env }
   delete process.env.EMX_CLAUDE_CONFIG
@@ -27,17 +28,19 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
   process.env.EMX_CLAUDE_EXECUTABLE = fileURLToPath(new URL('./fixtures/claude.mjs', import.meta.url))
   process.env.EMX_CLAUDE_LOG = join(dir, 'calls.jsonl')
   process.env.EMX_CLAUDE_PROJECTS_DIR = join(dir, 'projects')
+  Object.assign(process.env, extra.env)
   const file = join(dir, 'projects', encodePath(dir), `${options.resume ?? 'fixture-native'}.jsonl`)
   if (history) { await mkdir(join(dir, 'projects', encodePath(dir)), { recursive: true }); await writeFile(file, history) }
   await mkdir(join(dir, 'emx'), { recursive: true })
   await writeFile(join(dir, 'emx/config.json'), JSON.stringify({
-    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
+    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 }, ...extra.config,
   }))
   const daemon = new DaemonServer({ varDir: dir })
   let client: Awaited<ReturnType<typeof SocketClient.connect>> | undefined
   t.after(async () => {
     await daemon.stop(); await client?.close()
     for (const key of Object.keys(process.env)) if (key.startsWith('EMX_CLAUDE_')) delete process.env[key]
+    for (const key of Object.keys(extra.env ?? {})) delete process.env[key]
     Object.assign(process.env, saved)
     await rm(dir, { recursive: true, force: true })
   })
@@ -58,6 +61,28 @@ async function setup(t: TestContext, options: Partial<OpenParams> = {}, history?
     return client.notifications.slice(from)
   }
   return { dir, file, daemon, client, id, attached, session, calls, send }
+}
+
+for (const override of [false, true]) {
+  test(`Claude aliases isolate canonical overrides and use their ${override ? 'identity override' : 'configured executable'}`, async (t) => {
+    const executable = fileURLToPath(new URL('./fixtures/claude.mjs', import.meta.url))
+    const { calls, send, session } = await setup(t, { agent: 'acme' }, undefined, undefined, {
+      config: { agents: { acme: { backend: 'claude', title: 'Acme',
+        executable: override ? '/does-not-exist' : executable, extraArgs: ['--acme-extra'],
+        disallowedTools: ['AcmeTool'] } } },
+      env: { EMX_CLAUDE_EXECUTABLE: '/does-not-exist',
+        EMX_CLAUDE_CONFIG: override ? '{' : JSON.stringify({ executable: '/does-not-exist',
+          extraArgs: ['--canonical-extra'], disallowedTools: ['CanonicalTool'] }),
+        ...(override ? { EMX_ACME_EXECUTABLE: executable } : {}) },
+    })
+    const argv = (await calls()).find((call) => call.type === 'spawn').argv
+    assert.ok(argv.includes('--acme-extra'))
+    assert.ok(!argv.includes('--canonical-extra'))
+    assert.equal(argv[argv.indexOf('--disallowedTools') + 1], 'AcmeTool')
+    await send('alias message')
+    assert.equal(session.agent, 'acme')
+    assert.ok(session.blocks.some((block) => block.type === 'text' && block.text === 'alias message'))
+  })
 }
 
 async function until(predicate: () => boolean | Promise<boolean>) {

@@ -7,7 +7,7 @@ import { ConfigFiles, configNames, configTools } from './config-files.ts'
 import { Outbox } from '../remote/outbox.ts'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { Configuration } from '../config.ts'
+import { agentBackend, Configuration } from '../config.ts'
 import { Collaboration, sessionForkInfo, toolNames } from './collab.ts'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
@@ -45,6 +45,7 @@ export interface ServerOptions {
   remote?: boolean
   idleExit?: number
   configFile?: string
+  siteConfigFile?: string
   restart?: (runtime: string) => void
   log?: (message: string) => void
 }
@@ -139,7 +140,8 @@ export class DaemonServer {
     this.varDir = resolve(options.varDir)
     this.socket = options.socket ?? socketPath(this.varDir)
     this.editor = new Editor(stateDir(this.varDir))
-    this.configuration = new Configuration(this.varDir, options.configFile, options.remote ? join(homedir(), '.config/emx/config.json') : undefined)
+    this.configuration = new Configuration(this.varDir, options.configFile,
+      options.remote ? join(homedir(), '.config/emx/config.json') : undefined, options.siteConfigFile)
     if (options.remote) this.environments = new ProjectEnvironments()
     if (options.remote) this.outbox = new Outbox(join(stateDir(this.varDir), 'usage-outbox.json'))
     this.configFiles = new ConfigFiles(async (method, file) => {
@@ -286,7 +288,7 @@ export class DaemonServer {
       }))
       this.#refreshRootTools(saved.root)
       return env
-    } : undefined, agentConfig: () => this.configuration.value.agents[session.agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root, session), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    } : undefined, agentConfig: (agent) => this.configuration.value.agents[agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root, session), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
     return session
   }
 
@@ -336,7 +338,7 @@ export class DaemonServer {
       try {
         const record = object(entry)
         const agent = string(record.agent, 'agent')
-        if (!Object.hasOwn(backends, agent)) throw new Error(`Unknown agent: ${agent}`)
+        if (!Object.hasOwn(this.configuration.value.agents, agent) && !Object.hasOwn(backends, agent)) throw new Error(`Unknown agent: ${agent}`)
         const saved: SavedSession = { id: string(record.id, 'id'), agent,
           creationId: optionalString(record.creationId, 'creationId'),
           root: string(record.root, 'root'), info: object(record.info ?? {}),
@@ -455,9 +457,11 @@ export class DaemonServer {
 
   #hostPollers(enabled = this.usage.agents): UsageConfig['pollers'] {
     const agents = this.configuration.value.agents
-    return Object.fromEntries(['claude', 'codex', 'dsh', 'pi'].filter((name) => agents[name] && enabled.includes(name)).map((name) => [name,
-      { command: [agents[name].executable, ...(name === 'dsh' ? ['--profile', 'sdk', '--patch',
-        join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')] : [])] }]))
+    return Object.fromEntries(Object.keys(agents).filter((name) => enabled.includes(name)
+      && ['claude', 'codex', 'dsh', 'pi'].includes(agentBackend(this.configuration.value, name))).map((name) => [name,
+      { backend: agentBackend(this.configuration.value, name),
+        command: [agents[name].executable, ...(agentBackend(this.configuration.value, name) === 'dsh' ? ['--profile', 'sdk', '--patch',
+          join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')] : []), ...(agents[name].extraArgs ?? [])] }]))
   }
 
   #tools(value: unknown): void {
@@ -510,12 +514,13 @@ export class DaemonServer {
 
   async #select(session: Session, params: Record<string, unknown>) {
     const agent = string(params.agent, 'agent'), model = params.model === null ? null : string(params.model, 'model')
-    if (!Object.hasOwn(backends, agent) || !this.configuration.value.agents[agent]) invalid(`Unknown agent: ${agent}`)
+    if (!Object.hasOwn(this.configuration.value.agents, agent)) invalid(`Unknown agent: ${agent}`)
     if (params.unrestricted !== undefined && typeof params.unrestricted !== 'boolean') invalid('Expected boolean: unrestricted')
     const explicit = optionalString(params.profile, 'profile')
     const profile = explicit ?? (params.unrestricted ? 'orchestrator' : sessionProfile(session))
     if (this.environments) await this.environments.get(session.root)
-    const currentMode = session.settings.mode ?? (session.agent === 'claude' ? 'ask' : session.agent === 'codex' ? 'edits' : 'plan')
+    const kind = agentBackend(this.configuration.value, session.agent)
+    const currentMode = session.settings.mode ?? (kind === 'claude' ? 'ask' : kind === 'codex' ? 'edits' : 'plan')
     const requested = settings(params)
     let selected: Settings
     if (!params.unrestricted || explicit !== undefined) {
@@ -715,7 +720,8 @@ export class DaemonServer {
       case 'usage/clear': return this.usage.clear()
       case 'sessions/history': {
         const agent = string(params.agent, 'agent')
-        if (!['claude', 'codex', 'dsh', 'pi'].includes(agent)) invalid(`Unknown history agent: ${agent}`)
+        if (!Object.hasOwn(this.configuration.value.agents, agent)
+          || !['claude', 'codex', 'dsh', 'pi'].includes(agentBackend(this.configuration.value, agent))) invalid(`Unknown history agent: ${agent}`)
         const root = string(params.root, 'root')
         return history(agent, root, this.configuration.value.agents[agent],
           this.environments ? () => this.environments!.get(root) : undefined).then((items) => ({ items }))
@@ -770,7 +776,7 @@ export class DaemonServer {
         if (resume && !agent) invalid('Native resume requires its original agent')
         const useProfile = !source && (!agent || profile !== undefined)
         if (useProfile) profile ??= 'orchestrator'
-        if (agent !== undefined && !Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
+        if (agent !== undefined && !Object.hasOwn(this.configuration.value.agents, agent) && !Object.hasOwn(backends, agent)) invalid(`Unknown agent: ${agent}`)
         if (!source && profile && !Object.hasOwn(this.configuration.value.profiles, profile)) invalid(`Unknown profile: ${profile}`)
         const handle = optionalString(params.handle, 'handle')
         const parent = source ? undefined : optionalString(params.parent, 'parent')

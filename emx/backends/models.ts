@@ -3,14 +3,16 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { AgentConfig } from '../config.ts'
 import { allowedModel } from './pi.ts'
+import { allowedModel as allowedCodexModel } from './codex.ts'
 
 export interface ModelChoice { id: string, label?: string }
 
 /** Query only capabilities; never create a thread or send a model prompt. */
 export async function agentModels(agent: string, config: AgentConfig, root: string, env: NodeJS.ProcessEnv = process.env): Promise<ModelChoice[]> {
-  if (agent === 'claude') return ['default', 'sonnet', 'opus', 'haiku'].map((id) => ({ id }))
-  if (!['codex', 'pi'].includes(agent)) return []
-  const pi = agent === 'pi'
+  const kind = config.backend ?? agent
+  if (kind === 'claude') return ['default', 'sonnet', 'opus', 'haiku'].map((id) => ({ id }))
+  if (!['codex', 'pi'].includes(kind)) return []
+  const pi = kind === 'pi'
   const args = pi ? ['--mode', 'rpc', '--no-session', '--no-extensions', '--no-skills'] : ['app-server']
   const child = spawn(env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? config.executable,
     [...args, ...config.extraArgs ?? []], { cwd: root, env, stdio: 'pipe' })
@@ -50,7 +52,7 @@ export async function agentModels(agent: string, config: AgentConfig, root: stri
     let cursor: string | undefined
     do {
       const result = await request('model/list', { limit: 100, ...(cursor ? { cursor } : {}) })
-      models.push(...(result.data ?? []).filter((m: any) => !m.hidden)
+      models.push(...(result.data ?? []).filter((m: any) => !m.hidden && allowedCodexModel(String(m.model), config))
         .map((m: any) => ({ id: m.model, label: m.displayName })))
       cursor = result.nextCursor ?? undefined
     } while (cursor)

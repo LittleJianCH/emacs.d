@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import type { TestContext } from 'node:test'
 import { DaemonServer } from '../../emx/daemon/server.ts'
-import { developerInstructions, itemView, modes } from '../../emx/backends/codex.ts'
+import { allowedModel, developerInstructions, itemView, modes } from '../../emx/backends/codex.ts'
 import type { OpenParams } from '../../emx/daemon/protocol.ts'
 import { SocketClient } from './client.ts'
 
@@ -18,20 +18,27 @@ const editorTools = {
   readOnly: ['context', 'context', 'session_start', 'removed'],
 }
 
-async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfig = false, restartGate = false) {
+async function setup(t: TestContext, options: Partial<OpenParams> = {}, badConfig = false, restartGate = false,
+  extra: { config?: Record<string, unknown>, env?: Record<string, string | undefined> } = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'emx-codex-')))
-  const keys = ['EMX_CODEX_EXECUTABLE', 'EMX_CODEX_LOG', 'EMX_CODEX_BAD_CONFIG', 'EMX_CODEX_CONFIG', 'EMX_CODEX_RESTART_GATE']
+  const keys = ['EMX_CODEX_EXECUTABLE', 'EMX_CODEX_LOG', 'EMX_CODEX_BAD_CONFIG', 'EMX_CODEX_CONFIG', 'EMX_CODEX_RESTART_GATE',
+    ...Object.keys(extra.env ?? {})]
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
   process.env.EMX_CODEX_EXECUTABLE = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url))
   process.env.EMX_CODEX_LOG = join(dir, 'rpc.jsonl')
   process.env.EMX_CODEX_CONFIG = '{}'
+  for (const key of Object.keys(extra.env ?? {})) delete process.env[key]
   if (restartGate) process.env.EMX_CODEX_RESTART_GATE = join(dir, 'restart-gate')
   else delete process.env.EMX_CODEX_RESTART_GATE
   if (badConfig) process.env.EMX_CODEX_BAD_CONFIG = '1'
   else delete process.env.EMX_CODEX_BAD_CONFIG
+  for (const [key, value] of Object.entries(extra.env ?? {})) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
   await mkdir(join(dir, 'emx'), { recursive: true })
   await writeFile(join(dir, 'emx/config.json'), JSON.stringify({
-    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 },
+    collab: { handleCommand: [], agentHandleCommands: {} }, usage: { pollInterval: 0 }, ...extra.config,
   }))
   const daemon = new DaemonServer({ varDir: dir })
   let client: Awaited<ReturnType<typeof SocketClient.connect>> | undefined
@@ -94,6 +101,46 @@ test('top-level Codex forks persist and resume their own thread after restart an
     await saved.start()
     await checkResume()
   } finally { await restored.stop() }
+})
+
+test('configured Codex aliases use their own executable, title, arguments, models and resume', async (t) => {
+  const executable = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url))
+  const { attached, session, send, requests, client } = await setup(t, { agent: 'acme' }, false, false, {
+    config: { agents: { acme: { backend: 'codex', title: 'Acme', executable, extraArgs: ['--acme-extra'],
+      nativeSubagents: true, models: { include: ['^fake-extra$'], exclude: ['preview'] } } } },
+    // The canonical environment override must not hijack an alias.
+    env: { EMX_CODEX_EXTRA_MODEL: '1', EMX_CODEX_EXECUTABLE: '/does/not/exist/codex',
+      EMX_CODEX_CONFIG: JSON.stringify({ extraArgs: ['--canonical-extra'], nativeSubagents: false }) },
+  })
+  assert.deepEqual(attached.capabilities.models.map((model) => model.id), ['fake-extra'])
+  assert.deepEqual(attached.capabilities.models[0].efforts, ['medium'])
+  const init = (await requests()).find((request) => request.method === 'initialize')
+  assert.ok(init.argv.includes('--acme-extra'))
+  assert.ok(!init.argv.includes('--canonical-extra'))
+  assert.ok(!init.argv.includes('agents.enabled=false'))
+  await send('hi')
+  assert.ok(session.blocks.some((block) => block.type === 'text' && block.text === 'hi' && block.done))
+  const thread = session.resumeId()!
+  await session.restart()
+  await send('again')
+  const resumed = (await requests()).filter((request) => request.method === 'thread/resume')
+  assert.equal((await requests()).filter((request) => request.method === 'thread/start').length, 1)
+  assert.equal(resumed.length, 1)
+  assert.equal(resumed[0].params.threadId, thread)
+  const from = client.notifications.length
+  await client.request('session/send', { id: session.id, text: 'crash' })
+  await client.waitFor((n) => n.method === 'status' && n.params.status === 'exited', 5000, 'alias exit', from)
+  assert.ok(session.blocks.some((block) => block.type === 'notice' && block.notice.args?.message === 'Acme exited (7)'))
+  assert.ok(!session.blocks.some((block) => block.type === 'notice' && /Codex exited/.test(String(block.notice.args?.message))))
+  await send('recovered')
+  assert.equal((await requests()).findLast((request) => request.method === 'thread/resume').params.threadId, thread)
+})
+
+test('Codex model filters use the configured include and exclude patterns', () => {
+  assert.equal(allowedModel('fake-cheap'), true)
+  assert.equal(allowedModel('fake-cheap', { models: { include: ['^fake'], exclude: [] } }), true)
+  assert.equal(allowedModel('fake-cheap', { models: { include: ['^fake'], exclude: ['cheap'] } }), false)
+  assert.equal(allowedModel('hidden', { models: { include: ['^fake'], exclude: [] } }), false)
 })
 
 test('Codex launches private daemon MCP, skill replacements, modes and instructions', async (t) => {
@@ -297,6 +344,32 @@ for (const text of ['delayed', 'response-only']) {
   })
 }
 
+for (const mode of ['-32601', 'unknown', 'second']) {
+  test(`Codex falls back to thread turns when thread/turns/list is unavailable (${mode})`, async (t) => {
+    const { attached, session, send, requests, client } = await setup(t, { resume: 'fake-thread' }, false, false,
+      { env: { EMX_CODEX_NO_TURNS_LIST: mode } })
+    assert.equal(attached.earlier, true)
+    assert.equal(session.blocks.filter((block) => block.type === 'user').length, 3)
+    for (const n of [1, 2, 3]) assert.ok(session.blocks.some((block) => block.id === `old-user-${n}`))
+    assert.ok(session.blocks.some((block) => block.type === 'notice' && block.notice.kind === 'history-end'))
+    assert.ok(!session.blocks.some((block) => block.type === 'notice' && block.notice.kind === 'backend-error'))
+    const pages = async () => (await requests()).filter((request) => request.method === 'thread/turns/list').length
+    assert.equal(await pages(), mode === 'second' ? 2 : 1)
+    const resumes = (await requests()).filter((request) => request.method === 'thread/resume')
+    // Normal resumes leave turns to the pager; only the fallback asks for them inline.
+    assert.deepEqual(resumes.map((r) => r.params.excludeTurns), [true, false])
+    // The fallback still supplies every page Session.earlier can request.
+    const from = client.notifications.length
+    await client.request('session/earlier', { id: session.id, before: 'old-user-3', turns: 1 })
+    const early = await client.waitFor((n) => n.method === 'block/add' && n.params.block.id === 'old-user-2',
+      5000, 'fallback earlier', from)
+    assert.equal(early.params.history, true)
+    assert.equal(await pages(), mode === 'second' ? 2 : 1)
+    await send('after-fallback')
+    assert.equal(session.status, 'idle')
+  })
+}
+
 test('Codex resumes paged thread history, attach earlier turns excludes usage; crash resumes saved id', async (t) => {
   const { client, id, attached, requests, session, send } = await setup(t, { resume: 'fake-thread' })
   assert.equal(attached.earlier, true)
@@ -366,4 +439,14 @@ test('delegating Codex sessions auto-approve session_rate in plan mode', async (
   const argv = (await requests()).find((r) => r.method === 'initialize').argv
   assert.ok(argv.includes('mcp_servers.emacs.tools.session_rate.approval_mode="approve"'))
   assert.ok(session.editorTools().readOnly.includes('session_rate'))
+})
+
+
+test('canonical identity retains its legacy config environment override', async (t) => {
+  const { requests } = await setup(t, {}, false, false, {
+    env: { EMX_CODEX_CONFIG: JSON.stringify({ extraArgs: ['--canonical-extra'], nativeSubagents: true }) },
+  })
+  const argv = (await requests()).find((request) => request.method === 'initialize').argv
+  assert.ok(argv.includes('--canonical-extra'))
+  assert.ok(!argv.includes('agents.enabled=false'))
 })

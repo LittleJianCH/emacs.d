@@ -102,7 +102,7 @@ export class DshBackend implements Backend {
     // An executable override supports installations outside PATH and protocol fixtures.
     const config = this.host.agentConfig?.()
     const env = await this.host.environment?.()
-    const child = spawn(process.env.EMX_DSH_EXECUTABLE ?? config?.executable ?? 'dsh',
+    const child = spawn(process.env[`EMX_${this.host.agent.toUpperCase()}_EXECUTABLE`] ?? config?.executable ?? 'dsh',
       ['--profile', 'sdk', '--patch', patch,
         ...config?.nativeSubagents ? [] : ['--patch', noSubagents], ...(config?.extraArgs ?? [])],
       { cwd: this.host.root, env, stdio: 'pipe' })

@@ -1,10 +1,10 @@
 import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, readFileSync, writeFileSync, renameSync, rmSync, openSync, closeSync, readdirSync, fstatSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, openSync, closeSync, readdirSync, fstatSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Configuration, merge, validate } from '../../emx/config.ts'
+import { agentBackend, Configuration, merge, validate } from '../../emx/config.ts'
 import { emxRoot } from '../../emx/daemon/paths.ts'
 import { DaemonServer } from '../../emx/daemon/server.ts'
 import { SocketClient } from './client.ts'
@@ -198,4 +198,91 @@ test('daemon exposes effective config, watches both paths after atomic replace a
     assert.equal(result.config.collab.maxActive, 1)
     assert.equal((await client.request('config/get', {})).config.collab.maxActive, 1)
   } finally { await mcp.close(); await client.close(); await daemon.stop(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+
+test('agent identities select registered protocols and reject unknown kinds', () => {
+  const c = validate(merge(defaults(), { agents: { acme: { backend: 'codex', title: 'Acme', executable: 'acme' } } }))
+  assert.equal(agentBackend(c, 'acme'), 'codex')
+  assert.equal(agentBackend(c, 'codex'), 'codex')
+  for (const backend of ['missing', '', null, 12, 'constructor', '__proto__']) {
+    assert.throws(() => validate(merge(c, { agents: { acme: { backend } } })), /agents.acme.backend/)
+  }
+  const { backend, ...identity } = c.agents.acme
+  assert.throws(() => validate({ ...c, agents: { ...c.agents, acme: identity } }), /agents.acme.backend/)
+})
+
+test('temporary var directories ignore implicit site policy while the default var opts in', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'emx-site-isolation-'))
+  const paths = { defaultVar: join(dir, 'var'), site: join(dir, 'site/emx/config.json') }
+  mkdirSync(join(dir, 'site/emx'), { recursive: true })
+  writeFileSync(paths.site, JSON.stringify({ agents: {
+    acme: { backend: 'codex', title: 'Acme', executable: 'acme' },
+  } }))
+  // Substitute installation paths so the real checkout's site is never touched.
+  const isolated = new Configuration(join(dir, 'temporary'), undefined, undefined, undefined, paths)
+  const local = new Configuration(join(paths.defaultVar, '.'), undefined, undefined, undefined, paths)
+  const host = new Configuration(join(dir, 'host'), undefined, join(dir, 'host.json'), undefined, paths)
+  try {
+    assert.equal(isolated.site, undefined)
+    assert.equal(isolated.value.agents.acme, undefined)
+    assert.equal(host.site, undefined, 'temporary host simulations also stay isolated')
+    assert.equal(host.value.agents.acme, undefined)
+    assert.equal(local.site, paths.site)
+    assert.equal(local.value.agents.acme.backend, 'codex')
+    writeFileSync(paths.site, '{')
+    assert.deepEqual(isolated.reload().errors, [])
+    assert.deepEqual(host.reload().errors, [])
+    assert.equal(local.reload().errors.length, 1, 'the default var still reads site policy')
+  } finally {
+    isolated.close(); local.close(); host.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('site policy merges before var policy and supplies host executable overrides', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'emx-site-'))
+  const tracked = join(dir, 'emx/config.json'), site = join(dir, 'site/emx/config.json')
+  mkdirSync(join(dir, 'emx'), { recursive: true }); mkdirSync(join(dir, 'site/emx'), { recursive: true })
+  writeFileSync(tracked, JSON.stringify(defaults()))
+  writeFileSync(site, JSON.stringify({ agents: { acme: { backend: 'codex', title: 'Acme', executable: 'acme', extraArgs: ['site'] } },
+    profiles: { coder: { agent: 'acme', model: 'site-model' } }, collab: { maxActive: 3 } }))
+  const local = new Configuration(join(dir, 'local'), tracked, undefined, site)
+  const hostFile = join(dir, 'host.json')
+  writeFileSync(hostFile, JSON.stringify({ agents: { acme: { executable: 'host-acme' } } }))
+  const host = new Configuration(join(dir, 'host'), tracked, hostFile, site)
+  let restored: Configuration | undefined
+  try {
+    assert.deepEqual(local.errors, [])
+    assert.equal(local.value.collab.maxActive, 3)
+    assert.equal(local.value.profiles.coder.agent, 'acme')
+    assert.equal(local.value.profiles.coder.candidates, undefined)
+    assert.equal(host.value.agents.acme.executable, 'host-acme', 'installed site agents exist before any config push')
+    assert.equal(local.set(['agents', 'acme', 'extraArgs'], ['var']).config.agents.acme.backend, 'codex')
+    assert.deepEqual(local.value.agents.acme.extraArgs, ['var'])
+    local.set(['profiles', 'coder', 'candidates'], [{ agent: 'acme', model: 'var-model' }])
+    assert.equal(local.value.profiles.coder.agent, undefined)
+    local.set(['profiles', 'coder'], null)
+    assert.equal(local.value.profiles.coder.agent, 'acme', 'deleting var policy reveals the site default')
+    assert.deepEqual(host.push(local.value).errors, [])
+    assert.equal(host.value.agents.acme.executable, 'host-acme')
+    assert.deepEqual(host.value.agents.acme.extraArgs, ['var'])
+    restored = new Configuration(join(dir, 'host'), tracked, hostFile, site)
+    assert.equal(restored.value.agents.acme.executable, 'host-acme')
+    writeFileSync(hostFile, JSON.stringify({ agents: { acme: { backend: 'echo' } } }))
+    assert.match(host.reload().errors[0], /only override/)
+    assert.equal(host.value.agents.acme.backend, 'codex')
+    const changed = new Promise<void>((resolve) => local.watch((result) => {
+      if (result.config.agents.acme.title === 'Acme updated') resolve()
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    writeFileSync(site, JSON.stringify({ agents: { acme: { backend: 'codex', title: 'Acme updated', executable: 'acme' } } }))
+    await Promise.race([changed, new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('Site watcher timed out')), 3000)
+      timer.unref()
+    })])
+    writeFileSync(site, '{')
+    assert.equal(local.reload().errors.length, 1)
+    assert.equal(local.value.agents.acme.title, 'Acme updated')
+  } finally { local.close(); host.close(); restored?.close(); rmSync(dir, { recursive: true, force: true }) }
 })

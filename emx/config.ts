@@ -1,11 +1,13 @@
 // config.ts --- validated configuration, last-good reloads and directory watches.
 import { readFileSync, watchFile, unwatchFile, mkdirSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
-import { emxRoot, stateDir } from './daemon/paths.ts'
+import { dirname, join, resolve } from 'node:path'
+import { checkoutRoot, defaultVar, emxRoot, stateDir } from './daemon/paths.ts'
+import { backends } from './backends/backend.ts'
 import type { EditorTools } from './daemon/protocol.ts'
 
 export interface AgentConfig {
+  backend?: string
   title: string
   executable: string
   extraArgs?: string[]
@@ -82,6 +84,10 @@ export interface Config {
   daemon: { idleExit: number }
   sessions: { hibernateAfter: number }
 }
+/** Resolve a configured identity to its protocol adapter. */
+export function agentBackend(config: Pick<Config, 'agents'>, name: string): string {
+  return config.agents[name]?.backend ?? name
+}
 function object(value: unknown): value is Record<string, any> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -130,7 +136,9 @@ export function validate(value: unknown): Config {
   for (const [name, a] of Object.entries(obj(c.agents, 'agents'))) {
     const p = `agents.${name}`
     if (!name || name.includes('/')) fail(p, 'nonempty agent name without /')
-    keys(a, ['title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'quotaSkip', 'models', 'autoAllowTools'], p)
+    keys(a, ['backend', 'title', 'executable', 'extraArgs', 'nativeSubagents', 'disallowedTools', 'historyTurns', 'defaultModel', 'quotaSkip', 'models', 'autoAllowTools'], p)
+    if (a.backend !== undefined) str(a.backend, p + '.backend')
+    if (!Object.hasOwn(backends, a.backend ?? name)) fail(p + '.backend', 'registered backend')
     str(a.title, p + '.title'); str(a.executable, p + '.executable')
     if (!a.executable) fail(p + '.executable', 'nonempty string')
     if (a.extraArgs !== undefined) array(a.extraArgs, p + '.extraArgs')
@@ -234,13 +242,17 @@ export class Configuration {
   overriddenProfiles: string[] = []
   readonly defaults: string
   readonly override: string
+  readonly site?: string
   #base?: Config
   readonly baseFile?: string
   readonly host: boolean
   #watched: string[] = []
   #timer?: NodeJS.Timeout
-  constructor(varDir: string, defaults = join(emxRoot, 'config.json'), hostOverride?: string) {
+  constructor(varDir: string, defaults = join(emxRoot, 'config.json'), hostOverride?: string,
+    site?: string, paths = { defaultVar, site: join(checkoutRoot, 'site/emx/config.json') }) {
     this.defaults = defaults
+    // Alternate state directories stay isolated; launchers can opt in explicitly.
+    this.site = site ?? (resolve(varDir) === resolve(paths.defaultVar) ? paths.site : undefined)
     this.host = hostOverride !== undefined
     this.override = hostOverride ?? join(stateDir(varDir), 'config.json')
     if (this.host) {
@@ -251,10 +263,20 @@ export class Configuration {
     this.value = validate(JSON.parse(readFileSync(defaults, 'utf8')))
     this.reload()
   }
+  /** Installed site policy is shared by local and host runtimes. */
+  #defaults(): Config {
+    const defaults = JSON.parse(readFileSync(this.defaults, 'utf8'))
+    if (!this.site) return defaults
+    let site = {}
+    try { site = JSON.parse(readFileSync(this.site, 'utf8')) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    if (!object(site)) throw new Error(`${this.site}: expected object`)
+    return mergeConfiguration(defaults, site)
+  }
   reload(): { config: Config, errors: string[], changed: boolean } {
     let changed = false
     try {
-      const base = this.#base ?? JSON.parse(readFileSync(this.defaults, 'utf8'))
+      const base = this.#base ?? this.#defaults()
       let override = {}
       try { override = JSON.parse(readFileSync(this.override, 'utf8')) }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
@@ -327,7 +349,7 @@ export class Configuration {
     try { overlay = JSON.parse(readFileSync(this.override, 'utf8')) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     if (!object(overlay)) throw new Error(`${this.override}: expected object`)
-    const base = JSON.parse(readFileSync(this.defaults, 'utf8'))
+    const base = this.#defaults()
     const value = change(() => mergeConfiguration(base, overlay))
     if (value === undefined) throw new Error('config/set requires value (use null to delete)')
     const edit = (target: Record<string, any>, index: number): void => {
@@ -363,7 +385,7 @@ export class Configuration {
    * A newer client may send keys this host doesn't know yet: drop them, so
    * the host stays reachable until it is upgraded itself. */
   #complete(value: unknown): Config {
-    const defaults = JSON.parse(readFileSync(this.defaults, 'utf8'))
+    const defaults = this.#defaults()
     for (;;) {
       try { return validate(mergeConfiguration(defaults, value)) }
       catch (error) {
@@ -383,8 +405,9 @@ export class Configuration {
   }
   watch(changed: (result: ReturnType<Configuration['reload']>) => void): void {
     mkdirSync(dirname(this.override), { recursive: true, mode: 0o700 })
-    for (const file of [this.defaults, this.override]) {
-      // Poll the two tiny files, including inode replacement and deletion.
+    for (const file of [this.defaults, this.site, this.override]) {
+      if (!file) continue
+      // Poll the tiny files, including inode replacement and deletion.
       // fs.watch can exhaust kqueue watches in long-lived editor processes.
       watchFile(file, { interval: 250, persistent: false }, () => {
         clearTimeout(this.#timer)
