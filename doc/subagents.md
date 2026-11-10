@@ -339,6 +339,15 @@ schemas behind ToolSearch, so the `session_start` description and
 how to call it and how to brief, and never restate when. Codex repeats the
 instructions before every tool, so the rule stays short.
 
+In a user conversation the orchestrator's job is to clarify, plan, brief,
+check and integrate; the work itself goes to subagents by default, and it keeps
+only what is quicker to do than to brief. Its tools are not restricted: the
+prompt encourages delegation rather than enforcing it. Implementation goes to a
+profile meant for it, with the goal, files, constraints and verification; the
+orchestrator checks the report and diff instead of redoing the work, and edits
+itself only a few lines in a file already open or a quick fix to a delegated
+result.
+
 The rule is shaped by the question, not by a count or by parallelism. Where
 something is used, how a path works across files and what another codebase
 does there are delegated before the second lookup, even as the user's whole question or a

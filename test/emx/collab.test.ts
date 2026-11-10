@@ -83,6 +83,8 @@ test('one visible delegation rule: shaped by question, with its exceptions; tool
   assert.doesNotMatch(d, /only for[^]*, a fact one grep settles/)
   assert.match(d, /explaining code the\s+user already pointed at/)
   assert.match(d, /- Runs: delegate builds, benchmarks and test series[^]*don't run them yourself/)
+  assert.match(d, /In a user conversation your job is to clarify, plan,\s+brief, check and integrate: hand the work itself to subagents by default/)
+  assert.match(d, /- Implementation: delegate code changes to a profile meant for\s+implementation[^]*Edit yourself only for a\s+few lines in a file you already have open/)
   assert.match(d, /even as the user's whole question or a follow-up/)
   assert.match(d, /Stay local only for[^]*reading a diff to plan an atomic review/)
   assert.match(d, /If session_start\s+started you, use only helper profiles/)
