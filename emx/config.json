@@ -167,6 +167,12 @@
       "candidates": [
         {
           "agent": "claude",
+          "model": "claude-fable-5-2",
+          "mode": "auto",
+          "effort": "xhigh"
+        },
+        {
+          "agent": "claude",
           "model": "opus",
           "mode": "auto",
           "effort": "xhigh"
@@ -220,7 +226,7 @@
       "candidates": [
         {
           "agent": "claude",
-          "model": "fable",
+          "model": "claude-fable-5-2",
           "mode": "plan",
           "effort": "max"
         },
