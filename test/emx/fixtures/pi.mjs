@@ -79,7 +79,15 @@ function receive(m) {
       response(m, { disposition: 'started' }); write({ type: 'agent_start' }); write({ type: 'turn_start' })
       if (m.message === 'hold' || m.message.endsWith('\nhold')) break
       if (m.message === 'exit') { process.exit(7); break }
-      if (m.message === 'retry') write({ type: 'auto_retry_start', attempt: 1, errorMessage: 'fixture retry' })
+      if (m.message === 'retry' || m.message === 'retry-fail') {
+        const failed = { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'fixture retry' }
+        write({ type: 'message_end', message: failed })
+        write({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 0, errorMessage: 'fixture retry' })
+        if (m.message === 'retry-fail') {
+          write({ type: 'message_end', message: failed })
+          write({ type: 'auto_retry_end', success: false, attempt: 1, finalError: 'fixture retry' })
+        }
+      }
       if (m.message === 'bad-model') model = models[2]
       let call
       try { call = JSON.parse(m.message) } catch { /* Normal text prompt. */ }

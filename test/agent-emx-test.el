@@ -803,6 +803,8 @@ Only an idle completion, marked autonomous, starts a turn."
     (should (equal (plist-get (agent-session--block session "plan") :title) "更新计划"))
     (should (equal (plist-get (agent-session--block session "plan") :output) "☑ A\n▶ B"))
     (dolist (notice '(("backend-error" (:message "boom") "出错：boom")
+                      ("pi-retry" (:message "timeout" :attempt 1 :maxAttempts 3)
+                       "出错：timeout（第 1/3 次重试）")
                       ("command-error" (:message "bad") "命令失败：bad")
                       ("command-result" nil "命令已执行")
                       ("max-tokens" nil "输出达到 token 上限")

@@ -110,6 +110,8 @@ export class PiBackend implements Backend {
   #texts = new Map<number, string>()
   #calls = new Map<string, { name: string, input: any }>()
   #messageCalls = new Set<string>()
+  // The last failed response's notice, replaced when Pi retries it.
+  #failure?: { id: string, message: string }
   #stderr = ''
 
   constructor(host: SessionHost) { this.host = host }
@@ -123,9 +125,10 @@ export class PiBackend implements Backend {
       this.#write({ id, type, ...params })
     })
   }
-  #notice(message: string, level: 'error' | 'warning' = 'error'): void {
-    this.host.addBlock({ id: this.host.newId('notice'), type: 'notice',
-      notice: { kind: 'backend-error', args: { message }, level } })
+  #notice(message: string, level: 'error' | 'warning' = 'error'): string {
+    const id = this.host.newId('notice')
+    this.host.addBlock({ id, type: 'notice', notice: { kind: 'backend-error', args: { message }, level } })
+    return id
   }
   #model(settings: Settings): string {
     return settings.model || this.host.agentConfig?.()?.defaultModel || defaultModel
@@ -420,7 +423,8 @@ export class PiBackend implements Backend {
         for (const [index, id] of this.#texts) if (!kept.has(index)) { this.host.remove([id]); this.#texts.delete(index) }
         for (const id of this.#messageCalls) if (!calls.has(id)) { this.host.remove([id]); this.#calls.delete(id) }
         this.#messageCalls.clear()
-        if (message.errorMessage) this.#notice(message.errorMessage)
+        this.#failure = message.errorMessage
+          ? { id: this.#notice(message.errorMessage), message: message.errorMessage } : undefined
         if (message.stopReason === 'length') this.host.addBlock({ id: this.host.newId('notice'), type: 'notice', notice: { kind: 'max-tokens', level: 'error' } })
         if (message.usage && this.#running) {
           const u = message.usage
@@ -442,8 +446,21 @@ export class PiBackend implements Backend {
         break
       }
       case 'extension_error': this.#notice(event.error ?? 'Pi extension error'); break
-      case 'auto_retry_start': this.#notice(event.errorMessage ?? `Pi retry ${event.attempt}`, 'warning'); break
-      case 'auto_retry_end': if (!event.success && event.finalError) this.#notice(event.finalError); break
+      case 'auto_retry_start': {
+        // Pi reports a failed response twice: its message_end and this event.
+        // Show one notice per failure, saying that it is being retried.
+        const message = event.errorMessage ?? this.#failure?.message ?? 'Unknown error'
+        if (this.#failure) this.host.remove([this.#failure.id])
+        this.#failure = undefined
+        this.host.addBlock({ id: this.host.newId('notice'), type: 'notice', notice: { kind: 'pi-retry',
+          args: { message, attempt: event.attempt, maxAttempts: event.maxAttempts }, level: 'warning' } })
+        break
+      }
+      case 'auto_retry_end':
+        // A final failure was already shown by its message_end.
+        if (!event.success && event.finalError && event.finalError !== this.#failure?.message) this.#notice(event.finalError)
+        this.#failure = undefined
+        break
       case 'error': this.#notice(event.message ?? event.error ?? 'Pi error'); break
     }
   }
