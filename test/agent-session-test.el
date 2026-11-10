@@ -134,6 +134,10 @@ generating function directly."
   "Footer: separator and prompt; queued messages and requests go on the aux line."
   (agent-session-test--with-session
    (should (string-match-p "\\`\n *\n.*Echo ❯ \\'" (agent-session-test--footer)))
+   (agent-session-set-info agent-session--current :model "opencode-go/deepseek-v4.1-flash")
+   (should (string-match-p "DS V4\\.1 Flash ❯ \\'" (agent-session-test--footer)))
+   (agent-session-configure agent-session--current :model "big")
+   (should (string-match-p "Big ❯ \\'" (agent-session-test--footer)))
    (agent-session-test--type "hold")
    (agent-session-test--type "排队的消息")
    (should (string-match-p "工作中" (agent-session-test--footer)))

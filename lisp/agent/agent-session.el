@@ -1743,7 +1743,7 @@ WORD matches whole words, ignoring case."
   :type '(alist :key-type string :value-type string))
 
 (defun agent-session-model-short-name (name &optional agent-title)
-  "Model NAME or id shortened for narrow places such as the session list.
+  "Model NAME or id shortened for the prompt and session list.
 Drops a provider prefix (opencode-go/), a trailing note in parentheses
 and a date, spells an id like claude-opus-5-5 as Claude Opus 5.5, puts
 spaces for dashes, drops a leading AGENT-TITLE and applies
@@ -1974,7 +1974,7 @@ That is the separator (ongoing status on its left), auxiliary lines, prompt."
                    "\n"))
                 (agent-session-queue session) "")
      ;; Prompt: read-only and can't be entered; the text after it is editable.
-     (propertize (concat (agent-session-title session) " ❯ ")
+     (propertize (concat (agent-session-short-model-label session) " ❯ ")
                  'face 'agent-session-prompt
                  'cursor-intangible t 'field 'agent-session-prompt))))
 
