@@ -539,7 +539,9 @@ export class DaemonServer {
       selected.mode = modes[Math.min(cap, Math.max(0, modes.indexOf(selected.mode ?? 'plan')))]
     }
     await session.select(agent, selected, profile, this.configuration.value.collab.handoffLimit,
-      () => !this.collab.hasDependencies(session) && !this.collab.pending.some((p) => p.target === session.id))
+      () => !(session.info.parent ? this.collab.hasDependencies(session) : this.collab.hasStarts(session))
+        && !this.collab.pending.some((p) => p.target === session.id),
+      this.collab.selectHandoff(session))
     for (const [peer, id] of this.#mcp) if (id === session.id) peer.notify('mcp/tools_changed', {})
     await this.persist()
     return { id: session.id, agent: session.agent, profile: sessionProfile(session), settings: { ...session.settings } }

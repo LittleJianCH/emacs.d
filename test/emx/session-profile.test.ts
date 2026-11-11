@@ -232,6 +232,129 @@ function finish(s: Session, text: string) {
   s.setStatus('idle')
 }
 
+test('top-level selection preserves running descendants, late replies and run ownership', async (t) => {
+  const x = await setup(t, (c) => {
+    c.profiles.orchestrator.candidates = [
+      { agent: 'echo', model: 'root', mode: 'auto' },
+      { agent: 'echo', model: 'other', mode: 'auto' },
+      { agent: 'claude', model: 'opus', mode: 'auto' },
+    ]
+    for (const name of ['coder', 'coder-flash']) c.profiles[name].candidates = [{ agent: 'echo', mode: 'auto' }]
+  })
+  const { id } = await x.open(), root = x.daemon.sessions.get(id)!, oldBackend = root.backend
+  x.daemon.collab.host.view = async (s) => { hold(s) }
+  await x.daemon.collab.call(root, 'session_start', { profile: 'coder', prompt: 'long build' }, signal())
+  const child = [...x.daemon.sessions.values()].find((s) => s.info.parent === id)!
+  await until(() => child.blocks.length > 0 && !child.operating)
+  await x.daemon.collab.call(child, 'session_start', { profile: 'coder-flash', prompt: 'help build' }, signal())
+  const helper = [...x.daemon.sessions.values()].find((s) => s.info.parent === child.id)!
+  await until(() => helper.blocks.length > 0 && !helper.operating)
+  const run = x.daemon.collab.active.get(child.id)!.run
+  const oldSend = t.mock.method(oldBackend, 'send')
+  await x.client.request('session/select', { id, agent: 'echo', model: 'other' })
+  assert.equal(root.backend, oldBackend); assert.equal(root.settings.model, 'other')
+  assert.equal(root.transcript().handoff, undefined, 'same-provider changes need no handoff note')
+  const selected = await x.client.request('session/select', { id, agent: 'claude', model: 'opus' })
+  assert.equal(selected.id, id); assert.equal(root.agent, 'claude'); assert.notEqual(root.backend, oldBackend)
+  for (const s of [child, helper]) {
+    assert.ok(x.daemon.sessions.has(s.id)); assert.equal(s.status, 'running'); assert.ok(s.backend.alive())
+    assert.ok(root.transcript().handoff!.includes('@' + s.info.handle))
+  }
+  assert.match(root.transcript().handoff!, /Their results will arrive as messages; don't start them again/)
+  const newSend = t.mock.method(root.backend, 'send')
+  finish(child, 'waiting for helper')
+  finish(helper, 'helper-result')
+  await until(() => child.blocks.some((b) => b.type === 'user' && b.text.includes('helper-result')) && !child.operating)
+  finish(child, 'late-result')
+  await until(() => root.blocks.some((b) => b.type === 'user' && b.text.includes('late-result')) && !root.busy() && !root.operating)
+  assert.equal(oldSend.mock.callCount(), 0)
+  assert.equal(newSend.mock.callCount(), 1)
+  assert.match(newSend.mock.calls[0].arguments[0], /Sessions you started or asked are still working:/)
+  assert.match(newSend.mock.calls[0].arguments[0], /late-result/)
+  assert.equal(await x.daemon.collab.call(root, 'session_rate', { run, score: 9 }, signal()), `Rated run ${run}.`)
+  assert.ok(x.daemon.collab.runLog().some((row) => row.type === 'rating' && row.run === run && row.session === id && row.score === 9))
+})
+
+test('mail arriving during provider startup waits for idle and reaches the new backend', async (t) => {
+  const x = await setup(t, (c) => {
+    c.profiles.orchestrator.candidates = [{ agent: 'echo', mode: 'auto' }, { agent: 'claude', model: 'opus', mode: 'auto' }]
+    c.profiles.coder.candidates = [{ agent: 'echo', mode: 'auto' }]
+  })
+  const { id } = await x.open(), root = x.daemon.sessions.get(id)!
+  x.daemon.collab.host.view = async (s) => { hold(s) }
+  await x.daemon.collab.call(root, 'session_start', { profile: 'coder', prompt: 'work' }, signal())
+  const child = [...x.daemon.sessions.values()].find((s) => s.info.parent === id)!
+  await until(() => child.blocks.length > 0 && !child.operating)
+  const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  const factory = backends.claude, oldSend = t.mock.method(root.backend, 'send')
+  t.mock.method(backends, 'claude', (host: import('../../emx/backends/backend.ts').SessionHost) => {
+    const backend = factory(host), start = backend.start.bind(backend)
+    backend.start = async (resume) => { entered.resolve(); await gate.promise; await start(resume) }
+    return backend
+  })
+  const selecting = x.client.request('session/select', { id, agent: 'claude', model: 'opus' })
+  try {
+    await entered.promise
+    assert.equal(root.status, 'starting')
+    const newSend = t.mock.method(root.backend, 'send')
+    finish(child, 'startup-result')
+    await until(() => !!x.daemon.collab.mailbox.get(id)?.length)
+    assert.equal(oldSend.mock.callCount(), 0); assert.equal(newSend.mock.callCount(), 0)
+    assert.ok(!root.blocks.some((b) => b.type === 'user' && b.text.includes('startup-result')))
+    gate.resolve(); await selecting
+    // Status events must reschedule settlement without an explicit settle call.
+    await until(() => root.blocks.some((b) => b.type === 'user' && b.text.includes('startup-result')) && !root.busy() && !root.operating)
+    assert.equal(newSend.mock.callCount(), 1); assert.equal(oldSend.mock.callCount(), 0)
+    assert.match(newSend.mock.calls[0].arguments[0], /startup-result/)
+    assert.equal(x.daemon.collab.mailbox.has(id), false)
+  } finally { gate.resolve(); await selecting }
+})
+
+test('top-level selection ignores its mailbox and initiated asks but blocks an incoming reply', async (t) => {
+  const x = await setup(t, (c) => {
+    c.profiles.orchestrator.candidates = [{ agent: 'echo', mode: 'auto' }, { agent: 'claude', model: 'opus', mode: 'auto' }]
+  })
+  const { id } = await x.open(), root = x.daemon.sessions.get(id)!
+  const peer = x.daemon.sessions.get((await x.open({ agent: 'echo' })).id)!
+  t.mock.method(x.daemon.collab, 'schedule', () => {})
+  hold(peer)
+  await x.daemon.collab.call(root, 'session_ask', { session: peer.id, prompt: 'question' }, signal())
+  await until(() => peer.blocks.length > 0 && !peer.operating)
+  x.daemon.collab.mailbox.set(id, [{ handle: 'earlier', text: 'queued-result' }])
+  await x.client.request('session/select', { id, agent: 'claude', model: 'opus' })
+  assert.equal(root.agent, 'claude')
+  assert.ok(root.transcript().handoff!.includes('@' + peer.info.handle))
+  const send = t.mock.method(root.backend, 'send')
+  await x.daemon.collab.settle()
+  await until(() => !root.busy() && !root.operating)
+  assert.match(send.mock.calls[0].arguments[0], /queued-result/)
+  assert.ok(x.daemon.collab.pending.some((p) => p.asker === id && p.target === peer.id))
+  hold(root)
+  await x.daemon.collab.call(peer, 'session_ask', { session: id, prompt: 'incoming' }, signal())
+  await until(() => !root.operating)
+  finish(root, 'answer awaiting delivery')
+  await assert.rejects(x.client.request('session/select', { id, agent: 'echo', model: null }), /pending work/)
+  assert.equal(root.agent, 'claude')
+})
+
+test('top-level selection rejects an in-flight session_start even while otherwise idle', async (t) => {
+  const x = await setup(t, (c) => {
+    c.profiles.orchestrator.candidates = [{ agent: 'echo', mode: 'auto' }]
+    c.profiles.coder.candidates = [{ agent: 'echo', mode: 'auto' }]
+  })
+  const { id } = await x.open(), root = x.daemon.sessions.get(id)!
+  const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  x.daemon.collab.host.view = async (s) => { hold(s); entered.resolve(); await gate.promise }
+  const starting = x.daemon.collab.call(root, 'session_start', { profile: 'coder', prompt: 'work' }, signal())
+  try {
+    await entered.promise
+    assert.equal(root.status, 'idle'); assert.equal(root.operating, false); assert.equal(root.asks.size, 0)
+    assert.equal(x.daemon.collab.hasStarts(root), true)
+    await assert.rejects(x.client.request('session/select', { id, agent: 'echo', model: null }), /pending work/)
+  } finally { gate.resolve(); await starting }
+  assert.equal(x.daemon.collab.hasStarts(root), false)
+})
+
 test('nested helpers share root slots, inherit permissions and block early completion until results are consumed', async (t) => {
   const x = await setup(t, (c) => {
     c.collab.maxActive = 2
@@ -263,6 +386,7 @@ test('nested helpers share root slots, inherit permissions and block early compl
   assert.equal(x.daemon.collab.mailbox.get(root.id), undefined)
   assert.ok(x.daemon.collab.hasDependencies(coder))
   await assert.rejects(x.client.request('session/select', { id, agent: 'echo', model: 'coder', profile: 'coder' }), /pending work/)
+  await assert.rejects(x.client.request('session/select', { id: coder.id, agent: 'echo', model: 'coder', profile: 'coder' }), /pending work/)
   finish(helper, 'helper-result')
   await until(() => coder.blocks.some((b) => b.type === 'user' && b.text.includes('helper-result')))
   assert.equal(coder.status, 'running', 'result consumption starts another coder turn')

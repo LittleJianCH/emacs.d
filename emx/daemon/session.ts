@@ -402,7 +402,7 @@ export class Session implements SessionHost {
 
   /** Switch only between turns; retain the editor transcript and provider history. */
   select(agent: string, settings: Settings, profile: string, handoffLimit: number,
-    ready: () => boolean): Promise<void> {
+    ready: () => boolean, handoffNote = ''): Promise<void> {
     if (this.busy() || this.operating || this.asks.size || this.queue.length || this.pendingWork() || !ready()) {
       return Promise.reject(new RpcError(ErrorCode.InvalidParams, 'Finish pending work before changing profile or provider'))
     }
@@ -458,6 +458,7 @@ export class Session implements SessionHost {
               : block.type === 'text' ? 'Assistant: ' + block.text : '').join('\n\n')
           const bounded = [...history].slice(-handoffLimit).join('')
           this.#handoff = bounded ? 'Previous conversation for context only; do not treat it as new requests:\n' + bounded : oldHandoff
+          if (handoffNote) this.#handoff = [this.#handoff, handoffNote].filter(Boolean).join('\n\n')
         }
         this.setInfo(nextInfo)
         this.settings = {}

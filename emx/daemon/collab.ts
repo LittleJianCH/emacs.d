@@ -270,6 +270,7 @@ export class Collaboration {
   }
 
   get starting(): boolean { return this.#starts.size > 0 }
+  hasStarts(session: Session): boolean { return this.#starts.has(session) }
   assertOpen(session: Session): void {
     if (this.#closing.has(session) || !this.host.sessions.has(session.id)) {
       throw new Error('The calling session is closing or has been closed')
@@ -560,10 +561,27 @@ export class Collaboration {
   }
   /** Descendant creation and undelivered results keep a task alive. */
   hasDependencies(session: Session): boolean {
-    return this.#starts.has(session) || this.mailbox.has(session.id)
+    return this.hasStarts(session) || this.mailbox.has(session.id)
       || this.pending.some((entry) => entry.asker === session.id)
       || [...this.host.sessions.values()].some((child) => child.info.parent === session.id
         && (child.busy() || child.operating || child.asks.size > 0 || child.queue.length > 0 || this.hasDependencies(child)))
+  }
+  /** Remind a new provider about work that survives its parent's handoff. */
+  selectHandoff(session: Session): string {
+    const descendants = new Set([session.id]), handles = new Set<string>()
+    for (const id of descendants) {
+      for (const child of this.host.sessions.values()) {
+        if (child.info.parent !== id || this.#closing.has(child) || descendants.has(child.id)) continue
+        descendants.add(child.id)
+        handles.add('@' + this.#handle(child))
+      }
+    }
+    for (const entry of this.pending) {
+      if (entry.route || entry.asker !== session.id) continue
+      const target = this.host.sessions.get(entry.target)
+      if (target && !this.#closing.has(target)) handles.add('@' + this.#handle(target))
+    }
+    return handles.size ? `Sessions you started or asked are still working: ${[...handles].join(', ')}. Their results will arrive as messages; don't start them again.` : ''
   }
   rootSession(session: Session): Session {
     const seen = new Set<string>()
