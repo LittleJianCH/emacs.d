@@ -568,11 +568,12 @@ export class Collaboration {
   }
   /** Remind a new provider about work that survives its parent's handoff. */
   selectHandoff(session: Session): string {
-    const descendants = new Set([session.id]), handles = new Set<string>()
-    for (const id of descendants) {
-      for (const child of this.host.sessions.values()) {
-        if (child.info.parent !== id || this.#closing.has(child) || descendants.has(child.id)) continue
-        descendants.add(child.id)
+    // Only direct children with work left: idle kept children have already
+    // replied, and helpers report to their own coder.
+    const handles = new Set<string>()
+    for (const child of this.host.sessions.values()) {
+      if (child.info.parent === session.id && !this.#closing.has(child)
+        && (child.busy() || child.operating || child.asks.size > 0 || child.queue.length > 0 || this.hasDependencies(child))) {
         handles.add('@' + this.#handle(child))
       }
     }

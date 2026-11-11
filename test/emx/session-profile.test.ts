@@ -258,8 +258,9 @@ test('top-level selection preserves running descendants, late replies and run ow
   assert.equal(selected.id, id); assert.equal(root.agent, 'claude'); assert.notEqual(root.backend, oldBackend)
   for (const s of [child, helper]) {
     assert.ok(x.daemon.sessions.has(s.id)); assert.equal(s.status, 'running'); assert.ok(s.backend.alive())
-    assert.ok(root.transcript().handoff!.includes('@' + s.info.handle))
   }
+  assert.ok(root.transcript().handoff!.includes('@' + child.info.handle))
+  assert.ok(!root.transcript().handoff!.includes('@' + helper.info.handle), 'helpers report to their coder')
   assert.match(root.transcript().handoff!, /Their results will arrive as messages; don't start them again/)
   const newSend = t.mock.method(root.backend, 'send')
   finish(child, 'waiting for helper')
