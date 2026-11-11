@@ -262,7 +262,12 @@ candidate membership, disabled entries and availability. An unrestricted
 selection uses orchestrator capabilities. A provider change keeps the
 daemon session ID and transcript but clears provider-specific resume state
 and hands bounded recent context to a new native conversation. Selection
-requires an idle session with no queued work, asks or pending collaboration.
+requires an idle session with no queued work or asks, no `session_start`
+in flight and no reply it still owes another session. Children also wait
+for their own helpers and undelivered results. A top-level session may
+switch while its children run: results still arrive by session ID through
+the mailbox, and a provider change tells the new conversation which direct
+children and asked sessions still owe it a reply.
 `session/configure` cannot bypass profile model validation.
 
 Statuses are `starting`, `idle`, `running`, `disconnected` and `exited`.
