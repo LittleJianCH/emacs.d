@@ -255,6 +255,46 @@ without duplicates.  No prompt asks to end a list."
                  "^\\* 10:00 NbE\n:PROPERTIES:\n:CONCEPTS: \\[\\[id:id-a\\]\\[Alpha\\]\\]\n:END:"
                  nil t))))))
 
+;;; The shared format layer
+
+(ert-deftest init-kb-slug-matches-org-roam ()
+  "Programs outside Emacs name concept files as org-roam does."
+  (unless init-kb-test--available (ert-skip "org-roam is not installed"))
+  (dolist (title '("Normalization by Evaluation" "Martin-Löf Type Theory"
+                   "依值类型论" "  Cubical  NbE: (v2)!  " "C++ / Rust" "Ünïcödé café"
+                   "λ-calculus" "a__b"))
+    (ert-info (title)
+      (should (equal (my/kb-slug title) (org-roam-node-slugify title))))))
+
+(ert-deftest init-kb-readers-describe-concepts-and-sessions ()
+  "The readers shared with the MCP server return what the files say."
+  (with-temp-buffer
+    (insert ":PROPERTIES:\n:ID:       id-n\n:ROAM_ALIASES: NbE \"Normal Forms\"\n"
+            ":LEVEL:    implemented\n:CONFIRMED: t\n:UPDATED:  [2026-11-12]\n:END:\n"
+            "#+title: Normalization by Evaluation\n#+filetags: :type_theory:pl:\n\n"
+            "* Notes\n- x\n\n* Relations\n- requires :: [[id:id-m][MLTT]]\n"
+            "- related :: [[id:id-a][A]] and [[id:id-b][B]]\n- untagged [[id:id-c][C]]\n")
+    (org-mode)
+    (should (equal (my/kb-concept-summary)
+                   '(:id "id-n" :title "Normalization by Evaluation"
+                     :aliases ("NbE" "Normal Forms") :level "implemented"
+                     :confirmed "t" :updated "[2026-11-12]"
+                     :tags ("type_theory" "pl")
+                     :relations (("requires" "id-m" "MLTT") ("related" "id-a" "A")
+                                 ("related" "id-b" "B") (nil "id-c" "C"))))))
+  (with-temp-buffer
+    (insert ":PROPERTIES:\n:ID:       id-s\n:END:\n#+title: 2026-11-12\n\n"
+            "* 10:00 NbE\n:PROPERTIES:\n:AI:       claude\n"
+            ":CONCEPTS: [[id:id-n][NbE]] [[id:id-m][MLTT]]\n:END:\n** detail\n"
+            "* 11:00 Other\n:PROPERTIES:\n:AI:       chatgpt\n:CONCEPTS:\n:END:\n")
+    (org-mode)
+    (should (equal (mapcar (lambda (session) (plist-put session :begin nil))
+                           (my/kb-sessions))
+                   '((:heading "10:00 NbE" :ai "claude" :concepts ("id-n" "id-m")
+                      :begin nil)
+                     (:heading "11:00 Other" :ai "chatgpt" :concepts nil
+                      :begin nil))))))
+
 ;;; Relations
 
 (ert-deftest init-kb-relation-add-appends-to-the-relations-section ()

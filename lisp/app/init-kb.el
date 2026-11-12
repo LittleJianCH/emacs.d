@@ -240,8 +240,7 @@ of FUNCTION."
             (org-mode)))
         (goto-char (point-min))
         (setq result (funcall function))
-        (let ((coding-system-for-write 'utf-8-unix))
-          (write-region nil nil file nil 'silent))))
+        (my/kb-write-atomically file)))
     (org-roam-db-update-file file)
     result))
 
@@ -308,35 +307,11 @@ A concept listed already is not added again."
 
 (defun my/kb--insert-relation (relation node)
   "Add RELATION to NODE as the last item of the Relations section.
-The current buffer is a concept in Org mode.  Create the section at the
-end when it is missing.  Return the position of the new item."
-  (let ((id (org-roam-node-id node)))
-    (pcase-dolist (`(,_ ,name ,links) (my/kb-relation-items))
-      (when (and (equal name relation)
-                 (seq-some (lambda (link)
-                             (equal (org-element-property :path link) id))
-                           links))
-        (user-error "已有这条关系：%s :: %s"
-                    relation (org-roam-node-title node)))))
-  (let ((headline (org-element-map (org-element-parse-buffer 'headline)
-                      'headline
-                    (lambda (headline)
-                      (and (my/kb--relations-headline-p headline) headline))
-                    nil t)))
-    (if headline
-        (progn
-          (goto-char (org-element-property :begin headline))
-          (org-end-of-subtree t t)
-          (skip-chars-backward " \t\n")
-          (end-of-line))
-      (goto-char (point-max))
-      (skip-chars-backward " \t\n")
-      (delete-region (point) (point-max))
-      (insert "\n\n* " my/kb-relations-heading))
-    (insert "\n")
-    (prog1 (point)
-      (insert "- " relation " :: " (my/kb--link node))
-      (when (eobp) (insert "\n")))))
+The current buffer is a concept in Org mode.  Return the position of the
+new item; signal an error if the relation is there already."
+  (or (my/kb-insert-relation relation (org-roam-node-id node)
+                             (org-roam-node-title node))
+      (user-error "已有这条关系：%s :: %s" relation (org-roam-node-title node))))
 
 (defun my/kb-relation-add (file relation target)
   "Add the relation RELATION from the concept FILE to the concept TARGET.

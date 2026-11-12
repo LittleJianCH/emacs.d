@@ -111,14 +111,136 @@ excluded."
                     result))))))
     (nreverse result)))
 
-(defun my/kb-batch--files (root)
+(defun my/kb-slug (title)
+  "Return the file name, without directory and extension, for TITLE.
+The same as `org-roam-node-slugify': letters and digits kept, anything
+else turned into underscores, lowercase.  Concepts live in
+concepts/SLUG.org."
+  (require 'ucs-normalize)
+  (let ((slug-trim-chars
+         ;; Combining diacritical marks dropped after decomposition.
+         '(#x300 #x301 #x302 #x303 #x304 #x306 #x307
+           #x308 #x309 #x30A #x30B #x30C #x31B #x323
+           #x324 #x325 #x327 #x32D #x32E #x330 #x331)))
+    (thread-last title
+                 (ucs-normalize-NFD-string)
+                 (seq-remove (lambda (char) (memq char slug-trim-chars)))
+                 (apply #'string)
+                 (ucs-normalize-NFC-string)
+                 (replace-regexp-in-string "[^[:alnum:]]" "_")
+                 (replace-regexp-in-string "__*" "_")
+                 (replace-regexp-in-string "^_" "")
+                 (replace-regexp-in-string "_$" "")
+                 (downcase))))
+
+(defun my/kb-insert-relation (relation id title)
+  "Add the item RELATION :: [[id:ID][TITLE]] at the end of Relations.
+The current buffer is a concept in Org mode; the section is created at
+the end when it is missing.  Return the position of the new item, or nil
+if the section has that relation to ID already."
+  (unless (seq-some (pcase-lambda (`(,_ ,name ,links))
+                      (and (equal name relation)
+                           (seq-some (lambda (link)
+                                       (equal (org-element-property :path link) id))
+                                     links)))
+                    (my/kb-relation-items))
+    (let ((headline (org-element-map (org-element-parse-buffer 'headline)
+                        'headline
+                      (lambda (headline)
+                        (and (my/kb--relations-headline-p headline) headline))
+                      nil t)))
+      (if headline
+          (progn
+            (goto-char (org-element-property :begin headline))
+            (org-end-of-subtree t t)
+            (skip-chars-backward " \t\n")
+            (end-of-line))
+        (goto-char (point-max))
+        (skip-chars-backward " \t\n")
+        (delete-region (point) (point-max))
+        (insert "\n\n* " my/kb-relations-heading))
+      (insert "\n")
+      (prog1 (point)
+        (insert "- " relation " :: "
+                (org-link-make-string (concat "id:" id) title))
+        (when (eobp) (insert "\n"))))))
+
+(defun my/kb--link-description (link)
+  "Return the description of LINK as a string, or nil."
+  (when-let* ((contents (org-element-contents link)))
+    (org-trim (substring-no-properties (org-element-interpret-data contents)))))
+
+(defun my/kb-concept-summary (&optional data)
+  "Return a plist describing the concept in the current Org buffer.
+DATA is the parsed buffer, parsed here if nil.  Keys are :id, :title,
+:aliases, :level, :confirmed, :updated (property values or nil), :tags
+and :relations, a list of (NAME ID TITLE) for the links of the Relations
+items, NAME nil for an item without a tag."
+  (let ((keywords (org-collect-keywords '("TITLE" "FILETAGS")))
+        (property (lambda (name) (org-entry-get (point-min) name))))
+    (list :id (funcall property "ID")
+          :title (cadr (assoc "TITLE" keywords))
+          :aliases (split-string-and-unquote
+                    (or (funcall property "ROAM_ALIASES") ""))
+          :level (funcall property "LEVEL")
+          :confirmed (funcall property "CONFIRMED")
+          :updated (funcall property "UPDATED")
+          :tags (split-string (or (cadr (assoc "FILETAGS" keywords)) "")
+                              ":" t "[ \t]+")
+          :relations (cl-loop for (_ name links) in (my/kb-relation-items data)
+                              append (mapcar
+                                      (lambda (link)
+                                        (list name
+                                              (org-element-property :path link)
+                                              (my/kb--link-description link)))
+                                      links)))))
+
+(defun my/kb-id-links (string)
+  "Return the ids of the id links in STRING, in order."
+  (let ((start 0) ids)
+    (while (string-match "\\[\\[id:\\([^]:]+\\)" string start)
+      (push (match-string 1 string) ids)
+      (setq start (match-end 0)))
+    (nreverse ids)))
+
+(defun my/kb-sessions (&optional data)
+  "Return the learning sessions in the current Org buffer, as plists.
+DATA is the parsed buffer, parsed here if nil.  A session is a top-level
+heading; keys are :heading, :ai, :concepts (the ids of its CONCEPTS) and
+:begin, the position of the heading."
+  (org-element-map (or data (org-element-parse-buffer 'headline)) 'headline
+    (lambda (headline)
+      (when (= (org-element-property :level headline) 1)
+        (list :heading (org-element-property :raw-value headline)
+              :ai (org-element-property :AI headline)
+              :concepts (my/kb-id-links
+                         (or (org-element-property :CONCEPTS headline) ""))
+              :begin (org-element-property :begin headline))))))
+
+(defun my/kb-write-atomically (file)
+  "Write the current buffer to FILE through a temporary file and a rename.
+Watchers see the rename, as they see an editor's atomic save, and never a
+half-written file.  The temporary name starts with a dot, which the
+knowledge base ignores."
+  (let ((temporary (make-temp-file (expand-file-name ".kb-" (file-name-directory file))
+                                   nil ".tmp"))
+        (coding-system-for-write 'utf-8-unix))
+    (condition-case err
+        (progn
+          (write-region nil nil temporary nil 'silent)
+          (rename-file temporary file t))
+      (error
+       (ignore-errors (delete-file temporary))
+       (signal (car err) (cdr err))))))
+
+(defun my/kb-files (root)
   "Return the Org files under ROOT, sorted, skipping hidden files and directories."
   (sort (directory-files-recursively
          root "\\`[^.#].*\\.org\\'" nil
          (lambda (directory)
            (not (string-prefix-p "." (file-name-nondirectory directory)))))))
 
-(defmacro my/kb-batch--with-file (file &rest body)
+(defmacro my/kb-with-file (file &rest body)
   "Run BODY in a temporary Org buffer holding FILE."
   (declare (indent 1) (debug t))
   `(with-temp-buffer
@@ -213,24 +335,19 @@ SEVERITY is `error' or `warning'; the message is FORMAT applied to ARGS."
             (my/kb-batch--report 'warning position "AI 的值「%s」不在 %s 中"
                                  ai (string-join my/kb-ais " / ")))))))))
 
-(defun my/kb-batch-check ()
-  "Validate the knowledge base given on the command line.
-Print one finding per line in the format of compilation buffers, with
-file names relative to the knowledge base, and a summary.  Exit with
-status 1 if there are errors."
-  (let* ((root (file-name-as-directory
-                (expand-file-name (or (pop command-line-args-left)
-                                      (error "Usage: my/kb-batch-check DIR")))))
-         (files (my/kb-batch--files root))
+(defun my/kb-findings (root)
+  "Validate the knowledge base ROOT; return (FILES . FINDINGS).
+FILES is the number of files read.  FINDINGS are sorted lists (FILE LINE
+COLUMN SEVERITY MESSAGE), FILE relative to ROOT and SEVERITY `error' or
+`warning'."
+  (let* ((root (file-name-as-directory (expand-file-name root)))
+         (files (my/kb-files root))
          (ids (make-hash-table :test #'equal))
-         (errors 0)
-         (warnings 0)
          links)
-    (setq command-line-args-left nil
-          my/kb-batch--findings nil)
+    (setq my/kb-batch--findings nil)
     (dolist (file files)
       (setq my/kb-batch--file (file-relative-name file root))
-      (my/kb-batch--with-file file
+      (my/kb-with-file file
         (let ((data (org-element-parse-buffer)))
           (org-element-map data 'node-property
             (lambda (property)
@@ -262,13 +379,25 @@ status 1 if there are errors."
       (unless (gethash id ids)
         (push (list file line column 'error (format "悬空链接：id %s 不存在" id))
               my/kb-batch--findings)))
-    (dolist (finding (sort my/kb-batch--findings
-                           :key (lambda (finding) (take 3 finding))))
+    (cons (length files)
+          (sort my/kb-batch--findings :key (lambda (finding) (take 3 finding))))))
+
+(defun my/kb-batch-check ()
+  "Validate the knowledge base given on the command line.
+Print one finding per line in the format of compilation buffers, with
+file names relative to the knowledge base, and a summary.  Exit with
+status 1 if there are errors."
+  (let ((result (my/kb-findings (or (pop command-line-args-left)
+                                    (error "Usage: my/kb-batch-check DIR"))))
+        (errors 0)
+        (warnings 0))
+    (setq command-line-args-left nil)
+    (dolist (finding (cdr result))
       (pcase-let ((`(,file ,line ,column ,severity ,message) finding))
         (if (eq severity 'error) (cl-incf errors) (cl-incf warnings))
         (princ (format "%s:%d:%d: %s: %s\n" file line column severity message))))
     (princ (format "检查了 %d 个文件：%d 个错误，%d 个警告\n"
-                   (length files) errors warnings))
+                   (car result) errors warnings))
     (kill-emacs (if (> errors 0) 1 0))))
 
 ;;; Export
@@ -347,7 +476,7 @@ FILES are its Org files."
       (let ((relative (file-relative-name file root)))
         (cond
          ((string-prefix-p my/kb-concepts-subdirectory relative)
-          (my/kb-batch--with-file file
+          (my/kb-with-file file
             (let ((keywords (org-collect-keywords '("TITLE" "FILETAGS"))))
               (push (list (or (cadr (assoc "TITLE" keywords))
                               (file-name-base file))
@@ -398,7 +527,7 @@ knowledge base."
                (root (file-name-as-directory (file-truename root)))
                (output (file-name-as-directory (expand-file-name output)))
                (cache (file-name-as-directory (expand-file-name cache)))
-               (files (my/kb-batch--files root)))
+               (files (my/kb-files root)))
     (setq command-line-args-left nil
           my/kb-batch--root root
           org-id-locations-file (expand-file-name "id-locations" cache)
