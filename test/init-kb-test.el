@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; Exercise the knowledge base on temporary directories and databases:
-;; creation, capture, relations and labelled backlinks.  The module is loaded with `my/kb-directory' pointing at a
+;; creation, capture, relations, labelled backlinks and the table.  The module is loaded with `my/kb-directory' pointing at a
 ;; temporary directory, so the real ~/kb and var/org-roam.db are never
 ;; touched.  Skipped unless org-roam is installed; nothing is installed.
 
@@ -295,6 +295,91 @@ section is created, and a repeated relation is refused."
                    (string-match "\\[generalizes\\]" text)
                    (string-match "\\[学习记录\\]" text)
                    (string-match "\\[链接\\]" text)))))))
+
+;;; Table
+
+(defun init-kb-test--row (title)
+  "Move to the table row of TITLE."
+  (goto-char (point-min))
+  (should (search-forward title nil t))
+  (beginning-of-line))
+
+(ert-deftest init-kb-table-reads-the-database ()
+  "Rows come from the database (a rewritten file shows until indexed),
+LEVEL sorts by rank, and the filter keeps unconfirmed concepts."
+  (init-kb-test--with-kb
+    (let ((a (init-kb-test--concept root "a" "id-a" "Alpha"))
+          (b (init-kb-test--write root "concepts/b.org"
+                                  ":PROPERTIES:" ":ID:       id-b" ":LEVEL:    implemented"
+                                  ":CONFIRMED: t" ":UPDATED:  [2026-02-02]" ":END:"
+                                  "#+title: Beta"))
+          (s (init-kb-test--write root "sessions/2026-11-12.org"
+                                  ":PROPERTIES:" ":ID:       id-s" ":END:"
+                                  "#+title: 2026-11-12")))
+      (init-kb-test--index a b s)
+      ;; Rewritten, not yet indexed: the table shows the database.
+      (with-temp-file a (insert "#+title: Changed\n"))
+      (my/kb-table)
+      (with-current-buffer "*知识库*"
+        (should (derived-mode-p 'my/kb-table-mode))
+        (should (equal (sort (mapcar #'car tabulated-list-entries))
+                       '("id-a" "id-b")))
+        (init-kb-test--row "Beta")
+        (should (string-match-p "implemented +已确认 +2026-02-02 +tt\\|implemented +已确认 +2026-02-02"
+                                (buffer-substring (point) (line-end-position))))
+        (should (my/kb-table--level< (assoc "id-a" tabulated-list-entries)
+                                     (assoc "id-b" tabulated-list-entries)))
+        (my/kb-table-toggle-unconfirmed)
+        (should (equal (mapcar #'car tabulated-list-entries) '("id-a")))
+        (my/kb-table-toggle-unconfirmed)
+        (should (= (length tabulated-list-entries) 2))))))
+
+(ert-deftest init-kb-table-writes-level-and-confirmation-back ()
+  "Raising, lowering and confirming write the top drawer and UPDATED,
+update the database and the row in place."
+  (init-kb-test--with-kb
+    (let ((a (init-kb-test--concept root "a" "id-a" "Alpha"))
+          (today (format-time-string "[%Y-%m-%d]")))
+      (init-kb-test--index a)
+      (my/kb-table)
+      (with-current-buffer "*知识库*"
+        (init-kb-test--row "Alpha")
+        (let ((my/kb-level-change-confirms nil))
+          (my/kb-table-raise))
+        (let ((text (init-kb-test--file-string a)))
+          (should (string-match-p "^:LEVEL: +walked-through$" text))
+          (should (string-match-p "^:CONFIRMED: nil$" text))
+          (should (string-match-p (concat "^:UPDATED: +" (regexp-quote today) "$") text))
+          ;; Still one drawer, before the title.
+          (should (string-prefix-p ":PROPERTIES:\n:ID:" text)))
+        (should (string-match-p "walked-through +待确认"
+                                (buffer-substring (point) (line-end-position))))
+        (should (equal (plist-get (car (my/kb-concepts)) :level) "walked-through"))
+        (my/kb-table-lower)
+        (should (string-match-p "^:LEVEL: +exposed$" (init-kb-test--file-string a)))
+        (should (string-match-p "^:CONFIRMED: t$" (init-kb-test--file-string a)))
+        (should-error (my/kb-table-lower) :type 'user-error)
+        (my/kb-table-set-level "implemented")
+        (should (string-match-p "^:LEVEL: +implemented$" (init-kb-test--file-string a)))
+        (init-kb-test--row "Alpha")
+        (my/kb-table-confirm)
+        (should (string-match-p "^:CONFIRMED: nil$" (init-kb-test--file-string a)))
+        (should (equal (plist-get (car (my/kb-concepts)) :confirmed) "nil"))
+        (init-kb-test--row "Alpha")
+        (my/kb-table-confirm)
+        (should (string-match-p "^:CONFIRMED: t$" (init-kb-test--file-string a)))))))
+
+(ert-deftest init-kb-edit-refuses-a-modified-buffer ()
+  "Unsaved changes of a visiting buffer are never saved behind my back."
+  (init-kb-test--with-kb
+    (let ((a (init-kb-test--concept root "a" "id-a" "Alpha")))
+      (init-kb-test--index a)
+      (with-current-buffer (find-file-noselect a)
+        (goto-char (point-max))
+        (insert "draft\n")
+        (should-error (my/kb-set-properties a '(("LEVEL" . "can-apply")))
+                      :type 'user-error)
+        (should-not (string-match-p "draft\\|can-apply" (init-kb-test--file-string a)))))))
 
 (provide 'init-kb-test)
 ;;; init-kb-test.el ends here

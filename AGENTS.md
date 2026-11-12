@@ -49,8 +49,8 @@ lisp/agent/              shared agent support (see below)
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications; enabled via `my/apps' in init.el
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
-  init-kb.el             knowledge graph on org-roam in ~/kb (C-c n):
-                         capture, relations, labelled backlinks
+  init-kb.el             knowledge graph on org-roam in ~/kb (C-c n): table,
+                         relations, labelled backlinks
   kb-batch.el            its file format, needing only Org
 bin/emx                  minimal launcher: locate/build dist, import compiled CLI
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends

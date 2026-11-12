@@ -7,8 +7,9 @@
 ;; AI assistants will read and write it through MCP; Emacs is where I look
 ;; at it and edit it.  The file format is described in kb-batch.el.
 ;;
-;;   C-c n f   find or create a concept (SPC n f with evil)
-;;   C-c n i   insert a link
+;;   C-c n n   table of all concepts (SPC n n with evil): sort, raise or
+;;             lower LEVEL, confirm, open
+;;   C-c n f   find or create a concept      C-c n i   insert a link
 ;;   C-c n r   add a relation to a concept   C-c n b   backlinks buffer
 ;;   C-c n d   record a learning session     C-c n D   today's sessions
 ;;   C-c n t   add a tag   C-c n a   add an alias
@@ -26,6 +27,12 @@
 It is created with two example concepts when the module loads, if it
 does not exist yet.  Takes effect after a restart."
   :type 'directory
+  :group 'my/kb)
+
+(defcustom my/kb-level-change-confirms t
+  "Non-nil means changing LEVEL in the table also sets CONFIRMED to t.
+The change is mine, not an assistant's, so the new level is confirmed."
+  :type 'boolean
   :group 'my/kb)
 
 (defface my/kb-relation '((t :inherit org-verbatim :weight bold))
@@ -190,6 +197,17 @@ of FUNCTION."
           (write-region nil nil file nil 'silent))))
     (org-roam-db-update-file file)
     result))
+
+(defun my/kb-set-properties (file properties)
+  "Set PROPERTIES, an alist of names and values, in FILE's top drawer.
+UPDATED is set to today as well."
+  (my/kb--edit-file
+   file
+   (lambda ()
+     (pcase-dolist (`(,name . ,value)
+                    (append properties
+                            (list (cons "UPDATED" (my/kb-date-string)))))
+       (org-entry-put (point-min) name value)))))
 
 ;;; Reading concepts
 
@@ -390,10 +408,207 @@ first, in the order of `my/kb-relations'."
         (oset section point point)
         (insert ?\n)))))
 
+;;; Table of concepts
+
+(defun my/kb-concepts ()
+  "Return the concepts recorded in the database, as plists.
+Keys are :id, :file, :title, :level, :confirmed, :updated (property
+values, or nil) and :tags.  Nothing is read from the files."
+  (let ((tags (make-hash-table :test #'equal))
+        (directory (my/kb-concepts-directory)))
+    (pcase-dolist (`(,id ,tag) (org-roam-db-query [:select [node-id tag] :from tags]))
+      (push tag (gethash id tags)))
+    (cl-loop for (id file title properties)
+             in (org-roam-db-query [:select [id file title properties]
+                                    :from nodes :where (= level 0)])
+             when (string-prefix-p directory file)
+             collect (list :id id :file file :title title
+                           :level (cdr (assoc "LEVEL" properties))
+                           :confirmed (cdr (assoc "CONFIRMED" properties))
+                           :updated (cdr (assoc "UPDATED" properties))
+                           :tags (sort (gethash id tags))))))
+
+(defvar-local my/kb-table--concepts nil
+  "Hash table from the ids of the listed concepts to their plists.")
+
+(defvar-local my/kb-table--unconfirmed nil
+  "Non-nil means the table lists only concepts not confirmed.")
+
+(defun my/kb-table--level< (a b)
+  "Return non-nil if entry A has a lower LEVEL than entry B.
+Values not in `my/kb-levels' come first."
+  (< (or (seq-position my/kb-levels (aref (cadr a) 1)) -1)
+     (or (seq-position my/kb-levels (aref (cadr b) 1)) -1)))
+
+(defun my/kb-table--entry (concept)
+  "Return the `tabulated-list-entries' entry of CONCEPT."
+  (let ((level (plist-get concept :level))
+        (updated (plist-get concept :updated)))
+    (list (plist-get concept :id)
+          (vector (plist-get concept :title)
+                  (cond ((null level) (propertize "缺失" 'face 'org-warning))
+                        ((member level my/kb-levels) level)
+                        (t (propertize level 'face 'org-warning)))
+                  (if (equal (plist-get concept :confirmed) "t")
+                      "已确认"
+                    (propertize "待确认" 'face 'org-todo))
+                  (if (and updated (string-match "[0-9-]+" updated))
+                      (match-string 0 updated)
+                    "")
+                  (propertize (string-join (plist-get concept :tags) " ")
+                              'face 'org-tag)))))
+
+(defun my/kb-table--refresh ()
+  "Read the concepts from the database into the table."
+  (let ((concepts (make-hash-table :test #'equal))
+        (width 10)
+        entries)
+    (dolist (concept (my/kb-concepts))
+      (puthash (plist-get concept :id) concept concepts)
+      (unless (and my/kb-table--unconfirmed
+                   (equal (plist-get concept :confirmed) "t"))
+        (setq width (max width (string-width (plist-get concept :title))))
+        (push (my/kb-table--entry concept) entries)))
+    (setq my/kb-table--concepts concepts
+          tabulated-list-entries entries
+          mode-name (if my/kb-table--unconfirmed "知识库：待确认" "知识库"))
+    (setf (cadr (aref tabulated-list-format 0)) (min width 48))
+    (tabulated-list-init-header)))
+
+(defvar-keymap my/kb-table-mode-map
+  :doc "Keys of the knowledge base table."
+  :parent tabulated-list-mode-map
+  "RET" #'my/kb-table-open
+  "o" #'my/kb-table-open
+  "+" #'my/kb-table-raise
+  "=" #'my/kb-table-raise
+  "-" #'my/kb-table-lower
+  "1" #'my/kb-table-set-level
+  "2" #'my/kb-table-set-level
+  "3" #'my/kb-table-set-level
+  "4" #'my/kb-table-set-level
+  "5" #'my/kb-table-set-level
+  "c" #'my/kb-table-confirm
+  "u" #'my/kb-table-toggle-unconfirmed
+  "g" #'my/kb-table-refresh)
+
+(define-derived-mode my/kb-table-mode tabulated-list-mode "知识库"
+  "Table of the concepts of the knowledge base.
+\\<my/kb-table-mode-map>\\[my/kb-table-raise] and \\[my/kb-table-lower] raise and lower LEVEL, 1 to 5 set it, \
+\\[my/kb-table-confirm] confirms or unconfirms it;
+each change is written to the concept's file, with today as UPDATED.
+\\[my/kb-table-toggle-unconfirmed] lists only unconfirmed concepts, \
+\\[tabulated-list-sort] sorts by the column at point,
+\\[my/kb-table-open] opens the concept and \\[my/kb-table-refresh] \
+rereads the table.
+
+\\{my/kb-table-mode-map}"
+  (setq tabulated-list-format
+        (vector (list "标题" 30 t)
+                (list "掌握程度" 15 #'my/kb-table--level<)
+                (list "确认" 7 t)
+                (list "更新于" 11 t)
+                (list "标签" 0 t))
+        tabulated-list-padding 1
+        tabulated-list-sort-key '("标题"))
+  (add-hook 'tabulated-list-revert-hook #'my/kb-table--refresh nil t))
+
+(defconst my/kb-table--buffer "*知识库*"
+  "Name of the table buffer.")
+
+(defun my/kb-table ()
+  "List the concepts of the knowledge base in a table."
+  (interactive)
+  (let ((buffer (get-buffer-create my/kb-table--buffer)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'my/kb-table-mode)
+        (my/kb-table-mode))
+      (revert-buffer))
+    (pop-to-buffer-same-window buffer)))
+
+(defun my/kb-table--concept ()
+  "Return the plist of the concept at point."
+  (or (gethash (tabulated-list-get-id) my/kb-table--concepts)
+      (user-error "这一行没有概念")))
+
+(defun my/kb-table--update (concept properties)
+  "Write PROPERTIES, an alist, to CONCEPT's file and show them in its row."
+  (my/kb-set-properties (plist-get concept :file) properties)
+  (pcase-dolist (`(,name . ,value) properties)
+    (setq concept (plist-put concept (intern (concat ":" (downcase name))) value)))
+  (setq concept (plist-put concept :updated (my/kb-date-string)))
+  (puthash (plist-get concept :id) concept my/kb-table--concepts)
+  (let ((cells (cadr (my/kb-table--entry concept))))
+    (dolist (column '(1 2 3))
+      (tabulated-list-set-col column (aref cells column) t))))
+
+(defun my/kb-table-set-level (level)
+  "Set the LEVEL of the concept at point to LEVEL.
+Interactively, a digit key chooses the level of that rank in
+`my/kb-levels'.  With `my/kb-level-change-confirms', the level is also
+confirmed."
+  (interactive
+   (list (or (nth (1- (- last-command-event ?0)) my/kb-levels)
+             (user-error "没有这一级"))))
+  (let ((concept (my/kb-table--concept)))
+    (my/kb-table--update concept
+                         (cons (cons "LEVEL" level)
+                               (and my/kb-level-change-confirms
+                                    '(("CONFIRMED" . "t")))))
+    (message "%s：%s" (plist-get concept :title) level)))
+
+(defun my/kb-table--shift-level (delta)
+  "Move the LEVEL of the concept at point DELTA steps up `my/kb-levels'.
+A missing or unknown level becomes the lowest one."
+  (let* ((rank (seq-position my/kb-levels
+                             (plist-get (my/kb-table--concept) :level)))
+         (new (if rank (+ rank delta) 0)))
+    (unless (< -1 new (length my/kb-levels))
+      (user-error (if (> delta 0) "已是最高的掌握程度" "已是最低的掌握程度")))
+    (my/kb-table-set-level (nth new my/kb-levels))))
+
+(defun my/kb-table-raise ()
+  "Raise the LEVEL of the concept at point by one."
+  (interactive)
+  (my/kb-table--shift-level 1))
+
+(defun my/kb-table-lower ()
+  "Lower the LEVEL of the concept at point by one."
+  (interactive)
+  (my/kb-table--shift-level -1))
+
+(defun my/kb-table-confirm ()
+  "Confirm the LEVEL of the concept at point, or unconfirm a confirmed one.
+Then move to the next line."
+  (interactive)
+  (let* ((concept (my/kb-table--concept))
+         (confirm (not (equal (plist-get concept :confirmed) "t"))))
+    (my/kb-table--update concept
+                         (list (cons "CONFIRMED" (if confirm "t" "nil"))))
+    (message "%s：%s" (plist-get concept :title) (if confirm "已确认" "待确认"))
+    (forward-line 1)))
+
+(defun my/kb-table-toggle-unconfirmed ()
+  "Toggle between listing every concept and only the unconfirmed ones."
+  (interactive)
+  (setq my/kb-table--unconfirmed (not my/kb-table--unconfirmed))
+  (revert-buffer))
+
+(defun my/kb-table-refresh ()
+  "Reread the table from the database."
+  (interactive)
+  (revert-buffer))
+
+(defun my/kb-table-open ()
+  "Visit the file of the concept at point."
+  (interactive)
+  (find-file (plist-get (my/kb-table--concept) :file)))
+
 ;;; Keys
 
 (defvar-keymap my/kb-command-map
   :doc "Knowledge base commands, under C-c n (SPC n with evil)."
+  "n" #'my/kb-table
   "f" #'org-roam-node-find
   "i" #'org-roam-node-insert
   "r" #'my/kb-relation-add
@@ -404,6 +619,30 @@ first, in the order of `my/kb-relations'."
   "a" #'org-roam-alias-add)
 
 (keymap-global-set "C-c n" my/kb-command-map)
+
+;; evil may be turned off (see `my/use-evil'); declare it for the compiler.
+;; SPC n itself is bound in init-evil.el, so it works before this loads.
+(declare-function evil-set-initial-state "evil-core")
+(declare-function evil-define-key* "evil-core")
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'my/kb-table-mode 'normal)
+  (evil-define-key* '(normal motion) my/kb-table-mode-map
+    (kbd "RET") #'my/kb-table-open
+    "o" #'my/kb-table-open
+    "+" #'my/kb-table-raise
+    "=" #'my/kb-table-raise
+    "-" #'my/kb-table-lower
+    "1" #'my/kb-table-set-level
+    "2" #'my/kb-table-set-level
+    "3" #'my/kb-table-set-level
+    "4" #'my/kb-table-set-level
+    "5" #'my/kb-table-set-level
+    "c" #'my/kb-table-confirm
+    "u" #'my/kb-table-toggle-unconfirmed
+    "S" #'tabulated-list-sort
+    "gr" #'my/kb-table-refresh
+    "q" #'quit-window))
 
 (my/kb-bootstrap)
 (my/kb--enable-autosync)
