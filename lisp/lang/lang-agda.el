@@ -66,10 +66,21 @@ Try the current command first, then the pre-2.8 helper."
 (defun my/agda-activate ()
   "Enter Agda's mode without losing the current project environment."
   (let ((saved-env process-environment)
-        (saved-path exec-path))
+        (saved-path exec-path)
+        (warning-inhibit-types warning-inhibit-types))
     (unless (fboundp 'agda2-mode)
-      (let ((file (my/agda-mode-file)))
-        (add-to-list 'load-path (file-name-directory file))
+      (let* ((file (my/agda-mode-file))
+             (directory (file-name-directory file)))
+        ;; Emacs 31 includes the source path in this warning's type.
+        ;; Keep Agda's dynamic binding semantics and cover its autoloads,
+        ;; without hiding other warnings or warnings from other packages.
+        (setq warning-inhibit-types
+              (append (mapcar (lambda (source)
+                                (list 'files 'missing-lexbind-cookie
+                                      (abbreviate-file-name source)))
+                              (directory-files directory t "\\.el\\'"))
+                      warning-inhibit-types))
+        (add-to-list 'load-path directory)
         (load file nil t)
         (my/agda-register-mode)))
     ;; New mode initialization needs the project env, including in temp

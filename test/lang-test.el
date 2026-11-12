@@ -148,6 +148,64 @@
       (delete-directory directory t))))
 
 
+(ert-deftest lang-agda-cookie-warnings-stay-scoped ()
+  "Silence bundled cookie warnings, retaining dynamic scope and other warnings."
+  (let* ((directory (make-temp-file "agda-cookie-test-" t))
+         (outside (make-temp-file "agda-outside-" nil ".el"))
+         (warnings (generate-new-buffer " *agda-test-warnings*"))
+         (entry (expand-file-name "agda2.el" directory))
+         (mode (expand-file-name "agda2-mode.el" directory))
+         (helper (expand-file-name "helper.el" directory))
+         (original-warning (symbol-function 'display-warning))
+         (warning-inhibit-types '((retained-warning)))
+         (warning-suppress-types nil)
+         (warning-suppress-log-types nil)
+         (warning-minimum-level :emergency)
+         (warning-minimum-log-level :warning)
+         (load-path load-path))
+    (unwind-protect
+        (progn
+          (with-temp-file outside (insert ";; Outside Agda.\n"))
+          (with-temp-file helper
+            ;; The free variable must resolve in the calling dynamic let.
+            (insert "(defun agda-test-dynamic () agda-test-value)\n"))
+          (with-temp-file mode
+            (insert (format "(load %S nil t)\n" helper)
+                    "(defun agda2-mode ()\n"
+                    "  (let ((agda-test-value 'dynamic))\n"
+                    "    (setq-local agda-test-result (agda-test-dynamic)))\n"
+                    "  (display-warning 'files \"Other Agda warning\")\n"
+                    (format "  (load %S nil t))\n" outside)))
+          (with-temp-file entry
+            (insert (format "(autoload 'agda2-mode %S nil t)\n" mode)))
+          (cl-letf (((symbol-function 'my/agda-mode-file) (lambda () entry))
+                    ((symbol-function 'agda2-mode) nil)
+                    ((symbol-function 'display-warning)
+                     (lambda (type message &optional level _buffer)
+                       (funcall original-warning type message level
+                                (buffer-name warnings)))))
+            (with-temp-buffer
+              (my/agda-activate)
+              (should (eq (buffer-local-value 'agda-test-result
+                                             (current-buffer))
+                          'dynamic)))
+            (should (equal warning-inhibit-types '((retained-warning))))
+            (with-current-buffer warnings
+              (should (string-match-p "Other Agda warning" (buffer-string)))
+              (should (string-match-p (regexp-quote outside) (buffer-string)))
+              (dolist (file (list entry mode helper))
+                (should-not (string-match-p (regexp-quote file)
+                                            (buffer-string)))))
+            ;; Loading the same file after activation must warn again.
+            (load helper nil t)
+            (with-current-buffer warnings
+              (should (string-match-p (regexp-quote helper) (buffer-string))))))
+      (fmakunbound 'agda-test-dynamic)
+      (kill-buffer warnings)
+      (delete-file outside)
+      (delete-directory directory t))))
+
+
 (ert-deftest lang-nix-profile-paths-idempotent ()
   "GUI startup discovers Nix without adding missing or duplicate paths."
   (cl-letf (((symbol-function 'file-directory-p)
