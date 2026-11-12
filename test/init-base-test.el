@@ -146,6 +146,10 @@ Scrolling needs a real display: run it in the running Emacs."
   "No scroll margin, which makes touchpad scrolling jump back."
   (should (= (default-value 'scroll-margin) 0)))
 
+(ert-deftest init-base-no-vc-polling ()
+  "Auto-revert polling does not run git every second."
+  (should-not (default-value 'auto-revert-check-vc-info)))
+
 (ert-deftest init-base-truncates-code-lines ()
   "Code and config buffers truncate long lines; prose wraps."
   (with-temp-buffer

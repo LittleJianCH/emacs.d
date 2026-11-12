@@ -114,10 +114,12 @@ the public configuration unless `my/site-directory' was set explicitly."
 (repeat-mode 1)
 
 ;; Agents modify files externally, so buffers must refresh promptly;
-;; non-file buffers (dired etc.) are refreshed too.
+;; non-file buffers (dired etc.) are refreshed too.  A reverted buffer still
+;; refreshes its VC state; `auto-revert-check-vc-info' would also run git every
+;; second in each buffer left to polling, while watched buffers never got it.
 (setq auto-revert-interval 1
       auto-revert-avoid-polling t
-      auto-revert-check-vc-info t
+      auto-revert-check-vc-info nil
       global-auto-revert-non-file-buffers t
       auto-revert-verbose nil)
 (global-auto-revert-mode 1)

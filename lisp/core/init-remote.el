@@ -42,21 +42,8 @@
 ;; such as visiting or saving a file, never by polling.
 
 ;; autorevert does not revert remote files (`auto-revert-remote-files' is nil),
-;; but `auto-revert-check-vc-info' still runs `vc-refresh-state' on remote buffers
-;; every second: a dozen remote calls per round, enough to keep Emacs busy in that
-;; timer forever.  Remote buffers refresh VC state only when visited and saved.
-;; Set it again whenever a major mode starts: a mode change (such as re-running
-;; `org-mode') kills buffer-local variables, and a single buffer that lost the
-;; setting kept Emacs blocked for 1.5s of every second.
-(defun my/remote-buffer-setup ()
-  "Turn off polling-style remote access in remote buffers."
-  (when (file-remote-p default-directory)
-    (setq-local auto-revert-check-vc-info nil)))
-(add-hook 'find-file-hook #'my/remote-buffer-setup)
-(add-hook 'after-change-major-mode-hook #'my/remote-buffer-setup)
-
-;; Since remote files are never reverted, `global-auto-revert-mode' gains nothing
-;; from remote buffers, yet it polled each of them every second: a connection
+;; so `global-auto-revert-mode' gains nothing from remote buffers, yet it polled
+;; each of them every second: a connection
 ;; check and its handler, several `process-status' calls through tramp-rpc each,
 ;; 40ms of every second for 67 buffers.  Keep them out of the mode.  The default
 ;; value is consulted whenever a buffer is adopted, so neither hook order nor a
