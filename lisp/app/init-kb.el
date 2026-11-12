@@ -929,11 +929,14 @@ catches up with external changes.
 (defun my/kb-table-set-level (level)
   "Set the LEVEL of the concept at point to LEVEL.
 Interactively, a digit key chooses the level of that rank in
-`my/kb-levels'.  With `my/kb-level-change-confirms', the level is also
-confirmed."
+`my/kb-levels'; otherwise the level is read.  With
+`my/kb-level-change-confirms', the level is also confirmed."
   (interactive
-   (list (or (nth (1- (- last-command-event ?0)) my/kb-levels)
-             (user-error "没有这一级"))))
+   (list (if (and (characterp last-command-event)
+                  (<= ?1 last-command-event ?9))
+             (or (nth (- last-command-event ?1) my/kb-levels)
+                 (user-error "没有这一级"))
+           (completing-read "掌握程度：" my/kb-levels nil t))))
   (let ((concept (my/kb-table--concept)))
     (my/kb-table--update concept
                          (cons (cons "LEVEL" level)
