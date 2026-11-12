@@ -34,6 +34,8 @@
 (defvar org-roam-db-location)
 (defvar org-id-track-globally)
 (defvar org-id-locations-file)
+(defvar httpd-host)
+(defvar org-roam-ui-open-on-start)
 
 (defconst init-knowledge-test--state (make-temp-file "knowledge-ert-" t)
   "Temporary directory for the module's startup knowledge base.")
@@ -611,6 +613,91 @@ replaces the current one."
       (should (init-knowledge-test--wait (lambda () (null my/knowledge-sync--rebuild))))
       (should (= (length (my/knowledge-concepts)) 4))
       (should-not (my/knowledge-sync--changed-files)))))
+
+;;; Graph
+
+(ert-deftest init-knowledge-graph-accepts-only-localhost ()
+  "Host headers and origins must name this machine, not a look-alike."
+  (unless init-knowledge-test--available (ert-skip "org-roam is not installed"))
+  (dolist (host '("localhost" "localhost:35901" "127.0.0.1:35903"))
+    (should (my/knowledge-graph--local-host-p host)))
+  (dolist (host '(nil "evil.example" "localhost.evil.example" "evil.localhost"
+                  "localhost:35901.evil.example" "127.0.0.1.nip.io"))
+    (should-not (my/knowledge-graph--local-host-p host))))
+
+(ert-deftest init-knowledge-graph-guards-http ()
+  "Foreign hosts and files outside the knowledge base get 403, images
+are sent alone, and no response allows other origins."
+  (init-knowledge-test--with-knowledge
+    (let* ((inside (init-knowledge-test--concept root "a" "id-a" "Alpha"))
+           (outside (make-temp-file "knowledge-secret-"))
+           (local '(("GET" "/x" "HTTP/1.1") ("Host" "localhost:35901")))
+           (foreign '(("GET" "/x" "HTTP/1.1") ("Host" "evil.example:35901")))
+           calls)
+      (unwind-protect
+          (cl-letf (((symbol-function 'httpd-error)
+                     (lambda (_proc status &rest _) (push (list 'error status) calls)))
+                    ((symbol-function 'httpd-send-file)
+                     (lambda (_proc file &rest _) (push (list 'file file) calls)))
+                    ((symbol-function 'httpd-send-header)
+                     (lambda (_proc _mime status &rest headers)
+                       (push (list 'header status headers) calls))))
+            (let ((servlet (lambda (_proc _path _query _request &rest _)
+                             (push 'servlet calls)
+                             (httpd-send-header t "text/plain" 200
+                                                :Access-Control-Allow-Origin "*")))
+                  (img (lambda (file) (concat "/img/" (url-hexify-string file)))))
+              (my/knowledge-graph--guard-http servlet t "/node/id-a" nil foreign)
+              (should (equal (pop calls) '(error 403)))
+              (my/knowledge-graph--guard-http servlet t (funcall img outside) nil local)
+              (should (equal (pop calls) '(error 403)))
+              (my/knowledge-graph--guard-http servlet t (funcall img "/etc/../etc/hosts")
+                                              nil local)
+              (should (equal (pop calls) '(error 403)))
+              (my/knowledge-graph--guard-http servlet t (funcall img inside) nil local)
+              (should (equal (pop calls) (list 'file inside)))
+              (my/knowledge-graph--guard-http servlet t "/node/id-a" nil local)
+              (should (equal (nreverse calls) '(servlet (header 200 nil))))))
+        (delete-file outside)))))
+
+(ert-deftest init-knowledge-graph-guards-the-websocket ()
+  "Only the graph page's own origin may talk to Emacs; deleting is refused."
+  (unless init-knowledge-test--available (ert-skip "org-roam is not installed"))
+  (let (origin handled closed)
+    (cl-letf (((symbol-function 'websocket-origin) (lambda (_socket) origin))
+              ((symbol-function 'websocket-close) (lambda (_socket) (setq closed t))))
+      (dolist (bad '(nil "http://evil.example" "https://localhost.evil.example"
+                     "http://localhost:35901/evil" "null"))
+        (setq origin bad handled nil closed nil)
+        (my/knowledge-graph--guard-socket (lambda (&rest _) (setq handled t)) 'socket)
+        (ert-info ((format "%S" bad))
+          (should-not handled)
+          (should closed)))
+      (setq origin "http://localhost:35901" handled nil closed nil)
+      (my/knowledge-graph--guard-socket (lambda (_socket frame) (setq handled frame))
+                                        'socket 'frame)
+      (should (eq handled 'frame))
+      (should-not closed)))
+  (let ((file (make-temp-file "knowledge-keep-")))
+    (unwind-protect
+        (progn
+          (my/knowledge-graph--refuse-delete `((file . ,file)))
+          (should (file-exists-p file)))
+      (delete-file file))))
+
+(ert-deftest init-knowledge-graph-hardens-org-roam-ui ()
+  "Loading org-roam-ui installs the guards and keeps the server local."
+  (unless (and init-knowledge-test--available (package-installed-p 'org-roam-ui))
+    (ert-skip "org-roam-ui is not installed"))
+  (require 'org-roam-ui)
+  (should (eq httpd-host 'local))
+  (should-not org-roam-ui-open-on-start)
+  (dolist (servlet '(httpd/node httpd/img))
+    (should (advice-member-p #'my/knowledge-graph--guard-http servlet)))
+  (dolist (handler '(org-roam-ui--ws-on-open org-roam-ui--ws-on-message))
+    (should (advice-member-p #'my/knowledge-graph--guard-socket handler)))
+  (should (advice-member-p #'my/knowledge-graph--refuse-delete
+                           'org-roam-ui--on-msg-delete-node)))
 
 ;;; Validation and export
 

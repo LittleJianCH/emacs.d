@@ -16,6 +16,7 @@
 ;;   C-c n d   record a learning session     C-c n D   today's sessions
 ;;   C-c n c   add a concept to the session at point, one per call
 ;;   C-c n t   add a tag   C-c n a   add an alias
+;;   C-c n g   graph of the concepts (org-roam-ui, inside Emacs)
 ;;   C-c n v   validate the knowledge base (compilation buffer)
 ;;   C-c n p   export to HTML for the phone (C-u: everything again)
 ;;   C-c n s   catch up with external changes now   C-c n S   rebuild
@@ -1053,6 +1054,130 @@ the node at point in Org files."
 
 (add-hook 'my/knowledge-sync-updated-hook #'my/knowledge-table--sync-updated)
 
+;;; Graph
+
+;; org-roam-ui draws the graph in a web page, served by Emacs and shown in
+;; an xwidget, which talks back over a websocket (open a node, follow the
+;; current buffer).  As shipped, it lets any web site open in a browser read
+;; any file through http://localhost:35901/img/PATH (CORS allows every
+;; origin), read the notes, and delete any file over the websocket; the
+;; HTTP server even listens on every interface.  So here the server listens
+;; on localhost only and runs only while a graph buffer is open, requests
+;; must name localhost (no DNS rebinding), images come only from the
+;; knowledge base, no CORS header is sent, the websocket accepts only the
+;; page's own origin, and deleting from the page is disabled.
+
+(declare-function org-roam-ui-mode "org-roam-ui")
+(declare-function websocket-origin "websocket")
+(declare-function websocket-close "websocket")
+(declare-function httpd-error "simple-httpd")
+(declare-function httpd-send-file "simple-httpd")
+(declare-function xwidget-webkit-browse-url "xwidget")
+(declare-function xwidget-webkit-current-session "xwidget")
+(declare-function xwidget-buffer "xwidget.c")
+(defvar org-roam-ui-mode)
+(defvar org-roam-ui-port)
+(defvar httpd-host)
+
+(defvar my/knowledge-graph--buffers nil
+  "Live buffers showing the graph.")
+
+(defun my/knowledge-graph--local-host-p (host)
+  "Return non-nil if HOST, a Host header or origin host, is this machine."
+  (and host (string-match-p "\\`\\(?:localhost\\|127\\.0\\.0\\.1\\)\\(?::[0-9]+\\)?\\'"
+                            host)))
+
+(defun my/knowledge-graph--guard-http (servlet proc path query request &rest rest)
+  "Call SERVLET with PROC, PATH, QUERY, REQUEST and REST if it is safe.
+The request must name localhost; an image must be a file of the
+knowledge base.  The response allows no other origin."
+  (let ((file (and (string-prefix-p "/img/" path)
+                   (expand-file-name (org-link-decode (substring path 5))))))
+    (cond
+     ((not (and (my/knowledge-graph--local-host-p (cadr (assoc "Host" request)))
+                (or (null file)
+                    (and (file-regular-p file)
+                         (string-prefix-p (my/knowledge-root)
+                                          (file-truename file))))))
+      (httpd-error proc 403))
+     ;; org-roam-ui's image servlet sends a second header after the file,
+     ;; which current simple-httpd refuses; send the file alone.
+     (file (httpd-send-file proc file request))
+     (t
+      (let ((send (symbol-function 'httpd-send-header)))
+        (cl-letf (((symbol-function 'httpd-send-header)
+                   (lambda (proc mime status &rest headers)
+                     (cl-remf headers :Access-Control-Allow-Origin)
+                     (apply send proc mime status headers))))
+          (apply servlet proc path query request rest)))))))
+
+(defun my/knowledge-graph--guard-socket (handler socket &rest arguments)
+  "Call HANDLER with SOCKET and ARGUMENTS only for the graph page itself."
+  (let ((origin (websocket-origin socket)))
+    (if (and origin
+             (string-match "\\`http://\\([^/]+\\)\\'" origin)
+             (my/knowledge-graph--local-host-p (match-string 1 origin)))
+        (apply handler socket arguments)
+      (message "知识图谱：拒绝来自 %s 的连接" (or origin "未知来源"))
+      (websocket-close socket))))
+
+(defun my/knowledge-graph--refuse-delete (_data)
+  "Refuse to delete a file for the graph page."
+  (message "知识图谱：不能从图谱里删除，请在 Emacs 里删除文件"))
+
+(use-package org-roam-ui
+  :ensure t
+  :defer t
+  :custom
+  (org-roam-ui-sync-theme t)
+  (org-roam-ui-follow t)
+  (org-roam-ui-update-on-save t)
+  (org-roam-ui-open-on-start nil)
+  (org-roam-ui-browser-function #'my/knowledge-graph--show)
+  :config
+  (setq httpd-host 'local)
+  (dolist (servlet '(httpd/node httpd/img))
+    (advice-add servlet :around #'my/knowledge-graph--guard-http))
+  (dolist (handler '(org-roam-ui--ws-on-open org-roam-ui--ws-on-message))
+    (advice-add handler :around #'my/knowledge-graph--guard-socket))
+  (advice-add 'org-roam-ui--on-msg-delete-node :override
+              #'my/knowledge-graph--refuse-delete))
+
+(defun my/knowledge-graph--stop-when-unused ()
+  "Stop the graph server once no graph buffer is left."
+  (setq my/knowledge-graph--buffers
+        (seq-filter (lambda (buffer)
+                      (and (buffer-live-p buffer)
+                           (not (eq buffer (current-buffer)))))
+                    my/knowledge-graph--buffers))
+  (when (and (null my/knowledge-graph--buffers) org-roam-ui-mode)
+    (org-roam-ui-mode -1)))
+
+(defun my/knowledge-graph--show (url)
+  "Show URL in an xwidget in another window, as a graph buffer."
+  (let ((switch-to-buffer-obey-display-actions t)
+        (display-buffer-overriding-action
+         '((display-buffer-use-some-window display-buffer-pop-up-window)
+           (inhibit-same-window . t))))
+    (xwidget-webkit-browse-url url t))
+  (when-let* ((session (xwidget-webkit-current-session))
+              (buffer (xwidget-buffer session)))
+    (push buffer my/knowledge-graph--buffers)
+    (with-current-buffer buffer
+      (add-hook 'kill-buffer-hook #'my/knowledge-graph--stop-when-unused nil t))))
+
+(defun my/knowledge-graph ()
+  "Show the graph of the concepts and sessions, with org-roam-ui.
+Clicking a node opens it here; the graph follows the node at point.  The
+local server runs while a graph buffer is open."
+  (interactive)
+  (unless (featurep 'xwidget-internal)
+    (user-error "这个 Emacs 没有编译 xwidget，无法在内部显示图谱"))
+  (require 'org-roam-ui)
+  (unless org-roam-ui-mode
+    (org-roam-ui-mode 1))
+  (my/knowledge-graph--show (format "http://localhost:%d" org-roam-ui-port)))
+
 ;;; Keys
 
 (defvar-keymap my/knowledge-command-map
@@ -1067,6 +1192,7 @@ the node at point in Org files."
   "D" #'org-roam-dailies-goto-today
   "t" #'org-roam-tag-add
   "a" #'org-roam-alias-add
+  "g" #'my/knowledge-graph
   "v" #'my/knowledge-check
   "p" #'my/knowledge-publish
   "s" #'my/knowledge-sync-scan
