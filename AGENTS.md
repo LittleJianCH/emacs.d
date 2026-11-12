@@ -51,7 +51,8 @@ lisp/app/                standalone applications; enabled via `my/apps' in init.
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
   init-kb.el             knowledge graph on org-roam in ~/kb (C-c n): table,
                          relations, labelled backlinks, external-change sync
-  kb-batch.el            its file format, needing only Org
+  kb-batch.el            its file format, plus the validator and HTML export
+                         run by `emacs --batch -Q` subprocesses
 bin/emx                  minimal launcher: locate/build dist, import compiled CLI
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
   cli/                   argument parsing, help, emacsclient transport, daemon/MCP dispatch

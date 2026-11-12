@@ -13,6 +13,8 @@
 ;;   C-c n r   add a relation to a concept   C-c n b   backlinks buffer
 ;;   C-c n d   record a learning session     C-c n D   today's sessions
 ;;   C-c n t   add a tag   C-c n a   add an alias
+;;   C-c n v   validate the knowledge base (compilation buffer)
+;;   C-c n p   export to HTML for the phone (C-u: everything again)
 ;;   C-c n s   catch up with external changes now   C-c n S   rebuild
 ;;
 ;; Keeping the database current without blocking.  Saves inside Emacs are
@@ -39,7 +41,7 @@
 ;; `my/kb-sync-rebuild-threshold' changed files (the first run, a large
 ;; git checkout), a batch Emacs builds a new database in a temporary file,
 ;; which then replaces the current one, and a scan picks up what changed
-;; meanwhile.
+;; meanwhile.  Validation and HTML export likewise run in subprocesses.
 
 ;;; Code:
 
@@ -52,6 +54,11 @@
   "The knowledge base: a git repository of its own, the `org-roam-directory'.
 It is created with two example concepts when the module loads, if it
 does not exist yet.  Takes effect after a restart."
+  :type 'directory
+  :group 'my/kb)
+
+(defcustom my/kb-publish-directory (my/var "kb-site/")
+  "Directory `my/kb-publish' writes the HTML version of the knowledge base to."
   :type 'directory
   :group 'my/kb)
 
@@ -720,6 +727,71 @@ the rebuild.  Emacs stays usable throughout."
                  (message "知识库：重建数据库失败，详见 %s"
                           (buffer-name (process-buffer process))))))))))
 
+;;; Validation and export
+
+(defun my/kb--batch-command (function &rest args)
+  "Return the command running FUNCTION of kb-batch.el with ARGS, a list.
+The subprocess is a batch Emacs without the configuration, given the
+current values of the options it reads."
+  (append (list (my/kb--emacs) "--batch" "-Q"
+                "-L" (file-name-directory (locate-library "kb-batch"))
+                "--eval" (prin1-to-string
+                          `(setq my/kb-relations ',my/kb-relations
+                                 my/kb-ais ',my/kb-ais))
+                "-l" "kb-batch" "-f" function)
+          args))
+
+(defun my/kb-check ()
+  "Validate the knowledge base in a subprocess.
+Findings appear in a compilation buffer; \\[next-error] visits each: an
+invalid or missing property, a relation name not in `my/kb-relations',
+an id link to nothing."
+  (interactive)
+  (let ((default-directory (my/kb-root)))
+    (compilation-start
+     (mapconcat #'shell-quote-argument
+                (my/kb--batch-command "my/kb-batch-check" (my/kb-root))
+                " ")
+     nil (lambda (_) "*知识库校验*"))))
+
+(defvar my/kb--publish nil
+  "Process exporting the knowledge base, while it runs.")
+
+(defvar my/kb-publish-cache-directory (my/var "kb-publish/")
+  "Directory of org-publish timestamps and id locations for the export.")
+
+(defun my/kb-publish (&optional force)
+  "Export the knowledge base to HTML in `my/kb-publish-directory'.
+Runs in a subprocess; only changed files are exported again unless
+FORCE, the prefix argument, is non-nil.  Links between concepts become
+links between pages, and index.html lists every concept."
+  (interactive "P")
+  (when (process-live-p my/kb--publish)
+    (user-error "知识库正在导出"))
+  (let ((buffer (get-buffer-create "*知识库导出*"))
+        (output (expand-file-name my/kb-publish-directory)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (message "知识库：正在后台导出到 %s…" output)
+    (setq my/kb--publish
+          (make-process
+           :name "kb-publish"
+           :buffer buffer
+           :command (apply #'my/kb--batch-command "my/kb-batch-publish"
+                           (my/kb-root) output my/kb-publish-cache-directory
+                           (and force '("force")))
+           :noquery t
+           :sentinel
+           (lambda (process _event)
+             (unless (process-live-p process)
+               (setq my/kb--publish nil)
+               (if (zerop (process-exit-status process))
+                   (message "知识库已导出：%s"
+                            (expand-file-name "index.html" output))
+                 (message "知识库导出失败")
+                 (display-buffer (process-buffer process)))))))))
+
 ;;; Table of concepts
 
 (defun my/kb-concepts ()
@@ -940,6 +1012,8 @@ The table is updated again once those files are indexed."
   "D" #'org-roam-dailies-goto-today
   "t" #'org-roam-tag-add
   "a" #'org-roam-alias-add
+  "v" #'my/kb-check
+  "p" #'my/kb-publish
   "s" #'my/kb-sync-scan
   "S" #'my/kb-sync-rebuild)
 

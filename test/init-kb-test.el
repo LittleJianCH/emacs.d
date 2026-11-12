@@ -3,8 +3,9 @@
 ;;; Commentary:
 
 ;; Exercise the knowledge base on temporary directories and databases:
-;; creation, capture, relations, labelled backlinks, the table and catching
-;; up with external changes.  The module is loaded with `my/kb-directory' pointing at a
+;; creation, capture, relations, labelled backlinks, the table, catching up
+;; with external changes, and the batch validator and exporter (real
+;; subprocesses).  The module is loaded with `my/kb-directory' pointing at a
 ;; temporary directory, so the real ~/kb and var/org-roam.db are never
 ;; touched.  Skipped unless org-roam is installed; nothing is installed.
 
@@ -166,7 +167,11 @@ an existing one is left alone."
                              (string-match-p "^- prerequisite_of :: \\[\\[id:" text))
                            texts))
           (dolist (text texts)
-            (should (string-prefix-p ":PROPERTIES:\n:ID:" text)))))
+            (should (string-prefix-p ":PROPERTIES:\n:ID:" text))))
+        ;; The examples follow the format the validator checks.
+        (let ((result (init-kb-test--batch "my/kb-batch-check" my/kb-directory)))
+          (should (equal (car result) 0))
+          (should (string-match-p "0 个错误，0 个警告" (cdr result)))))
       ;; Let git init finish before the directory goes.
       (init-kb-test--wait (lambda () (file-directory-p
                                       (expand-file-name ".git" my/kb-directory)))
@@ -448,6 +453,86 @@ replaces the current one."
       (should (init-kb-test--wait (lambda () (null my/kb-sync--rebuild))))
       (should (= (length (my/kb-concepts)) 4))
       (should-not (my/kb-sync--changed-files)))))
+
+;;; Validation and export
+
+(ert-deftest init-kb-check-reports-problems-by-line ()
+  "The validator prints compilation-style findings and fails on errors."
+  (init-kb-test--with-kb
+    (init-kb-test--concept root "a" "id-a" "Alpha"
+                           "- see [[id:nowhere][X]]"
+                           "" "* Relations"
+                           "- requires :: [[id:id-b][Beta]]"
+                           "- likes :: [[id:id-b][Beta]]"
+                           "- no tag [[id:id-b][Beta]]"
+                           "- related :: no link")
+    (init-kb-test--write root "concepts/b.org"
+                         ":PROPERTIES:" ":ID:       id-b" ":LEVEL:    master"
+                         ":UPDATED:  2026-1-1" ":END:")
+    (init-kb-test--write root "sessions/2026-11-12.org"
+                         ":PROPERTIES:" ":ID:       id-a" ":END:" "#+title: 2026-11-12"
+                         "* 10:00" ":PROPERTIES:" ":AI:       gemini"
+                         ":CONCEPTS: [[id:id-b][Beta]] [[id:ghost][G]]" ":END:"
+                         "* 11:00")
+    (let* ((my/kb-relations '("requires" "related" "likes-not"))
+           (result (init-kb-test--batch "my/kb-batch-check" root))
+           (lines (split-string (cdr result) "\n" t)))
+      (should (equal (car result) 1))
+      (dolist (expected
+               '("concepts/a.org:12:7: error: 悬空链接：id nowhere 不存在"
+                 "concepts/a.org:16:1: error: 未知的关系名 likes"
+                 "concepts/a.org:17:1: error: Relations 下的条目应写成"
+                 "concepts/a.org:18:1: error: 关系 related 没有 id 链接"
+                 "concepts/b.org:1:1: error: 缺少属性 CONFIRMED"
+                 "concepts/b.org:1:1: error: 缺少 #+title"
+                 "concepts/b.org:3:1: error: LEVEL 的值「master」不合法"
+                 "concepts/b.org:4:1: error: UPDATED 的值「2026-1-1」不合法"
+                 "sessions/2026-11-12.org:2:1: error: 重复的 ID id-a（另见 concepts/a.org:2）"
+                 "sessions/2026-11-12.org:5:1: warning: AI 的值「gemini」"
+                 "sessions/2026-11-12.org:8:30: error: 悬空链接：id ghost 不存在"
+                 "sessions/2026-11-12.org:10:1: warning: 学习记录缺少 AI 属性"
+                 "检查了 3 个文件：10 个错误，2 个警告"))
+        (ert-info (expected)
+          (should (cl-some (lambda (line) (string-prefix-p expected line)) lines))))
+      ;; Customized relation names reach the subprocess.
+      (should (string-match-p "可用：requires / related / likes-not" (cdr result))))))
+
+(ert-deftest init-kb-publish-links-pages-without-touching-the-kb ()
+  "The export runs asynchronously, turns id links into relative links,
+writes an index, and leaves the knowledge base as it was."
+  (init-kb-test--with-kb
+    (init-kb-test--concept root "a" "id-a" "Alpha | A" "" "* Relations"
+                           "- requires :: [[id:id-b][Beta]]")
+    (init-kb-test--concept root "b" "id-b" "Beta")
+    (init-kb-test--write root "sessions/2026-11-12.org"
+                         ":PROPERTIES:" ":ID:       id-s" ":END:" "#+title: 2026-11-12"
+                         "* 10:00 NbE" ":PROPERTIES:" ":AI:       claude"
+                         ":CONCEPTS: [[id:id-a][Alpha]] [[id:gone][Gone]]" ":END:")
+    (let ((before (directory-files-recursively root "" t)))
+      (my/kb-publish)
+      (should (process-live-p my/kb--publish))
+      (should (init-kb-test--wait (lambda () (null my/kb--publish))))
+      (should (equal (directory-files-recursively root "" t) before))
+      (let ((page (lambda (file)
+                    (init-kb-test--file-string
+                     (expand-file-name file my/kb-publish-directory)))))
+        (should (string-match-p "href=\"b.html#ID-id-b\"" (funcall page "concepts/a.html")))
+        (should (string-match-p "掌握程度：exposed · 待确认 · 更新于 2026-01-01"
+                                (funcall page "concepts/a.html")))
+        (should (string-match-p "href=\"../index.html\"" (funcall page "concepts/a.html")))
+        (let ((session (funcall page "sessions/2026-11-12.html")))
+          (should (string-match-p "AI：claude · 涉及概念：<a href=\"../concepts/a.html#ID-id-a\">"
+                                  session))
+          (should (string-match-p "BROKEN LINK: gone" session)))
+        (let ((index (funcall page "index.html")))
+          (should (string-match-p "<a href=\"concepts/a.html\">Alpha &vert; A</a>" index))
+          (should (string-match-p "<a href=\"sessions/2026-11-12.html\">2026-11-12</a>"
+                                  index))))
+      ;; Again, incrementally.
+      (my/kb-publish)
+      (should (init-kb-test--wait (lambda () (null my/kb--publish))))
+      (should (file-exists-p (expand-file-name "timestamps/kb.cache"
+                                               my/kb-publish-cache-directory))))))
 
 (provide 'init-kb-test)
 ;;; init-kb-test.el ends here
