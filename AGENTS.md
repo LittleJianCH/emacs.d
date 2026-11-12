@@ -49,9 +49,11 @@ lisp/agent/              shared agent support (see below)
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications; enabled via `my/apps' in init.el
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
-  init-knowledge.el      knowledge graph on org-roam in ~/knowledge (C-c n):
-                         table, relations, labelled backlinks, external-change
-                         sync, graph view (org-roam-ui, hardened)
+  init-knowledge.el      knowledge graph on org-roam (C-c n): table, relations,
+                         labelled backlinks, external-change sync, graph view
+                         (org-roam-ui, hardened); knowledge bases registered
+                         per machine in var/knowledge-bases.eld, one database
+                         each under var/org-roam/, switched with C-c n w
   knowledge-batch.el     its file format, plus the validator and HTML export
                          run by `emacs --batch -Q` subprocesses
   knowledge-mcp.el       local stdio MCP server over the same files for AI

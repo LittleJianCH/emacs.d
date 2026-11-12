@@ -3,7 +3,9 @@
 ;;; Commentary:
 
 ;; A record of what I have learned and how well, kept in a git repository of
-;; its own (`my/knowledge-directory', ~/knowledge), which is the `org-roam-directory'.
+;; its own (~/knowledge by default, see `my/knowledge-directory'), which is
+;; the `org-roam-directory'.  Each machine may register several and switch
+;; between them.
 ;; AI assistants read and write it through the MCP server of knowledge-mcp.el
 ;; (bin/knowledge-mcp); Emacs is where I look at it, edit it and confirm levels.
 ;; The file format is described in knowledge-batch.el.
@@ -20,6 +22,7 @@
 ;;   C-c n v   validate the knowledge base (compilation buffer)
 ;;   C-c n p   export to HTML for the phone (C-u: everything again)
 ;;   C-c n s   catch up with external changes now   C-c n S   rebuild
+;;   C-c n w   switch knowledge base             C-c n W   register one
 ;;
 ;; Keeping the database current without blocking.  Saves inside Emacs are
 ;; handled by `org-roam-db-autosync-mode', enabled here without the full
@@ -55,11 +58,19 @@
 (require 'knowledge-batch)
 
 (defcustom my/knowledge-directory (expand-file-name "~/knowledge/")
-  "The knowledge base: a git repository of its own, the `org-roam-directory'.
-It is created with two example concepts when the module loads, if it
-does not exist yet.  Takes effect after a restart."
+  "Knowledge base for a machine that has none registered yet.
+A knowledge base is a git repository of its own, the `org-roam-directory'.
+This one is created with two example concepts if it does not exist, and
+registered; see `my/knowledge-register' for others.  The current one is
+in `my/knowledge-current-directory'."
   :type 'directory
   :group 'my/knowledge)
+
+(defvar my/knowledge-current nil
+  "Name of the current knowledge base.")
+
+(defvar my/knowledge-current-directory nil
+  "Directory of the current knowledge base, or nil before one is chosen.")
 
 (defcustom my/knowledge-publish-directory (my/var "knowledge-site/")
   "Directory `my/knowledge-publish' writes the HTML version of the knowledge base to."
@@ -89,8 +100,9 @@ The rebuild runs in a subprocess, see `my/knowledge-sync-rebuild'."
   :group 'my/knowledge)
 
 (defun my/knowledge-root ()
-  "Return the true name of `my/knowledge-directory', ending in a slash."
-  (file-name-as-directory (file-truename my/knowledge-directory)))
+  "Return the true name of the current knowledge base, ending in a slash."
+  (file-name-as-directory (file-truename (or my/knowledge-current-directory
+                                             my/knowledge-directory))))
 
 (defun my/knowledge-concepts-directory ()
   "Return the directory of the concept files."
@@ -119,12 +131,19 @@ The rebuild runs in a subprocess, see `my/knowledge-sync-rebuild'."
                             ".org")
                     root))
 
-(defun my/knowledge-bootstrap ()
-  "Create `my/knowledge-directory' with two related example concepts.
-Do nothing if the directory exists: existing data is never touched.
-The new directory becomes a git repository; `git init' runs
-asynchronously."
-  (let ((root (expand-file-name my/knowledge-directory)))
+(defun my/knowledge--git-init (root)
+  "Make ROOT a git repository, asynchronously, if git is available."
+  (when (executable-find "git")
+    (let ((default-directory root))
+      (make-process :name "knowledge-git-init" :command '("git" "init" "--quiet")
+                    :buffer nil :noquery t))))
+
+(defun my/knowledge-bootstrap (&optional directory)
+  "Create DIRECTORY with two related example concepts.
+DIRECTORY defaults to `my/knowledge-directory'.  Do nothing if it exists:
+existing data is never touched.  The new directory becomes a git
+repository; `git init' runs asynchronously."
+  (let ((root (expand-file-name (or directory my/knowledge-directory))))
     (unless (file-exists-p root)
       (make-directory (expand-file-name my/knowledge-concepts-subdirectory root) t)
       (make-directory (expand-file-name my/knowledge-sessions-subdirectory root) t)
@@ -147,10 +166,7 @@ asynchronously."
                     "\n* " my/knowledge-relations-heading "\n"
                     (format "- %s :: [[id:%s][%s]]\n"
                             relation (cdr (assoc target ids)) target)))))
-      (when (executable-find "git")
-        (let ((default-directory root))
-          (make-process :name "knowledge-git-init" :command '("git" "init" "--quiet")
-                        :buffer nil :noquery t)))
+      (my/knowledge--git-init root)
       (message "已创建知识库 %s，含两个示例概念" root))))
 
 ;;; org-roam
@@ -166,8 +182,6 @@ scans of `my/knowledge-sync-start' catch up asynchronously instead."
   :ensure t
   :demand t
   :custom
-  (org-roam-directory (my/knowledge-root))
-  (org-roam-db-location (my/var "org-roam.db"))
   (org-roam-dailies-directory my/knowledge-sessions-subdirectory)
   (org-roam-capture-templates
    `(("c" "概念" plain "* Notes\n%?\n\n* Relations\n"
@@ -596,7 +610,7 @@ Files the database has but the disk does not are included."
   "Queue the files of the knowledge base changed since they were indexed.
 Too many changes rebuild the database instead, see
 `my/knowledge-sync-rebuild-threshold'.  Files the database has from
-another directory, after `my/knowledge-directory' changed, are removed
+another directory, after switching knowledge bases, are removed
 at once."
   (interactive)
   (unless my/knowledge-sync--rebuild
@@ -771,8 +785,19 @@ an id link to nothing."
 (defvar my/knowledge-publish-cache-directory (my/var "knowledge-publish/")
   "Directory of org-publish timestamps and id locations for the export.")
 
+(defun my/knowledge--publish-subdirectory ()
+  "Return the subdirectory of the current knowledge base in export directories."
+  (file-name-as-directory
+   (let ((slug (my/knowledge-slug (or my/knowledge-current ""))))
+     (if (string-empty-p slug) "default" slug))))
+
+(defun my/knowledge-publish-output ()
+  "Return the directory the current knowledge base is exported to."
+  (expand-file-name (my/knowledge--publish-subdirectory) my/knowledge-publish-directory))
+
 (defun my/knowledge-publish (&optional force)
-  "Export the knowledge base to HTML in `my/knowledge-publish-directory'.
+  "Export the knowledge base to HTML, see `my/knowledge-publish-output'.
+Each knowledge base has its directory in `my/knowledge-publish-directory'.
 Runs in a subprocess; only changed files are exported again unless
 FORCE, the prefix argument, is non-nil.  Links between concepts become
 links between pages, and index.html lists every concept."
@@ -780,7 +805,7 @@ links between pages, and index.html lists every concept."
   (when (process-live-p my/knowledge--publish)
     (user-error "知识库正在导出"))
   (let ((buffer (get-buffer-create "*知识库导出*"))
-        (output (expand-file-name my/knowledge-publish-directory)))
+        (output (my/knowledge-publish-output)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)))
@@ -790,7 +815,9 @@ links between pages, and index.html lists every concept."
            :name "knowledge-publish"
            :buffer buffer
            :command (apply #'my/knowledge--batch-command "my/knowledge-batch-publish"
-                           (my/knowledge-root) output my/knowledge-publish-cache-directory
+                           (my/knowledge-root) output
+                           (expand-file-name (my/knowledge--publish-subdirectory)
+                                             my/knowledge-publish-cache-directory)
                            (and force '("force")))
            :noquery t
            :sentinel
@@ -866,7 +893,8 @@ Values not in `my/knowledge-levels' come first."
         (push (my/knowledge-table--entry concept) entries)))
     (setq my/knowledge-table--concepts concepts
           tabulated-list-entries entries
-          mode-name (if my/knowledge-table--unconfirmed "知识库：待确认" "知识库"))
+          mode-name (format "知识库「%s」%s" (or my/knowledge-current "")
+                            (if my/knowledge-table--unconfirmed "：待确认" "")))
     (setf (cadr (aref tabulated-list-format 0)) (min width 48))
     (tabulated-list-init-header)))
 
@@ -1153,6 +1181,13 @@ knowledge base.  The response allows no other origin."
   (when (and (null my/knowledge-graph--buffers) org-roam-ui-mode)
     (org-roam-ui-mode -1)))
 
+(defun my/knowledge-graph--close ()
+  "Close the graph buffers, which stops the graph server."
+  (mapc #'kill-buffer (seq-filter #'buffer-live-p my/knowledge-graph--buffers))
+  (setq my/knowledge-graph--buffers nil)
+  (when (bound-and-true-p org-roam-ui-mode)
+    (org-roam-ui-mode -1)))
+
 (defun my/knowledge-graph--show (url)
   "Show URL in an xwidget in another window, as a graph buffer."
   (let ((switch-to-buffer-obey-display-actions t)
@@ -1178,6 +1213,201 @@ local server runs while a graph buffer is open."
     (org-roam-ui-mode 1))
   (my/knowledge-graph--show (format "http://localhost:%d" org-roam-ui-port)))
 
+;;; Several knowledge bases
+
+;; Each machine registers its own knowledge bases, by name, in
+;; `my/knowledge-bases-file' under var/, so no path belongs to the
+;; configuration.  One is current at a time: org-roam, the table, the sync,
+;; validation, export and the graph all work on it.  Each has a database of
+;; its own in `my/knowledge-db-directory', so a base switched back to is
+;; still indexed, and only what changed meanwhile is read again.
+
+(defvar my/knowledge-bases-file (my/var "knowledge-bases.eld")
+  "File of the knowledge bases registered on this machine.
+It holds a plist: :bases, an alist of names and directories, and
+:current, the name of the current one.")
+
+(defvar my/knowledge-db-directory (my/var "org-roam/")
+  "Directory of the databases of the knowledge bases, one file each.")
+
+(defun my/knowledge--state ()
+  "Return the plist saved in `my/knowledge-bases-file', or nil."
+  (when (file-readable-p my/knowledge-bases-file)
+    (condition-case err
+        (with-temp-buffer
+          (insert-file-contents my/knowledge-bases-file)
+          (read (current-buffer)))
+      (error
+       (display-warning 'init-knowledge
+                        (format "无法读取 %s：%s" my/knowledge-bases-file
+                                (error-message-string err)))
+       nil))))
+
+(defun my/knowledge-bases ()
+  "Return the registered knowledge bases: an alist of names and directories."
+  (plist-get (my/knowledge--state) :bases))
+
+(defun my/knowledge--save-state (bases current)
+  "Save BASES, an alist of names and directories, with CURRENT the current name."
+  (make-directory (file-name-directory my/knowledge-bases-file) t)
+  (with-temp-buffer
+    (let ((print-length nil) (print-level nil))
+      (insert ";; Knowledge bases of this machine, see init-knowledge.el.\n")
+      (prin1 (list :current current :bases bases) (current-buffer))
+      (insert "\n"))
+    (my/knowledge-write-atomically my/knowledge-bases-file)))
+
+(defun my/knowledge--db-file (directory)
+  "Return the database file of the knowledge base in DIRECTORY."
+  (let ((root (file-name-as-directory (file-truename directory))))
+    (expand-file-name (format "%s-%s.db"
+                              (my/knowledge-slug
+                               (file-name-nondirectory (directory-file-name root)))
+                              (substring (md5 root) 0 8))
+                      my/knowledge-db-directory)))
+
+(defun my/knowledge--registered-name (directory bases)
+  "Return the name under which DIRECTORY is in BASES, or nil."
+  (car (seq-find (lambda (base) (file-equal-p (cdr base) directory)) bases)))
+
+(defun my/knowledge--activate (name directory)
+  "Make DIRECTORY, registered as NAME, the current knowledge base.
+Close the previous base's database, stop following its files and close
+the graph; then open this base's database and follow its files."
+  (my/knowledge-sync-stop)
+  (when (timerp my/knowledge-sync--timer)
+    (cancel-timer my/knowledge-sync--timer))
+  (when (process-live-p my/knowledge-sync--rebuild)
+    ;; Its database would replace the new base's.
+    (delete-process my/knowledge-sync--rebuild))
+  (clrhash my/knowledge-sync--queued)
+  (setq my/knowledge-sync--timer nil
+        my/knowledge-sync--rebuild nil
+        my/knowledge-sync--queue nil
+        my/knowledge-sync--indexed nil)
+  (my/knowledge-graph--close)
+  (org-roam-db--close-all)
+  (make-directory my/knowledge-db-directory t)
+  (setq my/knowledge-current name
+        my/knowledge-current-directory (file-name-as-directory
+                                        (expand-file-name directory))
+        org-roam-directory (my/knowledge-root)
+        org-roam-db-location (my/knowledge--db-file directory)
+        org-roam-buffer-current-node nil)
+  (my/knowledge-sync-start)
+  (my/knowledge-table--sync-updated nil))
+
+(defun my/knowledge--read-base (prompt)
+  "Read the name of a registered knowledge base with PROMPT."
+  (let* ((bases (or (my/knowledge-bases) (user-error "还没有登记知识库")))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (name)
+                  (concat "  " (abbreviate-file-name (cdr (assoc name bases)))
+                          (if (equal name my/knowledge-current) "（当前）" ""))))))
+    (completing-read prompt bases nil t)))
+
+(defun my/knowledge-switch (name)
+  "Make the registered knowledge base NAME current, also after a restart."
+  (interactive (list (my/knowledge--read-base "切换到知识库：")))
+  (let* ((bases (my/knowledge-bases))
+         (directory (or (cdr (assoc name bases))
+                        (user-error "没有登记名为「%s」的知识库" name))))
+    (unless (file-directory-p directory)
+      (user-error "知识库「%s」的目录 %s 不存在" name directory))
+    (my/knowledge--save-state bases name)
+    (my/knowledge--activate name directory)
+    (message "已切换到知识库「%s」：%s" name (abbreviate-file-name directory))))
+
+(defun my/knowledge-register (name directory &optional stay)
+  "Register DIRECTORY as the knowledge base NAME on this machine.
+Then switch to it, unless STAY, the prefix argument, is non-nil.  A
+missing directory is created, with concepts/ and sessions/, as a git
+repository; in an existing one only missing subdirectories are added."
+  (interactive
+   (let ((directory (read-directory-name "知识库目录：")))
+     (unless (or (file-directory-p directory)
+                 (y-or-n-p (format "%s 不存在，创建吗？" directory)))
+       (user-error "已取消"))
+     (list (read-string "名称：" (file-name-nondirectory
+                                  (directory-file-name directory)))
+           directory current-prefix-arg)))
+  (let* ((directory (file-name-as-directory (expand-file-name directory)))
+         (state (my/knowledge--state))
+         (bases (plist-get state :bases))
+         (name (string-trim name)))
+    (when (string-empty-p name)
+      (user-error "名称不能为空"))
+    (when (assoc name bases)
+      (user-error "已有名为「%s」的知识库" name))
+    (when-let* ((other (my/knowledge--registered-name directory bases)))
+      (user-error "这个目录已登记为「%s」" other))
+    (let ((new (not (file-exists-p directory))))
+      (dolist (subdirectory (list my/knowledge-concepts-subdirectory
+                                  my/knowledge-sessions-subdirectory))
+        (make-directory (expand-file-name subdirectory directory) t))
+      (when new
+        (my/knowledge--git-init directory)))
+    (my/knowledge--save-state (append bases (list (cons name directory)))
+                              (plist-get state :current))
+    (if stay
+        (message "已登记知识库「%s」：%s" name (abbreviate-file-name directory))
+      (my/knowledge-switch name))))
+
+(defun my/knowledge-unregister (name)
+  "Forget the registered knowledge base NAME on this machine.
+Its files stay; its database is deleted.  The current one cannot be
+unregistered: switch to another first."
+  (interactive (list (my/knowledge--read-base "取消登记知识库：")))
+  (let* ((state (my/knowledge--state))
+         (bases (plist-get state :bases))
+         (directory (or (cdr (assoc name bases))
+                        (user-error "没有登记名为「%s」的知识库" name))))
+    (when (equal name my/knowledge-current)
+      (user-error "「%s」是当前知识库，请先切换到别的" name))
+    (when (and (called-interactively-p 'any)
+               (not (yes-or-no-p (format "取消登记「%s」？%s 里的文件不会删除 "
+                                         name (abbreviate-file-name directory)))))
+      (user-error "已取消"))
+    (my/knowledge--save-state (assoc-delete-all name bases)
+                              (plist-get state :current))
+    (let ((database (my/knowledge--db-file directory)))
+      (when (file-exists-p database)
+        (delete-file database)))
+    (message "已取消登记知识库「%s」，文件仍在 %s" name
+             (abbreviate-file-name directory))))
+
+(defun my/knowledge--unique-name (name bases)
+  "Return NAME, or NAME with a number added, not yet in BASES."
+  (let ((candidate name) (n 1))
+    (while (assoc candidate bases)
+      (setq n (1+ n) candidate (format "%s-%d" name n)))
+    candidate))
+
+(defun my/knowledge--initialize ()
+  "Make this machine's current knowledge base current in Emacs.
+Without one, or if its directory is gone, use `my/knowledge-directory',
+created if missing and registered under its file name."
+  (let* ((state (my/knowledge--state))
+         (bases (plist-get state :bases))
+         (name (plist-get state :current))
+         (directory (cdr (assoc name bases))))
+    (unless (and directory (file-directory-p directory))
+      (when directory
+        (display-warning 'init-knowledge
+                         (format "知识库「%s」的目录 %s 不存在，改用 %s"
+                                 name directory my/knowledge-directory)))
+      (setq directory (file-name-as-directory (expand-file-name my/knowledge-directory)))
+      (my/knowledge-bootstrap directory)
+      (setq name (or (my/knowledge--registered-name directory bases)
+                     (my/knowledge--unique-name
+                      (file-name-nondirectory (directory-file-name directory))
+                      bases)))
+      (unless (assoc name bases)
+        (setq bases (append bases (list (cons name directory)))))
+      (my/knowledge--save-state bases name))
+    (my/knowledge--activate name directory)))
+
 ;;; Keys
 
 (defvar-keymap my/knowledge-command-map
@@ -1196,7 +1426,9 @@ local server runs while a graph buffer is open."
   "v" #'my/knowledge-check
   "p" #'my/knowledge-publish
   "s" #'my/knowledge-sync-scan
-  "S" #'my/knowledge-sync-rebuild)
+  "S" #'my/knowledge-sync-rebuild
+  "w" #'my/knowledge-switch
+  "W" #'my/knowledge-register)
 
 (keymap-global-set "C-c n" my/knowledge-command-map)
 
@@ -1225,9 +1457,8 @@ local server runs while a graph buffer is open."
     "gr" #'my/knowledge-table-refresh
     "q" #'quit-window))
 
-(my/knowledge-bootstrap)
 (my/knowledge--enable-autosync)
-(my/knowledge-sync-start)
+(my/knowledge--initialize)
 
 (provide 'init-knowledge)
 ;;; init-knowledge.el ends here

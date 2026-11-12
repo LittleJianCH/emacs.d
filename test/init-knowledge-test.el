@@ -21,6 +21,10 @@
 (defvar my/knowledge-directory)
 (defvar my/knowledge-publish-directory)
 (defvar my/knowledge-publish-cache-directory)
+(defvar my/knowledge-bases-file)
+(defvar my/knowledge-db-directory)
+(defvar my/knowledge-current)
+(defvar my/knowledge-current-directory)
 (defvar my/knowledge-sync--queue)
 (defvar my/knowledge-sync--queued)
 (defvar my/knowledge-sync--indexed)
@@ -44,13 +48,14 @@
   "Non-nil if org-roam is installed, so the module can load.")
 
 (when init-knowledge-test--available
+  ;; Loading registers and opens a knowledge base: keep it all temporary.
   (setq my/knowledge-directory (expand-file-name "startup-knowledge/" init-knowledge-test--state)
+        my/knowledge-bases-file (expand-file-name "bases.eld" init-knowledge-test--state)
+        my/knowledge-db-directory (expand-file-name "db/" init-knowledge-test--state)
         org-id-track-globally nil
         org-id-locations-file (expand-file-name "org-id-locations"
                                                 init-knowledge-test--state))
   (require 'init-knowledge)
-  ;; use-package set the real database; nothing has opened it yet.
-  (setq org-roam-db-location (expand-file-name "startup.db" init-knowledge-test--state))
   (my/knowledge-sync-stop))
 
 (add-hook 'kill-emacs-hook
@@ -116,10 +121,14 @@ LEVEL is exposed and CONFIRMED nil."
                    (file-truename (make-temp-file "knowledge-test-" t))))
             (state (make-temp-file "knowledge-test-state-" t))
             (my/knowledge-directory root)
+            (my/knowledge-current-directory root)
             (org-roam-directory root)
             (org-roam-db-location (expand-file-name "org-roam.db" state))
             (my/knowledge-publish-directory (expand-file-name "site/" state))
             (my/knowledge-publish-cache-directory (expand-file-name "cache/" state))
+            (my/knowledge-bases-file (expand-file-name "bases.eld" state))
+            (my/knowledge-db-directory (expand-file-name "db/" state))
+            (my/knowledge-current "test")
             (my/knowledge-sync--queue nil)
             (my/knowledge-sync--queued (make-hash-table :test #'equal))
             (my/knowledge-sync--indexed nil)
@@ -614,6 +623,85 @@ replaces the current one."
       (should (= (length (my/knowledge-concepts)) 4))
       (should-not (my/knowledge-sync--changed-files)))))
 
+;;; Several knowledge bases
+
+(ert-deftest init-knowledge-register-and-switch-bases ()
+  "Bases registered on this machine switch with databases of their own,
+and the registry keeps their names, directories and the current one."
+  (init-knowledge-test--with-knowledge
+    (let* ((home (file-name-as-directory (file-truename (make-temp-file "knowledge-bases-" t))))
+           (first (expand-file-name "first/" home))
+           (second (expand-file-name "second/" home)))
+      (unwind-protect
+          (progn
+            (my/knowledge-register "一" first)
+            (should (file-directory-p (expand-file-name "concepts" first)))
+            (should (file-directory-p (expand-file-name "sessions" first)))
+            (should (init-knowledge-test--wait
+                     (lambda () (file-directory-p (expand-file-name ".git" first))) 10))
+            (should (equal my/knowledge-current "一"))
+            (should (equal org-roam-directory first))
+            (should (string-prefix-p my/knowledge-db-directory org-roam-db-location))
+            (let ((first-db org-roam-db-location))
+              (init-knowledge-test--index
+               (init-knowledge-test--concept first "a" "id-a" "Alpha"))
+              (my/knowledge-register "二" second t)
+              (should (equal my/knowledge-current "一"))
+              (should (equal (my/knowledge-bases) `(("一" . ,first) ("二" . ,second))))
+              (my/knowledge-switch "二")
+              (should (equal org-roam-directory second))
+              (should-not (equal org-roam-db-location first-db))
+              (should-not (my/knowledge-concepts))
+              (should (equal (plist-get (my/knowledge--state) :current) "二"))
+              ;; Back again: still indexed, nothing read.
+              (my/knowledge-switch "一")
+              (should (equal org-roam-db-location first-db))
+              (should (equal (mapcar (lambda (concept) (plist-get concept :id))
+                                     (my/knowledge-concepts))
+                             '("id-a"))))
+            (should-error (my/knowledge-register "一" (expand-file-name "third/" home))
+                          :type 'user-error)
+            (should-error (my/knowledge-register "三" first) :type 'user-error)
+            (should-error (my/knowledge-switch "无") :type 'user-error)
+            (should-error (my/knowledge-unregister "一") :type 'user-error)
+            (let ((second-db (my/knowledge--db-file second)))
+              (should (file-exists-p second-db))
+              (my/knowledge-unregister "二")
+              (should-not (file-exists-p second-db)))
+            (should (equal (my/knowledge-bases) `(("一" . ,first))))
+            (should (file-directory-p second)))
+        (my/knowledge-sync-stop)
+        (org-roam-db--close-all)
+        (delete-directory home t)))))
+
+(ert-deftest init-knowledge-initialize-follows-the-registry ()
+  "Loading makes the registered current base current; a missing one, or
+none, falls back to `my/knowledge-directory', registered by its name."
+  (init-knowledge-test--with-knowledge
+    (let* ((home (file-name-as-directory (file-truename (make-temp-file "knowledge-bases-" t))))
+           (other (expand-file-name "other/" home)))
+      (unwind-protect
+          (progn
+            (make-directory other)
+            (my/knowledge--save-state `(("别的" . ,other)) "别的")
+            (my/knowledge--initialize)
+            (should (equal my/knowledge-current "别的"))
+            (should (equal org-roam-directory other))
+            ;; Its directory is gone on this machine.
+            (delete-directory other t)
+            (let ((warning-minimum-log-level :emergency))
+              (my/knowledge--initialize))
+            (should (equal org-roam-directory root))
+            (let ((name (file-name-nondirectory (directory-file-name root))))
+              (should (equal my/knowledge-current name))
+              (should (equal (plist-get (my/knowledge--state) :current) name))
+              (should (equal (cdr (assoc name (my/knowledge-bases))) root)))
+            ;; Nothing was created in an existing directory.
+            (should-not (directory-files (expand-file-name "concepts" root) nil "\\.org\\'")))
+        (my/knowledge-sync-stop)
+        (org-roam-db--close-all)
+        (delete-directory home t)))))
+
 ;;; Graph
 
 (ert-deftest init-knowledge-graph-accepts-only-localhost ()
@@ -762,7 +850,7 @@ writes an index, and leaves the knowledge base as it was."
       (should (equal (directory-files-recursively root "" t) before))
       (let ((page (lambda (file)
                     (init-knowledge-test--file-string
-                     (expand-file-name file my/knowledge-publish-directory)))))
+                     (expand-file-name file (my/knowledge-publish-output))))))
         (should (string-match-p "href=\"b.html#ID-id-b\"" (funcall page "concepts/a.html")))
         (should (string-match-p "掌握程度：exposed · 待确认 · 更新于 2026-01-01"
                                 (funcall page "concepts/a.html")))
@@ -781,7 +869,8 @@ writes an index, and leaves the knowledge base as it was."
       ;; Again, incrementally.
       (my/knowledge-publish)
       (should (init-knowledge-test--wait (lambda () (null my/knowledge--publish))))
-      (should (file-exists-p (expand-file-name "timestamps/knowledge.cache"
+      (should (string-prefix-p my/knowledge-publish-directory (my/knowledge-publish-output)))
+      (should (file-exists-p (expand-file-name "test/timestamps/knowledge.cache"
                                                my/knowledge-publish-cache-directory))))))
 
 (provide 'init-knowledge-test)
