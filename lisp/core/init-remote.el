@@ -55,6 +55,25 @@
 (add-hook 'find-file-hook #'my/remote-buffer-setup)
 (add-hook 'after-change-major-mode-hook #'my/remote-buffer-setup)
 
+;; Since remote files are never reverted, `global-auto-revert-mode' gains nothing
+;; from remote buffers, yet it polled each of them every second: a connection
+;; check and its handler, several `process-status' calls through tramp-rpc each,
+;; 40ms of every second for 67 buffers.  Keep them out of the mode.  The default
+;; value is consulted whenever a buffer is adopted, so neither hook order nor a
+;; mode change killing buffer-local variables can let one back in.
+(require 'autorevert)
+(defun my/remote-buffer-p (buffer)
+  "Return non-nil if BUFFER's default directory is remote.
+Only parses the name; never connects."
+  (file-remote-p (buffer-local-value 'default-directory buffer)))
+(setq-default global-auto-revert-ignore-buffer #'my/remote-buffer-p)
+;; Release remote buffers adopted before this was set (on reload).
+(dolist (buffer (buffer-list))
+  (when (and (buffer-local-value 'auto-revert--global-mode buffer)
+             (my/remote-buffer-p buffer))
+    (with-current-buffer buffer
+      (setq auto-revert--global-mode nil))))
+
 ;; `vc-registered' tries every backend in turn, and on a remote file each attempt
 ;; is another network round trip.
 (setq vc-handled-backends '(Git))
