@@ -1,0 +1,24 @@
+#!/bin/sh
+# Local MCP server for the knowledge base, over stdio (lisp/app/knowledge-mcp.el).
+# Usage: knowledge-mcp [DIRECTORY]    DIRECTORY defaults to $KNOWLEDGE_DIRECTORY, then ~/knowledge.
+# Clients may start it with a minimal PATH: set KNOWLEDGE_MCP_EMACS to choose Emacs.
+# The index of the knowledge base is kept in var/knowledge-mcp/ ($KNOWLEDGE_MCP_CACHE).
+here=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
+KNOWLEDGE_MCP_CACHE=${KNOWLEDGE_MCP_CACHE:-$here/var/knowledge-mcp}
+export KNOWLEDGE_MCP_CACHE
+emacs=${KNOWLEDGE_MCP_EMACS:-}
+if [ -z "$emacs" ]; then
+  for candidate in "$(command -v emacs 2>/dev/null)" \
+                   /opt/homebrew/bin/emacs /usr/local/bin/emacs \
+                   /Applications/Emacs.app/Contents/MacOS/Emacs; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      emacs=$candidate
+      break
+    fi
+  done
+fi
+if [ -z "$emacs" ]; then
+  echo "knowledge-mcp: Emacs not found; set KNOWLEDGE_MCP_EMACS" >&2
+  exit 1
+fi
+exec "$emacs" --batch -Q -L "$here/lisp/app" -l knowledge-mcp -f my/knowledge-mcp-main "$@"

@@ -49,14 +49,14 @@ lisp/agent/              shared agent support (see below)
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications; enabled via `my/apps' in init.el
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
-  init-kb.el             knowledge graph on org-roam in ~/kb (C-c n): table,
+  init-knowledge.el             knowledge graph on org-roam in ~/knowledge (C-c n): table,
                          relations, labelled backlinks, external-change sync
-  kb-batch.el            its file format, plus the validator and HTML export
+  knowledge-batch.el            its file format, plus the validator and HTML export
                          run by `emacs --batch -Q` subprocesses
-  kb-mcp.el              local stdio MCP server over the same files for AI
+  knowledge-mcp.el              local stdio MCP server over the same files for AI
                          clients; batch Emacs, independent of emx
 bin/emx                  minimal launcher: locate/build dist, import compiled CLI
-bin/kb-mcp               launcher of the knowledge base MCP server (kb-mcp.el)
+bin/knowledge-mcp               launcher of the knowledge base MCP server (knowledge-mcp.el)
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends
   cli/                   argument parsing, help, emacsclient transport, daemon/MCP dispatch
   backends/               Claude, Codex, dsh, Pi protocol adapters and native history
@@ -81,8 +81,8 @@ test/init-remote-test.el    ERT suite for remote editing
 test/init-ui-test.el        ERT suite for the themes, status line and side panels
 test/init-term-test.el      ERT suite for the terminal module
 test/init-lazy-test.el      ERT suite for on-demand module loading
-test/init-kb-test.el        ERT suite for the knowledge base (temp kb and database)
-test/kb-mcp-test.el         ERT suite driving bin/kb-mcp over stdio (temp kb)
+test/init-knowledge-test.el        ERT suite for the knowledge base (temp knowledge base and database)
+test/knowledge-mcp-test.el         ERT suite driving bin/knowledge-mcp over stdio (temp knowledge base)
 test/lang-test.el           ERT suite for the language modules (toolchains mocked)
 test/lang-functional-test.el Haskell and Lean startup, environments and keys
 test/lang-coq-test.el       Proof General bootstrap and proof workflows (mocked)
@@ -335,8 +335,8 @@ emacs --batch --init-directory=. --eval '(setq my/use-evil nil)' -l init.el \
       -l test/agent-runs-test.el \
       -l test/agent-emx-test.el -l test/agent-emx-config-test.el \
       -l test/agent-emx-collab-test.el -l test/agent-emx-remote-test.el \
-      -l test/agent-emx-smoke-test.el -l test/init-kb-test.el \
-      -l test/kb-mcp-test.el \
+      -l test/agent-emx-smoke-test.el -l test/init-knowledge-test.el \
+      -l test/knowledge-mcp-test.el \
       -f ert-run-tests-batch-and-exit
 ```
 
