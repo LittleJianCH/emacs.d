@@ -74,7 +74,10 @@
                         . my/agda-mode))
                :commands (my/agda-mode))
     ;; telega-server-build must see `telega-server-libs-prefix'.
-    (init-telega :keys ("C-c T") :commands (telega telega-server-build)))
+    (init-telega :keys ("C-c T") :commands (telega telega-server-build))
+    ;; Its commands are its own, so stubs for them would clash with the
+    ;; definitions while compiling; C-c n (SPC n) loads it.
+    (init-kb :keys ("C-c n")))
   "Alist of lazily loaded features and the triggers that load them.
 Each value is a plist with any of these keys:
   :files     (REGEXP . MODE) rules for `auto-mode-alist', the ones the

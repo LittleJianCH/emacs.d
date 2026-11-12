@@ -1,0 +1,412 @@
+;;; init-kb.el --- Personal knowledge graph on org-roam -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; A record of what I have learned and how well, kept in a git repository of
+;; its own (`my/kb-directory', ~/kb), which is the `org-roam-directory'.
+;; AI assistants will read and write it through MCP; Emacs is where I look
+;; at it and edit it.  The file format is described in kb-batch.el.
+;;
+;;   C-c n f   find or create a concept (SPC n f with evil)
+;;   C-c n i   insert a link
+;;   C-c n r   add a relation to a concept   C-c n b   backlinks buffer
+;;   C-c n d   record a learning session     C-c n D   today's sessions
+;;   C-c n t   add a tag   C-c n a   add an alias
+
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'seq)
+(require 'subr-x)
+(require 'kb-batch)
+
+(defcustom my/kb-directory (expand-file-name "~/kb/")
+  "The knowledge base: a git repository of its own, the `org-roam-directory'.
+It is created with two example concepts when the module loads, if it
+does not exist yet.  Takes effect after a restart."
+  :type 'directory
+  :group 'my/kb)
+
+(defface my/kb-relation '((t :inherit org-verbatim :weight bold))
+  "Face of relation names in the backlinks buffer."
+  :group 'my/kb)
+
+(defun my/kb-root ()
+  "Return the true name of `my/kb-directory', ending in a slash."
+  (file-name-as-directory (file-truename my/kb-directory)))
+
+(defun my/kb-concepts-directory ()
+  "Return the directory of the concept files."
+  (expand-file-name my/kb-concepts-subdirectory (my/kb-root)))
+
+(defun my/kb-concept-file-p (file)
+  "Return non-nil if FILE is a concept file."
+  (and file (string-prefix-p (my/kb-concepts-directory) (expand-file-name file))))
+
+;;; Creating the knowledge base
+
+(defconst my/kb--examples
+  '(("Martin-Löf Type Theory" "MLTT" "can-explain" "t"
+     ("依值类型论：Π、Σ、恒等类型和宇宙"
+      "判断相等与命题相等的区别")
+     ("prerequisite_of" . "Normalization by Evaluation"))
+    ("Normalization by Evaluation" "NbE" "walked-through" "nil"
+     ("eval 进语义域，quote 读回范式")
+     ("requires" . "Martin-Löf Type Theory")))
+  "Example concepts: title, alias, LEVEL, CONFIRMED, notes and a relation.")
+
+(defun my/kb--example-file (root title)
+  "Return the concept file for the example TITLE under ROOT."
+  (expand-file-name (concat my/kb-concepts-subdirectory
+                            (org-roam-node-slug (org-roam-node-create :title title))
+                            ".org")
+                    root))
+
+(defun my/kb-bootstrap ()
+  "Create `my/kb-directory' with two related example concepts.
+Do nothing if the directory exists: existing data is never touched.
+The new directory becomes a git repository; `git init' runs
+asynchronously."
+  (let ((root (expand-file-name my/kb-directory)))
+    (unless (file-exists-p root)
+      (make-directory (expand-file-name my/kb-concepts-subdirectory root) t)
+      (make-directory (expand-file-name my/kb-sessions-subdirectory root) t)
+      (let ((ids (mapcar (lambda (example) (cons (car example) (org-id-uuid)))
+                         my/kb--examples)))
+        (pcase-dolist (`(,title ,alias ,level ,confirmed ,notes
+                                (,relation . ,target))
+                       my/kb--examples)
+          (with-temp-file (my/kb--example-file root title)
+            (insert ":PROPERTIES:\n"
+                    (format ":ID:       %s\n" (cdr (assoc title ids)))
+                    (format ":ROAM_ALIASES: %s\n" alias)
+                    (format ":LEVEL:    %s\n" level)
+                    (format ":CONFIRMED: %s\n" confirmed)
+                    (format ":UPDATED:  %s\n" (my/kb-date-string))
+                    ":END:\n"
+                    (format "#+title: %s\n" title)
+                    "#+filetags: :type_theory:\n\n* Notes\n"
+                    (mapconcat (lambda (note) (concat "- " note "\n")) notes)
+                    "\n* " my/kb-relations-heading "\n"
+                    (format "- %s :: [[id:%s][%s]]\n"
+                            relation (cdr (assoc target ids)) target)))))
+      (when (executable-find "git")
+        (let ((default-directory root))
+          (make-process :name "kb-git-init" :command '("git" "init" "--quiet")
+                        :buffer nil :noquery t)))
+      (message "已创建知识库 %s，含两个示例概念" root))))
+
+;;; org-roam
+
+(defun my/kb--enable-autosync ()
+  "Turn on `org-roam-db-autosync-mode' without its full synchronization.
+Enabling the mode runs `org-roam-db-sync', which reads every file and
+blocks Emacs meanwhile."
+  (cl-letf (((symbol-function 'org-roam-db-sync) #'ignore))
+    (org-roam-db-autosync-mode 1)))
+
+(use-package org-roam
+  :ensure t
+  :demand t
+  :custom
+  (org-roam-directory (my/kb-root))
+  (org-roam-db-location (my/var "org-roam.db"))
+  (org-roam-dailies-directory my/kb-sessions-subdirectory)
+  (org-roam-capture-templates
+   `(("c" "概念" plain "* Notes\n%?\n\n* Relations\n"
+      :target (file+head
+               ,(concat my/kb-concepts-subdirectory "${slug}.org")
+               ,(concat ":PROPERTIES:\n"
+                        ":ID:       ${id}\n"
+                        ":LEVEL:    exposed\n"
+                        ":CONFIRMED: nil\n"
+                        ":UPDATED:  %<[%Y-%m-%d]>\n"
+                        ":END:\n"
+                        "#+title: ${title}\n"))
+      :unnarrowed t)))
+  (org-roam-dailies-capture-templates
+   `(("s" "学习记录" entry
+      ;; The time, so several sessions a day stay apart.
+      ,(concat "* %<%H:%M> %^{主题}\n:PROPERTIES:\n"
+               ":AI:       %^{AI|" (string-join my/kb-ais "|") "}\n"
+               ":CONCEPTS: %(my/kb-read-session-concepts)\n:END:\n%?")
+      :target (file+head "%<%Y-%m-%d>.org" "#+title: %<%Y-%m-%d>\n"))))
+  (org-roam-mode-sections (list #'my/kb-backlinks-section
+                                #'org-roam-reflinks-section))
+)
+
+(require 'org-id)
+(require 'org-roam)
+(require 'org-roam-dailies)
+
+;; use-package loads org-roam while compiling, which makes the compiler
+;; doubt its functions exist at run time; they do, after the requires.
+(declare-function org-roam-db-query "org-roam-db")
+(declare-function org-roam-db-update-file "org-roam-db")
+(declare-function org-roam-db-clear-file "org-roam-db")
+(declare-function org-roam-db--close-all "org-roam-db")
+(declare-function org-roam-node-read "org-roam-node")
+(declare-function org-roam-node-create "org-roam-node")
+(declare-function org-roam-node-slug "org-roam-node")
+(declare-function org-roam-backlinks-get "org-roam-mode")
+(declare-function org-roam-preview-get-contents "org-roam-mode")
+(declare-function org-roam-fontify-like-in-org-mode "org-roam-utils")
+(declare-function org-roam-buffer-toggle "org-roam-mode")
+(declare-function org-roam-tag-add "org-roam-node")
+(declare-function org-roam-alias-add "org-roam-node")
+(declare-function magit-insert-heading "magit-section")
+(declare-function magit-insert-section--create "magit-section")
+(declare-function magit-insert-section--finish "magit-section")
+
+;;; Editing files
+
+(defun my/kb--edit-file (file function)
+  "Call FUNCTION at the start of FILE, save FILE and index it.
+A buffer visiting FILE is edited and saved; it must have no unsaved
+changes, and is first reverted if FILE changed on disk.  Otherwise FILE
+is edited in a temporary Org buffer and written back.  Return the value
+of FUNCTION."
+  (let ((buffer (find-buffer-visiting file))
+        result)
+    (if buffer
+        (with-current-buffer buffer
+          (when (buffer-modified-p)
+            (user-error "%s 有未保存的修改，请先保存" (buffer-name)))
+          (unless (verify-visited-file-modtime buffer)
+            (revert-buffer t t t))
+          (setq result (org-with-wide-buffer
+                        (goto-char (point-min))
+                        (funcall function)))
+          (save-buffer))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (delay-mode-hooks
+          (let ((org-inhibit-startup t))
+            (org-mode)))
+        (goto-char (point-min))
+        (setq result (funcall function))
+        (let ((coding-system-for-write 'utf-8-unix))
+          (write-region nil nil file nil 'silent))))
+    (org-roam-db-update-file file)
+    result))
+
+;;; Reading concepts
+
+(defun my/kb--concept-node-p (node)
+  "Return non-nil if NODE is a concept: the file-level node of a concept file."
+  (and (= (org-roam-node-level node) 0)
+       (my/kb-concept-file-p (org-roam-node-file node))))
+
+(defun my/kb-read-concept (prompt &optional exclude)
+  "Read a concept with PROMPT; return its node, or nil on empty input.
+EXCLUDE is an id that is not offered."
+  (let ((node (org-roam-node-read
+               nil (lambda (node)
+                     (and (my/kb--concept-node-p node)
+                          (not (equal (org-roam-node-id node) exclude))))
+               nil t prompt)))
+    (and (org-roam-node-id node) node)))
+
+(defun my/kb--link (node)
+  "Return an id link to NODE described by its title."
+  (org-link-make-string (concat "id:" (org-roam-node-id node))
+                        (org-roam-node-title node)))
+
+(defun my/kb-read-session-concepts ()
+  "Read the concepts a learning session covered; return their id links.
+Used by the session capture template; empty input ends the list."
+  (let (links node)
+    (while (setq node (my/kb-read-concept
+                       (format "涉及的概念（已选 %d 个，空输入结束）："
+                               (length links))))
+      (cl-pushnew (my/kb--link node) links :test #'equal))
+    (string-join (nreverse links) " ")))
+
+;;; Relations
+
+(defun my/kb--insert-relation (relation node)
+  "Add RELATION to NODE as the last item of the Relations section.
+The current buffer is a concept in Org mode.  Create the section at the
+end when it is missing.  Return the position of the new item."
+  (let ((id (org-roam-node-id node)))
+    (pcase-dolist (`(,_ ,name ,links) (my/kb-relation-items))
+      (when (and (equal name relation)
+                 (seq-some (lambda (link)
+                             (equal (org-element-property :path link) id))
+                           links))
+        (user-error "已有这条关系：%s :: %s"
+                    relation (org-roam-node-title node)))))
+  (let ((headline (org-element-map (org-element-parse-buffer 'headline)
+                      'headline
+                    (lambda (headline)
+                      (and (my/kb--relations-headline-p headline) headline))
+                    nil t)))
+    (if headline
+        (progn
+          (goto-char (org-element-property :begin headline))
+          (org-end-of-subtree t t)
+          (skip-chars-backward " \t\n")
+          (end-of-line))
+      (goto-char (point-max))
+      (skip-chars-backward " \t\n")
+      (delete-region (point) (point-max))
+      (insert "\n\n* " my/kb-relations-heading))
+    (insert "\n")
+    (prog1 (point)
+      (insert "- " relation " :: " (my/kb--link node))
+      (when (eobp) (insert "\n")))))
+
+(defun my/kb-relation-add (file relation target)
+  "Add the relation RELATION from the concept FILE to the concept TARGET.
+Interactively, FILE is the current buffer's concept, or one read first;
+then choose the relation name, from `my/kb-relations', and the target.
+In the concept's own buffer the item is inserted and left unsaved, like
+an inserted link; otherwise the file is saved and indexed."
+  (interactive
+   (let* ((file (if (my/kb-concept-file-p buffer-file-name)
+                    buffer-file-name
+                  (org-roam-node-file
+                   (or (my/kb-read-concept "为哪个概念添加关系：")
+                       (user-error "没有选择概念")))))
+          (relation (completing-read "关系：" my/kb-relations nil t))
+          (source (caar (org-roam-db-query
+                         [:select id :from nodes
+                          :where (and (= file $s1) (= level 0))]
+                         file))))
+     (list file relation
+           (or (my/kb-read-concept (format "%s 的目标概念：" relation) source)
+               (user-error "没有选择目标概念")))))
+  (if (and buffer-file-name (file-equal-p file buffer-file-name))
+      (let ((position (save-excursion
+                        (save-restriction
+                          (widen)
+                          (my/kb--insert-relation relation target)))))
+        (unless (<= (point-min) position (point-max))
+          (widen))
+        (goto-char position))
+    (my/kb--edit-file file (lambda ()
+                             (my/kb--insert-relation relation target))))
+  (message "已添加关系：%s :: %s" relation (org-roam-node-title target)))
+
+;;; Backlinks with relation names
+
+(defun my/kb--link-kind ()
+  "Return how the link at point refers to its target.
+A relation name for an item of the Relations section, `session' for the
+CONCEPTS property of a learning session, nil for anything else."
+  (or (my/kb-relation-at-point)
+      (let ((element (org-element-at-point)))
+        (and (eq (org-element-type element) 'node-property)
+             (equal (org-element-property :key element) "CONCEPTS")
+             'session))))
+
+(defun my/kb--backlink-kinds (backlinks)
+  "Return a hash table from each of BACKLINKS to its `my/kb--link-kind'.
+Each source file is read once, from its buffer if one visits it."
+  (let ((kinds (make-hash-table :test #'eq)))
+    (pcase-dolist (`(,file . ,group)
+                   (seq-group-by (lambda (backlink)
+                                   (org-roam-node-file
+                                    (org-roam-backlink-source-node backlink)))
+                                 backlinks))
+      (let ((compute (lambda ()
+                       (dolist (backlink group)
+                         (goto-char (org-roam-backlink-point backlink))
+                         (puthash backlink (my/kb--link-kind) kinds)))))
+        (if-let* ((buffer (find-buffer-visiting file)))
+            (with-current-buffer buffer
+              (org-with-wide-buffer (funcall compute)))
+          (when (file-exists-p file)
+            (with-temp-buffer
+              (insert-file-contents file)
+              (delay-mode-hooks
+                (let ((org-inhibit-startup t))
+                  (org-mode)))
+              (funcall compute))))))
+    kinds))
+
+(defun my/kb--kind-label (kind)
+  "Return the label shown before a backlink of KIND."
+  (pcase kind
+    ('session "学习记录")
+    ('nil "链接")
+    (_ kind)))
+
+(defun my/kb--kind-rank (kind)
+  "Return the sort rank of a backlink of KIND: relations first."
+  (pcase kind
+    ('session (1+ (length my/kb-relations)))
+    ('nil (+ 2 (length my/kb-relations)))
+    (_ (or (seq-position my/kb-relations kind) (length my/kb-relations)))))
+
+(defun my/kb-backlinks-section (node)
+  "Insert the backlinks of NODE, each labelled with how it links.
+Replaces `org-roam-backlinks-section' in `org-roam-mode-sections': the
+label is the relation name when the source's Relations section names
+NODE (\"requires\" means the source requires NODE), \"学习记录\" for a
+session that covered it and \"链接\" for any other link.  Relations come
+first, in the order of `my/kb-relations'."
+  (when-let* ((backlinks (org-roam-backlinks-get node)))
+    (let* ((kinds (my/kb--backlink-kinds backlinks))
+           (backlinks
+            (sort backlinks
+                  :key (lambda (backlink)
+                         (list (my/kb--kind-rank (gethash backlink kinds))
+                               (org-roam-node-title
+                                (org-roam-backlink-source-node backlink)))))))
+      (magit-insert-section (org-roam-backlinks)
+        (magit-insert-heading "反向链接：")
+        (dolist (backlink backlinks)
+          (my/kb--insert-backlink backlink (gethash backlink kinds)))
+        (insert ?\n)))))
+
+(defun my/kb--insert-backlink (backlink kind)
+  "Insert BACKLINK labelled with KIND, as `org-roam-node-insert-section' does."
+  (let ((source (org-roam-backlink-source-node backlink))
+        (point (org-roam-backlink-point backlink))
+        (outline (plist-get (org-roam-backlink-properties backlink) :outline)))
+    (magit-insert-section section (org-roam-node-section)
+      (insert (propertize (format "[%s]" (my/kb--kind-label kind))
+                          'font-lock-face (if (stringp kind)
+                                              'my/kb-relation
+                                            'org-roam-olp))
+              " "
+              (propertize (org-roam-node-title source)
+                          'font-lock-face 'org-roam-title)
+              (format " (%s)"
+                      (propertize (if outline
+                                      (mapconcat #'org-link-display-format
+                                                 outline " > ")
+                                    "Top")
+                                  'font-lock-face 'org-roam-olp)))
+      (magit-insert-heading)
+      (oset section node source)
+      (magit-insert-section section (org-roam-preview-section)
+        (insert (org-roam-fontify-like-in-org-mode
+                 (org-roam-preview-get-contents (org-roam-node-file source) point))
+                "\n")
+        (oset section file (org-roam-node-file source))
+        (oset section point point)
+        (insert ?\n)))))
+
+;;; Keys
+
+(defvar-keymap my/kb-command-map
+  :doc "Knowledge base commands, under C-c n (SPC n with evil)."
+  "f" #'org-roam-node-find
+  "i" #'org-roam-node-insert
+  "r" #'my/kb-relation-add
+  "b" #'org-roam-buffer-toggle
+  "d" #'org-roam-dailies-capture-today
+  "D" #'org-roam-dailies-goto-today
+  "t" #'org-roam-tag-add
+  "a" #'org-roam-alias-add)
+
+(keymap-global-set "C-c n" my/kb-command-map)
+
+(my/kb-bootstrap)
+(my/kb--enable-autosync)
+
+(provide 'init-kb)
+;;; init-kb.el ends here

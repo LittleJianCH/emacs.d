@@ -10,6 +10,7 @@
 ;;   SPC SPC  one-shot request to an agent (same as C-c a q, init-agent.el)
 ;;   SPC w  window commands SPC u  prefix argument (C-u scrolls up)
 ;;   SPC t  terminal (same as C-c t, init-term.el)
+;;   SPC n  knowledge base (same as C-c n, init-kb.el)
 ;;   SPC l  language commands: Eglot actions a / r / f (same as C-c l,
 ;;          init-dev.el) plus each language's own (lisp/lang/)
 ;;   SPC g g  magit status  SPC g b  toggle per-line blame (magit-blame)
@@ -78,6 +79,9 @@
     (kbd "<leader>u") #'universal-argument
     (kbd "<leader>h") help-map
     (kbd "<leader>i") #'my/open-init-file
+    ;; Whatever C-c n is: the lazy loader of init-kb, then its keymap.
+    (kbd "<leader>n") `(menu-item "" nil :filter
+                                  ,(lambda (_) (key-binding (kbd "C-c n"))))
     (kbd "C-j") #'my/scroll-down-with-point
     (kbd "C-k") #'my/scroll-up-with-point))
 

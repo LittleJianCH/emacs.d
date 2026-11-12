@@ -70,6 +70,7 @@ text can't scroll, only point moves."
       transient-values-file (my/var "transient/values.el")
       url-configuration-directory (my/var "url/")
       tramp-persistency-file-name (my/var "tramp")
+      org-id-locations-file (my/var "org-id-locations")
       custom-file (expand-file-name "custom.el" user-emacs-directory))
 (defcustom my/site-directory (expand-file-name "site" user-emacs-directory)
   "Directory of the optional private site repository, or nil to disable it.

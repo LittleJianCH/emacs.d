@@ -40,7 +40,7 @@
   "Enabled language modules, each loaded from lisp/lang/lang-NAME.el.
 Most load on first visiting one of their files; see `my/lazy-modules'.")
 
-(defvar my/apps '(telega)
+(defvar my/apps '(telega kb)
   "Enabled applications, each loaded from lisp/app/init-NAME.el on first use.")
 
 (defvar my/agents '(claude codex dsh pi)
@@ -63,7 +63,7 @@ Most load on first visiting one of their files; see `my/lazy-modules'.")
   (my/lazy-require (intern (format "lang-%s" lang))))
 
 (require 'init-agent)       ; agent sessions, agent -> Emacs bridge
-(dolist (app my/apps)       ; telega: Telegram client, C-c T
+(dolist (app my/apps)       ; telega: Telegram client, C-c T; kb: C-c n
   (my/lazy-require (intern (format "init-%s" app))))
 
 ;; Restore normal GC settings once startup finishes.
