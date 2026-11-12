@@ -3,26 +3,36 @@
 ;;; Commentary:
 
 ;; A Model Context Protocol server, over stdio, through which AI assistants
-;; read and write the knowledge base of init-knowledge.el.  bin/knowledge-mcp runs it in a
-;; batch Emacs without the configuration:
+;; read and write the knowledge base of init-knowledge.el.  bin/knowledge-mcp
+;; runs it in a batch Emacs without the configuration:
 ;;
 ;;   emacs --batch -Q -L lisp/app -l knowledge-mcp -f my/knowledge-mcp-main [DIRECTORY]
 ;;
-;; DIRECTORY defaults to $KNOWLEDGE_DIRECTORY, then ~/knowledge.  The server works on the
-;; files themselves, with the parsing and editing of knowledge-batch.el, so it
-;; needs no running Emacs and neither org-roam nor its database; the editor
-;; follows the changes it makes.  It is independent of emx.
+;; The knowledge bases are those registered on this machine in Emacs, read
+;; from $KNOWLEDGE_BASES_FILE (bin/knowledge-mcp: var/knowledge-bases.eld)
+;; at every tool call.  Every tool takes an optional base, a registered
+;; name, so an assistant may work on several in one conversation; the
+;; default is DIRECTORY or $KNOWLEDGE_DIRECTORY when given, otherwise the
+;; base current in Emacs (C-c n w), and ~/knowledge without a registry.
+;; Nothing is remembered between calls: one server serves every
+;; conversation of a client.  Assistants cannot register bases.  The server
+;; works on the files themselves, with the parsing and editing of
+;; knowledge-batch.el, so it needs no running Emacs and neither org-roam nor
+;; its database; the editor follows the changes it makes.  It is independent
+;; of emx.
 ;;
 ;; Assistants may set LEVEL but never confirm it: every write of LEVEL sets
 ;; CONFIRMED to nil and UPDATED to today, and no tool sets CONFIRMED to t.
 ;; Files are written atomically.  What the files say is read again when
 ;; their modification time changes, so the index stays current while the
 ;; editor and other programs change them.  Reading a file costs a few
-;; milliseconds, so the index is kept in $KNOWLEDGE_MCP_CACHE (bin/knowledge-mcp uses
-;; var/knowledge-mcp/), and a restarted server reads only the files changed since.
+;; milliseconds, so the index is kept in $KNOWLEDGE_MCP_CACHE
+;; (bin/knowledge-mcp uses var/knowledge-mcp/), and a restarted server
+;; reads only the files changed since.
 ;;
-;; Customized `my/knowledge-relations' and `my/knowledge-ais' do not reach this process;
-;; pass them as --eval forms before -l, as for the other batch commands.
+;; Customized `my/knowledge-relations' and `my/knowledge-ais' do not reach
+;; this process; pass them as --eval forms before -l, as for the other batch
+;; commands.
 
 ;;; Code:
 
@@ -30,6 +40,18 @@
 (require 'org-id)
 
 (define-error 'my/knowledge-mcp-error "Knowledge base tool error")
+
+(defvar my/knowledge-mcp--bases-file nil
+  "Registry of the knowledge bases of this machine, or nil.")
+
+(defvar my/knowledge-mcp--default-directory nil
+  "Knowledge base served when a call names none, or nil for the registry's.")
+
+(defvar my/knowledge-mcp--caches (make-hash-table :test #'equal)
+  "Hash table from knowledge bases served to their `my/knowledge-mcp--cache'.")
+
+(defvar my/knowledge-mcp--base nil
+  "Registered name of the knowledge base served, or nil.")
 
 (defvar my/knowledge-mcp--root nil
   "The knowledge base served, a true directory name ending in a slash.")
@@ -82,6 +104,78 @@ CONTENTS is (concept . PLIST), (sessions . PLIST) or nil.")
 (defun my/knowledge-mcp--fail (format &rest args)
   "Signal a tool error with the message FORMAT applied to ARGS."
   (signal 'my/knowledge-mcp-error (list (apply #'format format args))))
+
+(defun my/knowledge-mcp--use-root (root &optional name)
+  "Serve the knowledge base ROOT, registered as NAME if known.
+The index of the previous one is saved; each one's stays in memory."
+  (let ((root (file-name-as-directory (file-truename root))))
+    (setq my/knowledge-mcp--base name)
+    (unless (equal root my/knowledge-mcp--root)
+      (my/knowledge-mcp--save-cache)
+      (setq my/knowledge-mcp--root root
+            my/knowledge-mcp--cache-dirty nil
+            my/knowledge-mcp--cache-file
+            (when-let* ((directory (getenv "KNOWLEDGE_MCP_CACHE")))
+              (expand-file-name (concat (md5 root) ".eld") directory)))
+      (if-let* ((cache (gethash root my/knowledge-mcp--caches)))
+          (setq my/knowledge-mcp--cache cache)
+        (setq my/knowledge-mcp--cache (make-hash-table :test #'equal))
+        (puthash root my/knowledge-mcp--cache my/knowledge-mcp--caches)
+        (my/knowledge-mcp--load-cache)))))
+
+(defun my/knowledge-mcp--registry ()
+  "Return the registry: a plist with :current and :bases, or nil."
+  (when (and my/knowledge-mcp--bases-file
+             (file-readable-p my/knowledge-mcp--bases-file))
+    (with-temp-buffer
+      (insert-file-contents my/knowledge-mcp--bases-file)
+      (read (current-buffer)))))
+
+(defun my/knowledge-mcp--select (base)
+  "Serve the registered knowledge base named BASE, or the default if nil."
+  (let* ((registry (my/knowledge-mcp--registry))
+         (bases (plist-get registry :bases)))
+    (cond
+     (base
+      (let ((directory (or (cdr (assoc base bases))
+                           (my/knowledge-mcp--fail
+                            "No knowledge base is registered as \"%s\"; registered: %s"
+                            base (if bases (mapconcat #'car bases ", ") "none")))))
+        (unless (file-directory-p directory)
+          (my/knowledge-mcp--fail "The directory of knowledge base \"%s\" is missing"
+                                  base))
+        (my/knowledge-mcp--use-root directory base)))
+     (my/knowledge-mcp--default-directory
+      (my/knowledge-mcp--use-root
+       my/knowledge-mcp--default-directory
+       (car (seq-find (lambda (entry)
+                        (file-equal-p (cdr entry) my/knowledge-mcp--default-directory))
+                      bases))))
+     ((null registry) (my/knowledge-mcp--use-root "~/knowledge"))
+     (t
+      (let* ((name (plist-get registry :current))
+             (directory (cdr (assoc name bases))))
+        (unless (and directory (file-directory-p directory))
+          (my/knowledge-mcp--fail
+           "The knowledge base current in Emacs, \"%s\", is missing; pass base, \
+see knowledge_list_bases"
+           name))
+        (my/knowledge-mcp--use-root directory name))))))
+
+(defun my/knowledge-mcp--list-bases (_arguments)
+  "List the knowledge bases registered on this machine."
+  (let* ((registry (my/knowledge-mcp--registry))
+         (current (plist-get registry :current)))
+    `((bases . ,(vconcat
+                 (mapcar (pcase-lambda (`(,name . ,directory))
+                           `((name . ,name) (directory . ,directory)
+                             (current_in_emacs . ,(if (equal name current) t :false))
+                             (exists . ,(if (file-directory-p directory) t :false))))
+                         (plist-get registry :bases))))
+      (default . ,(my/knowledge-mcp--null
+                   (if my/knowledge-mcp--default-directory
+                       (file-name-as-directory (expand-file-name my/knowledge-mcp--default-directory))
+                     current))))))
 
 ;;; Index
 
@@ -276,7 +370,8 @@ Create the section before Relations, or at the end, when it is missing."
                     (or (null tag) (member tag (plist-get concept :tags))))))
            (my/knowledge-mcp--concepts))))
     (when level (my/knowledge-mcp--check-member level my/knowledge-levels "level"))
-    `((total . ,(length matches))
+    `((base . ,(my/knowledge-mcp--null my/knowledge-mcp--base))
+      (total . ,(length matches))
       (concepts . ,(vconcat (mapcar #'my/knowledge-mcp--concept-json
                                     (take limit matches)))))))
 
@@ -299,6 +394,7 @@ Create the section before Relations, or at the end, when it is missing."
     (dolist (other concepts)
       (puthash (plist-get other :id) (plist-get other :title) titles))
     (append
+     `((base . ,(my/knowledge-mcp--null my/knowledge-mcp--base)))
      (my/knowledge-mcp--concept-json concept)
      `((notes . ,(my/knowledge-mcp--null (my/knowledge-mcp--notes (plist-get concept :file))))
        (relations
@@ -605,11 +701,29 @@ Create the section before Relations, or at the end, when it is missing."
          (time (type . "string") (description . "HH:MM, default now")))
         (required . ["topic"]))
        my/knowledge-mcp--log-session)
+      ("knowledge_list_bases"
+       ,(concat "List the user's knowledge bases registered on this machine, and the "
+                "one current in Emacs, used when a call names no base.  Every other "
+                "tool takes an optional base to work on another one.")
+       ((type . "object") (properties . ,(make-hash-table)))
+       my/knowledge-mcp--list-bases)
       ("knowledge_check"
        ,(concat "Validate the knowledge base: properties, levels, relation names and "
                 "links to missing concepts.  Messages are in Chinese.")
        ((type . "object") (properties . ,(make-hash-table)))
        my/knowledge-mcp--check))))
+
+(defun my/knowledge-mcp--with-base (tool schema)
+  "Return SCHEMA of TOOL with the optional base property every tool takes."
+  (if (equal tool "knowledge_list_bases")
+      schema
+    (let ((properties (alist-get 'properties schema)))
+      (cons (cons 'properties
+                  (cons '(base (type . "string")
+                               (description . "Registered knowledge base to use; \
+default: the one current in Emacs (see knowledge_list_bases)"))
+                        (and (consp properties) properties)))
+            (assq-delete-all 'properties (copy-alist schema))))))
 
 ;;; Protocol
 
@@ -619,8 +733,10 @@ Create the section before Relations, or at the end, when it is missing."
    "(level, lowest first: " (string-join my/knowledge-levels ", ") "), how concepts "
    "relate, and the learning sessions with AI assistants that covered them.  "
    "Look concepts up before creating them.  After teaching the user, record the "
-   "session with knowledge_log_session and update levels with knowledge_set_level.  You can "
-   "never confirm a level: the user confirms them in Emacs.")
+   "session with knowledge_log_session and update levels with knowledge_set_level.  "
+   "You can never confirm a level: the user confirms them in Emacs.  The user may "
+   "keep several knowledge bases (knowledge_list_bases); calls use the one current "
+   "in Emacs unless they name another with base.")
   "Instructions sent at initialization.")
 
 (defun my/knowledge-mcp--guess-ai (client)
@@ -637,6 +753,8 @@ Create the section before Relations, or at the end, when it is missing."
     (condition-case err
         (progn
           (unless tool (my/knowledge-mcp--fail "Unknown tool %s" name))
+          (unless (equal name "knowledge_list_bases")
+            (my/knowledge-mcp--select (alist-get 'base (alist-get 'arguments params))))
           (let ((value (funcall (nth 3 tool) (alist-get 'arguments params))))
             `((content . [((type . "text")
                            (text . ,(decode-coding-string (json-serialize value)
@@ -666,7 +784,7 @@ Signal `my/knowledge-mcp--unknown' for an unknown method."
      `((tools . ,(vconcat
                   (mapcar (pcase-lambda (`(,name ,description ,schema ,_))
                             `((name . ,name) (description . ,description)
-                              (inputSchema . ,schema)))
+                              (inputSchema . ,(my/knowledge-mcp--with-base name schema))))
                           (my/knowledge-mcp--tools))))))
     ("tools/call" (my/knowledge-mcp--call params))
     (_ (signal 'my/knowledge-mcp--unknown (list method)))))
@@ -702,8 +820,9 @@ Signal `my/knowledge-mcp--unknown' for an unknown method."
 
 (defun my/knowledge-mcp-main ()
   "Serve the knowledge base over stdio until standard input ends.
-The directory is the first command-line argument, $KNOWLEDGE_DIRECTORY or ~/knowledge.
-The index is saved in the directory $KNOWLEDGE_MCP_CACHE, when set."
+The directory is the first command-line argument or $KNOWLEDGE_DIRECTORY;
+without either, the current one of the registry $KNOWLEDGE_BASES_FILE,
+or ~/knowledge.  The index is saved in $KNOWLEDGE_MCP_CACHE, when set."
   (set-language-environment "UTF-8")
   (setq locale-coding-system 'utf-8
         org-id-track-globally nil
@@ -711,17 +830,11 @@ The index is saved in the directory $KNOWLEDGE_MCP_CACHE, when set."
         gc-cons-threshold (* 64 1024 1024))
   (set-keyboard-coding-system 'utf-8)
   (set-terminal-coding-system 'utf-8)
-  (setq my/knowledge-mcp--root
-        (file-name-as-directory
-         (file-truename (or (pop command-line-args-left)
-                            (getenv "KNOWLEDGE_DIRECTORY")
-                            "~/knowledge")))
+  (setq my/knowledge-mcp--default-directory (or (pop command-line-args-left)
+                                                (getenv "KNOWLEDGE_DIRECTORY"))
         command-line-args-left nil
-        my/knowledge-mcp--cache-file
-        (when-let* ((directory (getenv "KNOWLEDGE_MCP_CACHE")))
-          (expand-file-name (concat (md5 my/knowledge-mcp--root) ".eld") directory)))
-  (my/knowledge-mcp--load-cache)
-  (message "knowledge-mcp: serving %s" my/knowledge-mcp--root)
+        my/knowledge-mcp--bases-file (getenv "KNOWLEDGE_BASES_FILE"))
+  (message "knowledge-mcp: started")
   (let (line)
     (while (setq line (condition-case nil
                           (read-from-minibuffer "")

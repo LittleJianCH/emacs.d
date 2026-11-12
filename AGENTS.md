@@ -57,7 +57,8 @@ lisp/app/                standalone applications; enabled via `my/apps' in init.
   knowledge-batch.el     its file format, plus the validator and HTML export
                          run by `emacs --batch -Q` subprocesses
   knowledge-mcp.el       local stdio MCP server over the same files for AI
-                         clients; batch Emacs, independent of emx
+                         clients; any registered base per call (default: the
+                         one current in Emacs); batch Emacs, independent of emx
 bin/emx                  minimal launcher: locate/build dist, import compiled CLI
 bin/knowledge-mcp        launcher of the knowledge base MCP server (knowledge-mcp.el)
 emx/                     the emx daemon (TypeScript compiled on demand to generated dist/): protocol, sessions, backends

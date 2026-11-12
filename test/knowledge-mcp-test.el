@@ -22,19 +22,23 @@
 
 (defun knowledge-mcp-test--start (root cache &optional client)
   "Start the server on ROOT with the index cache CACHE, then initialize.
-CLIENT is the client name sent; the result of initialize is returned."
+ROOT nil serves the registry CACHE/bases.eld.  CLIENT is the client name
+sent; the result of initialize is returned."
   (setq knowledge-mcp-test--output ""
         knowledge-mcp-test--process
         (let ((process-environment
                (list (concat "HOME=" (getenv "HOME")) "PATH=/usr/bin:/bin"
                      (concat "KNOWLEDGE_MCP_CACHE=" cache)
+                     (concat "KNOWLEDGE_BASES_FILE="
+                             (expand-file-name "bases.eld" cache))
                      ;; The Emacs running the tests, whatever PATH holds.
                      (concat "KNOWLEDGE_MCP_EMACS=" (expand-file-name invocation-name
                                                                invocation-directory))))
               (default-directory "/"))
           (make-process :name "knowledge-mcp-test" :connection-type 'pipe :noquery t
-                        :command (list (expand-file-name "bin/knowledge-mcp" emx-test--checkout)
-                                       root)
+                        :command (cons (expand-file-name "bin/knowledge-mcp"
+                                                         emx-test--checkout)
+                                       (and root (list root)))
                         :stderr (get-buffer-create " *knowledge-mcp-test stderr*")
                         :filter (lambda (_ string)
                                   (setq knowledge-mcp-test--output
@@ -136,7 +140,8 @@ and unknown methods or tools get errors, and the server keeps serving."
                            (alist-get 'tools (alist-get 'result
                                                         (knowledge-mcp-test--request "tools/list"))))
                    '("knowledge_search" "knowledge_get_concept" "knowledge_create_concept" "knowledge_set_level"
-                     "knowledge_add_relation" "knowledge_append_notes" "knowledge_log_session" "knowledge_check")))
+                     "knowledge_add_relation" "knowledge_append_notes" "knowledge_log_session"
+                     "knowledge_list_bases" "knowledge_check")))
     (process-send-string knowledge-mcp-test--process "not json\n")
     (should (equal (alist-get 'code (alist-get 'error (knowledge-mcp-test--line))) -32700))
     (should (equal (alist-get 'code (alist-get 'error (knowledge-mcp-test--request "nope/nope")))
@@ -203,7 +208,8 @@ take the slug as file name and keep ordinary file modes; names are unique."
       (should (string-match-p ":LEVEL:    implemented\n:CONFIRMED: nil\n" text))
       (should (string-match-p (regexp-quote (concat ":UPDATED:  " (my/knowledge-date-string)))
                               text)))
-    (should (equal (knowledge-mcp-test--call "knowledge_search" '((confirmed . t))) '((total . 0) (concepts))))
+    (should (equal (knowledge-mcp-test--call "knowledge_search" '((confirmed . t)))
+                   '((base) (total . 0) (concepts))))
     (should (eq (car-safe (knowledge-mcp-test--call "knowledge_set_level" '((concept . "NbE")
                                                               (level . "master"))))
                 'error))))
@@ -287,6 +293,79 @@ saved index."
       (should (string-search "Alpha Prime" (with-temp-buffer
                                               (insert-file-contents (car saved))
                                               (buffer-string)))))))
+
+(ert-deftest knowledge-mcp-works-on-several-bases ()
+  "Calls use the base current in Emacs unless they name another, so one
+conversation can work on several; nothing sticks between calls."
+  (let* ((home (file-name-as-directory (file-truename (make-temp-file "knowledge-mcp-bases-" t))))
+         (cache (make-temp-file "knowledge-mcp-cache-" t))
+         (first (expand-file-name "first/" home))
+         (second (expand-file-name "second/" home))
+         (bases (expand-file-name "bases.eld" cache))
+         (registry (lambda (current)
+                     (with-temp-file bases
+                       (prin1 `(:current ,current :bases (("一" . ,first) ("二" . ,second)
+                                                          ("丢失" . ,(concat home "gone/"))))
+                              (current-buffer)))))
+         (knowledge-mcp-test--id 0))
+    (make-directory first)
+    (make-directory second)
+    (funcall registry "一")
+    (unwind-protect
+        (progn
+          (knowledge-mcp-test--start nil cache)
+          (should (equal (knowledge-mcp-test--call "knowledge_list_bases")
+                         `((bases ((name . "一") (directory . ,first)
+                                   (current_in_emacs . t) (exists . t))
+                                  ((name . "二") (directory . ,second)
+                                   (current_in_emacs . :false) (exists . t))
+                                  ((name . "丢失") (directory . ,(concat home "gone/"))
+                                   (current_in_emacs . :false) (exists . :false)))
+                           (default . "一"))))
+          (knowledge-mcp-test--call "knowledge_create_concept" '((title . "Alpha")))
+          (knowledge-mcp-test--call "knowledge_create_concept"
+                                    '((title . "Beta") (base . "二")))
+          (should (file-exists-p (expand-file-name "concepts/alpha.org" first)))
+          (should (file-exists-p (expand-file-name "concepts/beta.org" second)))
+          ;; Naming a base lasts one call only.
+          (let ((default (knowledge-mcp-test--call "knowledge_search")))
+            (should (equal (alist-get 'base default) "一"))
+            (should (equal (mapcar (lambda (c) (alist-get 'title c))
+                                   (alist-get 'concepts default))
+                           '("Alpha"))))
+          (should (equal (mapcar (lambda (c) (alist-get 'title c))
+                                 (alist-get 'concepts (knowledge-mcp-test--call
+                                                       "knowledge_search" '((base . "二")))))
+                         '("Beta")))
+          (should (string-match-p "registered: 一, 二, 丢失"
+                                  (cdr (knowledge-mcp-test--call
+                                        "knowledge_search" '((base . "三"))))))
+          (should (string-match-p "directory of knowledge base \"丢失\" is missing"
+                                  (cdr (knowledge-mcp-test--call
+                                        "knowledge_search" '((base . "丢失"))))))
+          ;; Switching in Emacs changes the default.
+          (funcall registry "二")
+          (should (equal (alist-get 'base (knowledge-mcp-test--call "knowledge_search"))
+                         "二"))
+          (funcall registry "丢失")
+          (should (string-match-p "current in Emacs, \"丢失\", is missing"
+                                  (cdr (knowledge-mcp-test--call "knowledge_search"))))
+          ;; Every tool but the list takes base.
+          (dolist (tool (alist-get 'tools (alist-get 'result
+                                                     (knowledge-mcp-test--request "tools/list"))))
+            (ert-info ((alist-get 'name tool))
+              (should (eq (and (assq 'base (alist-get 'properties
+                                                     (alist-get 'inputSchema tool)))
+                               t)
+                          (not (equal (alist-get 'name tool) "knowledge_list_bases")))))))
+      (when (process-live-p knowledge-mcp-test--process)
+        (process-send-eof knowledge-mcp-test--process)
+        (let ((deadline (time-add nil 10)))
+          (while (and (process-live-p knowledge-mcp-test--process)
+                      (time-less-p nil deadline))
+            (accept-process-output knowledge-mcp-test--process 0.1))))
+      (delete-directory home t)
+      (delete-directory cache t))))
 
 (provide 'knowledge-mcp-test)
 ;;; knowledge-mcp-test.el ends here
