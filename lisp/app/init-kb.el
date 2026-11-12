@@ -13,7 +13,33 @@
 ;;   C-c n r   add a relation to a concept   C-c n b   backlinks buffer
 ;;   C-c n d   record a learning session     C-c n D   today's sessions
 ;;   C-c n t   add a tag   C-c n a   add an alias
-
+;;   C-c n s   catch up with external changes now   C-c n S   rebuild
+;;
+;; Keeping the database current without blocking.  Saves inside Emacs are
+;; handled by `org-roam-db-autosync-mode', enabled here without the full
+;; `org-roam-db-sync' it would run at once.  Agents change files outside
+;; Emacs, so three things feed a queue of files to index:
+;;
+;; - file-notify watches on the knowledge base's directories.  On macOS they
+;;   are kqueue watches, which report files created, deleted or renamed in
+;;   a directory (so editors' atomic saves) but not a file rewritten in
+;;   place; one watch per file would take thousands of descriptors.
+;; - A scan comparing the modification time of every file, from one
+;;   `directory-files-and-attributes' per directory, with the files table
+;;   of the database.  It reads no file contents and takes milliseconds for
+;;   thousands of files, so it runs when the module loads, every
+;;   `my/kb-sync-scan-interval' seconds once Emacs is idle, when a frame
+;;   gains focus, and on `g' in the table.  It catches in-place writes and
+;;   whatever changed while Emacs was not running.
+;; - `my/kb-sync-enqueue', for callers that know what they changed.
+;;
+;; The queue is drained by timers while Emacs is idle, a file at a time,
+;; giving way as soon as input arrives; `org-roam-db-update-file' skips
+;; files whose contents hash has not changed.  When a scan finds more than
+;; `my/kb-sync-rebuild-threshold' changed files (the first run, a large
+;; git checkout), a batch Emacs builds a new database in a temporary file,
+;; which then replaces the current one, and a scan picks up what changed
+;; meanwhile.
 
 ;;; Code:
 
@@ -33,6 +59,18 @@ does not exist yet.  Takes effect after a restart."
   "Non-nil means changing LEVEL in the table also sets CONFIRMED to t.
 The change is mine, not an assistant's, so the new level is confirmed."
   :type 'boolean
+  :group 'my/kb)
+
+(defcustom my/kb-sync-scan-interval 120
+  "Seconds between scans for files changed outside Emacs.
+Each scan waits for Emacs to be idle."
+  :type 'natnum
+  :group 'my/kb)
+
+(defcustom my/kb-sync-rebuild-threshold 200
+  "Changed files a scan may queue; beyond this the database is rebuilt.
+The rebuild runs in a subprocess, see `my/kb-sync-rebuild'."
+  :type 'natnum
   :group 'my/kb)
 
 (defface my/kb-relation '((t :inherit org-verbatim :weight bold))
@@ -108,8 +146,8 @@ asynchronously."
 
 (defun my/kb--enable-autosync ()
   "Turn on `org-roam-db-autosync-mode' without its full synchronization.
-Enabling the mode runs `org-roam-db-sync', which reads every file and
-blocks Emacs meanwhile."
+Enabling the mode runs `org-roam-db-sync', which reads every file; the
+scans of `my/kb-sync-start' catch up asynchronously instead."
   (cl-letf (((symbol-function 'org-roam-db-sync) #'ignore))
     (org-roam-db-autosync-mode 1)))
 
@@ -408,6 +446,280 @@ first, in the order of `my/kb-relations'."
         (oset section point point)
         (insert ?\n)))))
 
+;;; Following external changes
+
+(defvar my/kb-sync--queue nil
+  "Files waiting to be indexed, oldest first.")
+
+(defvar my/kb-sync--queued (make-hash-table :test #'equal)
+  "Set of the files in `my/kb-sync--queue'.")
+
+(defvar my/kb-sync--indexed nil
+  "Files whose index changed since the queue was last empty.")
+
+(defvar my/kb-sync--timer nil
+  "Timer of the next drain of the queue.")
+
+(defvar my/kb-sync--scan-timer nil
+  "Repeating timer of the periodic scan.")
+
+(defvar my/kb-sync--watches nil
+  "Alist of watched directories and their file-notify descriptors.")
+
+(defvar my/kb-sync--rebuild nil
+  "Process rebuilding the database, while it runs.")
+
+(defvar my/kb-sync-updated-hook nil
+  "Hook run once the queue is empty, with the files whose index changed.
+After a rebuild the argument is nil.")
+
+(defun my/kb-sync--file-p (file)
+  "Return non-nil if FILE, an absolute name, belongs in the database."
+  (let ((name (file-name-nondirectory file)))
+    (and (string-suffix-p ".org" name)
+         (not (string-match-p "\\`[.#]" name))
+         (not (string-match-p "/\\.git/" file))
+         (string-prefix-p (my/kb-root) file)
+         (org-roam-file-p file))))
+
+(defun my/kb-sync--arm (delay)
+  "Drain the queue after DELAY seconds of idleness, unless a drain is due.
+When Emacs is idle already, an idle timer would wait for the next idle
+period, so a plain timer is used."
+  (unless (timerp my/kb-sync--timer)
+    (setq my/kb-sync--timer
+          (if (current-idle-time)
+              (run-with-timer delay nil #'my/kb-sync--drain)
+            (run-with-idle-timer delay nil #'my/kb-sync--drain)))))
+
+(defun my/kb-sync-enqueue (&rest files)
+  "Queue FILES for indexing while Emacs is idle.
+Files that no longer exist are removed from the database instead."
+  (dolist (file files)
+    (let ((file (expand-file-name file)))
+      (when (and (my/kb-sync--file-p file)
+                 (not (gethash file my/kb-sync--queued)))
+        (puthash file t my/kb-sync--queued)
+        (setq my/kb-sync--queue (nconc my/kb-sync--queue (list file))))))
+  (when my/kb-sync--queue
+    (my/kb-sync--arm 0.5)))
+
+(defun my/kb-sync--hash (file)
+  "Return the contents hash the database has for FILE, or nil."
+  (caar (org-roam-db-query [:select hash :from files :where (= file $s1)] file)))
+
+(defun my/kb-sync--index (file)
+  "Bring the database up to date with FILE.
+Return non-nil if that changed the database."
+  (let ((before (my/kb-sync--hash file)))
+    (if (not (file-exists-p file))
+        (org-roam-db-clear-file file)
+      ;; A buffer that has not caught up with the file yet would be indexed
+      ;; in its place.
+      (when-let* ((buffer (find-buffer-visiting file)))
+        (with-current-buffer buffer
+          (unless (or (buffer-modified-p) (verify-visited-file-modtime buffer))
+            (revert-buffer t t t))))
+      (condition-case err
+          (progn
+            (org-roam-db-update-file file)
+            ;; Unchanged contents leave the old time behind, which the next
+            ;; scan would report again.
+            (org-roam-db-query [:update files :set (= mtime $s1)
+                                :where (= file $s2)]
+                               (file-attribute-modification-time
+                                (file-attributes file))
+                               file))
+        (error
+         (org-roam-db-clear-file file)
+         (message "知识库：无法索引 %s：%s" file (error-message-string err)))))
+    (not (equal before (my/kb-sync--hash file)))))
+
+(defun my/kb-sync--drain ()
+  "Index queued files until input arrives or 50 ms have passed."
+  (setq my/kb-sync--timer nil)
+  (unless my/kb-sync--rebuild
+    (let ((deadline (time-add nil 0.05)))
+      (while (and my/kb-sync--queue
+                  (not (input-pending-p))
+                  (time-less-p nil deadline))
+        (let ((file (pop my/kb-sync--queue)))
+          (remhash file my/kb-sync--queued)
+          (when (my/kb-sync--index file)
+            (push file my/kb-sync--indexed)))))
+    (cond
+     (my/kb-sync--queue (my/kb-sync--arm 0.1))
+     (my/kb-sync--indexed
+      (let ((files (nreverse my/kb-sync--indexed)))
+        (setq my/kb-sync--indexed nil)
+        (run-hook-with-args 'my/kb-sync-updated-hook files))))))
+
+(defun my/kb-sync--directories (root)
+  "Return ROOT and its subdirectories, skipping hidden ones such as .git."
+  (cons root
+        (cl-loop for (name . attributes)
+                 in (directory-files-and-attributes root t "\\`[^.]" t)
+                 when (eq (file-attribute-type attributes) t)
+                 append (my/kb-sync--directories (file-name-as-directory name)))))
+
+(defun my/kb-sync--changed-files ()
+  "Return the files whose modification time differs from the database's.
+Files the database has but the disk does not are included."
+  (let ((known (make-hash-table :test #'equal))
+        changed)
+    (pcase-dolist (`(,file ,mtime)
+                   (org-roam-db-query [:select [file mtime] :from files]))
+      (puthash file mtime known))
+    (dolist (directory (my/kb-sync--directories (my/kb-root)))
+      (pcase-dolist (`(,file . ,attributes)
+                     (directory-files-and-attributes directory t "\\.org\\'" t))
+        (when (and (null (file-attribute-type attributes))
+                   (my/kb-sync--file-p file))
+          (let ((mtime (gethash file known)))
+            (remhash file known)
+            (unless (and mtime
+                         (time-equal-p mtime (file-attribute-modification-time
+                                              attributes)))
+              (push file changed))))))
+    (maphash (lambda (file _) (push file changed)) known)
+    changed))
+
+(defun my/kb-sync-scan ()
+  "Queue the files of the knowledge base changed since they were indexed.
+Too many changes rebuild the database instead, see
+`my/kb-sync-rebuild-threshold'."
+  (interactive)
+  (unless my/kb-sync--rebuild
+    (let ((changed (my/kb-sync--changed-files)))
+      (cond
+       ((> (length changed) my/kb-sync-rebuild-threshold)
+        (my/kb-sync-rebuild))
+       (changed
+        (apply #'my/kb-sync-enqueue changed)
+        (when (called-interactively-p 'interactive)
+          (message "知识库：%d 个文件待更新" (length changed))))
+       ((called-interactively-p 'interactive)
+        (message "知识库数据库已是最新"))))))
+
+(defun my/kb-sync--scan-when-idle ()
+  "Scan once Emacs has been idle for a second."
+  (if (and (current-idle-time) (time-less-p 1 (current-idle-time)))
+      (my/kb-sync-scan)
+    (run-with-idle-timer 1 nil #'my/kb-sync-scan)))
+
+(defun my/kb-sync--focus-changed ()
+  "Scan when a frame gains focus: other programs may have changed files."
+  (when (seq-some #'frame-focus-state (frame-list))
+    (my/kb-sync--scan-when-idle)))
+
+(defun my/kb-sync--notify (event)
+  "Queue the files of the file-notify EVENT; watch new directories."
+  (pcase-let ((`(,descriptor ,action ,file ,file1) event))
+    (pcase action
+      ('stopped
+       (setq my/kb-sync--watches (seq-remove (lambda (watch)
+                                               (equal (cdr watch) descriptor))
+                                             my/kb-sync--watches)))
+      ((or 'created 'changed 'deleted 'renamed)
+       (dolist (name (delq nil (list file file1)))
+         (if (and (memq action '(created renamed)) (file-directory-p name))
+             (progn
+               (my/kb-sync--watch (file-name-as-directory name))
+               (my/kb-sync--scan-when-idle))
+           (my/kb-sync-enqueue name)))))))
+
+(defun my/kb-sync--watch (directory)
+  "Watch DIRECTORY for changes, unless it is watched already or hidden."
+  (unless (or (assoc directory my/kb-sync--watches)
+              (string-match-p "/\\." (substring directory
+                                                (length (my/kb-root)))))
+    (condition-case err
+        (push (cons directory (file-notify-add-watch
+                               directory '(change) #'my/kb-sync--notify))
+              my/kb-sync--watches)
+      (file-notify-error
+       (message "知识库：无法监视 %s：%s" directory (error-message-string err))))))
+
+(defun my/kb-sync-start ()
+  "Follow changes made to the knowledge base outside Emacs.
+Watch its directories, scan now and every `my/kb-sync-scan-interval'
+seconds, and when a frame gains focus."
+  (my/kb-sync-stop)
+  (dolist (directory (my/kb-sync--directories (my/kb-root)))
+    (my/kb-sync--watch directory))
+  (setq my/kb-sync--scan-timer
+        (run-with-timer my/kb-sync-scan-interval my/kb-sync-scan-interval
+                        #'my/kb-sync--scan-when-idle))
+  (add-function :after after-focus-change-function #'my/kb-sync--focus-changed)
+  (run-with-idle-timer 1 nil #'my/kb-sync-scan))
+
+(defun my/kb-sync-stop ()
+  "Stop following external changes."
+  (pcase-dolist (`(,_ . ,descriptor) my/kb-sync--watches)
+    (file-notify-rm-watch descriptor))
+  (setq my/kb-sync--watches nil)
+  (when (timerp my/kb-sync--scan-timer)
+    (cancel-timer my/kb-sync--scan-timer))
+  (setq my/kb-sync--scan-timer nil)
+  (remove-function after-focus-change-function #'my/kb-sync--focus-changed))
+
+(defun my/kb--emacs ()
+  "Return the file name of the running Emacs, for batch subprocesses."
+  (expand-file-name invocation-name invocation-directory))
+
+(defun my/kb-sync-rebuild ()
+  "Rebuild the database from every file, in a batch Emacs.
+The new database is written to a temporary file and replaces the
+current one when complete; a scan then picks up files changed during
+the rebuild.  Emacs stays usable throughout."
+  (interactive)
+  (when (process-live-p my/kb-sync--rebuild)
+    (user-error "知识库数据库正在重建"))
+  (let* ((target org-roam-db-location)
+         (temporary (concat target ".rebuild"))
+         (form
+          `(progn
+             (setq package-user-dir ,package-user-dir)
+             (package-initialize)
+             (require 'org-roam)
+             (setq org-roam-directory ,(my/kb-root)
+                   org-roam-db-location ,temporary
+                   org-roam-file-exclude-regexp ',org-roam-file-exclude-regexp
+                   org-roam-file-extensions ',org-roam-file-extensions
+                   org-roam-db-extra-links-elements
+                   ',org-roam-db-extra-links-elements
+                   org-roam-db-extra-links-exclude-keys
+                   ',org-roam-db-extra-links-exclude-keys
+                   org-id-track-globally nil)
+             (org-roam-db-sync))))
+    (when (file-exists-p temporary)
+      (delete-file temporary))
+    (message "知识库：正在后台重建数据库…")
+    (setq my/kb-sync--rebuild
+          (make-process
+           :name "kb-rebuild"
+           :buffer (get-buffer-create " *知识库重建*")
+           :command (list (my/kb--emacs) "--batch" "-Q"
+                          "--eval" (prin1-to-string form))
+           :noquery t
+           :sentinel
+           (lambda (process _event)
+             (unless (process-live-p process)
+               (setq my/kb-sync--rebuild nil)
+               (if (and (zerop (process-exit-status process))
+                        (file-exists-p temporary))
+                   (progn
+                     (org-roam-db--close-all)
+                     (rename-file temporary target t)
+                     (message "知识库：数据库已重建")
+                     (my/kb-sync-scan)
+                     ;; Files queued during the rebuild wait for no new event.
+                     (when my/kb-sync--queue
+                       (my/kb-sync--arm 0.5))
+                     (run-hook-with-args 'my/kb-sync-updated-hook nil))
+                 (message "知识库：重建数据库失败，详见 %s"
+                          (buffer-name (process-buffer process))))))))))
+
 ;;; Table of concepts
 
 (defun my/kb-concepts ()
@@ -500,7 +812,7 @@ each change is written to the concept's file, with today as UPDATED.
 \\[my/kb-table-toggle-unconfirmed] lists only unconfirmed concepts, \
 \\[tabulated-list-sort] sorts by the column at point,
 \\[my/kb-table-open] opens the concept and \\[my/kb-table-refresh] \
-rereads the table.
+catches up with external changes.
 
 \\{my/kb-table-mode-map}"
   (setq tabulated-list-format
@@ -595,14 +907,25 @@ Then move to the next line."
   (revert-buffer))
 
 (defun my/kb-table-refresh ()
-  "Reread the table from the database."
+  "Reread the table, and catch up with files changed outside Emacs.
+The table is updated again once those files are indexed."
   (interactive)
+  (my/kb-sync-scan)
   (revert-buffer))
 
 (defun my/kb-table-open ()
   "Visit the file of the concept at point."
   (interactive)
   (find-file (plist-get (my/kb-table--concept) :file)))
+
+(defun my/kb-table--sync-updated (_files)
+  "Reread a live table after the database caught up with changes."
+  (when-let* ((buffer (get-buffer my/kb-table--buffer)))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'my/kb-table-mode)
+        (revert-buffer)))))
+
+(add-hook 'my/kb-sync-updated-hook #'my/kb-table--sync-updated)
 
 ;;; Keys
 
@@ -616,7 +939,9 @@ Then move to the next line."
   "d" #'org-roam-dailies-capture-today
   "D" #'org-roam-dailies-goto-today
   "t" #'org-roam-tag-add
-  "a" #'org-roam-alias-add)
+  "a" #'org-roam-alias-add
+  "s" #'my/kb-sync-scan
+  "S" #'my/kb-sync-rebuild)
 
 (keymap-global-set "C-c n" my/kb-command-map)
 
@@ -646,6 +971,7 @@ Then move to the next line."
 
 (my/kb-bootstrap)
 (my/kb--enable-autosync)
+(my/kb-sync-start)
 
 (provide 'init-kb)
 ;;; init-kb.el ends here

@@ -3,7 +3,8 @@
 ;;; Commentary:
 
 ;; Exercise the knowledge base on temporary directories and databases:
-;; creation, capture, relations, labelled backlinks and the table.  The module is loaded with `my/kb-directory' pointing at a
+;; creation, capture, relations, labelled backlinks, the table and catching
+;; up with external changes.  The module is loaded with `my/kb-directory' pointing at a
 ;; temporary directory, so the real ~/kb and var/org-roam.db are never
 ;; touched.  Skipped unless org-roam is installed; nothing is installed.
 
@@ -46,7 +47,8 @@
                                                 init-kb-test--state))
   (require 'init-kb)
   ;; use-package set the real database; nothing has opened it yet.
-  (setq org-roam-db-location (expand-file-name "startup.db" init-kb-test--state)))
+  (setq org-roam-db-location (expand-file-name "startup.db" init-kb-test--state))
+  (my/kb-sync-stop))
 
 (add-hook 'kill-emacs-hook
           (lambda () (delete-directory init-kb-test--state t)))
@@ -380,6 +382,72 @@ update the database and the row in place."
         (should-error (my/kb-set-properties a '(("LEVEL" . "can-apply")))
                       :type 'user-error)
         (should-not (string-match-p "draft\\|can-apply" (init-kb-test--file-string a)))))))
+
+;;; Following external changes
+
+(ert-deftest init-kb-scan-follows-external-changes ()
+  "Changed, new and deleted files are found by modification time and
+indexed; afterwards a scan finds nothing, also for a file only touched."
+  (init-kb-test--with-kb
+    (let ((a (init-kb-test--concept root "a" "id-a" "Alpha"))
+          (b (init-kb-test--concept root "b" "id-b" "Beta"))
+          (later (time-add nil 10))
+          updated)
+      (init-kb-test--index a b)
+      (should-not (my/kb-sync--changed-files))
+      (add-hook 'my/kb-sync-updated-hook (lambda (files) (setq updated files)))
+      ;; An agent rewrites a, creates c, deletes b.
+      (with-temp-file a
+        (insert (string-replace "exposed" "can-apply" (init-kb-test--file-string a))))
+      (set-file-times a later)
+      (let ((c (init-kb-test--concept root "c" "id-c" "Gamma")))
+        (init-kb-test--delete b)
+        (should (equal (sort (my/kb-sync--changed-files)) (sort (list a b c))))
+        (my/kb-sync-scan)
+        (init-kb-test--drain)
+        (should (equal (sort updated) (sort (list a b c))))
+        (let ((concepts (my/kb-concepts)))
+          (should (equal (sort (mapcar (lambda (concept) (plist-get concept :id)) concepts))
+                         '("id-a" "id-c")))
+          (should (equal (plist-get (seq-find (lambda (concept)
+                                                (equal (plist-get concept :id) "id-a"))
+                                              concepts)
+                                    :level)
+                         "can-apply")))
+        (should-not (my/kb-sync--changed-files))
+        ;; Touched, not changed: indexed once, then quiet, and no update.
+        (setq updated 'none)
+        (set-file-times c (time-add later 10))
+        (should (equal (my/kb-sync--changed-files) (list c)))
+        (my/kb-sync-scan)
+        (init-kb-test--drain)
+        (should (eq updated 'none))
+        (should-not (my/kb-sync--changed-files))))))
+
+(ert-deftest init-kb-scan-skips-hidden-and-temporary-files ()
+  "Only Org files of the knowledge base are queued, never git's or locks."
+  (init-kb-test--with-kb
+    (let ((a (init-kb-test--concept root "a" "id-a" "Alpha")))
+      (init-kb-test--write root ".git/x.org" "x")
+      (init-kb-test--write root "concepts/.#a.org" "x")
+      (init-kb-test--write root "concepts/#a.org#" "x")
+      (init-kb-test--write root "concepts/notes.txt" "x")
+      (should (equal (my/kb-sync--changed-files) (list a))))))
+
+(ert-deftest init-kb-scan-rebuilds-in-a-subprocess-when-many-changed ()
+  "Past the threshold, a batch Emacs builds the database, which then
+replaces the current one."
+  (init-kb-test--with-kb
+    (dotimes (i 4)
+      (init-kb-test--concept root (format "c%d" i) (format "id-%d" i)
+                             (format "Concept %d" i)))
+    (let ((my/kb-sync-rebuild-threshold 2))
+      (my/kb-sync-scan)
+      (should (process-live-p my/kb-sync--rebuild))
+      (should-not my/kb-sync--queue)
+      (should (init-kb-test--wait (lambda () (null my/kb-sync--rebuild))))
+      (should (= (length (my/kb-concepts)) 4))
+      (should-not (my/kb-sync--changed-files)))))
 
 (provide 'init-kb-test)
 ;;; init-kb-test.el ends here
