@@ -203,28 +203,57 @@ an existing one is left alone."
       (should (string-match-p "^\\* Relations$" text)))))
 
 (ert-deftest init-kb-session-capture-records-ai-and-concepts ()
-  "A session is a heading of today's file in sessions/, with AI and the
-id links of the concepts read for it."
+  "A session is a heading of today's file in sessions/, asking only for
+the topic and AI; concepts are added one per call, also while capturing,
+without duplicates.  No prompt asks to end a list."
   (init-kb-test--with-kb
     (let ((a (init-kb-test--concept root "a" "id-a" "Alpha"))
-          (answers (list "Alpha" "")))
-      (init-kb-test--index a)
+          (b (init-kb-test--concept root "b" "id-b" "Beta"))
+          prompts)
+      (init-kb-test--index a b)
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (prompt &rest _)
-                   (cond ((string-match-p "AI" prompt) "chatgpt")
-                         ((string-match-p "概念" prompt) (pop answers))
-                         (t "NbE"))))
-                ((symbol-function 'read-string)
-                 (lambda (&rest _) "NbE")))
-        (org-roam-dailies-capture-today)
-        (org-capture-finalize))
-      (let ((text (init-kb-test--file-string
-                   (expand-file-name (format-time-string "sessions/%Y-%m-%d.org") root))))
+                   (push prompt prompts)
+                   (if (string-match-p "AI" prompt) "chatgpt" "NbE"))))
+        (org-roam-dailies-capture-today))
+      (should (= (length prompts) 2))
+      (should-not (cl-some (lambda (prompt) (string-match-p "概念" prompt)) prompts))
+      ;; In the capture buffer, the body of the new heading.
+      (my/kb-session-add-concept (org-roam-node-from-id "id-a"))
+      (my/kb-session-add-concept (org-roam-node-from-id "id-b"))
+      (my/kb-session-add-concept (org-roam-node-from-id "id-a"))
+      (org-capture-finalize)
+      (let* ((file (expand-file-name (format-time-string "sessions/%Y-%m-%d.org") root))
+             (text (init-kb-test--file-string file)))
         (should (string-match-p
                  (concat "^\\* [0-9][0-9]:[0-9][0-9] NbE\n:PROPERTIES:\n:AI: +chatgpt\n"
-                         ":CONCEPTS: \\[\\[id:id-a\\]\\[Alpha\\]\\]\n:END:")
+                         ":CONCEPTS: \\[\\[id:id-a\\]\\[Alpha\\]\\] "
+                         "\\[\\[id:id-b\\]\\[Beta\\]\\]\n:END:")
                  text))
         (should (string-match-p (format-time-string "^#\\+title: %Y-%m-%d$") text))))))
+
+(ert-deftest init-kb-session-add-concept-needs-a-session ()
+  "Outside a session heading the command explains where to use it."
+  (init-kb-test--with-kb
+    (let ((a (init-kb-test--concept root "a" "id-a" "Alpha"))
+          (s (init-kb-test--write root "sessions/2026-11-12.org"
+                                  ":PROPERTIES:" ":ID:       id-s" ":END:"
+                                  "#+title: 2026-11-12" "" "* 10:00 NbE" "** detail" "text")))
+      (init-kb-test--index a s)
+      (with-current-buffer (find-file-noselect a)
+        (should-error (my/kb-session-add-concept (org-roam-node-from-id "id-a"))
+                      :type 'user-error))
+      (with-current-buffer (find-file-noselect s)
+        (goto-char (point-min))
+        (should-error (my/kb-session-add-concept (org-roam-node-from-id "id-a"))
+                      :type 'user-error)
+        ;; From a subheading, the session is its top-level heading.
+        (goto-char (point-max))
+        (my/kb-session-add-concept (org-roam-node-from-id "id-a"))
+        (goto-char (point-min))
+        (should (re-search-forward
+                 "^\\* 10:00 NbE\n:PROPERTIES:\n:CONCEPTS: \\[\\[id:id-a\\]\\[Alpha\\]\\]\n:END:"
+                 nil t))))))
 
 ;;; Relations
 
@@ -514,7 +543,9 @@ writes an index, and leaves the knowledge base as it was."
     (init-kb-test--write root "sessions/2026-11-12.org"
                          ":PROPERTIES:" ":ID:       id-s" ":END:" "#+title: 2026-11-12"
                          "* 10:00 NbE" ":PROPERTIES:" ":AI:       claude"
-                         ":CONCEPTS: [[id:id-a][Alpha]] [[id:gone][Gone]]" ":END:")
+                         ":CONCEPTS: [[id:id-a][Alpha]] [[id:gone][Gone]]" ":END:"
+                         "* 11:00 Empty" ":PROPERTIES:" ":AI:       chatgpt"
+                         ":CONCEPTS:" ":END:")
     (let ((before (directory-files-recursively root "" t)))
       (my/kb-publish)
       (should (process-live-p my/kb--publish))
@@ -530,7 +561,10 @@ writes an index, and leaves the knowledge base as it was."
         (let ((session (funcall page "sessions/2026-11-12.html")))
           (should (string-match-p "AI：claude · 涉及概念：<a href=\"../concepts/a.html#ID-id-a\">"
                                   session))
-          (should (string-match-p "BROKEN LINK: gone" session)))
+          (should (string-match-p "BROKEN LINK: gone" session))
+          ;; A session without concepts shows only its AI.
+          (should (string-match-p "AI：chatgpt\n" session))
+          (should-not (string-match-p "AI：chatgpt · " session)))
         (let ((index (funcall page "index.html")))
           (should (string-match-p "<a href=\"concepts/a.html\">Alpha &vert; A</a>" index))
           (should (string-match-p "<a href=\"sessions/2026-11-12.html\">2026-11-12</a>"

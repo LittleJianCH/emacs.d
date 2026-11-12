@@ -319,7 +319,7 @@ buffer, before parsing, so the files are not touched."
     (goto-char (point-min))
     (while (re-search-forward org-outline-regexp-bol nil t)
       (let ((ai (org-entry-get (point) "AI"))
-            (concepts (org-entry-get (point) "CONCEPTS")))
+            (concepts (org-string-nw-p (org-entry-get (point) "CONCEPTS"))))
         (when (or ai concepts)
           (save-excursion
             (org-end-of-meta-data)

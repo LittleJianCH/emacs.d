@@ -12,6 +12,7 @@
 ;;   C-c n f   find or create a concept      C-c n i   insert a link
 ;;   C-c n r   add a relation to a concept   C-c n b   backlinks buffer
 ;;   C-c n d   record a learning session     C-c n D   today's sessions
+;;   C-c n c   add a concept to the session at point, one per call
 ;;   C-c n t   add a tag   C-c n a   add an alias
 ;;   C-c n v   validate the knowledge base (compilation buffer)
 ;;   C-c n p   export to HTML for the phone (C-u: everything again)
@@ -182,7 +183,8 @@ scans of `my/kb-sync-start' catch up asynchronously instead."
       ;; The time, so several sessions a day stay apart.
       ,(concat "* %<%H:%M> %^{主题}\n:PROPERTIES:\n"
                ":AI:       %^{AI|" (string-join my/kb-ais "|") "}\n"
-               ":CONCEPTS: %(my/kb-read-session-concepts)\n:END:\n%?")
+               ;; Filled one concept at a time with C-c n c.
+               ":CONCEPTS:\n:END:\n%?")
       :target (file+head "%<%Y-%m-%d>.org" "#+title: %<%Y-%m-%d>\n"))))
   (org-roam-mode-sections (list #'my/kb-backlinks-section
                                 #'org-roam-reflinks-section))
@@ -276,15 +278,31 @@ EXCLUDE is an id that is not offered."
   (org-link-make-string (concat "id:" (org-roam-node-id node))
                         (org-roam-node-title node)))
 
-(defun my/kb-read-session-concepts ()
-  "Read the concepts a learning session covered; return their id links.
-Used by the session capture template; empty input ends the list."
-  (let (links node)
-    (while (setq node (my/kb-read-concept
-                       (format "涉及的概念（已选 %d 个，空输入结束）："
-                               (length links))))
-      (cl-pushnew (my/kb--link node) links :test #'equal))
-    (string-join (nreverse links) " ")))
+(defun my/kb-session-add-concept (concept)
+  "Add CONCEPT to the CONCEPTS property of the learning session at point.
+The session is the top-level heading around point in a file of
+sessions/, also in the buffer capturing it; run this once per concept.
+A concept listed already is not added again."
+  (interactive (list (or (my/kb-read-concept "涉及的概念：")
+                         (user-error "没有选择概念"))))
+  (let ((file (buffer-file-name (buffer-base-buffer)))
+        (title (org-roam-node-title concept)))
+    (unless (and file
+                 (string-prefix-p (expand-file-name my/kb-sessions-subdirectory
+                                                    (my/kb-root))
+                                  (file-truename file)))
+      (user-error "请在学习记录（sessions/ 下的文件）里使用"))
+    (when (org-before-first-heading-p)
+      (user-error "请把光标放在某次学习记录的标题下"))
+    (save-excursion
+      (org-back-to-heading t)
+      (while (and (> (org-outline-level) 1) (org-up-heading-safe)))
+      (let ((concepts (or (org-entry-get (point) "CONCEPTS") "")))
+        (if (string-search (format "[[id:%s]" (org-roam-node-id concept)) concepts)
+            (message "已关联过：%s" title)
+          (org-entry-put (point) "CONCEPTS"
+                         (string-trim (concat concepts " " (my/kb--link concept))))
+          (message "已关联：%s" title))))))
 
 ;;; Relations
 
@@ -1012,6 +1030,7 @@ The table is updated again once those files are indexed."
   "r" #'my/kb-relation-add
   "b" #'org-roam-buffer-toggle
   "d" #'org-roam-dailies-capture-today
+  "c" #'my/kb-session-add-concept
   "D" #'org-roam-dailies-goto-today
   "t" #'org-roam-tag-add
   "a" #'org-roam-alias-add
