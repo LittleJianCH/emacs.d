@@ -473,6 +473,43 @@ update the database and the row in place."
         (my/knowledge-table-confirm)
         (should (string-match-p "^:CONFIRMED: t$" (init-knowledge-test--file-string a)))))))
 
+(ert-deftest init-knowledge-table-shows-backlinks-of-the-row ()
+  "In the table, b shows the backlinks of the concept at point and they
+follow the row; nothing asks Org for a node in the table buffer."
+  (init-knowledge-test--with-knowledge
+    (let ((a (init-knowledge-test--concept root "a" "id-a" "Alpha"))
+          (b (init-knowledge-test--concept root "b" "id-b" "Beta"
+                                           "" "* Relations" "- requires :: [[id:id-a][Alpha]]"))
+          (c (init-knowledge-test--concept root "c" "id-c" "Gamma"
+                                           "" "* Relations" "- related :: [[id:id-b][Beta]]"))
+          (warnings (get-buffer-create "*Warnings*")))
+      (init-knowledge-test--index a b c)
+      (with-current-buffer warnings (let ((inhibit-read-only t)) (erase-buffer)))
+      (save-window-excursion
+        (delete-other-windows)
+        (my/knowledge-table)
+        (unwind-protect
+            (with-current-buffer "*知识库*"
+              (init-knowledge-test--row "Alpha")
+              (my/knowledge-backlinks)
+              (should (get-buffer-window org-roam-buffer))
+              (should (equal (org-roam-node-id org-roam-buffer-current-node) "id-a"))
+              (should (string-match-p "\\[requires\\] Beta"
+                                      (with-current-buffer org-roam-buffer
+                                        (buffer-string))))
+              ;; Moving to another row and finishing a command follows it.
+              (init-knowledge-test--row "Beta")
+              (my/knowledge-table--follow)
+              (should (equal (org-roam-node-id org-roam-buffer-current-node) "id-b"))
+              (should (string-match-p "\\[related\\] Gamma"
+                                      (with-current-buffer org-roam-buffer
+                                        (buffer-string))))
+              (my/knowledge-backlinks)
+              (should-not (get-buffer-window org-roam-buffer)))
+          (when (get-buffer org-roam-buffer) (kill-buffer org-roam-buffer))))
+      (should-not (string-match-p "org-element"
+                                  (with-current-buffer warnings (buffer-string)))))))
+
 (ert-deftest init-knowledge-edit-refuses-a-modified-buffer ()
   "Unsaved changes of a visiting buffer are never saved behind my back."
   (init-knowledge-test--with-knowledge

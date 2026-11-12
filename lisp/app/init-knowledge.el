@@ -12,6 +12,7 @@
 ;;             lower LEVEL, confirm, open
 ;;   C-c n f   find or create a concept      C-c n i   insert a link
 ;;   C-c n r   add a relation to a concept   C-c n b   backlinks buffer
+;;             (in the table: of the concept at point, following the row)
 ;;   C-c n d   record a learning session     C-c n D   today's sessions
 ;;   C-c n c   add a concept to the session at point, one per call
 ;;   C-c n t   add a tag   C-c n a   add an alias
@@ -208,6 +209,11 @@ scans of `my/knowledge-sync-start' catch up asynchronously instead."
 (declare-function org-roam-preview-get-contents "org-roam-mode")
 (declare-function org-roam-fontify-like-in-org-mode "org-roam-utils")
 (declare-function org-roam-buffer-toggle "org-roam-mode")
+(declare-function org-roam-buffer-render-contents "org-roam-mode")
+(declare-function org-roam-node-from-id "org-roam-node")
+(defvar org-roam-buffer)
+(defvar org-roam-buffer-current-node)
+(defvar org-roam-buffer-current-directory)
 (declare-function org-roam-tag-add "org-roam-node")
 (declare-function org-roam-alias-add "org-roam-node")
 (declare-function magit-insert-heading "magit-section")
@@ -868,6 +874,7 @@ Values not in `my/knowledge-levels' come first."
   "5" #'my/knowledge-table-set-level
   "c" #'my/knowledge-table-confirm
   "u" #'my/knowledge-table-toggle-unconfirmed
+  "b" #'my/knowledge-backlinks
   "g" #'my/knowledge-table-refresh)
 
 (define-derived-mode my/knowledge-table-mode tabulated-list-mode "知识库"
@@ -878,8 +885,9 @@ raise and lower LEVEL, 1 to 5 set it, \
 each change is written to the concept's file, with today as UPDATED.
 \\[my/knowledge-table-toggle-unconfirmed] lists only unconfirmed concepts, \
 \\[tabulated-list-sort] sorts by the column at point,
-\\[my/knowledge-table-open] opens the concept and \\[my/knowledge-table-refresh] \
-catches up with external changes.
+\\[my/knowledge-table-open] opens the concept, \
+\\[my/knowledge-backlinks] shows its backlinks, following the row, and
+\\[my/knowledge-table-refresh] catches up with external changes.
 
 \\{my/knowledge-table-mode-map}"
   (setq tabulated-list-format
@@ -890,7 +898,8 @@ catches up with external changes.
                 (list "标签" 0 t))
         tabulated-list-padding 1
         tabulated-list-sort-key '("标题"))
-  (add-hook 'tabulated-list-revert-hook #'my/knowledge-table--refresh nil t))
+  (add-hook 'tabulated-list-revert-hook #'my/knowledge-table--refresh nil t)
+  (add-hook 'post-command-hook #'my/knowledge-table--follow nil t))
 
 (defconst my/knowledge-table--buffer "*知识库*"
   "Name of the table buffer.")
@@ -988,6 +997,43 @@ The table is updated again once those files are indexed."
   (interactive)
   (find-file (plist-get (my/knowledge-table--concept) :file)))
 
+(defun my/knowledge--show-backlinks (node)
+  "Show the backlinks of NODE in the persistent org-roam buffer."
+  (setq org-roam-buffer-current-node node
+        org-roam-buffer-current-directory org-roam-directory)
+  (with-current-buffer (get-buffer-create org-roam-buffer)
+    (org-roam-buffer-render-contents)))
+
+(defun my/knowledge-table--row-node ()
+  "Return the node of the concept at point in the table, or nil."
+  (when-let* ((id (tabulated-list-get-id)))
+    (org-roam-node-from-id id)))
+
+(defun my/knowledge-backlinks ()
+  "Show or hide the backlinks buffer.
+In the table it shows the concept at point, and follows the row as
+point moves; elsewhere it is `org-roam-buffer-toggle', which follows
+the node at point in Org files."
+  (interactive)
+  (cond
+   ((not (derived-mode-p 'my/knowledge-table-mode))
+    (org-roam-buffer-toggle))
+   ((get-buffer-window org-roam-buffer)
+    (quit-window nil (get-buffer-window org-roam-buffer)))
+   (t
+    (my/knowledge--show-backlinks (or (my/knowledge-table--row-node)
+                                      (user-error "这一行没有概念")))
+    (display-buffer org-roam-buffer))))
+
+(defun my/knowledge-table--follow ()
+  "Show the backlinks of the row at point, if they are displayed."
+  (when-let* (((get-buffer-window org-roam-buffer 'visible))
+              (id (tabulated-list-get-id))
+              ((not (and org-roam-buffer-current-node
+                         (equal id (org-roam-node-id org-roam-buffer-current-node)))))
+              (node (org-roam-node-from-id id)))
+    (my/knowledge--show-backlinks node)))
+
 (defun my/knowledge-table--sync-updated (_files)
   "Reread a live table after the database caught up with changes."
   (when-let* ((buffer (get-buffer my/knowledge-table--buffer)))
@@ -1005,7 +1051,7 @@ The table is updated again once those files are indexed."
   "f" #'org-roam-node-find
   "i" #'org-roam-node-insert
   "r" #'my/knowledge-relation-add
-  "b" #'org-roam-buffer-toggle
+  "b" #'my/knowledge-backlinks
   "d" #'org-roam-dailies-capture-today
   "c" #'my/knowledge-session-add-concept
   "D" #'org-roam-dailies-goto-today
@@ -1039,6 +1085,7 @@ The table is updated again once those files are indexed."
     "c" #'my/knowledge-table-confirm
     "u" #'my/knowledge-table-toggle-unconfirmed
     "S" #'tabulated-list-sort
+    "b" #'my/knowledge-backlinks
     "gr" #'my/knowledge-table-refresh
     "q" #'quit-window))
 
