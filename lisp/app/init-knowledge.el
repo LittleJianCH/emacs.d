@@ -594,10 +594,20 @@ Files the database has but the disk does not are included."
 (defun my/knowledge-sync-scan ()
   "Queue the files of the knowledge base changed since they were indexed.
 Too many changes rebuild the database instead, see
-`my/knowledge-sync-rebuild-threshold'."
+`my/knowledge-sync-rebuild-threshold'.  Files the database has from
+another directory, after `my/knowledge-directory' changed, are removed
+at once."
   (interactive)
   (unless my/knowledge-sync--rebuild
-    (let ((changed (my/knowledge-sync--changed-files)))
+    (let* ((root (my/knowledge-root))
+           (changed (my/knowledge-sync--changed-files))
+           (elsewhere (seq-remove (lambda (file) (string-prefix-p root file))
+                                  changed)))
+      (when elsewhere
+        (dolist (file elsewhere)
+          (org-roam-db-clear-file file))
+        (setq changed (seq-difference changed elsewhere))
+        (run-hook-with-args 'my/knowledge-sync-updated-hook elsewhere))
       (cond
        ((> (length changed) my/knowledge-sync-rebuild-threshold)
         (my/knowledge-sync-rebuild))

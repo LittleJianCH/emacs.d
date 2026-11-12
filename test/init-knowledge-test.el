@@ -563,6 +563,30 @@ indexed; afterwards a scan finds nothing, also for a file only touched."
         (should (eq updated 'none))
         (should-not (my/knowledge-sync--changed-files))))))
 
+(ert-deftest init-knowledge-scan-forgets-another-directory ()
+  "After switching knowledge bases, the old one's files leave the database."
+  (init-knowledge-test--with-knowledge
+    (let* ((other (file-name-as-directory
+                   (file-truename (make-temp-file "knowledge-other-" t))))
+           (old (init-knowledge-test--concept other "old" "id-old" "Old"))
+           (a (init-knowledge-test--concept root "a" "id-a" "Alpha"))
+           updated)
+      (unwind-protect
+          (progn
+            (let ((org-roam-directory other))
+              (init-knowledge-test--index old))
+            (init-knowledge-test--index a)
+            (add-hook 'my/knowledge-sync-updated-hook
+                      (lambda (files) (setq updated files)))
+            (my/knowledge-sync-scan)
+            (should-not my/knowledge-sync--queue)
+            (should (equal updated (list old)))
+            (should (equal (mapcar (lambda (concept) (plist-get concept :id))
+                                   (my/knowledge-concepts))
+                           '("id-a")))
+            (should-not (my/knowledge-sync--changed-files)))
+        (delete-directory other t)))))
+
 (ert-deftest init-knowledge-scan-skips-hidden-and-temporary-files ()
   "Only Org files of the knowledge base are queued, never git's or locks."
   (init-knowledge-test--with-knowledge
