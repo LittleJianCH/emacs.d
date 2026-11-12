@@ -64,10 +64,16 @@
          :map eglot-mode-map
          ("C-c l a" . eglot-code-actions)
          ("C-c l r" . eglot-rename)
-         ("C-c l f" . eglot-format-buffer))
+         ("C-c l f" . eglot-format-buffer)
+         ("C-c l s" . consult-eglot-symbols))
   :custom
   (eglot-autoshutdown t)
   (eglot-events-buffer-config '(:size 0)))
+
+;; Workspace symbols from the language server, narrowed live with preview.
+(use-package consult-eglot
+  :ensure t
+  :commands consult-eglot-symbols)
 
 (declare-function evil-define-key* "evil-core")
 (defvar eglot-mode-map)
@@ -79,7 +85,8 @@
     (evil-define-key* '(normal motion visual) eglot-mode-map
       (kbd "<leader>la") #'eglot-code-actions
       (kbd "<leader>lr") #'eglot-rename
-      (kbd "<leader>lf") #'eglot-format-buffer)))
+      (kbd "<leader>lf") #'eglot-format-buffer
+      (kbd "<leader>ls") #'consult-eglot-symbols)))
 
 ;; Show eldoc (hover, signature) in a child frame next to point.  Its look, a
 ;; padded card in the status-line band color, comes from the theme
