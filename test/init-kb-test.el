@@ -295,6 +295,27 @@ without duplicates.  No prompt asks to end a list."
                      (:heading "11:00 Other" :ai "chatgpt" :concepts nil
                       :begin nil))))))
 
+(ert-deftest init-kb-atomic-writes-keep-file-modes ()
+  "A rewritten file keeps its modes, a new one gets the default ones,
+and no temporary file is left behind."
+  (let ((directory (make-temp-file "kb-modes-" t)))
+    (unwind-protect
+        (let ((old (expand-file-name "old.org" directory))
+              (new (expand-file-name "new.org" directory)))
+          (with-temp-file old (insert "x\n"))
+          (set-file-modes old #o640)
+          (with-temp-buffer
+            (insert "y\n")
+            (my/kb-write-atomically old)
+            (my/kb-write-atomically new))
+          (should (= (file-modes old) #o640))
+          (should (= (file-modes new) (logand #o666 (default-file-modes))))
+          (should (equal (with-temp-buffer (insert-file-contents old) (buffer-string))
+                         "y\n"))
+          (should (equal (directory-files directory nil "\\`[^.]\\|\\`\\.kb-")
+                         '("new.org" "old.org"))))
+      (delete-directory directory t))))
+
 ;;; Relations
 
 (ert-deftest init-kb-relation-add-appends-to-the-relations-section ()

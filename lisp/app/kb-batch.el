@@ -220,14 +220,17 @@ heading; keys are :heading, :ai, :concepts (the ids of its CONCEPTS) and
 (defun my/kb-write-atomically (file)
   "Write the current buffer to FILE through a temporary file and a rename.
 Watchers see the rename, as they see an editor's atomic save, and never a
-half-written file.  The temporary name starts with a dot, which the
-knowledge base ignores."
+half-written file.  FILE keeps its modes; a new file gets the default.
+The temporary name starts with a dot, which the knowledge base ignores."
   (let ((temporary (make-temp-file (expand-file-name ".kb-" (file-name-directory file))
                                    nil ".tmp"))
         (coding-system-for-write 'utf-8-unix))
     (condition-case err
         (progn
           (write-region nil nil temporary nil 'silent)
+          ;; make-temp-file creates it private; keep the file's own modes.
+          (set-file-modes temporary (or (file-modes file)
+                                        (logand #o666 (default-file-modes))))
           (rename-file temporary file t))
       (error
        (ignore-errors (delete-file temporary))
