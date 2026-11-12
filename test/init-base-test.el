@@ -146,6 +146,28 @@ Scrolling needs a real display: run it in the running Emacs."
   "No scroll margin, which makes touchpad scrolling jump back."
   (should (= (default-value 'scroll-margin) 0)))
 
+(ert-deftest init-base-third-party-warnings-not-logged ()
+  "early-init.el keeps package noise out of *Warnings*, but not the rest.
+Loaded in a subprocess: it also changes GC and frame settings."
+  (let ((early (expand-file-name "early-init.el" user-emacs-directory)))
+    (with-temp-buffer
+      (should (zerop (call-process
+                      (expand-file-name invocation-name invocation-directory)
+                      nil '(t nil) nil "--batch" "-Q" "-l" early "--eval"
+                      (prin1-to-string
+                       '(progn
+                          (require 'warnings)
+                          (display-warning '(files missing-lexbind-cookie "x.el")
+                                           "cookie")
+                          (display-warning 'other "kept")
+                          (prin1 (list native-comp-async-report-warnings-errors
+                                       (with-current-buffer "*Warnings*"
+                                         (buffer-string)))))))))
+      (let ((result (car (read-from-string (buffer-string)))))
+        (should-not (car result))
+        (should (string-match-p "kept" (cadr result)))
+        (should-not (string-match-p "cookie" (cadr result)))))))
+
 (ert-deftest init-base-no-vc-polling ()
   "Auto-revert polling does not run git every second."
   (should-not (default-value 'auto-revert-check-vc-info)))

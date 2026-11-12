@@ -7,8 +7,11 @@
 ;; Packages are initialized in init.el.
 (setq package-enable-at-startup nil)
 
-;; Don't pop up native-comp warnings; just log them to *Warnings*.
-(setq native-comp-async-report-warnings-errors 'silent)
+;; Keep third-party noise out of *Warnings*: native-comp warnings about
+;; packages (still in *Async-native-compile-log*; our own files are checked
+;; by byte-compiling), and packages that lack a lexical-binding cookie.
+(setq native-comp-async-report-warnings-errors nil
+      warning-suppress-log-types '((files missing-lexbind-cookie)))
 
 ;; Disable unneeded UI elements before the first frame is created, to avoid flicker.
 (setq frame-inhibit-implied-resize t
