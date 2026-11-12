@@ -37,5 +37,88 @@ several tramp calls on every one-second poll."
       (should auto-revert--global-mode)
       (setq buffer-file-name nil))))
 
+(defun init-remote-test--server (root buffer)
+  "Return an eglot server for project ROOT managing BUFFER, without a process."
+  (require 'eglot)
+  (let ((server (make-instance 'eglot-lsp-server
+                               :process (make-pipe-process
+                                         :name "init-remote-test" :noquery t))))
+    (setf (eglot--project server) (cons 'transient root)
+          ;; As after connecting, with `eglot-autoreconnect' allowing it.
+          (eglot--inhibit-autoreconnect server) nil)
+    (push buffer (eglot--managed-buffers server))
+    server))
+
+(ert-deftest init-remote-eglot-remote-server-lost ()
+  "A remote server dying with its connection marks its buffers, no reconnect.
+eglot reconnected at once while offline, failed and gave up for good."
+  (with-temp-buffer
+    (let ((server (init-remote-test--server "/ssh:example.invalid:/tmp/"
+                                            (current-buffer))))
+      (unwind-protect
+          (progn
+            (my/eglot--server-lost server)
+            (should my/eglot--lost)
+            (should (eq (eglot--inhibit-autoreconnect server) t)))
+        (delete-process (jsonrpc--process server)))))
+  ;; Asked to shut down: nothing to restart.
+  (with-temp-buffer
+    (let ((server (init-remote-test--server "/ssh:example.invalid:/tmp/"
+                                            (current-buffer))))
+      (unwind-protect
+          (progn
+            (setf (eglot--shutdown-requested server) t)
+            (my/eglot--server-lost server)
+            (should-not my/eglot--lost))
+        (delete-process (jsonrpc--process server)))))
+  ;; Local servers keep eglot's own reconnection.
+  (with-temp-buffer
+    (let ((server (init-remote-test--server temporary-file-directory
+                                            (current-buffer))))
+      (unwind-protect
+          (progn
+            (my/eglot--server-lost server)
+            (should-not my/eglot--lost)
+            (should-not (eglot--inhibit-autoreconnect server)))
+        (delete-process (jsonrpc--process server))))))
+
+(ert-deftest init-remote-eglot-shutdown-skips-reconnect ()
+  "Through eglot's own shutdown, a lost remote server neither warns nor
+reconnects."
+  (with-temp-buffer
+    (let ((server (init-remote-test--server "/ssh:example.invalid:/tmp/"
+                                            (current-buffer)))
+          (reconnects 0) warnings)
+      (unwind-protect
+          (cl-letf (((symbol-function 'eglot-reconnect)
+                     (lambda (_server) (cl-incf reconnects)))
+                    ((symbol-function 'eglot--warn)
+                     (lambda (format &rest args)
+                       (push (apply #'format format args) warnings))))
+            (eglot--on-shutdown server)
+            (should (= reconnects 0))
+            (should-not warnings)
+            (should my/eglot--lost))
+        (delete-process (jsonrpc--process server))))))
+
+(ert-deftest init-remote-eglot-restarts-once-connected ()
+  "A buffer that lost its server restarts it only once connected again."
+  (with-temp-buffer
+    (let ((connected nil) (ensured 0))
+      (cl-letf (((symbol-function 'my/eglot--connected-p) (lambda () connected))
+                ((symbol-function 'eglot-ensure) (lambda () (cl-incf ensured))))
+        (my/eglot--restart-lost)
+        (should (= ensured 0))
+        (setq my/eglot--lost t)
+        (my/eglot--restart-lost)
+        (should (= ensured 0))
+        (should my/eglot--lost)
+        (setq connected t)
+        (my/eglot--restart-lost)
+        (should (= ensured 1))
+        (should-not my/eglot--lost)
+        (my/eglot--restart-lost)
+        (should (= ensured 1))))))
+
 (provide 'init-remote-test)
 ;;; init-remote-test.el ends here

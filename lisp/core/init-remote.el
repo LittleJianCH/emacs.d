@@ -61,6 +61,56 @@ Only parses the name; never connects."
     (with-current-buffer buffer
       (setq auto-revert--global-mode nil))))
 
+;;; Language servers across dropped connections
+
+;; The connection to dev drops whenever the laptop goes offline, and every
+;; remote language server dies with it.  eglot then reconnects at once, which
+;; fails while offline, gives up after that quick failure and never retries:
+;; 109 warnings and no server left.  So a remote server that dies without being
+;; asked to is not reconnected; its buffers are marked instead, and each starts
+;; its server again when it is next shown or saved while the connection is
+;; already back.  Only buffers returned to restart, rather than every
+;; worktree's rust-analyzer at once, and nothing here opens a connection.
+;; Local servers keep eglot's own reconnection.
+(eval-when-compile (require 'eglot))
+
+(defvar-local my/eglot--lost nil
+  "Non-nil if this buffer's remote language server died with its connection.")
+
+(defun my/eglot--server-lost (server)
+  "Mark the buffers of SERVER instead of reconnecting, if it is remote.
+Runs before `eglot--on-shutdown'."
+  (when (and (not (eglot--shutdown-requested server))
+             (file-remote-p (project-root (eglot--project server))))
+    (setf (eglot--inhibit-autoreconnect server) t)
+    (dolist (buffer (eglot--managed-buffers server))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq my/eglot--lost t))))))
+
+(defun my/eglot--connected-p ()
+  "Return non-nil if the connection of this buffer is up; never connect."
+  (file-remote-p default-directory nil t))
+
+(defun my/eglot--restart-lost ()
+  "Start the language server this buffer lost, once connected again."
+  (when (and my/eglot--lost
+             (not (eglot-managed-p))
+             (my/eglot--connected-p))
+    (setq my/eglot--lost nil)
+    (eglot-ensure)))
+
+(defun my/eglot--restart-shown (&optional _frame)
+  "Run `my/eglot--restart-lost' in the buffer of the selected window."
+  (with-current-buffer (window-buffer)
+    (my/eglot--restart-lost)))
+
+(with-eval-after-load 'eglot
+  (advice-add 'eglot--on-shutdown :before #'my/eglot--server-lost))
+(add-hook 'window-buffer-change-functions #'my/eglot--restart-shown)
+(add-hook 'window-selection-change-functions #'my/eglot--restart-shown)
+(add-hook 'after-save-hook #'my/eglot--restart-lost)
+
 ;; `vc-registered' tries every backend in turn, and on a remote file each attempt
 ;; is another network round trip.
 (setq vc-handled-backends '(Git))
