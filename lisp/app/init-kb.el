@@ -4,8 +4,9 @@
 
 ;; A record of what I have learned and how well, kept in a git repository of
 ;; its own (`my/kb-directory', ~/kb), which is the `org-roam-directory'.
-;; AI assistants will read and write it through MCP; Emacs is where I look
-;; at it and edit it.  The file format is described in kb-batch.el.
+;; AI assistants read and write it through the MCP server of kb-mcp.el
+;; (bin/kb-mcp); Emacs is where I look at it, edit it and confirm levels.
+;; The file format is described in kb-batch.el.
 ;;
 ;;   C-c n n   table of all concepts (SPC n n with evil): sort, raise or
 ;;             lower LEVEL, confirm, open

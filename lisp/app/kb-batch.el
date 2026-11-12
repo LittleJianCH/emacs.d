@@ -14,7 +14,8 @@
 ;; Customized options reach the subprocess as `setq' forms evaluated before
 ;; this file loads; `defcustom' keeps a value that is already bound.
 ;;
-;; The format, shared with the MCP layer that will read and write it:
+;; The format, shared with the MCP server of kb-mcp.el, which reads and
+;; writes it with the functions here:
 ;;
 ;; - One concept per file, concepts/SLUG.org: a file-level node whose
 ;;   property drawer, at the top of the file, holds ID, LEVEL, CONFIRMED and

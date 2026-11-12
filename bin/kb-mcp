@@ -1,0 +1,24 @@
+#!/bin/sh
+# Local MCP server for the knowledge base, over stdio (lisp/app/kb-mcp.el).
+# Usage: kb-mcp [DIRECTORY]    DIRECTORY defaults to $KB_DIRECTORY, then ~/kb.
+# Clients may start it with a minimal PATH: set KB_MCP_EMACS to choose Emacs.
+# The index of the knowledge base is kept in var/kb-mcp/ ($KB_MCP_CACHE).
+here=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
+KB_MCP_CACHE=${KB_MCP_CACHE:-$here/var/kb-mcp}
+export KB_MCP_CACHE
+emacs=${KB_MCP_EMACS:-}
+if [ -z "$emacs" ]; then
+  for candidate in "$(command -v emacs 2>/dev/null)" \
+                   /opt/homebrew/bin/emacs /usr/local/bin/emacs \
+                   /Applications/Emacs.app/Contents/MacOS/Emacs; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      emacs=$candidate
+      break
+    fi
+  done
+fi
+if [ -z "$emacs" ]; then
+  echo "kb-mcp: Emacs not found; set KB_MCP_EMACS" >&2
+  exit 1
+fi
+exec "$emacs" --batch -Q -L "$here/lisp/app" -l kb-mcp -f my/kb-mcp-main "$@"
