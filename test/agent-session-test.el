@@ -445,6 +445,19 @@ The transcript only marks waiting and the outcome on the related tool."
        (agent-session-list-next)
        (should (eq (plist-get (get-text-property (point) 'agent-session-entry) :buffer) buffer))))))
 
+(ert-deftest agent-session-test-list-keeps-no-undo ()
+  "Renders rewrite the whole list, so the buffer records no undo."
+  (agent-session-test--with-session
+   ;; Not `with-temp-buffer': names starting with a space record no undo.
+   (let ((buffer (generate-new-buffer "*agent-sessions-test*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (agent-session-list-mode)
+           (setq agent-session-list--root temporary-file-directory)
+           (dotimes (_ 3) (agent-session-list--render))
+           (should (eq buffer-undo-list t)))
+       (kill-buffer buffer)))))
+
 (ert-deftest agent-session-test-list-toggle ()
   "The list command opens, hides from either window, and reopens the sidebar."
   (save-window-excursion

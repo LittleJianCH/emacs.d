@@ -497,6 +497,8 @@ Clicking it runs COMMAND in the session list window."
                                                                  "重新获取历史会话（g）")
                               (propertize "  单击打开 · RET 打开 · k 结束"
                                           'face 'agent-session-dim))))
+  ;; Each render rewrites the whole list; undo would only pile up copies.
+  (buffer-disable-undo)
   (hl-line-mode 1))
 
 ;;;###autoload
