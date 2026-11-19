@@ -1,7 +1,7 @@
 import './fixtures/environment.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, openSync, closeSync, readdirSync, fstatSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, openSync, closeSync, readdirSync, fstatSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { agentBackend, Configuration, merge, validate } from '../../emx/config.ts'
@@ -236,6 +236,36 @@ test('temporary var directories ignore implicit site policy while the default va
     assert.equal(local.reload().errors.length, 1, 'the default var still reads site policy')
   } finally {
     isolated.close(); local.close(); host.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('default var reached through a checkout symlink loads site policy and keeps other roots isolated', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'emx-site-symlink-'))
+  const checkout = join(dir, 'checkout'), alias = join(dir, 'alias')
+  const paths = { defaultVar: join(checkout, 'var'), site: join(checkout, 'site/emx/config.json') }
+  const configs: Configuration[] = []
+  try {
+    mkdirSync(paths.defaultVar, { recursive: true })
+    mkdirSync(join(checkout, 'site/emx'), { recursive: true })
+    mkdirSync(join(checkout, 'temporary'))
+    symlinkSync(checkout, alias, 'dir')
+    writeFileSync(paths.site, JSON.stringify({ agents: {
+      acme: { backend: 'codex', title: 'Acme', executable: 'acme' },
+    } }))
+    for (const [varDir, expectedSite] of [
+      [join(alias, 'var'), paths.site],
+      [join(alias, 'temporary'), undefined],
+      [join(alias, 'missing'), undefined],
+    ] as const) {
+      const config = new Configuration(varDir, undefined, undefined, undefined, paths)
+      configs.push(config)
+      assert.deepEqual(config.errors, [])
+      assert.equal(config.site, expectedSite)
+      assert.equal(config.value.agents.acme?.backend, expectedSite ? 'codex' : undefined)
+    }
+  } finally {
+    for (const config of configs) config.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

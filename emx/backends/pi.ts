@@ -200,7 +200,7 @@ export class PiBackend implements Backend {
     child.once('error', ended); child.once('close', () => ended())
     try {
       const state = await this.#request('get_state')
-      // Without an explicit effort Pi starts at its own default level (high).
+      // Without an explicit effort, preserve the native session's initial level.
       const initial = state.thinkingLevel as string | undefined
       this.#resume = state.sessionId
       if (!this.#resume) throw new Error('Pi did not return a sessionId')
@@ -225,10 +225,12 @@ export class PiBackend implements Backend {
       if (!offered) throw new Error(`Pi model is not available: ${model}`)
       const supported = efforts(offered)
       let requestedEffort = settings.effort
-      if (requestedEffort && offered.thinkingLevelMap && !supported.includes(requestedEffort)) {
+      if (requestedEffort && !supported.includes(requestedEffort)) {
         // The editor sends its current effort with a model selection, then
         // clears incompatible effort. Accept that transition atomically.
-        if (model !== previous.model && requestedEffort === previous.effort) requestedEffort = undefined
+        // Choose before set_model: Pi may clamp the inherited level upward to
+        // max, which must not replace our preferred fallback.
+        if (model !== previous.model && requestedEffort === previous.effort) requestedEffort = preferredEffort(supported, 'high')
         else throw new Error(`Pi model ${model} does not support thinking level: ${requestedEffort}`)
       }
       let state = await this.#request('get_state')
@@ -311,7 +313,7 @@ export class PiBackend implements Backend {
 
   #approval(request: any): Promise<void> {
     return this.#dialog(request, async (stale) => {
-      const { tool, id, input = {}, review } = JSON.parse(request.title.slice('emx-approval '.length))
+      const { tool, id, input = {} } = JSON.parse(request.title.slice('emx-approval '.length))
       if (typeof tool !== 'string' || typeof id !== 'string' || stale()) return undefined
       const mode = this.host.settings.mode ?? this.#confirmed.mode ?? 'edits'
       const readOnly = ['read', 'grep', 'find', 'ls'].includes(tool)

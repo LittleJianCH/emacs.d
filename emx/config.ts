@@ -1,5 +1,5 @@
 // config.ts --- validated configuration, last-good reloads and directory watches.
-import { readFileSync, watchFile, unwatchFile, mkdirSync, writeFileSync, renameSync, rmSync } from 'node:fs'
+import { readFileSync, realpathSync, watchFile, unwatchFile, mkdirSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { checkoutRoot, defaultVar, emxRoot, stateDir } from './daemon/paths.ts'
@@ -273,7 +273,7 @@ export class Configuration {
     site?: string, paths = { defaultVar, site: join(checkoutRoot, 'site/emx/config.json') }) {
     this.defaults = defaults
     // Alternate state directories stay isolated; launchers can opt in explicitly.
-    this.site = site ?? (resolve(varDir) === resolve(paths.defaultVar) ? paths.site : undefined)
+    this.site = site ?? (sameDirectory(varDir, paths.defaultVar) ? paths.site : undefined)
     this.host = hostOverride !== undefined
     this.override = hostOverride ?? join(stateDir(varDir), 'config.json')
     if (this.host) {

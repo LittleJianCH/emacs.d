@@ -274,7 +274,7 @@ test('live model and thinking changes validate filters even while hibernated; pr
   assert.equal(session.settings.model, 'opencode-go/glm-5.3-flash')
   await send('resumed')
   await client.request('session/configure', { id, model: 'opencode-go/kimi-k3' })
-  assert.equal(session.settings.effort, 'max', 'a model switch clears the inherited unsupported effort')
+  assert.equal(session.settings.effort, 'high', 'a model switch clears the inherited unsupported effort without jumping to max')
 })
 
 test('steer and abort stay live; idle waits for agent_settled, queued messages run afterward', async (t) => {
@@ -323,6 +323,7 @@ test('resume uses --session; fork uses --fork and ephemeral children keep their 
   const { daemon, client, id, session, send, requests } = await setup(t, { resume: 'saved-native' })
   assert.equal(session.resumeId(), 'saved-native')
   assert.ok((await requests())[0].argv.includes('--session'))
+  assert.equal(typeof (await loadExtension({}, (await requests())[0].argv)).beforeAgentStart, 'function')
   await send('history')
   await session.backend.flush?.()
   // No editor is needed to open the child view; reconnect after creating it.
@@ -331,6 +332,7 @@ test('resume uses --session; fork uses --fork and ephemeral children keep their 
   const child = [...daemon.sessions.values()].find((s) => s.info.parent === id)!.id
   const childStart = (await requests()).find((r) => r.session === child)
   assert.equal(childStart.argv[childStart.argv.indexOf('--fork') + 1], 'saved-native')
+  assert.equal(typeof (await loadExtension({}, childStart.argv)).beforeAgentStart, 'function')
   assert.ok(!childStart.argv.includes('--no-session'), 'Pi 1.3 ignores --fork when --no-session is set')
   const peer = await SocketClient.connect(daemon.socket)
   t.after(() => peer.close())
@@ -359,6 +361,7 @@ test('resume uses --session; fork uses --fork and ephemeral children keep their 
 test('fresh children use --no-session without suppressing fork history', async (t) => {
   const { requests } = await setup(t, { parent: 'parent' })
   assert.ok((await requests())[0].argv.includes('--no-session'))
+  assert.equal(typeof (await loadExtension({}, (await requests())[0].argv)).beforeAgentStart, 'function')
 })
 
 test('installed skills replace discovery and images use Pi ImageContent', async (t) => {
@@ -375,17 +378,22 @@ test('installed skills replace discovery and images use Pi ImageContent', async 
 })
 
 /** Load the extension with environment ENV; return its registrations. */
-async function loadExtension(env: Record<string, string> = {}) {
+async function loadExtension(env: Record<string, string> = {}, argv?: string[]) {
   const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
   Object.assign(process.env, env)
   try {
-    let registration: any, handler: any
+    let registration: any, handler: any, beforeAgentStart: any
     const events: string[] = []
-    const extensionUrl = new URL('../../lisp/agent/backend/pi/emacs-extension.js', import.meta.url).href
+    const extensionUrl = argv ? argv[argv.indexOf('-e') + 1]
+      : new URL('../../lisp/agent/backend/pi/emacs-extension.js', import.meta.url).href
     const { default: extension } = await import(extensionUrl)
     extension({ registerMcpServer: (name: string, config: any) => { registration = { name, config } },
-      on: (event: string, callback: any) => { events.push(event); if (event === 'tool_call') handler = callback } } as any)
-    return { registration, handler, events }
+      on: (event: string, callback: any) => {
+        events.push(event)
+        if (event === 'tool_call') handler = callback
+        if (event === 'before_agent_start') beforeAgentStart = callback
+      } } as any)
+    return { registration, handler, beforeAgentStart, events }
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value

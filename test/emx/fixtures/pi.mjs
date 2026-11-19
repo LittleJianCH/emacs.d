@@ -97,8 +97,9 @@ function receive(m) {
     case 'set_model':
       model = models.find((v) => v.provider === m.provider && v.id === m.modelId)
       if (!model) throw new Error('Invalid fixture model')
+      thinkingLevel = clampThinkingLevel(model, modelThinkingLevel(model) ?? globalThinkingLevel ?? thinkingLevel ?? 'medium')
       response(m, model); break
-    case 'set_thinking_level': thinkingLevel = m.level; response(m); break
+    case 'set_thinking_level': thinkingLevel = clampThinkingLevel(model, m.level); response(m); break
     case 'get_session_stats': response(m, { sessionId, tokens: { total: turn * 14 } }); break
     case 'prompt': {
       if (m.message === '/handled') { response(m, { disposition: 'handled' }); break }
