@@ -184,5 +184,21 @@ export async function history(agent: string, root: string, config?: AgentConfig,
       id: s.id, title: title(s.title), time: s.time, ...location(s.cwd, dirs),
     }))
   })
+  if (kind === 'agy') return peer([config.executable, 'acp', ...(config.extraArgs ?? [])], root, env, async (request) => {
+    await request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'emx-history', version: '1' } })
+    const seen = new Map<string, HistoryItem>()
+    for (const dir of dirs) {
+      const result = await request('session/list', { cwd: dir.root })
+      for (const s of result?.sessions ?? []) {
+        const id = typeof s?.sessionId === 'string' ? s.sessionId : undefined
+        const cwd = typeof s?.cwd === 'string' ? resolve(s.cwd) : dir.root
+        if (!id || !cwds.includes(cwd) || seen.has(id)) continue
+        const time = typeof s.updatedAt === 'number' ? s.updatedAt
+          : typeof s.updatedAt === 'string' && !Number.isNaN(Date.parse(s.updatedAt)) ? Date.parse(s.updatedAt) / 1000 : 0
+        seen.set(id, { id, title: title(s.title), time, ...location(cwd, dirs) })
+      }
+    }
+    return [...seen.values()].sort((a, b) => b.time - a.time).slice(0, 50)
+  })
   throw new Error(`Unknown history agent: ${agent}`)
 }

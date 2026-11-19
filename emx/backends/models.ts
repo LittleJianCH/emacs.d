@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline'
 import type { AgentConfig } from '../config.ts'
 import { allowedModel } from './pi.ts'
 import { allowedModel as allowedCodexModel } from './codex.ts'
+import { parseCapabilities as parseAgyCapabilities } from './agy.ts'
 
 export interface ModelChoice { id: string, label?: string }
 
@@ -11,9 +12,9 @@ export interface ModelChoice { id: string, label?: string }
 export async function agentModels(agent: string, config: AgentConfig, root: string, env: NodeJS.ProcessEnv = process.env): Promise<ModelChoice[]> {
   const kind = config.backend ?? agent
   if (kind === 'claude') return ['default', 'sonnet', 'opus', 'haiku'].map((id) => ({ id }))
-  if (!['codex', 'pi'].includes(kind)) return []
-  const pi = kind === 'pi'
-  const args = pi ? ['--mode', 'rpc', '--no-session', '--no-extensions', '--no-skills'] : ['app-server']
+  if (!['codex', 'pi', 'agy'].includes(kind)) return []
+  const pi = kind === 'pi', agy = kind === 'agy'
+  const args = pi ? ['--mode', 'rpc', '--no-session', '--no-extensions', '--no-skills'] : agy ? ['acp'] : ['app-server']
   const child = spawn(env[`EMX_${agent.toUpperCase()}_EXECUTABLE`] ?? config.executable,
     [...args, ...config.extraArgs ?? []], { cwd: root, env, stdio: 'pipe' })
   child.stdin.on('error', () => {})
@@ -45,6 +46,12 @@ export async function agentModels(agent: string, config: AgentConfig, root: stri
       const result = await request('get_available_models')
       return (result.models ?? []).map((m: any) => ({ id: `${m.provider}/${m.id}`, label: m.name }))
         .filter((m: ModelChoice) => allowedModel(m.id, config))
+    }
+    if (agy) {
+      await request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'emx-models', version: '1' } })
+      const session = await request('session/new', { cwd: root, mcpServers: [] })
+      if (session?.sessionId) await request('session/close', { sessionId: session.sessionId }).catch(() => {})
+      return parseAgyCapabilities(session ?? {}, config).models.map((m) => ({ id: m.id, label: m.name }))
     }
     await request('initialize', { clientInfo: { name: 'emx-models', version: '1' } })
     write({ jsonrpc: '2.0', method: 'initialized' })

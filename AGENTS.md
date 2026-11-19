@@ -132,7 +132,7 @@ isolated checkout without site/ or custom.el, to exclude private startup code.
   transient menu `agent-session-menu`, global prefix map on `C-c a`.
 - `agent-session-table.el` — renders complete Markdown tables in replies after
   fontification, keeping cell faces and lining up CJK text.
-- `backend/agent-{claude,codex,dsh,pi}.el` — small registration modules, loaded
+- `backend/agent-{claude,codex,dsh,pi,agy}.el` — small registration modules, loaded
   only for `my/agents`. All register `:backend emx`; no Lisp protocol adapters
   or migration switch remain. Defaults and execution policy are daemon config.
 - `emx/backends/claude.ts` — Claude stream-json, approvals, live model/mode
@@ -169,8 +169,14 @@ isolated checkout without site/ or custom.el, to exclude private startup code.
   `agents.pi.autoAllowTools` (display-only editor tools) without asking.
   Reviewer model calls bypass the usage ledger. Tests use a fake Pi CLI and
   a fake guardian; the reviewer is tested with a fake model.
+- `emx/backends/agy.ts` — Antigravity CLI (`agy acp`) over ACP JSON-RPC 2.0
+  stdio: live model, thinking level (`thought_level`), and mode configuration,
+  Emacs MCP injection, audited read-only MCP auto-approval, image attachments,
+  streaming thoughts/tools/plans, `session/load` / `session/resume`, and
+  `session/list` history discovery.
 - `emx/backends/history.ts` — `sessions/history {agent, root}`: discover past
-  Claude JSONL, Codex `thread/list`, and dsh `sessions/list` asynchronously on
+  Claude JSONL, Codex `thread/list`, dsh `sessions/list`, Pi JSONL, and agy
+  `session/list` asynchronously on
   their owning host. Groups git worktrees and preserves each resume root.
 - `agent-emx.el` — one client backend for every enabled agent. Connections own
   sockets; `agent-session` holds only view/client state. Events render into the

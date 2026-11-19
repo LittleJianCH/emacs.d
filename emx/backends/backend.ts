@@ -6,6 +6,7 @@ import { DshBackend } from './dsh.ts'
 import { ClaudeBackend } from './claude.ts'
 import { CodexBackend } from './codex.ts'
 import { PiBackend } from './pi.ts'
+import { AgyBackend } from './agy.ts'
 import type { SessionEvent } from '../daemon/protocol.ts'
 
 export type NewAsk = Ask extends infer A ? A extends Ask ? Omit<A, 'id'> : never : never
@@ -66,6 +67,7 @@ export const backends: Record<string, (host: SessionHost) => Backend> = {
   claude: (host) => new ClaudeBackend(host),
   codex: (host) => new CodexBackend(host),
   pi: (host) => new PiBackend(host),
+  agy: (host) => new AgyBackend(host),
 }
 
 /** Read backend-neutral editor skill context. */

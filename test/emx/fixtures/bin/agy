@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Never resolve the real Antigravity CLI from a test daemon or naming command.
+import '../agy.mjs'

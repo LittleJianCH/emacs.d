@@ -43,7 +43,7 @@ Most load on first visiting one of their files; see `my/lazy-modules'.")
 (defvar my/apps '(telega knowledge)
   "Enabled applications, each loaded from lisp/app/init-NAME.el on first use.")
 
-(defvar my/agents '(claude codex dsh pi)
+(defvar my/agents '(claude codex dsh pi agy)
   "Enabled daemon agent registrations, loaded from lisp/agent/backend/agent-NAME.el.")
 
 (require 'init-base)        ; defaults, paths, macOS environment

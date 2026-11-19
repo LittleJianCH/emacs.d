@@ -11,7 +11,7 @@ const bin = fileURLToPath(new URL('./bin/', import.meta.url))
 const state = fileURLToPath(new URL('../../../var/emx/', import.meta.url))
 const dir = mkdtempSync(join(tmpdir(), 'emx-node-state-'))
 process.env.PATH = bin + delimiter + (process.env.PATH ?? '')
-for (const name of ['CLAUDE', 'CODEX', 'DSH', 'PI']) {
+for (const name of ['CLAUDE', 'CODEX', 'DSH', 'PI', 'AGY']) {
   delete process.env[`EMX_${name}_EXECUTABLE`]
   delete process.env[`EMX_${name}_CONFIG`]
   delete process.env[`EMX_${name}_LOG`]

@@ -23,7 +23,7 @@
 
 (ert-deftest agent-backend-test-enabled-modules ()
   "Only enabled backends are loaded and registered at startup."
-  (dolist (enabled '(nil (codex) (claude codex dsh pi)))
+  (dolist (enabled '(nil (codex) (claude codex dsh pi agy)))
     (with-temp-buffer
       (let* ((default-directory agent-backend-test--root)
              (setup (prin1-to-string
@@ -37,7 +37,7 @@
                   (cl-assert
                    (equal (sort (mapcar #'car agent-session-agents) #'string<)
                           (sort (copy-sequence my/agents) #'string<)))
-                  (dolist (agent '(claude codex dsh pi))
+                  (dolist (agent '(claude codex dsh pi agy))
                     (let ((enabled (memq agent my/agents)))
                       (cl-assert
                        (eq (not (null enabled))
