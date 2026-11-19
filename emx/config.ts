@@ -60,9 +60,16 @@ export function candidateDisabledBy(c: Config, name: string, candidate: ProfileC
 function candidateEntry(name: string, candidate: ProfileCandidate): string {
   return `${name}:${candidate.agent}/${candidate.model ?? ''}`
 }
+export interface ReviewerConfig {
+  agent: string
+  model?: string | null
+  effort?: string | null
+  timeoutMs: number
+}
 export interface Config {
   agents: Record<string, AgentConfig>
   profiles: Record<string, Profile>
+  reviewer: ReviewerConfig
   collab: {
     startGuidance: string
     quotaSkip: number
@@ -132,7 +139,7 @@ export function validate(value: unknown): Config {
     for (const key of Object.keys(v)) if (!allowed.includes(key)) throw new Error(`config.${p ? p + '.' : ''}${key}: unknown key`)
   }
   const c = obj(value, '')
-  keys(c, ['agents', 'profiles', 'collab', 'usage', 'daemon', 'sessions'], '')
+  keys(c, ['agents', 'profiles', 'reviewer', 'collab', 'usage', 'daemon', 'sessions'], '')
   for (const [name, a] of Object.entries(obj(c.agents, 'agents'))) {
     const p = `agents.${name}`
     if (!name || name.includes('/')) fail(p, 'nonempty agent name without /')
@@ -171,7 +178,7 @@ export function validate(value: unknown): Config {
       str(v.agent, path + '.agent')
       if (!c.agents[v.agent]) fail(path + '.agent', 'configured agent')
       for (const k of ['model', 'effort', 'mode']) if (v[k] != null) str(v[k], path + '.' + k)
-      if (v.mode != null && !['plan', 'ask', 'edits', 'auto', 'full'].includes(v.mode)) fail(path + '.mode', 'permission mode')
+      if (v.mode != null && !['plan', 'ask', 'edits', 'auto', 'guardian', 'full'].includes(v.mode)) fail(path + '.mode', 'permission mode')
     }
     if (a.candidates !== undefined) {
       if (!Array.isArray(a.candidates) || !a.candidates.length) fail(p + '.candidates', 'nonempty candidate array')
@@ -198,6 +205,12 @@ export function validate(value: unknown): Config {
       }
     }
   }
+  const reviewer = obj(c.reviewer, 'reviewer')
+  keys(reviewer, ['agent', 'model', 'effort', 'timeoutMs'], 'reviewer')
+  str(reviewer.agent, 'reviewer.agent')
+  if (!c.agents[reviewer.agent]) fail('reviewer.agent', 'configured agent')
+  for (const k of ['model', 'effort']) if (reviewer[k] != null) str(reviewer[k], 'reviewer.' + k)
+  num(reviewer.timeoutMs, 'reviewer.timeoutMs', 1000)
   const collab = obj(c.collab, 'collab')
   keys(collab, ['startGuidance', 'quotaSkip', 'disabled', 'maxActive', 'handoffLimit', 'closeFinished', 'confirm', 'textLimit', 'replyLimit', 'confirmTimeout', 'handleTimeout', 'handleCommand', 'agentHandleCommands', 'tools', 'prompts'], 'collab')
   str(collab.startGuidance, 'collab.startGuidance')
@@ -236,10 +249,18 @@ function dropKey(value: unknown, path: string[]): boolean {
   return true
 }
 
+/** Recognize checkout state reached through a symlink without opting other roots in. */
+function sameDirectory(left: string, right: string): boolean {
+  if (resolve(left) === resolve(right)) return true
+  try { return realpathSync(left) === realpathSync(right) }
+  catch { return false }
+}
+
 export class Configuration {
   value: Config
   errors: string[] = []
   overriddenProfiles: string[] = []
+  reviewerOverridden = false
   readonly defaults: string
   readonly override: string
   readonly site?: string
@@ -295,6 +316,7 @@ export class Configuration {
       changed = JSON.stringify(next) !== JSON.stringify(this.value)
       this.value = next
       this.overriddenProfiles = Object.keys(override.profiles ?? {})
+      this.reviewerOverridden = Object.hasOwn(override, 'reviewer')
       this.errors = []
     } catch (error) { this.errors = [String(error)] }
     return { config: this.value, errors: this.errors, changed }

@@ -1,50 +1,29 @@
 // Thin Pi RPC bridge: emx owns policy and the editor owns all interaction.
-// When emx answers review (auto mode), the guardian guardian.ts loaded
-// decides instead, asking through emx too.
 
-/** CTX whose ui.select becomes an emx-review approval of EVENT. */
-function reviewContext(ctx, event) {
-  const select = async (title, _options, options) => {
-    const choice = await ctx.ui.select('emx-review ' + JSON.stringify({
-      tool: event.toolName, id: event.toolCallId, input: event.input, reason: title,
-    }), ['allow', 'deny'], options)
-    return choice === undefined ? undefined : choice === 'allow' ? 'Allow' : 'Block'
-  }
-  const bound = (target, key) => {
-    const value = Reflect.get(target, key)
-    return typeof value === 'function' ? value.bind(target) : value
-  }
-  const ui = new Proxy(ctx.ui, { get: (target, key) => key === 'select' ? select : bound(target, key) })
-  return new Proxy(ctx, { get: (target, key) => key === 'ui' ? ui : bound(target, key) })
-}
+const COMMUNICATION_RULES = `## Task communication
+- Communicate with the task giver. As a subagent, report to the parent agent; your final result goes to the parent, with no requirement to address the end user directly.
+- Before substantial tool work, briefly state what you will do.
+- During long tasks, give brief progress updates with meaningful findings, phase changes, or blockers, aiming for about every 60 seconds when able to reply. Do not promise updates while blocked waiting for tools or the network.
+- Use ordinary assistant text for progress; thinking is not a progress update. Do not narrate every tool call.
+- Finish with the result, relevant validation, and remaining limitations. If unsuccessful, state what was completed, what remains incomplete, and why.`
 
 module.exports = function (pi) {
+  // Pi 1.3.0 supplies the current chained prompt for each run. Keep it intact,
+  // without caching a prior turn's prompt or adding conversation messages.
+  pi.on('before_agent_start', (event) => ({
+    systemPrompt: event.systemPrompt.includes(COMMUNICATION_RULES)
+      ? event.systemPrompt : event.systemPrompt + '\n\n' + COMMUNICATION_RULES,
+  }))
   pi.registerMcpServer('emacs', {
     command: process.execPath,
     args: [process.env.EMX_PI_EMX, 'mcp'],
     env: { EMX_DAEMON_SOCKET: process.env.EMX_DAEMON_SOCKET, EMX_SESSION: process.env.EMX_SESSION },
     exposure: 'direct',
   })
-  let reported = false
   pi.on('tool_call', async (event, ctx) => {
-    const guardian = globalThis[Symbol.for('emx.pi.guardian')]
-    if (guardian?.error && !reported) {
-      reported = true
-      ctx.ui.notify?.(`Auto review is unavailable: ${guardian.error.message ?? guardian.error}`, 'error')
-    }
     const choice = await ctx.ui.select('emx-approval ' + JSON.stringify({
       tool: event.toolName, id: event.toolCallId, input: event.input,
-      review: event.toolName === 'bash' ? guardian?.handlers.length > 0 : Boolean(guardian?.review),
-    }), ['allow', 'always', 'deny', 'deny-plan', 'review'])
-    if (choice === 'review') {
-      const review = reviewContext(ctx, event)
-      // Bash goes through the guardian's gates; other tools to its reviewer.
-      for (const handler of event.toolName === 'bash' ? guardian?.handlers ?? [] : [guardian?.review].filter(Boolean)) {
-        const result = await handler(event, review)
-        if (result?.block) return result
-      }
-      return
-    }
+    }), ['allow', 'always', 'deny', 'deny-plan'])
     if (choice === 'allow' || choice === 'always') return
     return { block: true, reason: choice === 'deny-plan'
       ? 'You are in plan mode. Do not modify anything. Only read and propose a plan.'

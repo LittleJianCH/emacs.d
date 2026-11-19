@@ -114,6 +114,8 @@ export type Ask =
       /** The agent's own description of the request, passed through. */
       description?: string,
       choices: ChoiceId[],
+      /** Daemon-internal tool payload for the unified guardian reviewer; stripped before wire emission. */
+      reviewInput?: { tool: string, input?: Record<string, unknown> },
     }
   | { id: string, type: 'question', tool?: string, questions: Question[] }
 
@@ -282,6 +284,13 @@ export interface SendParams {
 /** Config-order catalog, including disabled profiles and candidates. */
 export interface CollabProfiles {
   quotaSkip: number
+  reviewer: {
+    agent: string
+    model: string | null
+    effort: string | null
+    timeoutMs: number
+    overridden: boolean
+  }
   profiles: {
     name: string
     cost: string

@@ -13,7 +13,7 @@ import type { Settings, ToolView } from '../daemon/protocol.ts'
 /** The bridge depends on dsh internals; other versions warrant a notice. */
 export const testedVersion = '0.2.0-rc.2'
 export const presets: Record<string, string> = {
-  ask: 'read-only', edits: 'workspace-write', auto: 'auto', full: 'danger-full-access',
+  ask: 'read-only', edits: 'workspace-write', auto: 'auto', guardian: 'workspace-write', full: 'danger-full-access',
 }
 const patch = join(checkoutRoot, 'lisp/agent/backend/dsh/emacs.yml')
 const noSubagents = join(checkoutRoot, 'lisp/agent/backend/dsh/no-subagents.yml')
@@ -258,7 +258,8 @@ export class DshBackend implements Backend {
       const block = this.host.blocks.find((block) => block.id === params.callId)
       const answer = await this.host.ask({ type: 'approval', tool: params.callId,
         view: block?.type === 'tool' ? block.view : toolView(this.host.root, params.toolName, {}),
-        description: params.reason, choices: ['allow', 'deny'] })
+        description: params.reason, choices: ['allow', 'deny'],
+        reviewInput: { tool: params.toolName, input: params.args ?? {} } })
       this.#write({ id, result: { decision: answer.choice === 'allow' ? 'allow' : 'reject' } })
     } else if (method === 'question') {
       const questions = params.questions ?? []

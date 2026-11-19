@@ -24,7 +24,7 @@ export function sessionForkInfo(source: Session) {
 }
 
 const costRanks: Record<string, number> = { minimal: 0, low: 1, medium: 2, high: 3, premium: 4, unknown: 5 }
-const modes = ['plan', 'ask', 'edits', 'auto', 'full']
+const modes = ['plan', 'ask', 'edits', 'auto', 'guardian', 'full']
 const icons: Record<string, string> = { command: '$', edit: '✎', read: '≡', search: '⌕', web: '◎', mcp: '⚙', task: '◆', plan: '☰', question: '?', other: '•' }
 export const format = (text: string, ...args: unknown[]): string => {
   let i = 0
@@ -515,15 +515,26 @@ export class Collaboration {
       ...(availability ? {availability} : {}), unavailable,
       strained: availability && availability.state !== 'available' ? undefined : this.#strain(candidate, quotaSkip), quotaSkip }
   }
-  profiles(overridden: string[] = [], root?: string): CollabProfiles {
+  profiles(overridden: string[] = [], root?: string, reviewerOverridden = false): CollabProfiles {
     const env = this.#environment(root)
-    return { quotaSkip: this.config.collab.quotaSkip, profiles: Object.entries(this.config.profiles).map(([name, role]) => {
-      const candidates = profileCandidates(role).map((candidate) => ({ agent: candidate.agent, model: candidate.model ?? null,
-        ...(candidate.effort != null ? { effort: candidate.effort } : {}),
-        ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.candidateStatus(name, candidate, env) }))
-      return { name, cost: profileCost(name, role), description: role.description ?? '',
-        disabled: candidates.every((candidate) => candidate.disabled), overridden: overridden.includes(name), candidates }
-    }) }
+    const reviewer = this.config.reviewer
+    return {
+      quotaSkip: this.config.collab.quotaSkip,
+      reviewer: {
+        agent: reviewer.agent,
+        model: reviewer.model ?? null,
+        effort: reviewer.effort ?? null,
+        timeoutMs: reviewer.timeoutMs,
+        overridden: reviewerOverridden,
+      },
+      profiles: Object.entries(this.config.profiles).map(([name, role]) => {
+        const candidates = profileCandidates(role).map((candidate) => ({ agent: candidate.agent, model: candidate.model ?? null,
+          ...(candidate.effort != null ? { effort: candidate.effort } : {}),
+          ...(candidate.mode != null ? { mode: candidate.mode } : {}), ...this.candidateStatus(name, candidate, env) }))
+        return { name, cost: profileCost(name, role), description: role.description ?? '',
+          disabled: candidates.every((candidate) => candidate.disabled), overridden: overridden.includes(name), candidates }
+      }),
+    }
   }
   #select(caller: Session, name: string, role: Profile): { candidate: ProfileCandidate, note: string } {
     const env = this.#environment(caller.root)

@@ -44,8 +44,7 @@ lisp/agent/              shared agent support (see below)
   agent-runs.el         combined subagent runs and ratings grouped by profile and model
   backend/              individual backends, enabled via `my/agents' in init.el
     agent-NAME.el       enabled-agent registration (all use :backend emx)
-    pi/                 thin Pi RPC approval and direct MCP extension,
-                        vendored Bash guardian (auto-permissions/)
+    pi/                 thin Pi RPC approval and direct MCP extension
     dsh/                DeepSeek Harness bridge plugin and profile patches
 lisp/app/                standalone applications; enabled via `my/apps' in init.el
   init-telega.el         Telegram client (telega; needs a source-built TDLib)
@@ -152,23 +151,15 @@ isolated checkout without site/ or custom.el, to exclude private startup code.
 - `emx/backends/pi.ts` — Pi 1.3.0 RPC, filtered OpenCode Go models, live
   thinking/mode settings, native resume/fork and `agent_settled` completion.
   `backend/pi/emacs-extension.js` forwards every tool for daemon arbitration
-  and registers direct Emacs MCP. Pi has no reviewer of its own, so auto mode
-  answers `review` wherever Claude Code's and Codex's reviewers would judge:
-  Bash, and every call it would otherwise ask about (writes outside the
-  root, non-read-only editor tools, unknown tools). Bash goes through the
-  vendored pi-auto-permissions guardian (`backend/pi/auto-permissions/`,
-  unmodified upstream 0.1.4; review new source before upgrading), whose
-  regex gates pick the commands its reviewer model judges. Other calls go
-  to the reviewer in `backend/pi/guardian.ts`, which reuses the guardian's
-  evidence, prompt, verdicts and model. guardian.ts is a second extension so
-  Pi resolves the guardian's imports; a load failure leaves Pi running with
-  emx's own auto policy. Rules and reviewer model are
-  `backend/pi/auto-permissions.json`, passed through
-  `PI_AUTO_PERMISSIONS_CONFIG`; reviewer questions return as `emx-review`
-  approvals with its reason, and failures ask. Auto also runs
-  `agents.pi.autoAllowTools` (display-only editor tools) without asking.
-  Reviewer model calls bypass the usage ledger. Tests use a fake Pi CLI and
-  a fake guardian; the reviewer is tested with a fake model.
+  and registers direct Emacs MCP. Auto mode runs `agents.pi.autoAllowTools`
+  (display-only editor tools) and contained workspace writes without asking,
+  and routes everything else through `emx/daemon/guardian.ts`.
+- `emx/daemon/guardian.ts` — unified approval reviewer for `guardian` mode
+  across all backends (and Pi's `auto` mode), backed by a configurable warm
+  harness worker (`reviewer` in `emx/config.json`, editable in `C-c a p`).
+  Extracts reasoning-blind evidence from `Session.blocks`, applies hard
+  convention blocks, and fails closed to user approval with the reviewer's
+  reason.
 - `emx/backends/agy.ts` — Antigravity CLI (`agy acp`) over ACP JSON-RPC 2.0
   stdio: live model, thinking level (`thought_level`), and mode configuration,
   Emacs MCP injection, audited read-only MCP auto-approval, image attachments,

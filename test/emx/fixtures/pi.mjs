@@ -8,17 +8,52 @@ const log = (direction, value) => {
   if (process.env.EMX_PI_LOG) appendFileSync(process.env.EMX_PI_LOG, JSON.stringify({
     direction, ...value, argv, cwd: process.cwd(), socket: process.env.EMX_DAEMON_SOCKET,
     session: process.env.EMX_SESSION, emx: process.env.EMX_PI_EMX,
-    guardianConfig: process.env.PI_AUTO_PERMISSIONS_CONFIG,
   }) + '\n')
 }
 const write = (value) => { log('out', value); process.stdout.write(JSON.stringify(value) + '\n') }
 const response = (m, data) => write({ id: m.id, type: 'response', command: m.type, success: true, data })
 const models = ['kimi-k3', 'glm-5.3-flash', 'model-free', 'preview-model', 'contributor-model'].map((id) => ({
-  id, provider: 'opencode-go', name: id,
-  thinkingLevelMap: { off: null, low: id === 'kimi-k3' ? null : 'low', high: id === 'kimi-k3' ? null : 'high', max: 'max' },
-})).concat([{ id: 'other', provider: 'other-provider', name: 'Other' }])
+  id, provider: 'opencode-go', name: id, reasoning: true,
+  thinkingLevelMap: { off: null, minimal: null, medium: null, ...(id === 'kimi-k3' ? { low: null } : {}), max: 'max' },
+})).concat([
+  { id: 'thinking-no-map', provider: 'opencode-go', reasoning: true },
+  { id: 'thinking-partial-map', provider: 'opencode-go', reasoning: true,
+    thinkingLevelMap: { low: null, high: 'high', xhigh: null, max: null } },
+  { id: 'thinking-extended-map', provider: 'opencode-go', reasoning: true,
+    thinkingLevelMap: { max: 0, xhigh: 'xhigh', low: null, unknown: 'ignored' } },
+  { id: 'thinking-high-excluded', provider: 'opencode-go', reasoning: true,
+    thinkingLevelMap: { high: null, max: 'max' } },
+  { id: 'nonreasoning-no-map', provider: 'opencode-go', reasoning: false },
+  { id: 'nonreasoning-map', provider: 'opencode-go', reasoning: false,
+    thinkingLevelMap: { off: null, high: 'high', xhigh: 'xhigh', max: 'max' } },
+  { id: 'other', provider: 'other-provider', name: 'Other', reasoning: false },
+])
+// Pi 1.3 getSupportedThinkingLevels / clampThinkingLevel: base levels are
+// opt-out, extended levels opt-in, and unsupported requests clamp upward first.
+const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const supportedThinkingLevels = (model) => !model.reasoning ? ['off'] : levels.filter((level) => {
+  const mapped = model.thinkingLevelMap?.[level]
+  if (mapped === null) return false
+  return level !== 'xhigh' && level !== 'max' || mapped !== undefined
+})
+const clampThinkingLevel = (model, level) => {
+  const supported = supportedThinkingLevels(model)
+  if (supported.includes(level)) return level
+  const index = levels.indexOf(level)
+  if (index === -1) return supported[0] ?? 'off'
+  for (const candidate of [...levels.slice(index), ...levels.slice(0, index).reverse()]) {
+    if (supported.includes(candidate)) return candidate
+  }
+  return supported[0] ?? 'off'
+}
+// Isolated fixture settings: Kimi prefers high, no global override. Pi's
+// built-in default is medium; model switches otherwise retain the current level.
+const modelThinkingLevels = { 'opencode-go/kimi-k3': 'high' }
+const globalThinkingLevel = undefined
+const modelThinkingLevel = (model) => modelThinkingLevels[`${model.provider}/${model.id}`]
 let model = models.find((m) => `${m.provider}/${m.id}` === arg('--model')) ?? models[0]
-let thinkingLevel = argv.includes('--thinking') ? arg('--thinking') : 'high'
+let thinkingLevel = clampThinkingLevel(model, argv.includes('--thinking') ? arg('--thinking')
+  : modelThinkingLevel(model) ?? globalThinkingLevel ?? 'medium')
 let isStreaming = false
 // Pi resolves --no-session before either --session or --fork. Fail tests that
 // combine them instead of silently pretending inheritance worked.
@@ -49,14 +84,6 @@ function receive(m) {
     const call = waiting
     waiting = undefined
     if (!call) return
-    // The extension's guardian asks the user through emx with its reason.
-    if (m.value === 'review' && call.reason !== undefined && !call.reviewed) {
-      waiting = { ...call, reviewed: true }
-      write({ type: 'extension_ui_request', id: `review-${turn}`, method: 'select',
-        title: 'emx-review ' + JSON.stringify({ tool: call.tool, id: call.id, input: call.input ?? {}, reason: call.reason }),
-        options: ['allow', 'deny'] })
-      return
-    }
     write({ type: 'tool_execution_update', toolCallId: call.id, toolName: call.tool,
       partialResult: { content: [{ type: 'text', text: 'partial output' }] } })
     write({ type: 'tool_execution_end', toolCallId: call.id, toolName: call.tool,

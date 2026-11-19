@@ -27,6 +27,8 @@ export interface SessionOptions {
   onEvent?: (session: Session, event: SessionEvent) => void
   onUsage?: (session: Session, event: SessionEvent) => void
   onChange?: (summaryChanged: boolean) => void
+  review?: (session: Session, ask: Extract<NewAsk, { type: 'approval' }>, signal: AbortSignal) => Promise<import('./guardian.ts').ReviewVerdict>
+  onClose?: (session: Session) => void
 }
 
 export interface Transcript {
@@ -75,6 +77,9 @@ export class Session implements SessionHost {
   #shown = new Set<string>()
   #onUsage?: SessionOptions['onUsage']
   #onChange: (summaryChanged: boolean) => void
+  #review?: SessionOptions['review']
+  #onClose?: SessionOptions['onClose']
+  #reviewAborts = new Set<AbortController>()
   #resume: string | undefined
   #handoff?: string
   #queued: Message[] = []
@@ -108,6 +113,8 @@ export class Session implements SessionHost {
     this.#onEvent = options.onEvent
     this.#onUsage = options.onUsage
     this.#onChange = options.onChange ?? (() => {})
+    this.#review = options.review
+    this.#onClose = options.onClose
     if (options.transcript) {
       this.#handoff = options.transcript.handoff
       this.capabilities = structuredClone(options.transcript.capabilities ?? this.capabilities)
@@ -286,8 +293,30 @@ export class Session implements SessionHost {
   }
   remove(ids: string[]): void { this.emit({ type: 'block/remove', ids }) }
 
-  ask(input: NewAsk): Promise<Answer> {
-    const ask = { ...input, id: this.newId('ask') } as Ask
+  async ask(input: NewAsk): Promise<Answer> {
+    let payload: NewAsk = input
+    const useGuardian = this.settings.mode === 'guardian'
+      || (this.settings.mode === 'auto' && (this.agentConfig()?.backend ?? this.agent) === 'pi')
+    if (input.type === 'approval' && useGuardian && this.#review) {
+      const ac = new AbortController()
+      this.#reviewAborts.add(ac)
+      try {
+        const verdict = await this.#review(this, input, ac.signal)
+        if (ac.signal.aborted || this.#closing || this.#stopped) return {}
+        if (verdict.decision === 'approve') return { choice: 'allow' }
+        const reason = `统一审查：${verdict.reason}`
+        payload = {
+          ...input,
+          description: input.description ? `${input.description}\n\n${reason}` : reason,
+        }
+      } finally {
+        this.#reviewAborts.delete(ac)
+      }
+    }
+    const clean = payload.type === 'approval' && 'reviewInput' in payload
+      ? (({ reviewInput: _, ...rest }) => rest)(payload)
+      : payload
+    const ask = { ...clean, id: this.newId('ask') } as Ask
     return new Promise((resolve) => {
       // Register before emitting: an answer can arrive as soon as it is visible.
       this.asks.set(ask.id, { ask, resolve })
@@ -304,6 +333,8 @@ export class Session implements SessionHost {
   }
 
   #cancelAsks(): void {
+    for (const ac of this.#reviewAborts) ac.abort()
+    this.#reviewAborts.clear()
     for (const [id, pending] of this.asks) {
       this.emit({ type: 'ask/remove', id, resolution: 'cancelled' })
       pending.resolve({})
@@ -511,6 +542,7 @@ export class Session implements SessionHost {
     this.#queued = []
     if (this.queue.length) this.emit({ type: 'queue', items: [] })
     this.#cancelAsks()
+    this.#onClose?.(this)
   }
 
   stop(): Promise<void> {

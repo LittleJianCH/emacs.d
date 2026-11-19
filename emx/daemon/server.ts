@@ -24,6 +24,7 @@ import { Editor } from './editor.ts'
 import { UsageService } from '../usage/service.ts'
 import type { UsageConfig } from '../usage/service.ts'
 import { Accounting } from '../usage/accounting.ts'
+import { GuardianReviewer } from './guardian.ts'
 import { Session } from './session.ts'
 import { sessionProfile } from './profiles.ts'
 import { profileCandidates } from '../config.ts'
@@ -108,6 +109,7 @@ export class DaemonServer {
   readonly editor: Editor
   readonly configuration: Configuration
   readonly collab: Collaboration
+  readonly guardian: GuardianReviewer
   readonly environments?: ProjectEnvironments
   readonly outbox?: Outbox
   readonly configFiles: ConfigFiles
@@ -142,6 +144,7 @@ export class DaemonServer {
     this.editor = new Editor(stateDir(this.varDir))
     this.configuration = new Configuration(this.varDir, options.configFile,
       options.remote ? join(homedir(), '.config/emx/config.json') : undefined, options.siteConfigFile)
+    this.guardian = new GuardianReviewer(() => this.configuration.value)
     if (options.remote) this.environments = new ProjectEnvironments()
     if (options.remote) this.outbox = new Outbox(join(stateDir(this.varDir), 'usage-outbox.json'))
     this.configFiles = new ConfigFiles(async (method, file) => {
@@ -288,7 +291,7 @@ export class DaemonServer {
       }))
       this.#refreshRootTools(saved.root)
       return env
-    } : undefined, agentConfig: (agent) => this.configuration.value.agents[agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root, session), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged) })
+    } : undefined, agentConfig: (agent) => this.configuration.value.agents[agent], hibernateAfter: () => this.configuration.value.sessions.hibernateAfter, editorTools: () => this.collab.tools(this.editor.tools, saved.root, session), onEvent: (session, event) => this.collab.event(session, event), onUsage: (session, event) => this.accounting.accept(session, event), onChange: (summaryChanged) => this.#changed(summaryChanged), review: (s, ask, signal) => this.guardian.review(s, ask, signal), onClose: (s) => this.guardian.closeSession(s.id) })
     return session
   }
 
@@ -448,6 +451,7 @@ export class DaemonServer {
     this.#checkIdle()
     this.usage.configure({ pollInterval: result.config.usage.pollInterval,
       pollers: this.#hostPollers() })
+    this.guardian.configure()
     for (const session of this.sessions.values()) session.refreshHibernate()
     for (const peer of new Set([...this.#usageClients, ...(this.client ? [this.client] : [])])) {
       peer.notify('config', { config: result.config, errors: result.errors })
@@ -738,7 +742,8 @@ export class DaemonServer {
       }
       case 'collab/runs': return this.collab.runReport(integer(params.range, 'range', 0))
       case 'collab/profiles': return this.collab.profiles(this.configuration.overriddenProfiles,
-        params.root === undefined ? undefined : string(params.root, 'root'))
+        params.root === undefined ? undefined : string(params.root, 'root'),
+        this.configuration.reviewerOverridden)
       case 'collab/read': return this.collab.read(this.#session(params), params)
       case 'collab/ask': {
         const route = object(params.route), origin = object(params.origin)
@@ -1089,6 +1094,7 @@ export class DaemonServer {
     clearTimeout(this.#restartTimer)
     clearInterval(this.#outboxTimer)
     this.configuration.close()
+    this.guardian.closeAll()
     this.collab.stop()
     this.editor.detach()
     await this.editor.flush().catch((error) => this.#log(`Cannot save tools: ${error}`))

@@ -205,6 +205,62 @@ When both indices are nil, append a candidate."
      (if agent (list "agents" agent "quotaSkip") '("collab" "quotaSkip"))
      (unless empty (/ (string-to-number input) 100.0)))))
 
+(defun agent-profiles--edit-reviewer ()
+  "Edit the unified guardian reviewer model configuration."
+  (when agent-profiles--writing (user-error "正在保存配置，请稍候"))
+  (let* ((buffer (current-buffer))
+         (generation agent-profiles--generation)
+         (old (plist-get agent-profiles--snapshot :reviewer))
+         (agents (let ((config (plist-get agent-emx-config--value :agents)) names)
+                   (while config
+                     (push (substring (symbol-name (car config)) 1) names)
+                     (setq config (cddr config)))
+                   (nreverse names)))
+         (agent (completing-read "统一审查代理：" agents nil t nil nil
+                                 (plist-get old :agent)))
+         (finish
+          (lambda (choices)
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (if (/= generation agent-profiles--generation)
+                    (message "配置已更新，请重新编辑")
+                  (let* ((model (string-trim
+                                 (completing-read
+                                  "统一审查模型（留空使用默认，可自由输入）："
+                                  (delete-dups
+                                   (append choices (agent-profiles--model-fallback agent)))
+                                  nil nil (and (equal agent (plist-get old :agent))
+                                               (stringp (plist-get old :model))
+                                               (plist-get old :model)))))
+                         (effort (string-trim
+                                  (read-string "推理强度（可选，留空不指定）："
+                                               (and (stringp (plist-get old :effort))
+                                                    (plist-get old :effort)))))
+                         (default-sec (max 1 (/ (or (plist-get old :timeoutMs) 30000) 1000)))
+                         (timeout-str (string-trim
+                                       (read-string "超时秒数（正整数）："
+                                                    (number-to-string default-sec))))
+                         (timeout-sec (if (string-empty-p timeout-str)
+                                          default-sec
+                                        (string-to-number timeout-str))))
+                    (unless (and (string-match-p "\\`[0-9]+\\'" timeout-str)
+                                 (>= timeout-sec 1))
+                      (user-error "超时秒数必须是正整数"))
+                    (let ((value (list :agent agent
+                                       :model (if (string-empty-p model) :null model)
+                                       :effort (if (string-empty-p effort) :null effort)
+                                       :timeoutMs (* timeout-sec 1000))))
+                      (agent-profiles--set '("reviewer") value '(reviewer))))))))))
+    (agent-emx--local-connection
+     (lambda (connection)
+       (agent-emx--request
+        connection "agents/models" (list :agent agent)
+        (lambda (result)
+          (funcall finish (mapcar (lambda (m) (plist-get m :id))
+                                  (append (plist-get result :models) nil))))
+        (lambda (_) (funcall finish nil))))
+     (lambda (_) (funcall finish nil)))))
+
 (defun agent-profiles--status (candidate profile-disabled)
   "Return CANDIDATE's status, respecting PROFILE-DISABLED."
   (let* ((availability (plist-get candidate :availability))
@@ -345,12 +401,13 @@ When both indices are nil, append a candidate."
     (agent-profiles--disable name (not off))))
 
 (defun agent-profiles-edit ()
-  "Edit the candidate or quota threshold at point."
+  "Edit the candidate, quota threshold, or unified reviewer at point."
   (interactive)
   (pcase (agent-profiles--selection)
     (`(candidate ,name ,index) (agent-profiles--edit-candidate name index))
     (`(threshold ,agent) (agent-profiles--edit-threshold agent))
-    (_ (user-error "请先选择候选或阈值行"))))
+    ('(reviewer) (agent-profiles--edit-reviewer))
+    (_ (user-error "请先选择候选、阈值或统一审查行"))))
 
 (defun agent-profiles-add ()
   "Insert a new candidate after the row at point."
@@ -366,14 +423,22 @@ When both indices are nil, append a candidate."
       (agent-profiles--delete-candidate (nth 1 id) (nth 2 id)))))
 
 (defun agent-profiles-restore ()
-  "Confirm restoring the profile at point to its default configuration."
+  "Confirm restoring the profile or unified reviewer at point to defaults."
   (interactive)
-  (let* ((profile (plist-get (agent-profiles--candidate-row) :profile))
-         (name (plist-get profile :name)))
-    (unless (eq (plist-get profile :overridden) t)
-      (user-error "该配置已使用默认值"))
-    (when (y-or-n-p (format "恢复 %s 的默认配置？" name))
-      (agent-profiles--set (list "profiles" name) nil))))
+  (pcase (agent-profiles--selection)
+    ('(reviewer)
+     (let ((reviewer (plist-get agent-profiles--snapshot :reviewer)))
+       (unless (eq (plist-get reviewer :overridden) t)
+         (user-error "统一审查模型已使用默认值"))
+       (when (y-or-n-p "恢复统一审查模型的默认配置？")
+         (agent-profiles--set '("reviewer") nil '(reviewer)))))
+    (_
+     (let* ((profile (plist-get (agent-profiles--candidate-row) :profile))
+            (name (plist-get profile :name)))
+       (unless (eq (plist-get profile :overridden) t)
+         (user-error "该配置已使用默认值"))
+       (when (y-or-n-p (format "恢复 %s 的默认配置？" name))
+         (agent-profiles--set (list "profiles" name) nil))))))
 
 (defun agent-profiles-exhaust ()
   "Allow the threshold row at point to use all its quota."
@@ -401,9 +466,10 @@ When both indices are nil, append a candidate."
     (princ "配额已用比例达到阈值时跳过；用到耗尽表示一直用到余量为 0。\n")))
 
 (defun agent-profiles--describe ()
-  "Show the current profile description in the echo area."
-  (let ((description (plist-get (plist-get (agent-profiles--row) :profile)
-                                :description)))
+  "Show the current row's description in the echo area."
+  (let* ((row (agent-profiles--row))
+         (description (or (plist-get (plist-get row :profile) :description)
+                          (plist-get row :description))))
     (unless (equal description agent-profiles--description)
       (setq agent-profiles--description description)
       (message "%s" (or description "")))))
@@ -493,7 +559,20 @@ When both indices are nil, append a candidate."
          (append (nreverse thresholds)
                  (list (list :id '(threshold nil)
                              :cells (list "全局" (agent-profiles--threshold-label global)
-                                          "")))))))
+                                          ""))))))
+      (when-let* ((reviewer (plist-get agent-profiles--snapshot :reviewer)))
+        (insert "\n" (propertize "统一审查模型\n" 'face 'agent-session-assistant))
+        (agent-profiles--table
+         '("Agent" "模型" "Effort" "超时" "来源")
+         (list (list :id '(reviewer)
+                     :description "guardian（统一审查）模式下，由该 harness 模型接管所有 CLI 的审批请求；按 RET / e 修改，R 恢复默认。"
+                     :cells (list (or (plist-get reviewer :agent) "")
+                                  (if (stringp (plist-get reviewer :model))
+                                      (plist-get reviewer :model) "默认模型")
+                                  (if (stringp (plist-get reviewer :effort))
+                                      (plist-get reviewer :effort) "")
+                                  (format "%ds" (max 1 (/ (or (plist-get reviewer :timeoutMs) 30000) 1000)))
+                                  (if (eq (plist-get reviewer :overridden) t) "自定义*" "默认")))))))
     (setq agent-profiles--rows (nreverse agent-profiles--rows))
     (agent-profiles--goto selection)))
 

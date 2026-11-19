@@ -18,12 +18,16 @@ export const modes: Record<string, string> = {
   ask: 'default',
   edits: 'accept-edits',
   auto: 'auto',
+  guardian: 'accept-edits',
   plan: 'plan',
 }
 
-const fromAcpMode: Record<string, string> = Object.fromEntries(
-  Object.entries(modes).map(([emxMode, acpMode]) => [acpMode, emxMode]),
-)
+const fromAcpMode: Record<string, string> = {
+  default: 'ask',
+  'accept-edits': 'edits',
+  auto: 'auto',
+  plan: 'plan',
+}
 
 const mimeTypes: Record<string, string> = {
   '.png': 'image/png',
@@ -114,6 +118,11 @@ export function parseCapabilities(
       ? source.modes.availableModes.map((m: any) => String(m.id))
       : Object.values(modes)
   const parsedModes = [...new Set(rawModes.map((m) => fromAcpMode[m]).filter((m): m is string => !!m))]
+  if ((parsedModes.includes('edits') || parsedModes.includes('ask')) && !parsedModes.includes('guardian')) {
+    const autoIndex = parsedModes.indexOf('auto')
+    if (autoIndex >= 0) parsedModes.splice(autoIndex + 1, 0, 'guardian')
+    else parsedModes.push('guardian')
+  }
 
   return {
     models,
@@ -674,6 +683,11 @@ export class AgyBackend implements Backend {
       ...(toolId ? { tool: toolId } : {}),
       view,
       choices,
+      reviewInput: {
+        tool: typeof call.name === 'string' && call.name ? call.name : view.name,
+        input: (call.rawInput && typeof call.rawInput === 'object' ? call.rawInput
+          : call.args && typeof call.args === 'object' ? call.args : {}) as Record<string, unknown>,
+      },
     })
 
     if (this.#process !== child) return

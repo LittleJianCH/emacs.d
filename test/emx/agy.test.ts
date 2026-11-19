@@ -127,7 +127,7 @@ test('parseCapabilities groups model efforts and maps ACP modes', () => {
     ],
   }, { models: { include: ['^fake-'], exclude: ['oss'] } })
   assert.deepEqual(caps.models, [{ id: 'fake-pro', name: 'Fake Pro', efforts: ['low', 'high', 'xhigh'] }])
-  assert.deepEqual(caps.modes, ['ask', 'edits', 'auto', 'plan'])
+  assert.deepEqual(caps.modes, ['ask', 'edits', 'auto', 'guardian', 'plan'])
 })
 
 test('toolView and toolOutput normalize ACP tool calls', () => {

@@ -340,6 +340,7 @@ caller falls back to \"interrupt, then send\"."
   '((ask "需确认" "命令和文件改动都需要确认")
     (edits "自动接受编辑" "文件改动自动通过，其他操作仍需确认")
     (auto "自动审查" "由 agent 的自动审查放行常规操作，其余询问")
+    (guardian "统一审查" "CLI 保持需审批，由 Emacs 指定的审查模型统一判断")
     (full "完全访问" "命令和改动都不再询问")
     (plan "计划" "只读规划，不做改动"))
   "Unified permission modes (after T3 Code), mapped by each backend.")
@@ -349,7 +350,7 @@ caller falls back to \"interrupt, then send\"."
 The default is “自动审查” (auto review): the agent's auto review lets
 routine operations through and only asks when the risk is higher (same as
 auto mode in the Claude Code desktop app)."
-  :type '(choice (const ask) (const edits) (const auto) (const full)))
+  :type '(choice (const ask) (const edits) (const auto) (const guardian) (const full)))
 
 (defvar agent-session-default-agent nil
   "Agent used by default for new sessions: the most recently used one.")

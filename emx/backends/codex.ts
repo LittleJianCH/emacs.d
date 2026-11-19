@@ -16,6 +16,7 @@ export const modes: Record<string, [string, string, string, string]> = {
   ask: ['untrusted', 'readOnly', 'read-only', 'user'],
   edits: ['on-request', 'workspaceWrite', 'workspace-write', 'user'],
   auto: ['on-request', 'workspaceWrite', 'workspace-write', 'auto_review'],
+  guardian: ['on-request', 'workspaceWrite', 'workspace-write', 'user'],
   full: ['never', 'dangerFullAccess', 'danger-full-access', 'user'],
   plan: ['never', 'readOnly', 'read-only', 'user'],
 }
@@ -465,7 +466,10 @@ export class CodexBackend implements Backend {
       const answer = await this.host.ask({ type: 'approval', tool: params.itemId,
         view: block?.type === 'tool' ? block.view : itemView(this.host.root,
           method.includes('commandExecution') ? { type: 'commandExecution', command: params.command } : { type: 'fileChange', changes: params.changes }),
-        description: params.reason, choices: ['allow', 'always', 'deny'] })
+        description: params.reason, choices: ['allow', 'always', 'deny'],
+        reviewInput: method.includes('commandExecution')
+          ? { tool: 'commandExecution', input: { command: params.command, cwd: params.cwd, reason: params.reason } }
+          : { tool: 'fileChange', input: { changes: params.changes, reason: params.reason } } })
       result = { decision: answer.choice === 'allow' ? 'accept' : answer.choice === 'always' ? 'acceptForSession' : 'decline' }
     } else if (method === 'item/tool/requestUserInput') {
       const questions = params.questions ?? []

@@ -16,7 +16,7 @@ import type { Block, SessionEvent, Settings, ToolView, Usage } from '../daemon/p
 import { diff } from './dsh.ts'
 
 export const modes: Record<string, string> = {
-  ask: 'default', edits: 'acceptEdits', auto: 'auto', full: 'bypassPermissions', plan: 'plan',
+  ask: 'default', edits: 'acceptEdits', auto: 'auto', guardian: 'acceptEdits', full: 'bypassPermissions', plan: 'plan',
 }
 export const defaultDisallowedTools = ['Agent', 'Workflow', 'SendMessage', 'ListAgents']
 export interface ClaudeConfiguration {
@@ -701,7 +701,8 @@ export class ClaudeBackend implements Backend {
     } else {
       const answer = await this.host.ask({ type: 'approval', tool: request.tool_use_id,
         view: toolView(this.host.root, request.tool_name, request.input), description: request.description,
-        choices: request.permission_suggestions?.length ? ['allow', 'always', 'deny'] : ['allow', 'deny'] })
+        choices: request.permission_suggestions?.length ? ['allow', 'always', 'deny'] : ['allow', 'deny'],
+        reviewInput: { tool: request.tool_name, input: request.input ?? {} } })
       response = answer.choice === 'allow' || answer.choice === 'always'
         ? { behavior: 'allow', updatedInput: request.input,
           ...(answer.choice === 'always' ? { updatedPermissions: request.permission_suggestions } : {}) }

@@ -250,6 +250,12 @@
       ]
     }
   },
+  "reviewer": {
+    "agent": "pi",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "effort": "low",
+    "timeoutMs": 30000
+  },
   "collab": {
     "startGuidance": "How to brief a session: give the goal, relevant context, file scope, constraints, verification and expected report.  A concise brief is enough: don't finish the work merely to prepare it.  Split by independent outcome and file ownership; code, tests and docs are not automatically independent.  Never have two sessions edit the same files, including yourself.\nFork only for reasoning that depends heavily on your conversation and is costly to summarize: never to read, and not to keep a long run's known commands and inputs, which you can pass instead.\nFor a review, ask for findings, not edits; emx prefers another vendor for it.\nWhile the child works, do not duplicate its task.  Integrate its report and verify the claims that matter before relying on them.",
     "maxActive": 4,
