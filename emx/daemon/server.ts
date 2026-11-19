@@ -493,22 +493,23 @@ export class DaemonServer {
       const status = this.collab.modelStatus(profile, session.root, candidate)
       return { ...candidate, model: candidate.model ?? null,
         label: config.agents[candidate.agent].title + ' ' + (candidate.model ?? 'default'),
-        ...status, selectable: status.available && !status.disabled && !status.strained }
+        ...status, selectable: status.available && !status.disabled }
     })
     if (scope === 'all') {
       const results = await Promise.allSettled(Object.entries(config.agents).map(async ([agent, agentConfig]) => {
         const status = this.collab.modelStatus('orchestrator', session.root, { agent })
         if (!status.available) return []
         const env = this.collab.projectEnvironment(session.root)
-        const catalog = await agentModels(agent, agentConfig, session.root, env)
+        const catalog = await agentModels(agent, agentConfig, session.root, env).catch(() => [])
         const configured = Object.values(config.profiles).flatMap(profileCandidates).filter((c) => c.agent === agent)
         const choices = [null, ...new Set([...catalog.map((model) => model.id),
           ...configured.flatMap((c) => c.model ? [c.model] : []),
-          ...(session.agent === agent ? session.capabilities.models.map((m) => m.id) : [])])]
+          ...(session.agent === agent ? [...session.capabilities.models.map((m) => m.id),
+            ...(session.settings.model ? [session.settings.model] : [])] : [])])]
         return choices.map((model) => {
           const state = this.collab.modelStatus('orchestrator', session.root, { agent, model })
           return { agent, model, label: agentConfig.title + ' ' + (catalog.find((m) => m.id === model)?.label ?? model ?? 'default'),
-            ...state, selectable: state.available && !state.disabled && !state.strained }
+            ...state, selectable: state.available }
         })
       }))
       for (const result of results) if (result.status === 'fulfilled') models.push(...result.value)
@@ -520,22 +521,31 @@ export class DaemonServer {
     const agent = string(params.agent, 'agent'), model = params.model === null ? null : string(params.model, 'model')
     if (!Object.hasOwn(this.configuration.value.agents, agent)) invalid(`Unknown agent: ${agent}`)
     if (params.unrestricted !== undefined && typeof params.unrestricted !== 'boolean') invalid('Expected boolean: unrestricted')
+    if (params.preserveProfile !== undefined && typeof params.preserveProfile !== 'boolean') invalid('Expected boolean: preserveProfile')
     const explicit = optionalString(params.profile, 'profile')
-    const profile = explicit ?? (params.unrestricted ? 'orchestrator' : sessionProfile(session))
+    // A concrete model change must not grant orchestrator tools to a read-only role.
+    if (params.preserveProfile && (!params.unrestricted || explicit !== undefined || agent !== session.agent)) {
+      invalid('preserveProfile requires unrestricted selection of the current agent without an explicit profile')
+    }
+    const profile = explicit ?? (params.unrestricted && !params.preserveProfile ? 'orchestrator' : sessionProfile(session))
     if (this.environments) await this.environments.get(session.root)
     const kind = agentBackend(this.configuration.value, session.agent)
     const currentMode = session.settings.mode ?? (kind === 'claude' ? 'ask' : kind === 'codex' ? 'edits' : 'plan')
     const requested = settings(params)
     let selected: Settings
     if (!params.unrestricted || explicit !== undefined) {
-      const candidate = this.collab.profileCandidate(profile, session.root, agent, model, requested)
+      const candidate = this.collab.profileCandidate(profile, session.root, agent, model, requested, true)
       selected = { ...requested, model, effort: candidate.effort ?? null, mode: candidate.mode ?? currentMode }
     } else {
       const catalog = await this.#models(session, 'all')
       if (!catalog.models.some((m) => m.agent === agent && m.model === model && m.selectable)) {
-        invalid('Model is unavailable, disabled or quota-limited')
+        invalid('Model is unavailable')
       }
       selected = { model, effort: null, mode: currentMode, ...requested }
+      if (params.preserveProfile) {
+        selected.mode = currentMode
+        delete selected.beforePlan
+      }
     }
     if (session.info.parent) {
       const modes = ['plan', 'ask', 'edits', 'auto', 'full']
@@ -557,7 +567,7 @@ export class DaemonServer {
       if (connection === this.client || this.#mcp.has(connection)) invalid('Connection already has another role')
       this.#usageClients.add(connection)
       this.#checkIdle()
-      return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 }, config: this.configuration.value },
+      return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1, preserveProfile: 1 }, config: this.configuration.value },
         () => connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas }))
     }
     if (this.#usageClients.has(connection) && !method.startsWith('usage/') && method !== 'ping' && method !== 'daemon/restart') {
@@ -597,7 +607,7 @@ export class DaemonServer {
     }
     const params = object(value)
     switch (method) {
-      case 'ping': return { daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 },
+      case 'ping': return { daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1, preserveProfile: 1 },
         liveAgents: [...this.sessions.values()].filter((session) => session.backend.alive()).length }
       case 'hello': {
         if (params.config !== undefined) this.#configChanged(this.configuration.push(params.config))
@@ -620,7 +630,7 @@ export class DaemonServer {
         this.client = connection
         this.editor.connection = connection
         this.#checkIdle()
-        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1 }, config: this.configuration.value, sessions: this.#list() }, () => {
+        return new Reply({ daemon: process.pid, version: this.version, capabilities: { usage: 1, stopIfIdle: 1, restart: 1, preserveProfile: 1 }, config: this.configuration.value, sessions: this.#list() }, () => {
           connection.notify('usage/quotas', { quotas: this.usage.configure({}).quotas })
           if (this.outbox) connection.notify('usage/outbox', { entries: this.outbox.entries })
           connection.notify('sessions', { sessions: this.#list() })
@@ -874,8 +884,9 @@ export class DaemonServer {
       case 'session/select': return this.#select(this.#session(params), params)
       case 'session/configure': {
         const session = this.#session(params), choices = settings(params)
-        if (typeof session.info.profile === 'string' && Object.hasOwn(choices, 'model')) {
-          this.collab.profileCandidate(sessionProfile(session), session.root, session.agent, choices.model)
+        if (typeof session.info.profile === 'string' && Object.hasOwn(choices, 'model')
+          && choices.model !== session.settings.model) {
+          this.collab.profileCandidate(sessionProfile(session), session.root, session.agent, choices.model, {}, true)
         }
         return session.configure(choices).then(() => ({}))
       }

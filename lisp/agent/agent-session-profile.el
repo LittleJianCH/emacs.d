@@ -70,7 +70,7 @@ profile first."
       (agent-emx--local-connection receive #'agent-session-profile--error))))
 
 (defun agent-session-profile--key (candidate)
-  "Return an unambiguous slash-completion key for CANDIDATE."
+  "Return an unambiguous completion key for CANDIDATE."
   (concat (plist-get candidate :agent) "/"
           (or (plist-get candidate :model) "默认")
           (when-let* ((effort (plist-get candidate :effort)))
@@ -84,7 +84,10 @@ profile first."
           (plist-get candidate :agent)
           (or (plist-get candidate :model) "默认")
           (or (plist-get candidate :effort) "默认")
-          (if (eq (plist-get candidate :selectable) t) "" " · 当前不可选")))
+          (cond ((not (eq (plist-get candidate :selectable) t)) " · 当前不可选")
+                ((plist-get candidate :strained)
+                 (concat " · 余量紧张：" (plist-get candidate :strained)))
+                (t ""))))
 
 (defun agent-session-profile--choices (session)
   "Return selectable profile completion rows for SESSION."
@@ -108,7 +111,7 @@ profile first."
 
 (defun agent-session-profile-refresh-models (session &optional callback scope)
   "Fetch SESSION's models in SCOPE, then call CALLBACK with the result.
-Only profile results update the slash-completion snapshot."
+Only profile results update the candidate-picker snapshot."
   (agent-emx--rpc
    session "session/models" (list :scope (or scope "profile"))
    (lambda (result)
@@ -140,8 +143,9 @@ Only profile results update the slash-completion snapshot."
       (agent-emx--settings session settings))
     (agent-session-profile-refresh-models session)))
 
-(defun agent-session-profile--select (session candidate &optional unrestricted)
-  "Select CANDIDATE for SESSION, optionally UNRESTRICTED by its old profile."
+(defun agent-session-profile--select (session candidate &optional unrestricted preserve-profile)
+  "Select CANDIDATE for SESSION, optionally UNRESTRICTED by its candidates.
+PRESERVE-PROFILE retains the current agent's role and permission mode."
   (agent-emx--rpc
    session "session/select"
    (append (list :agent (plist-get candidate :agent)
@@ -149,10 +153,23 @@ Only profile results update the slash-completion snapshot."
            (cl-loop for key in '(:effort :mode)
                     when (plist-member candidate key)
                     append (list key (plist-get candidate key)))
-           ;; Omitting profile requests the daemon's orchestrator fallback.
-           (when unrestricted (list :unrestricted t)))
+           (when unrestricted (list :unrestricted t))
+           (when preserve-profile (list :preserveProfile t)))
    (lambda (result) (agent-session-profile--selected session result))
    #'agent-session-profile--error))
+
+(defun agent-session-profile-set-model (session model effort)
+  "Set SESSION's concrete MODEL and EFFORT without changing its role or mode."
+  ;; A daemon pending restart would ignore preserveProfile and grant more tools.
+  (let ((connection (agent-emx--get session :emx-connection)))
+    (unless (and connection
+                 (eq (plist-get (agent-emx--connection-capabilities connection)
+                                :preserveProfile) 1))
+      (user-error "模型切换需要等待服务更新完成，请稍后重试")))
+  (agent-session-profile--select
+   session (list :agent (symbol-name (agent-session-agent session))
+                 :model model :effort effort)
+   t t))
 
 (defun agent-session-profile-select-model (&optional model)
   "Select MODEL from the current profile, including other providers."
@@ -193,7 +210,9 @@ The daemon retains the conversation and provides context across providers."
        (agent-session-profile--defer
         (lambda ()
           (when (buffer-live-p (agent-session-buffer session))
-            (let* ((models (append (plist-get result :models) nil))
+            (let* ((models (seq-filter
+                            (lambda (row) (eq (plist-get row :selectable) t))
+                            (append (plist-get result :models) nil)))
                    (agents (delete-dups
                             (mapcar (lambda (row) (plist-get row :agent)) models)))
                    (agent (completing-read

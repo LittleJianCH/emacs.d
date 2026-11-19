@@ -139,7 +139,7 @@ export interface HelloParams {
 export interface HelloResult {
   sessions?: SessionSummary[]
   config?: import('../config.ts').Config
-  capabilities?: { usage: number, stopIfIdle?: number, restart?: number }
+  capabilities?: { usage: number, stopIfIdle?: number, restart?: number, preserveProfile?: number }
   liveAgents?: number
   daemon: number
   /** Hash of the emx sources the daemon runs. */
@@ -370,7 +370,7 @@ export interface Requests {
   'session/configure': [{ id: SessionId } & Settings, {}]
   'session/models': [{ id: SessionId, scope?: 'profile' | 'all' }, SessionModels]
   'session/select': [{ id: SessionId, agent: string, model: string | null, profile?: string,
-    unrestricted?: boolean } & Settings, { id: SessionId, agent: string, profile: string, settings: Settings }]
+    unrestricted?: boolean, preserveProfile?: boolean } & Settings, { id: SessionId, agent: string, profile: string, settings: Settings }]
   'session/answer': [{ id: SessionId, ask: string } & Answer, { stale: boolean }]
   'session/earlier': [EarlierParams, { earlier: boolean }]
   'session/stop': [{ id: SessionId }, {}]

@@ -2426,37 +2426,34 @@ CANDIDATES is ((VALUE . NOTE) ...)."
                    (concat "  " (propertize note 'face 'completions-annotations)))))))
     (completing-read prompt (mapcar #'car candidates) nil t nil nil default)))
 
-(declare-function agent-session-profile-model-completion "agent-session-profile")
-
-(autoload 'agent-session-profile-select-model "agent-session-profile")
+(autoload 'agent-session-profile-set-model "agent-session-profile")
 (autoload 'agent-session-profile-create "agent-session-profile")
 (autoload 'agent-session-select-any-model "agent-session-profile")
 
 (defun agent-session-select-model (&optional model)
-  "Switch the model of the current session to MODEL."
+  "Switch the current agent's concrete model to MODEL, keeping its role."
   (interactive)
-  (if (eq (agent-session-backend (agent-session--this)) 'emx)
-      (agent-session-profile-select-model model)
-    (let* ((session (agent-session--this))
-           (models (or (agent-session-backend-models (agent-session-backend session) session)
-                       (user-error "%s 还没有返回模型列表" (agent-session-title session))))
-           (model (or model
-                      (agent-session--completing-read
-                       "模型: "
-                       (mapcar (lambda (m) (cons (plist-get m :id)
-                                                 (string-join (delq nil (list (plist-get m :name)
-                                                                              (plist-get m :description)))
-                                                              " · ")))
-                               models)
-                       (agent-session-setting session :model)))))
-      (unless (seq-find (lambda (m) (equal (plist-get m :id) model)) models)
-        (user-error "没有模型 %s" model))
-      (agent-session-configure session :model model)
-      ;; Reset to the default if the new model doesn't support the current effort.
-      (let ((efforts (plist-get (agent-session-model-info session) :efforts))
-            (effort (agent-session-setting session :effort)))
-        (when (and effort efforts (not (member effort efforts)))
-          (agent-session-configure session :effort nil))))))
+  (let* ((session (agent-session--this))
+         (models (or (agent-session-backend-models (agent-session-backend session) session)
+                     (user-error "%s 还没有返回模型列表" (agent-session-title session))))
+         (model (or model
+                    (agent-session--completing-read
+                     "模型: "
+                     (mapcar (lambda (m) (cons (plist-get m :id)
+                                               (string-join (delq nil (list (plist-get m :name)
+                                                                            (plist-get m :description)))
+                                                            " · ")))
+                             models)
+                     (agent-session-setting session :model))))
+         (info (seq-find (lambda (m) (equal (plist-get m :id) model)) models)))
+    (unless info (user-error "没有模型 %s" model))
+    (let* ((efforts (plist-get info :efforts))
+           (effort (agent-session-setting session :effort))
+           (reset (and effort (not (member effort efforts)))))
+      (if (eq (agent-session-backend session) 'emx)
+          (agent-session-profile-set-model session model (unless reset effort))
+        (agent-session-configure session :model model)
+        (when reset (agent-session-configure session :effort nil))))))
 
 (defun agent-session-select-effort (&optional effort)
   "Switch the reasoning effort of the current session to EFFORT."
@@ -2693,12 +2690,7 @@ shares a line with the input."
        ((and (string-match "\\`/\\([[:alnum:]-]+\\)[ \t]+\\([^ \t\n]*\\)\\'" text)
              (nth 3 (assoc (match-string 1 text) agent-session-local-commands)))
         (list (+ start (match-beginning 2)) (point)
-              (if (and (equal (match-string 1 text) "model")
-                       (eq (agent-session-backend session) 'emx))
-                  (progn
-                    (require 'agent-session-profile)
-                    (agent-session-profile-model-completion session))
-                (funcall (nth 3 (assoc (match-string 1 text) agent-session-local-commands)) session))
+              (funcall (nth 3 (assoc (match-string 1 text) agent-session-local-commands)) session)
               :exclusive 'no))
        ;; /command at line start
        ((string-match "\\`/[^ \t\n]*\\'" text)

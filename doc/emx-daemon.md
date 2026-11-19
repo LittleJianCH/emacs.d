@@ -259,7 +259,15 @@ policy when no profile is present.
 `session/models` lists the current profile candidates across providers, or
 all enabled provider catalogs with `scope: "all"`. `session/select` validates
 candidate membership, disabled entries and availability. An unrestricted
-selection uses orchestrator capabilities. A provider change keeps the
+selection uses orchestrator capabilities. With `preserveProfile: true`, an
+unrestricted selection may only change the current agent's model and effort;
+it keeps the existing profile, tools and permission mode. It rejects an
+explicit profile or a different agent. The editor requires the hello capability
+`preserveProfile: 1` before sending this selection, so a pending daemon update
+cannot silently change the role. Manual selections ignore quota strain;
+automatic opens retain their quota checks. The unrestricted catalog retains
+configured, cached and active models when a provider probe fails.
+A provider change keeps the
 daemon session ID and transcript but clears provider-specific resume state
 and hands bounded recent context to a new native conversation. Selection
 requires an idle session with no queued work or asks, no `session_start`
@@ -268,7 +276,8 @@ for their own helpers and undelivered results. A top-level session may
 switch while its children run: results still arrive by session ID through
 the mailbox, and a provider change tells the new conversation which direct
 children and asked sessions still owe it a reply.
-`session/configure` cannot bypass profile model validation.
+`session/configure` validates changed models against the profile; settings
+updates may retain a model already selected through the unrestricted picker.
 
 Statuses are `starting`, `idle`, `running`, `disconnected` and `exited`.
 `disconnected` is an editor-side condition for a remote session whose
@@ -324,7 +333,7 @@ Requests may flow both ways; the contract is `emx/daemon/protocol.ts`.
 | `session/context` | `{id, skills}` | `{}` |
 | `session/configure` | `{id, model?, effort?, mode?, beforePlan?}` | `{}` |
 | `session/models` | `{id, scope?: "profile"\|"all"}` | `{profile, scope, models}` |
-| `session/select` | `{id, agent, model, profile?, unrestricted?, effort?, mode?}` | `{id, agent, profile, settings}` |
+| `session/select` | `{id, agent, model, profile?, unrestricted?, preserveProfile?, effort?, mode?}` | `{id, agent, profile, settings}` |
 | `session/answer` | `{id, ask, choice?, answers?}` | `{stale}` |
 | `session/earlier` | `{id, before, turns?}` | `{earlier}` |
 | `session/stop` | `{id}` | `{}` |

@@ -13,7 +13,7 @@
           (agent-session--clock nil)
           (agent-session-status-functions nil)
           (agent-session--list-refresh-function nil)
-          (connection (agent-emx--make-connection))
+          (connection (agent-emx--make-connection :capabilities '(:preserveProfile 1)))
           (session (agent-session--make
                     :agent 'claude :backend 'emx :root temporary-file-directory
                     :buffer buffer :status 'idle
@@ -30,7 +30,8 @@
 
 (defconst agent-session-profile-test--models
   '((:agent "claude" :model "opus-test" :effort "high" :selectable t)
-    (:agent "codex" :model "sol-test" :effort "xhigh" :selectable t)
+    (:agent "codex" :model "sol-test" :effort "xhigh"
+            :strained "10080 quota 100% used" :selectable t)
     (:agent "codex" :model "blocked" :selectable :false)))
 
 (ert-deftest agent-session-profile-test-create-entry ()
@@ -127,33 +128,111 @@ orchestrator as default."
                          (buffer-local-value 'agent-session--current buffer))))
         (when buffer (kill-buffer buffer))))))
 
-(ert-deftest agent-session-profile-test-slash-candidate-completion ()
-  "Slash completion offers selectable cross-provider profile rows with notes."
+(ert-deftest agent-session-profile-test-slash-concrete-model-completion ()
+  "Slash completion offers the current agent's model IDs, outside its profile."
   (agent-session-profile-test--with-session
    (agent-emx--set session :profile-models agent-session-profile-test--models)
    (agent-emx--set session :emx-capabilities
-                   '(:models [(:id "unlisted-provider-model")]))
+                   '(:models [(:id "unlisted-provider-model") (:id "other-model")]))
    (goto-char (point-max))
    (insert "/model ")
    (pcase-let ((`(,_ ,_ ,table . ,_) (agent-session-completion-at-point)))
      (should (equal (all-completions "" table)
-                    '("claude/opus-test@high" "codex/sol-test@xhigh")))
-     (let* ((metadata (completion-metadata "" table nil))
-            (annotate (completion-metadata-get metadata 'annotation-function)))
-       (should (string-match-p "codex.*sol-test.*xhigh"
-                               (funcall annotate "codex/sol-test@xhigh")))))))
+                    '("unlisted-provider-model" "other-model"))))))
 
-(ert-deftest agent-session-profile-test-slash-rejects-unlisted ()
-  "Typed slash arguments cannot escape the current candidate list."
+(ert-deftest agent-session-profile-test-current-model-keeps-role-and-draft ()
+  "A concrete model selection bypasses candidates without requesting more tools."
   (agent-session-profile-test--with-session
-   (cl-letf (((symbol-function 'agent-session-profile--defer) #'funcall)
-             ((symbol-function 'agent-emx--rpc)
-              (lambda (_ method _params callback &optional _failure)
-                (should (equal method "session/models"))
-                (funcall callback (list :models
-                                        (vconcat agent-session-profile-test--models))))))
-     (should-error (agent-session-select-model "anything") :type 'user-error)
-     (should-error (agent-session-select-model "codex/blocked") :type 'user-error))))
+   (let (selection asked)
+     (agent-emx--set session :emx-capabilities
+                     '(:models [(:id "outside-profile" :efforts ["low" "high"])]))
+     (setf (agent-session-settings session) '(:model "old" :effort "high" :mode plan))
+     (agent-session-text session "answer" "已有上下文")
+     (goto-char (point-max))
+     (insert "草稿")
+     (cl-letf (((symbol-function 'agent-session--completing-read)
+                (lambda (_prompt choices _default)
+                  (setq asked (mapcar #'car choices)) "outside-profile"))
+               ((symbol-function 'agent-emx--rpc)
+                (lambda (_ method params callback &optional _failure)
+                  (pcase method
+                    ("session/select"
+                     (setq selection params)
+                     (funcall callback
+                              '(:id "old" :agent "claude" :profile "coder"
+                                :settings (:model "outside-profile" :effort "high" :mode "plan"))))
+                    ("session/models" (funcall callback '(:models [])))))))
+       (agent-session-select-model)
+       (should (equal asked '("outside-profile")))
+       (should (equal selection '(:agent "claude" :model "outside-profile"
+                                 :effort "high" :unrestricted t :preserveProfile t)))
+       (should (equal (plist-get (agent-session-info session) :profile) "coder"))
+       (should (eq (agent-session-setting session :mode) 'plan))
+       (should (string-match-p "已有上下文" (buffer-string)))
+       (should (equal (agent-session--input-text session) "草稿"))))))
+
+(ert-deftest agent-session-profile-test-slash-validates-concrete-model-and-effort ()
+  "Typed arguments use actual model IDs and reset unsupported effort."
+  (agent-session-profile-test--with-session
+   (let (selection)
+     (agent-emx--set session :emx-capabilities
+                     '(:models [(:id "outside-profile" :efforts ["low"])]))
+     (setf (agent-session-settings session) '(:effort "xhigh" :mode plan))
+     (cl-letf (((symbol-function 'agent-emx--rpc)
+                (lambda (_ method params &rest _)
+                  (should (equal method "session/select"))
+                  (setq selection params))))
+       (should-error (agent-session-select-model "anything") :type 'user-error)
+       (should-error (agent-session-select-model "codex/sol-test@xhigh") :type 'user-error)
+       (should (agent-session--run-local-command session "/model outside-profile"))
+       (should (equal (plist-get selection :model) "outside-profile"))
+       (should (plist-member selection :effort))
+       (should-not (plist-get selection :effort))))))
+
+(ert-deftest agent-session-profile-test-no-effort-model-clears-old-effort ()
+  "Models without reasoning controls must not inherit an old effort setting."
+  (agent-session-profile-test--with-session
+   (agent-emx--set session :emx-capabilities
+                   '(:models [(:id "no-reasoning" :efforts [])]))
+   (setf (agent-session-settings session) '(:effort "high" :mode plan))
+   (let (selection)
+     (cl-letf (((symbol-function 'agent-emx--rpc)
+                (lambda (_ method params &rest _)
+                  (should (equal method "session/select"))
+                  (setq selection params))))
+       (agent-session-select-model "no-reasoning")
+       (should (equal (plist-get selection :model) "no-reasoning"))
+       (should (plist-member selection :effort))
+       (should-not (plist-get selection :effort))))))
+
+(ert-deftest agent-session-profile-test-old-daemon-cannot-change-role ()
+  "Wait for a pending daemon restart instead of sending an unsafe selection."
+  (agent-session-profile-test--with-session
+   (setf (agent-emx--connection-capabilities connection) '(:usage 1))
+   (cl-letf (((symbol-function 'agent-emx--rpc)
+              (lambda (&rest _) (ert-fail "Old daemon must not receive selection"))))
+     (should-error (agent-session-profile-set-model session "outside-profile" nil)
+                   :type 'user-error))))
+
+(ert-deftest agent-session-profile-test-no-any-model-local-leader ()
+  "Check Evil keys in a fresh process without enabling Evil in the UI tests."
+  (with-temp-buffer
+    (let* ((default-directory emx-test--checkout)
+           (status
+            (call-process
+             (expand-file-name invocation-name invocation-directory) nil t nil
+             "--batch" "-Q" (concat "--init-directory=" emx-test--checkout)
+             "--eval" (prin1-to-string
+                       `(setq package-user-dir ,package-user-dir my/use-evil t))
+             "-l" "test/test-helper.el" "-l" "init.el"
+             "--eval"
+             (prin1-to-string
+              '(progn
+                 (cl-assert (not (lookup-key agent-session-local-leader-map "a")))
+                 (cl-assert (eq (lookup-key agent-session-local-leader-map "m")
+                                #'agent-session-select-model))
+                 (cl-assert (commandp 'agent-session-select-any-model)))))))
+      (ert-info ((buffer-string)) (should (eql status 0))))))
 
 (ert-deftest agent-session-profile-test-cross-provider-same-view ()
   "Selection updates registration and metadata without erasing text or draft."
@@ -174,7 +253,7 @@ orchestrator as default."
                      (funcall callback
                               '(:id "new" :agent "codex" :profile "coder"
                                     :settings (:model "sol-test" :effort "xhigh"))))))))
-       (agent-session-select-model "codex/sol-test@xhigh")
+       (agent-session-profile-select-model "codex/sol-test@xhigh")
        (should (equal (plist-get selection :agent) "codex"))
        (should (equal (plist-get selection :effort) "xhigh"))
        (should-not (plist-get selection :unrestricted))
@@ -192,9 +271,11 @@ orchestrator as default."
    (let ((answers '("codex" "free-model")) selection)
      (cl-letf (((symbol-function 'agent-session-profile--defer) #'funcall)
                ((symbol-function 'completing-read)
-                (lambda (_prompt _collection _predicate require-match &rest _)
-                   (should require-match)
-                   (pop answers)))
+                (lambda (_prompt collection _predicate require-match &rest _)
+                  (should require-match)
+                  (when (equal (car answers) "codex")
+                    (should (member "codex" collection)))
+                  (pop answers)))
                ((symbol-function 'read-string) (lambda (&rest _) "xhigh"))
                ((symbol-function 'agent-emx--rpc)
                 (lambda (_ method params callback &optional _failure)
@@ -287,7 +368,7 @@ orchestrator as default."
                               '(:id "old" :agent "codex" :profile "coder"
                                 :settings (:model "sol-test" :effort "xhigh"
                                            :mode "auto"))))))))
-       (agent-session-select-model "codex/sol-test@xhigh:auto")
+       (agent-session-profile-select-model "codex/sol-test@xhigh:auto")
        (should (equal (plist-get selection :mode) "auto"))
        (should (equal (plist-get selection :effort) "xhigh"))
        (should (eq (agent-session-setting session :mode) 'auto))))))

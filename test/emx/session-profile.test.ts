@@ -160,11 +160,93 @@ test('project availability, disabled candidates and quota constrain lists, open 
   assert.equal(list.models[1].disabled, true); assert.equal(list.models[1].selectable, false)
   await assert.rejects(x.open(), /No selectable candidate/)
   x.daemon.configuration.value.collab.disabled = []
-  x.daemon.usage.quota({ agent: 'codex', windows: [{ id: '5h', used: 0.99 }] })
+  x.daemon.usage.quota({ agent: 'codex', windows: [{ id: 'weekly', used: 1, limited: true }] })
   list = await x.client.request('session/models', { id })
   assert.match(list.models[1].strained!, /quota/)
-  assert.equal(list.models[1].selectable, false)
-  await assert.rejects(x.client.request('session/select', { id, agent: 'codex', model: 'gpt-6.1-sol' }), /No selectable candidate/)
+  assert.equal(list.models[1].selectable, true, 'strained candidates remain manually selectable')
+  const all = await x.client.request('session/models', { id, scope: 'all' })
+  assert.ok(all.models.some((m) => m.agent === 'codex' && m.model === 'gpt-6.1-sol' && m.selectable))
+  await assert.rejects(x.open(), /No selectable candidate/, 'automatic open cannot use strained candidates')
+  await x.client.request('session/select', { id, agent: 'codex', model: 'gpt-6.1-sol' })
+  assert.equal(x.daemon.sessions.get(id)!.agent, 'codex')
+  await x.client.request('session/select', { id, agent: 'codex', model: 'gpt-6.1-sol', unrestricted: true })
+  t.mock.method(x.daemon.usage, 'candidateAvailability', () => undefined)
+  x.daemon.collab.host.environment = () => process.env
+  x.daemon.usage.quota({ agent: 'claude', windows: [{ id: '5h', used: 0.99 }] })
+  x.daemon.usage.quota({ agent: 'codex', windows: [{ id: 'weekly', used: 0.1, limited: false }] })
+  const skippedStrained = await x.open()
+  assert.equal(x.daemon.sessions.get(skippedStrained.id)!.agent, 'codex', 'default profile open skips strained candidate')
+})
+
+test('concrete current-agent choices preserve read-only role, mode and MCP tools outside its candidates', async (t) => {
+  const x = await setup(t, (c) => {
+    c.profiles['explorer-flash'].candidates = [{ agent: 'codex', model: 'gpt-6.1-sol', mode: 'plan' }]
+  })
+  const { id } = await x.open({ profile: 'explorer-flash' }), s = x.daemon.sessions.get(id)!
+  assert.equal((await x.client.request('ping', {})).capabilities?.preserveProfile, 1)
+  const before = structuredClone(s.editorTools()), backend = s.backend
+  s.settings.beforePlan = 'ask'
+  x.daemon.usage.quota({ agent: 'codex', windows: [{ id: 'weekly', used: 1, limited: true }] })
+  for (const model of ['fake-cheap', 'gpt-6.1-sol']) {
+    const selected = await x.client.request('session/select', {
+      id, agent: 'codex', model, unrestricted: true, preserveProfile: true, mode: 'full', beforePlan: 'full', effort: 'high',
+    })
+    assert.equal(selected.profile, 'explorer-flash'); assert.equal(selected.settings.model, model)
+    assert.equal(selected.settings.mode, 'plan'); assert.equal(selected.settings.effort, 'high')
+    assert.equal(selected.settings.beforePlan, 'ask')
+    assert.equal(s.backend, backend); assert.deepEqual(s.editorTools(), before)
+    assert.ok(!s.editorTools().tools.some((tool) => tool.name === 'session_start' || tool.name === 'render'))
+    await x.client.request('session/configure', { id, model, effort: 'low', mode: 'plan' })
+    assert.equal(s.settings.effort, 'low'); assert.equal(s.info.profile, 'explorer-flash')
+    if (model === 'fake-cheap') {
+      await assert.rejects(x.client.request('session/configure', { id, model: 'other-outside-profile' }), /No selectable candidate/)
+    }
+  }
+  await x.client.request('session/select', {
+    id, agent: 'codex', model: null, unrestricted: true, preserveProfile: true,
+  })
+  await x.client.request('session/configure', { id, model: null, effort: 'low', mode: 'plan' })
+  assert.equal(s.settings.model, null); assert.equal(s.settings.effort, 'low')
+  assert.equal(s.info.profile, 'explorer-flash'); assert.deepEqual(s.editorTools(), before)
+  const child = await x.open({ agent: 'codex', parent: id, settings: { mode: 'plan' } })
+  await x.client.request('session/select', {
+    id: child.id, agent: 'codex', model: 'fake-cheap', unrestricted: true, preserveProfile: true, mode: 'auto',
+  })
+  assert.equal(x.daemon.sessions.get(child.id)!.settings.mode, 'plan')
+  for (const extra of [{ agent: 'claude' }, { unrestricted: false }, { profile: 'orchestrator' }, { preserveProfile: 'yes' }]) {
+    await assert.rejects(x.client.request('session/select', {
+      id, agent: 'codex', model: 'fake-cheap', unrestricted: true, preserveProfile: true, ...extra,
+    } as any), /preserveProfile/)
+  }
+  assert.deepEqual(s.editorTools(), before)
+  s.setInfo({ profile: 'removed-role' })
+  await x.client.request('session/select', {
+    id, agent: 'codex', model: 'fake-cheap', unrestricted: true, preserveProfile: true,
+  })
+  assert.equal(s.info.profile, 'removed-role'); assert.deepEqual(s.editorTools().tools, [])
+  const log = (await readFile(join(x.dir, 'codex.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+  assert.ok(!log.some((row) => row.method === 'turn/start'), 'model selection never sends a prompt')
+})
+
+test('failed catalog probe retains configured, cached and current Codex models in the arbitrary picker', async (t) => {
+  const x = await setup(t)
+  const { id } = await x.open({ agent: 'codex', settings: { model: 'current-unadvertised' } })
+  const other = await x.open()
+  const failed = join(x.dir, 'failed-catalog.mjs')
+  await writeFile(failed, `#!${process.execPath}\nprocess.exit(1)\n`, { mode: 0o700 })
+  process.env.EMX_CODEX_EXECUTABLE = failed
+  x.daemon.usage.quota({ agent: 'codex', windows: [{ id: 'weekly', used: 1, limited: true }] })
+  x.daemon.configuration.value.collab.disabled.push('orchestrator:codex/gpt-6.1-sol')
+  const result = await x.client.request('session/models', { id, scope: 'all' })
+  const models = result.models.filter((m) => m.agent === 'codex')
+  for (const model of [null, 'gpt-6.1-sol', 'fake-cheap', 'current-unadvertised']) {
+    assert.ok(models.some((m) => m.model === model && m.selectable), `missing fallback: ${model}`)
+  }
+  const crossProvider = await x.client.request('session/models', { id: other.id, scope: 'all' })
+  assert.ok(crossProvider.models.some((m) => m.agent === 'codex' && m.model === 'gpt-6.1-sol' && m.selectable),
+    'Codex remains in the picker when the current agent is Claude and discovery fails')
+  const log = (await readFile(join(x.dir, 'codex.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+  assert.ok(!log.some((row) => row.method === 'turn/start'), 'discovery never sends a prompt')
 })
 
 test('cross-provider selection preserves transcript, bounds hidden handoff and never reuses native resume', async (t) => {

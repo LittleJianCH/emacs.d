@@ -166,9 +166,12 @@ different tools even when they use the same model.
 ### User conversations and model selection
 
 New-conversation commands select a profile, defaulting to `orchestrator`.
-The normal `/model` picker lists that profile's candidates, including their
-provider and reasoning effort. A candidate carries its own mode/effort;
-switching within a provider uses its normal configuration path. Switching
+The normal `/model` picker lists concrete models of the current agent,
+independently of the profile's candidates. It keeps the session's profile,
+MCP capabilities and permission mode, and resets unsupported reasoning effort.
+Manual model choices may use strained quota (for example Codex credits after
+weekly quota exhaustion); automatic profile selection still skips strained
+candidates, with the existing all-strained fallback for subagents. Switching
 providers keeps the daemon session ID and visible transcript, starts a
 fresh native conversation and hands off bounded recent text. Native resume
 IDs never cross providers. Switching is rejected while work, approvals,
@@ -177,7 +180,9 @@ queued messages or collaboration results remain pending.
 `M-x agent-session-select-any-model` (also `a` in the session menu) selects
 from all enabled providers' model catalogs.
 It permits a model outside the profile candidates and uses orchestrator's
-MCP policy. Legacy sessions retain their provider and model; absent profile
+MCP policy. There is no Evil `, a` binding. Catalog discovery failures retain
+configured models and the current agent's cached and active models.
+Legacy sessions retain their provider and model; absent profile
 identity defaults to orchestrator capability policy rather than forcing a
 model change. Profile identity travels in session info, including reconnect
 snapshots and persisted records.

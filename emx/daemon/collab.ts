@@ -552,8 +552,8 @@ export class Collaboration {
     const skipped = candidates.slice(0, candidates.indexOf(chosen)).map(reason)
     return { candidate: chosen.candidate, note: skipped.length ? this.#prompt('candidatesSkipped', skipped.join('; ')) : '' }
   }
-  /** Availability for a project, shared by open, model lists and selection. */
-  profileCandidate(name: string, root: string, agent?: string, model?: string | null, settings: Settings = {}): ProfileCandidate {
+  /** Manual choices may spend credits; automatic opens still skip strained candidates. */
+  profileCandidate(name: string, root: string, agent?: string, model?: string | null, settings: Settings = {}, manual = false): ProfileCandidate {
     const role = this.config.profiles[name]
     if (!role) throw new Error(`Unknown profile: ${name}`)
     const candidates = profileCandidates(role).filter((candidate) =>
@@ -562,7 +562,7 @@ export class Collaboration {
       && (settings.mode === undefined || (candidate.mode ?? null) === settings.mode))
     const candidate = candidates.find((candidate) => {
       const status = this.candidateStatus(name, candidate, this.#environment(root))
-      return status.available && !status.disabled && !status.strained
+      return status.available && !status.disabled && (manual || !status.strained)
     })
     if (!candidate) throw new Error(`No selectable candidate for profile ${name}`)
     return structuredClone(candidate)
