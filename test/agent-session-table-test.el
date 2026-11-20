@@ -158,6 +158,14 @@
   (let ((text "┌────┬────┐\n│ 功能 │ 原文 │\n└────┴────┘\n"))
     (should (equal text (agent-session--markdown text)))))
 
+(ert-deftest agent-session-table-test-row-rules ()
+  "A horizontal rule separates the header and every pair of body rows."
+  (should (equal (substring-no-properties
+                  (agent-session-table--grid
+                   '(("a" "b") ("1" "2") ("3" "4")) '("---" "---") 80))
+                 (concat "┌───┬───┐\n│ a │ b │\n├───┼───┤\n"
+                         "│ 1 │ 2 │\n├───┼───┤\n│ 3 │ 4 │\n└───┴───┘\n"))))
+
 (ert-deftest agent-session-table-test-code-buttons-after-table ()
   "Wrapping tables does not shift fenced-code run buttons into their cells."
   (with-temp-buffer

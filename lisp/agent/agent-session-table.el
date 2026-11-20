@@ -115,6 +115,7 @@ Short columns retain their natural width; spare space goes to longer ones."
 
 (defun agent-session-table--grid (rows formats &optional budget)
   "Render ROWS as a fixed-pitch grid within BUDGET, using column FORMATS.
+Rows are separated by horizontal rules.
 When columns cannot fit even one glyph each, stack the cells vertically.
 If a single boxed cell cannot fit, omit borders and separate cells by blank
 lines."
@@ -158,8 +159,10 @@ lines."
             (progn
               (rule "┌" "┬" "┐")
               (row (car cells) t)
-              (rule "├" "┼" "┤")
-              (dolist (values (cdr cells)) (row values nil))
+              ;; A rule after every row keeps wrapped multi-line rows apart.
+              (dolist (values (cdr cells))
+                (rule "├" "┼" "┤")
+                (row values nil))
               (rule "└" "┴" "┘"))
           (dolist (values cells)
             (insert (string-join (agent-session-table--wrap (car values) budget)
